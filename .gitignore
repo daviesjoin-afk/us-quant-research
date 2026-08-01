@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+.venv313/
+venv/
+dist/
+build/
+
+# Local runtime state and market data
+data/
+runtime/
+*.sqlite
+*.sqlite3
+*.db
+*.spec
+
+# Secrets and local overrides
+.env
+.env.*
+!.env.example
+configs/*.local.toml
+secrets/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

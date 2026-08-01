@@ -1,0 +1,44 @@
+[app]
+environment = "paper"
+database_path = "runtime/paper_orders.sqlite3"
+live_trading_enabled = false
+
+[account]
+# 仅为历史回测/扫描的可调整资金情景，不代表 Paper 或 Live 账户余额。
+# Paper/Live 资金必须从对应 IBKR 账户接口读取。
+initial_equity = "1500"
+base_currency = "USD"
+whole_shares_only = true
+allow_margin_borrowing = false
+
+[risk]
+max_gross_exposure_pct = "0.10"
+max_position_exposure_pct = "0.10"
+daily_loss_halt_pct = "0.02"
+drawdown_halt_pct = "0.08"
+
+[research]
+# 仅用于历史组合研究，不会放宽 Paper/Live 交易风控。
+# 5 个持仓各自最多 10% 风险，总组合最多 50% 风险。
+portfolio_max_gross_exposure_pct = "0.50"
+portfolio_max_position_exposure_pct = "0.10"
+
+[execution]
+per_share_commission = "0.0035"
+minimum_commission = "0.35"
+slippage_bps = "2"
+
+[broker]
+provider = "ibkr"
+host = "127.0.0.1"
+port = 4002
+client_id = 17
+api_read_only = true
+paper_order_submission_enabled = false
+connection_timeout_seconds = "2"
+
+# 可选替代执行规则不预置任何代码。只有用户明确配置后才启用，例如：
+# [substitutions.SIGNAL_SYMBOL]
+# execution_symbol = "EXECUTION_SYMBOL"
+# exposure_multiplier = "1"
+# holding_mode = "intraday_or_short_term"

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "us-quant"
+version = "0.19.0"
+description = "Local-first US equities and ETF quantitative trading system"
+requires-python = ">=3.12"
+dependencies = [
+  "tzdata>=2025.2",
+  "websockets>=15,<17",
+]
+
+[project.optional-dependencies]
+research = [
+  "ipykernel>=6.29",
+  "nbclient>=0.10",
+  "nbformat>=5.10",
+]
+desktop = [
+  "PySide6>=6.10,<6.12",
+  "pyinstaller>=6.16,<7",
+]
+
+[project.scripts]
+us-quant = "us_quant.cli:main"
+us-quant-desktop = "us_quant.desktop:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["runtime", "build", "dist", ".venv", ".venv313"]

@@ -1,0 +1,37 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+.venv313/
+venv/
+dist/
+build/
+releases/
+
+# Local runtime state and market data
+data/
+runtime/
+*.sqlite
+*.sqlite3
+*.db
+*.spec
+
+# Local visual-acceptance screenshots: the desktop runtime page prints this
+# machine's absolute state root, so rendered PNGs carry local paths.
+research/artifacts/*.png
+
+# Secrets and local overrides
+.env
+.env.*
+!.env.example
+configs/*.local.toml
+secrets/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,3091 @@
+{
+  "manifest": {
+    "blocks": [
+      {
+        "body": "# 美股小资金 MU/MUU 历史日 K 研究",
+        "id": "title",
+        "type": "markdown"
+      },
+      {
+        "body": "## 技术摘要\n\n- **周频风险控制策略的样本外净回报为 17.33%，最大回撤 3.06%。** 结果覆盖 189 个交易日，并计入 $11.55 佣金。\n- **均线过滤没有证明增量价值。** 三个测试窗口均选择 20/100 参数，且账户曲线与周频恒定风险基准完全一致，说明测试期内信号始终保持多头。\n- **一次买入持有收益更高但不满足当前风险口径。** 其回报为 48.25%，最大回撤 30.76%，最差单日 -14.61%。\n- **暂不批准模拟盘自动下单。** 当前只覆盖强趋势阶段且 MUU 历史不足两年；下一步应先扩展不同市场状态并验证更低周转方案。",
+        "id": "technical_summary",
+        "sourceId": "daily_k_research_run",
+        "type": "markdown"
+      },
+      {
+        "cardIds": [
+          "oos_return_card",
+          "drawdown_card",
+          "cost_card",
+          "buy_hold_risk_card"
+        ],
+        "id": "headline_metrics_block",
+        "type": "metric-strip"
+      },
+      {
+        "body": "## 风险约束压低了收益，也显著控制了账户波动\n\n风险控制路径把 MUU 的 2 倍暴露折算进 10% 账户风险目标，并每 5 个交易日重新计算整股数量。买入持有路径没有再平衡，随着 MUU 上涨逐渐变成更集中的仓位，因此收益和风险同时放大。",
+        "id": "equity_section",
+        "sourceId": "daily_k_research_run",
+        "type": "markdown"
+      },
+      {
+        "chartId": "oos_equity_chart",
+        "id": "equity_chart_block",
+        "type": "chart"
+      },
+      {
+        "body": "## 均线策略与恒定风险基准在样本外完全重合\n\n均线信号在三个完整测试窗口中没有退出多头状态，所以它与不做趋势过滤、只维持相同风险目标的基准产生了相同的回报、回撤、成交次数与佣金。当前证据支持的是风险再平衡本身，而不是均线择时。",
+        "id": "comparison_note",
+        "sourceId": "daily_k_research_run",
+        "type": "markdown"
+      },
+      {
+        "id": "comparison_table_block",
+        "tableId": "oos_comparison_table",
+        "type": "table"
+      },
+      {
+        "body": "## 小资金账户不适合把日线调仓频率拉满\n\n日频再平衡发生 91 次成交并支付 $31.85 佣金；预设的周频方案降至 33 次和 $11.55。日频成本拖累为 2.81%，周频为 0.78%，解释了大部分收益差距。月频在这段单边上涨样本中历史回报最高，但它是敏感性结果，不能凭三个窗口就认定为更优参数。",
+        "id": "frequency_section",
+        "sourceId": "daily_k_research_run",
+        "type": "markdown"
+      },
+      {
+        "id": "frequency_table_block",
+        "tableId": "frequency_table",
+        "type": "table"
+      },
+      {
+        "body": "## 数据与指标定义\n\n- MU 有 1254 根日 K；MUU 自 2024 年 10 月 10 日起只有 446 根，共得到 446 个对齐交易日。\n- MUU 对 MU 的日收益 beta 为 1.990，相关系数 0.9981；它适合做短期杠杆替代研究，但不能按长期固定 2 倍线性收益处理。\n- 所有策略只允许整股、不开融资、不做空；MU 在收盘产生信号，MUU 在下一常规交易时段开盘执行。",
+        "id": "data_scope",
+        "sourceId": "daily_k_research_run",
+        "type": "markdown"
+      },
+      {
+        "body": "## 方法与样本外切分\n\n采用锚定式 walk-forward：先用 252 个交易日训练，再滚动三个 63 日完整测试窗口；候选参数为 5/20、10/50、20/100、50/200，训练期按计费后年化 Sharpe 选择。最后不足完整窗口的 5 个交易日被排除。所有候选从共同的 200 日预热边界开始比较，避免短周期因更早开始交易而获得不公平优势。",
+        "id": "methodology",
+        "sourceId": "daily_k_research_run",
+        "type": "markdown"
+      },
+      {
+        "body": "## 限制、稳健性与不能推出的结论\n\n- 无成本情景回报为 18.11%，配置成本后为 17.33%；成本影响可见，但更高的 5–10 bps 滑点没有改变参数选择。\n- MUU 样本不足两年，且覆盖的是 MU 大幅上涨阶段；三个正收益窗口不能代表横盘、持续下跌或跳空危机。\n- 日 K 无法验证日内做 T、买卖价差、部分成交、盘中止损或同日往返成本。\n- 这是历史描述与样本外检验，不是未来盈利保证。",
+        "id": "limitations",
+        "sourceId": "daily_k_research_run",
+        "type": "markdown"
+      },
+      {
+        "body": "## 建议的下一步\n\n1. 保持自动下单关闭，先扩展日线研究到更广的市场状态和无杠杆对照标的。\n2. 将策略候选从单一均线过滤扩展到少量、事先定义的趋势和波动率控制规则，继续使用完整样本外窗口，禁止按最终收益反复挑参。\n3. 实时权限确认后再下载分钟 K，单独建立日内做 T 研究，显式模拟价差、滑点和成交概率。\n4. 只有影子运行、模拟盘和风险熔断验收均通过后，才讨论小额实盘。",
+        "id": "next_steps",
+        "type": "markdown"
+      },
+      {
+        "body": "## 待回答问题\n\n- MUU 在震荡和持续下跌阶段，周频风险再平衡是否仍优于日频？\n- 当账户权益为 1,000、1,500、2,000 美元时，整股离散化会怎样改变实际风险暴露？\n- 分钟级数据中，日内做 T 的毛收益能否稳定覆盖最低佣金、点差和滑点？",
+        "id": "further_questions",
+        "type": "markdown"
+      }
+    ],
+    "cards": [
+      {
+        "dataset": "headline_metrics",
+        "id": "oos_return_card",
+        "metrics": [
+          {
+            "field": "oos_return",
+            "format": "percent",
+            "label": "净回报"
+          },
+          {
+            "field": "no_cost_return",
+            "format": "percent",
+            "label": "无成本情景"
+          }
+        ],
+        "sourceId": "daily_k_research_run"
+      },
+      {
+        "dataset": "headline_metrics",
+        "id": "drawdown_card",
+        "metrics": [
+          {
+            "field": "max_drawdown",
+            "format": "percent",
+            "label": "最大回撤"
+          },
+          {
+            "field": "worst_day",
+            "format": "percent",
+            "label": "最差单日",
+            "signed": true
+          }
+        ],
+        "sourceId": "daily_k_research_run"
+      },
+      {
+        "dataset": "headline_metrics",
+        "id": "cost_card",
+        "metrics": [
+          {
+            "field": "commission_usd",
+            "format": "currency",
+            "label": "佣金"
+          },
+          {
+            "field": "trade_count",
+            "format": "number",
+            "label": "成交次数"
+          }
+        ],
+        "sourceId": "daily_k_research_run"
+      },
+      {
+        "dataset": "headline_metrics",
+        "id": "buy_hold_risk_card",
+        "metrics": [
+          {
+            "field": "buy_hold_drawdown",
+            "format": "percent",
+            "label": "最大回撤"
+          },
+          {
+            "field": "buy_hold_worst_day",
+            "format": "percent",
+            "label": "最差单日",
+            "signed": true
+          }
+        ],
+        "sourceId": "daily_k_research_run"
+      }
+    ],
+    "charts": [
+      {
+        "dataset": "oos_equity_long",
+        "description": "均以首个测试日开盘交易前的 1,500 美元账户权益归一为 100。",
+        "encodings": {
+          "color": {
+            "field": "series",
+            "title": "方案",
+            "type": "nominal"
+          },
+          "x": {
+            "field": "date",
+            "title": "日期",
+            "type": "temporal"
+          },
+          "y": {
+            "field": "index_value",
+            "title": "权益指数",
+            "type": "quantitative"
+          }
+        },
+        "id": "oos_equity_chart",
+        "options": {
+          "legend": true,
+          "points": "never"
+        },
+        "sourceId": "daily_k_research_run",
+        "title": "样本外账户权益指数",
+        "type": "line"
+      }
+    ],
+    "description": "MU 信号映射到 MUU 整股执行的历史日 K 数据质量、样本外表现与成本敏感性研究。",
+    "generatedAt": "2026-07-24T13:16:31.057989+00:00",
+    "sources": [
+      {
+        "id": "daily_k_research_run",
+        "label": "本地 IBKR MU/MUU 历史日 K 研究",
+        "path": "research/results/daily_k_research.json",
+        "query": {
+          "description": "本地 Python 回测：MU 收盘信号、MUU 整股执行、下一交易日开盘成交、锚定式 walk-forward。",
+          "engine": "DuckDB",
+          "executed_at": "2026-07-24T13:16:31.057989+00:00",
+          "filters": [
+            "regular trading session daily TRADES bars",
+            "aligned MU and MUU dates only",
+            "2024-10-10 through 2026-07-23",
+            "whole shares only",
+            "no shorting and no margin borrowing",
+            "three complete 63-session out-of-sample folds"
+          ],
+          "language": "sql",
+          "metric_definitions": [
+            "样本外回报 = 期末账户权益 / 期初账户权益 - 1；包含佣金和滑点。",
+            "最大回撤 = 样本外账户权益相对此前权益峰值的最大跌幅。",
+            "目标风险暴露 = 账户权益的 10%；MUU 按 2 倍暴露折算为约 5% 名义仓位。",
+            "最差单日 = 相邻样本外账户权益之间的最低日收益。"
+          ],
+          "sql": "SELECT * FROM read_json_auto('research/results/daily_k_research.json');",
+          "tables_used": [
+            "20260724T120505Z_1b4e4692c862.json",
+            "20260724T120505Z_9a0574349abb.json"
+          ]
+        }
+      }
+    ],
+    "surface": "report",
+    "tables": [
+      {
+        "columns": [
+          {
+            "field": "plan",
+            "label": "方案",
+            "type": "text"
+          },
+          {
+            "field": "total_return",
+            "label": "净回报",
+            "type": "percent"
+          },
+          {
+            "field": "max_drawdown",
+            "label": "最大回撤",
+            "type": "percent"
+          },
+          {
+            "field": "worst_day",
+            "label": "最差单日",
+            "movement": true,
+            "type": "percent"
+          },
+          {
+            "field": "commission_usd",
+            "label": "佣金",
+            "type": "currency"
+          },
+          {
+            "field": "trade_count",
+            "label": "成交次数",
+            "type": "number"
+          },
+          {
+            "field": "risk_policy",
+            "label": "风险口径",
+            "type": "text"
+          }
+        ],
+        "dataset": "oos_comparison",
+        "defaultSort": {
+          "direction": "desc",
+          "field": "total_return"
+        },
+        "description": "2025 年 10 月 14 日至 2026 年 7 月 16 日；回报、回撤和单日损失均为账户权益口径。",
+        "id": "oos_comparison_table",
+        "sourceId": "daily_k_research_run",
+        "title": "样本外方案比较"
+      },
+      {
+        "columns": [
+          {
+            "field": "frequency",
+            "label": "频率",
+            "type": "text"
+          },
+          {
+            "field": "rebalance_interval_days",
+            "label": "间隔（日）",
+            "type": "number"
+          },
+          {
+            "field": "oos_return",
+            "label": "样本外回报",
+            "type": "percent"
+          },
+          {
+            "field": "cost_drag",
+            "label": "成本拖累",
+            "type": "percent"
+          },
+          {
+            "field": "max_drawdown",
+            "label": "最大回撤",
+            "type": "percent"
+          },
+          {
+            "field": "commission",
+            "label": "佣金",
+            "type": "currency"
+          },
+          {
+            "field": "trade_count",
+            "label": "成交次数",
+            "type": "number"
+          }
+        ],
+        "dataset": "frequency_sensitivity",
+        "defaultSort": {
+          "direction": "asc",
+          "field": "rebalance_interval_days"
+        },
+        "description": "同一候选均线框架，分别按 1、5、21 个交易日重新计算目标整股数量。",
+        "id": "frequency_table",
+        "sourceId": "daily_k_research_run",
+        "title": "调仓频率敏感性"
+      }
+    ],
+    "title": "美股小资金 MU/MUU 历史日 K 研究",
+    "version": 1
+  },
+  "snapshot": {
+    "datasets": {
+      "frequency_sensitivity": [
+        {
+          "commission": 31.85,
+          "cost_drag": 0.02805819599999998,
+          "frequency": "daily",
+          "max_drawdown": 0.03333156941025808,
+          "no_cost_oos_return": 0.16743333333333332,
+          "oos_return": 0.13937513733333334,
+          "rebalance_interval_days": 1,
+          "selected_parameters": "20/100, 20/100, 20/100",
+          "trade_count": 91
+        },
+        {
+          "commission": 11.55,
+          "cost_drag": 0.00780242266666667,
+          "frequency": "weekly",
+          "max_drawdown": 0.030608803896615577,
+          "no_cost_oos_return": 0.18108666666666667,
+          "oos_return": 0.173284244,
+          "rebalance_interval_days": 5,
+          "selected_parameters": "20/100, 20/100, 20/100",
+          "trade_count": 33
+        },
+        {
+          "commission": 2.45,
+          "cost_drag": 0.001688320000000021,
+          "frequency": "monthly",
+          "max_drawdown": 0.033275287907915375,
+          "no_cost_oos_return": 0.19506,
+          "oos_return": 0.19337168,
+          "rebalance_interval_days": 21,
+          "selected_parameters": "10/50, 20/100, 20/100",
+          "trade_count": 7
+        }
+      ],
+      "headline_metrics": [
+        {
+          "buy_hold_drawdown": 0.3076254610136626,
+          "buy_hold_worst_day": -0.14609274902263167,
+          "commission_usd": 11.55,
+          "max_drawdown": 0.030608803896615577,
+          "no_cost_return": 0.18108666666666667,
+          "oos_return": 0.173284244,
+          "trade_count": 33,
+          "worst_day": -0.009754163587008199
+        }
+      ],
+      "oos_comparison": [
+        {
+          "commission_usd": 11.55,
+          "max_drawdown": 0.030608803896615577,
+          "plan": "均线 + 周频风险再平衡",
+          "risk_policy": "10% 风险目标，5 日再平衡",
+          "total_return": 0.173284244,
+          "trade_count": 33,
+          "worst_day": -0.009754163587008199
+        },
+        {
+          "commission_usd": 11.55,
+          "max_drawdown": 0.030608803896615577,
+          "plan": "周频恒定风险基准",
+          "risk_policy": "10% 风险目标，5 日再平衡",
+          "total_return": 0.173284244,
+          "trade_count": 33,
+          "worst_day": -0.009754163587008199
+        },
+        {
+          "commission_usd": 0.35,
+          "max_drawdown": 0.3076254610136626,
+          "plan": "一次买入持有",
+          "risk_policy": "风险随 MUU 价格漂移",
+          "total_return": 0.4825101786666667,
+          "trade_count": 1,
+          "worst_day": -0.14609274902263167
+        }
+      ],
+      "oos_equity_long": [
+        {
+          "date": "2025-10-14",
+          "equity_usd": 1499.345268,
+          "index_value": 99.956351,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-10-14",
+          "equity_usd": 1499.345268,
+          "index_value": 99.956351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-10-15",
+          "equity_usd": 1503.405268,
+          "index_value": 100.227018,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-10-15",
+          "equity_usd": 1503.405268,
+          "index_value": 100.227018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-10-16",
+          "equity_usd": 1511.815268,
+          "index_value": 100.787685,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-10-16",
+          "equity_usd": 1511.815268,
+          "index_value": 100.787685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-10-17",
+          "equity_usd": 1511.525268,
+          "index_value": 100.768351,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-10-17",
+          "equity_usd": 1511.525268,
+          "index_value": 100.768351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-10-20",
+          "equity_usd": 1515.295268,
+          "index_value": 101.019685,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-10-20",
+          "equity_usd": 1515.295268,
+          "index_value": 101.019685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-10-21",
+          "equity_usd": 1511.452852,
+          "index_value": 100.763523,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-10-21",
+          "equity_usd": 1511.525268,
+          "index_value": 100.768351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-10-22",
+          "equity_usd": 1508.702852,
+          "index_value": 100.58019,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-10-22",
+          "equity_usd": 1508.335268,
+          "index_value": 100.555685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-10-23",
+          "equity_usd": 1514.452852,
+          "index_value": 100.963523,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-10-23",
+          "equity_usd": 1515.005268,
+          "index_value": 101.000351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-10-24",
+          "equity_usd": 1523.702852,
+          "index_value": 101.58019,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-10-24",
+          "equity_usd": 1525.735268,
+          "index_value": 101.715685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-10-27",
+          "equity_usd": 1524.452852,
+          "index_value": 101.63019,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-10-27",
+          "equity_usd": 1526.605268,
+          "index_value": 101.773685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-10-28",
+          "equity_usd": 1525.080794,
+          "index_value": 101.672053,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-10-28",
+          "equity_usd": 1528.055268,
+          "index_value": 101.870351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-10-29",
+          "equity_usd": 1528.600794,
+          "index_value": 101.90672,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-10-29",
+          "equity_usd": 1532.695268,
+          "index_value": 102.179685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-10-30",
+          "equity_usd": 1526.840794,
+          "index_value": 101.789386,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-10-30",
+          "equity_usd": 1530.375268,
+          "index_value": 102.025018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-10-31",
+          "equity_usd": 1526.180794,
+          "index_value": 101.745386,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-10-31",
+          "equity_usd": 1529.505268,
+          "index_value": 101.967018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-03",
+          "equity_usd": 1534.100794,
+          "index_value": 102.273386,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-03",
+          "equity_usd": 1539.945268,
+          "index_value": 102.663018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-04",
+          "equity_usd": 1521.79009,
+          "index_value": 101.452673,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-04",
+          "equity_usd": 1523.995268,
+          "index_value": 101.599685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-05",
+          "equity_usd": 1534.18009,
+          "index_value": 102.278673,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-05",
+          "equity_usd": 1541.105268,
+          "index_value": 102.740351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-06",
+          "equity_usd": 1534.60009,
+          "index_value": 102.306673,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-06",
+          "equity_usd": 1541.685268,
+          "index_value": 102.779018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-07",
+          "equity_usd": 1534.39009,
+          "index_value": 102.292673,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-07",
+          "equity_usd": 1541.395268,
+          "index_value": 102.759685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-10",
+          "equity_usd": 1545.10009,
+          "index_value": 103.006673,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-10",
+          "equity_usd": 1556.185268,
+          "index_value": 103.745685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-11",
+          "equity_usd": 1536.546642,
+          "index_value": 102.436443,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-11",
+          "equity_usd": 1543.425268,
+          "index_value": 102.895018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-12",
+          "equity_usd": 1538.926642,
+          "index_value": 102.595109,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-12",
+          "equity_usd": 1547.485268,
+          "index_value": 103.165685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-13",
+          "equity_usd": 1534.166642,
+          "index_value": 102.277776,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-13",
+          "equity_usd": 1539.365268,
+          "index_value": 102.624351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-14",
+          "equity_usd": 1539.776642,
+          "index_value": 102.651776,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-14",
+          "equity_usd": 1548.935268,
+          "index_value": 103.262351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-17",
+          "equity_usd": 1536.886642,
+          "index_value": 102.459109,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-17",
+          "equity_usd": 1544.005268,
+          "index_value": 102.933685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-18",
+          "equity_usd": 1528.235102,
+          "index_value": 101.88234,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-18",
+          "equity_usd": 1530.665268,
+          "index_value": 102.044351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-19",
+          "equity_usd": 1526.145102,
+          "index_value": 101.743007,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-19",
+          "equity_usd": 1527.475268,
+          "index_value": 101.831685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-20",
+          "equity_usd": 1511.895102,
+          "index_value": 100.793007,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-20",
+          "equity_usd": 1505.725268,
+          "index_value": 100.381685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-21",
+          "equity_usd": 1515.125102,
+          "index_value": 101.00834,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-21",
+          "equity_usd": 1510.655268,
+          "index_value": 100.710351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-24",
+          "equity_usd": 1523.865102,
+          "index_value": 101.591007,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-24",
+          "equity_usd": 1523.995268,
+          "index_value": 101.599685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-25",
+          "equity_usd": 1524.53251,
+          "index_value": 101.635501,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-25",
+          "equity_usd": 1524.575268,
+          "index_value": 101.638351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-26",
+          "equity_usd": 1528.67251,
+          "index_value": 101.911501,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-26",
+          "equity_usd": 1529.795268,
+          "index_value": 101.986351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-11-28",
+          "equity_usd": 1533.04251,
+          "index_value": 102.202834,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-11-28",
+          "equity_usd": 1535.305268,
+          "index_value": 102.353685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-01",
+          "equity_usd": 1535.80251,
+          "index_value": 102.386834,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-01",
+          "equity_usd": 1538.785268,
+          "index_value": 102.585685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-02",
+          "equity_usd": 1535.11251,
+          "index_value": 102.340834,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-02",
+          "equity_usd": 1537.915268,
+          "index_value": 102.527685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-03",
+          "equity_usd": 1530.920242,
+          "index_value": 102.061349,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-03",
+          "equity_usd": 1532.695268,
+          "index_value": 102.179685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-04",
+          "equity_usd": 1526.120242,
+          "index_value": 101.741349,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-04",
+          "equity_usd": 1525.735268,
+          "index_value": 101.715685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-05",
+          "equity_usd": 1532.520242,
+          "index_value": 102.168016,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-05",
+          "equity_usd": 1535.015268,
+          "index_value": 102.334351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-08",
+          "equity_usd": 1538.720242,
+          "index_value": 102.581349,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-08",
+          "equity_usd": 1544.005268,
+          "index_value": 102.933685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-09",
+          "equity_usd": 1542.320242,
+          "index_value": 102.821349,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-09",
+          "equity_usd": 1549.225268,
+          "index_value": 103.281685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-10",
+          "equity_usd": 1545.208578,
+          "index_value": 103.013905,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-10",
+          "equity_usd": 1554.735268,
+          "index_value": 103.649018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-11",
+          "equity_usd": 1542.148578,
+          "index_value": 102.809905,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-11",
+          "equity_usd": 1549.805268,
+          "index_value": 103.320351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-12",
+          "equity_usd": 1531.708578,
+          "index_value": 102.113905,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-12",
+          "equity_usd": 1532.985268,
+          "index_value": 102.199018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-15",
+          "equity_usd": 1529.728578,
+          "index_value": 101.981905,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-15",
+          "equity_usd": 1529.795268,
+          "index_value": 101.986351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-16",
+          "equity_usd": 1527.028578,
+          "index_value": 101.801905,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-16",
+          "equity_usd": 1525.445268,
+          "index_value": 101.696351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-17",
+          "equity_usd": 1522.116448,
+          "index_value": 101.47443,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-17",
+          "equity_usd": 1519.645268,
+          "index_value": 101.309685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-18",
+          "equity_usd": 1535.766448,
+          "index_value": 102.38443,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-18",
+          "equity_usd": 1538.495268,
+          "index_value": 102.566351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-19",
+          "equity_usd": 1547.106448,
+          "index_value": 103.14043,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-19",
+          "equity_usd": 1554.155268,
+          "index_value": 103.610351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-22",
+          "equity_usd": 1554.456448,
+          "index_value": 103.63043,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-22",
+          "equity_usd": 1564.305268,
+          "index_value": 104.287018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-23",
+          "equity_usd": 1553.616448,
+          "index_value": 103.57443,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-23",
+          "equity_usd": 1563.145268,
+          "index_value": 104.209685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-24",
+          "equity_usd": 1559.481658,
+          "index_value": 103.965444,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-24",
+          "equity_usd": 1573.875268,
+          "index_value": 104.925018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-26",
+          "equity_usd": 1558.201658,
+          "index_value": 103.880111,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-26",
+          "equity_usd": 1571.555268,
+          "index_value": 104.770351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-29",
+          "equity_usd": 1563.641658,
+          "index_value": 104.242777,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-29",
+          "equity_usd": 1581.415268,
+          "index_value": 105.427685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-30",
+          "equity_usd": 1562.681658,
+          "index_value": 104.178777,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-30",
+          "equity_usd": 1579.675268,
+          "index_value": 105.311685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2025-12-31",
+          "equity_usd": 1558.521658,
+          "index_value": 103.901444,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2025-12-31",
+          "equity_usd": 1572.135268,
+          "index_value": 104.809018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-02",
+          "equity_usd": 1573.509514,
+          "index_value": 104.900634,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-02",
+          "equity_usd": 1602.585268,
+          "index_value": 106.839018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-05",
+          "equity_usd": 1571.549514,
+          "index_value": 104.769968,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-05",
+          "equity_usd": 1598.525268,
+          "index_value": 106.568351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-06",
+          "equity_usd": 1588.209514,
+          "index_value": 105.880634,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-06",
+          "equity_usd": 1633.035268,
+          "index_value": 108.869018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-07",
+          "equity_usd": 1585.549514,
+          "index_value": 105.703301,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-07",
+          "equity_usd": 1627.525268,
+          "index_value": 108.501685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-08",
+          "equity_usd": 1578.689514,
+          "index_value": 105.245968,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-08",
+          "equity_usd": 1613.315268,
+          "index_value": 107.554351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-09",
+          "equity_usd": 1586.9455,
+          "index_value": 105.796367,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-09",
+          "equity_usd": 1634.195268,
+          "index_value": 108.946351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-12",
+          "equity_usd": 1587.1655,
+          "index_value": 105.811033,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-12",
+          "equity_usd": 1634.775268,
+          "index_value": 108.985018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-13",
+          "equity_usd": 1583.6455,
+          "index_value": 105.576367,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-13",
+          "equity_usd": 1625.495268,
+          "index_value": 108.366351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-14",
+          "equity_usd": 1581.4455,
+          "index_value": 105.4297,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-14",
+          "equity_usd": 1619.695268,
+          "index_value": 107.979685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-15",
+          "equity_usd": 1582.8755,
+          "index_value": 105.525033,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-15",
+          "equity_usd": 1623.465268,
+          "index_value": 108.231018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-16",
+          "equity_usd": 1593.794004,
+          "index_value": 106.252934,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-16",
+          "equity_usd": 1654.205268,
+          "index_value": 110.280351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-20",
+          "equity_usd": 1594.794004,
+          "index_value": 106.3196,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-20",
+          "equity_usd": 1657.105268,
+          "index_value": 110.473685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-21",
+          "equity_usd": 1605.294004,
+          "index_value": 107.0196,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-21",
+          "equity_usd": 1687.555268,
+          "index_value": 112.503685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-22",
+          "equity_usd": 1609.194004,
+          "index_value": 107.2796,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-22",
+          "equity_usd": 1698.865268,
+          "index_value": 113.257685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-23",
+          "equity_usd": 1610.094004,
+          "index_value": 107.3396,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-23",
+          "equity_usd": 1701.475268,
+          "index_value": 113.431685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-26",
+          "equity_usd": 1605.320288,
+          "index_value": 107.021353,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-26",
+          "equity_usd": 1686.975268,
+          "index_value": 112.465018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-27",
+          "equity_usd": 1613.000288,
+          "index_value": 107.533353,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-27",
+          "equity_usd": 1714.815268,
+          "index_value": 114.321018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-28",
+          "equity_usd": 1622.760288,
+          "index_value": 108.184019,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-28",
+          "equity_usd": 1750.195268,
+          "index_value": 116.679685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-29",
+          "equity_usd": 1623.000288,
+          "index_value": 108.200019,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-29",
+          "equity_usd": 1751.065268,
+          "index_value": 116.737685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-01-30",
+          "equity_usd": 1614.360288,
+          "index_value": 107.624019,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-01-30",
+          "equity_usd": 1719.745268,
+          "index_value": 114.649685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-02",
+          "equity_usd": 1623.320288,
+          "index_value": 108.221353,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-02",
+          "equity_usd": 1752.225268,
+          "index_value": 116.815018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-03",
+          "equity_usd": 1615.720288,
+          "index_value": 107.714686,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-03",
+          "equity_usd": 1724.675268,
+          "index_value": 114.978351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-04",
+          "equity_usd": 1599.960288,
+          "index_value": 106.664019,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-04",
+          "equity_usd": 1667.545268,
+          "index_value": 111.169685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-05",
+          "equity_usd": 1601.080288,
+          "index_value": 106.738686,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-05",
+          "equity_usd": 1671.605268,
+          "index_value": 111.440351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-06",
+          "equity_usd": 1605.160288,
+          "index_value": 107.010686,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-06",
+          "equity_usd": 1686.395268,
+          "index_value": 112.426351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-09",
+          "equity_usd": 1600.778622,
+          "index_value": 106.718575,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-09",
+          "equity_usd": 1671.315268,
+          "index_value": 111.421018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-10",
+          "equity_usd": 1596.818622,
+          "index_value": 106.454575,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-10",
+          "equity_usd": 1658.555268,
+          "index_value": 110.570351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-11",
+          "equity_usd": 1611.218622,
+          "index_value": 107.414575,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-11",
+          "equity_usd": 1704.955268,
+          "index_value": 113.663685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-12",
+          "equity_usd": 1612.658622,
+          "index_value": 107.510575,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-12",
+          "equity_usd": 1709.595268,
+          "index_value": 113.973018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-13",
+          "equity_usd": 1611.668622,
+          "index_value": 107.444575,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-13",
+          "equity_usd": 1706.405268,
+          "index_value": 113.760351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-17",
+          "equity_usd": 1606.40679,
+          "index_value": 107.093786,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-17",
+          "equity_usd": 1690.455268,
+          "index_value": 112.697018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-18",
+          "equity_usd": 1613.92679,
+          "index_value": 107.595119,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-18",
+          "equity_usd": 1717.715268,
+          "index_value": 114.514351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-19",
+          "equity_usd": 1612.56679,
+          "index_value": 107.504453,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-19",
+          "equity_usd": 1712.785268,
+          "index_value": 114.185685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-20",
+          "equity_usd": 1616.56679,
+          "index_value": 107.771119,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-20",
+          "equity_usd": 1727.285268,
+          "index_value": 115.152351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-23",
+          "equity_usd": 1613.68679,
+          "index_value": 107.579119,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-23",
+          "equity_usd": 1716.845268,
+          "index_value": 114.456351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-24",
+          "equity_usd": 1612.79471,
+          "index_value": 107.519647,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-24",
+          "equity_usd": 1713.075268,
+          "index_value": 114.205018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-25",
+          "equity_usd": 1616.15471,
+          "index_value": 107.743647,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-25",
+          "equity_usd": 1726.995268,
+          "index_value": 115.133018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-26",
+          "equity_usd": 1611.81471,
+          "index_value": 107.454314,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-26",
+          "equity_usd": 1709.015268,
+          "index_value": 113.934351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-02-27",
+          "equity_usd": 1610.69471,
+          "index_value": 107.379647,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-02-27",
+          "equity_usd": 1704.375268,
+          "index_value": 113.625018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-02",
+          "equity_usd": 1610.55471,
+          "index_value": 107.370314,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-02",
+          "equity_usd": 1703.795268,
+          "index_value": 113.586351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-03",
+          "equity_usd": 1599.201378,
+          "index_value": 106.613425,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-03",
+          "equity_usd": 1660.295268,
+          "index_value": 110.686351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-04",
+          "equity_usd": 1607.121378,
+          "index_value": 107.141425,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-04",
+          "equity_usd": 1685.815268,
+          "index_value": 112.387685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-05",
+          "equity_usd": 1605.321378,
+          "index_value": 107.021425,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-05",
+          "equity_usd": 1680.015268,
+          "index_value": 112.001018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-06",
+          "equity_usd": 1594.971378,
+          "index_value": 106.331425,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-06",
+          "equity_usd": 1646.665268,
+          "index_value": 109.777685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-09",
+          "equity_usd": 1601.901378,
+          "index_value": 106.793425,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-09",
+          "equity_usd": 1668.995268,
+          "index_value": 111.266351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-10",
+          "equity_usd": 1607.211378,
+          "index_value": 107.147425,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-10",
+          "equity_usd": 1686.105268,
+          "index_value": 112.407018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-11",
+          "equity_usd": 1613.421378,
+          "index_value": 107.561425,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-11",
+          "equity_usd": 1706.115268,
+          "index_value": 113.741018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-12",
+          "equity_usd": 1607.841378,
+          "index_value": 107.189425,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-12",
+          "equity_usd": 1688.135268,
+          "index_value": 112.542351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-13",
+          "equity_usd": 1616.121378,
+          "index_value": 107.741425,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-13",
+          "equity_usd": 1714.815268,
+          "index_value": 114.321018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-16",
+          "equity_usd": 1622.691378,
+          "index_value": 108.179425,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-16",
+          "equity_usd": 1735.985268,
+          "index_value": 115.732351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-17",
+          "equity_usd": 1630.036906,
+          "index_value": 108.669127,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-17",
+          "equity_usd": 1763.825268,
+          "index_value": 117.588351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-18",
+          "equity_usd": 1630.036906,
+          "index_value": 108.669127,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-18",
+          "equity_usd": 1763.825268,
+          "index_value": 117.588351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-19",
+          "equity_usd": 1623.736906,
+          "index_value": 108.249127,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-19",
+          "equity_usd": 1737.725268,
+          "index_value": 115.848351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-20",
+          "equity_usd": 1616.526906,
+          "index_value": 107.76846,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-20",
+          "equity_usd": 1707.855268,
+          "index_value": 113.857018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-23",
+          "equity_usd": 1610.506906,
+          "index_value": 107.367127,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-23",
+          "equity_usd": 1682.915268,
+          "index_value": 112.194351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-24",
+          "equity_usd": 1606.783426,
+          "index_value": 107.118895,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-24",
+          "equity_usd": 1671.025268,
+          "index_value": 111.401685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-25",
+          "equity_usd": 1601.563426,
+          "index_value": 106.770895,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-25",
+          "equity_usd": 1654.205268,
+          "index_value": 110.280351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-26",
+          "equity_usd": 1591.483426,
+          "index_value": 106.098895,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-26",
+          "equity_usd": 1621.725268,
+          "index_value": 108.115018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-27",
+          "equity_usd": 1592.203426,
+          "index_value": 106.146895,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-27",
+          "equity_usd": 1624.045268,
+          "index_value": 108.269685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-30",
+          "equity_usd": 1580.143426,
+          "index_value": 105.342895,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-30",
+          "equity_usd": 1585.185268,
+          "index_value": 105.679018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-03-31",
+          "equity_usd": 1587.257946,
+          "index_value": 105.817196,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-03-31",
+          "equity_usd": 1600.555268,
+          "index_value": 106.703685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-01",
+          "equity_usd": 1602.237946,
+          "index_value": 106.815863,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-01",
+          "equity_usd": 1631.585268,
+          "index_value": 108.772351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-02",
+          "equity_usd": 1601.257946,
+          "index_value": 106.75053,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-02",
+          "equity_usd": 1629.555268,
+          "index_value": 108.637018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-06",
+          "equity_usd": 1607.277946,
+          "index_value": 107.151863,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-06",
+          "equity_usd": 1642.025268,
+          "index_value": 109.468351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-07",
+          "equity_usd": 1607.137946,
+          "index_value": 107.14253,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-07",
+          "equity_usd": 1641.735268,
+          "index_value": 109.449018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-08",
+          "equity_usd": 1624.439026,
+          "index_value": 108.295935,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-08",
+          "equity_usd": 1674.795268,
+          "index_value": 111.653018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-09",
+          "equity_usd": 1630.109026,
+          "index_value": 108.673935,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-09",
+          "equity_usd": 1693.065268,
+          "index_value": 112.871018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-10",
+          "equity_usd": 1629.569026,
+          "index_value": 108.637935,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-10",
+          "equity_usd": 1691.325268,
+          "index_value": 112.755018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-13",
+          "equity_usd": 1631.999026,
+          "index_value": 108.799935,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-13",
+          "equity_usd": 1699.155268,
+          "index_value": 113.277018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-14",
+          "equity_usd": 1647.299026,
+          "index_value": 109.819935,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-14",
+          "equity_usd": 1748.455268,
+          "index_value": 116.563685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-15",
+          "equity_usd": 1643.234718,
+          "index_value": 109.548981,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-15",
+          "equity_usd": 1735.985268,
+          "index_value": 115.732351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-16",
+          "equity_usd": 1643.444718,
+          "index_value": 109.562981,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-16",
+          "equity_usd": 1736.855268,
+          "index_value": 115.790351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-17",
+          "equity_usd": 1642.744718,
+          "index_value": 109.516315,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-17",
+          "equity_usd": 1733.955268,
+          "index_value": 115.597018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-20",
+          "equity_usd": 1640.644718,
+          "index_value": 109.376315,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-20",
+          "equity_usd": 1725.255268,
+          "index_value": 115.017018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-21",
+          "equity_usd": 1640.994718,
+          "index_value": 109.399648,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-21",
+          "equity_usd": 1726.705268,
+          "index_value": 115.113685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-22",
+          "equity_usd": 1653.174718,
+          "index_value": 110.211648,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-22",
+          "equity_usd": 1777.165268,
+          "index_value": 118.477685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-23",
+          "equity_usd": 1651.074718,
+          "index_value": 110.071648,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-23",
+          "equity_usd": 1768.465268,
+          "index_value": 117.897685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-24",
+          "equity_usd": 1655.974718,
+          "index_value": 110.398315,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-24",
+          "equity_usd": 1788.765268,
+          "index_value": 119.251018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-27",
+          "equity_usd": 1666.194718,
+          "index_value": 111.079648,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-27",
+          "equity_usd": 1831.105268,
+          "index_value": 122.073685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-28",
+          "equity_usd": 1658.424718,
+          "index_value": 110.561648,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-28",
+          "equity_usd": 1798.915268,
+          "index_value": 119.927685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-29",
+          "equity_usd": 1664.069114,
+          "index_value": 110.937941,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-29",
+          "equity_usd": 1820.375268,
+          "index_value": 121.358351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-04-30",
+          "equity_usd": 1663.769114,
+          "index_value": 110.917941,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-04-30",
+          "equity_usd": 1818.635268,
+          "index_value": 121.242351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-01",
+          "equity_usd": 1670.019114,
+          "index_value": 111.334608,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-01",
+          "equity_usd": 1854.885268,
+          "index_value": 123.659018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-04",
+          "equity_usd": 1679.569114,
+          "index_value": 111.971274,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-04",
+          "equity_usd": 1910.275268,
+          "index_value": 127.351685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-05",
+          "equity_usd": 1698.019114,
+          "index_value": 113.201274,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-05",
+          "equity_usd": 2017.285268,
+          "index_value": 134.485685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-06",
+          "equity_usd": 1704.96047,
+          "index_value": 113.664031,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-06",
+          "equity_usd": 2064.265268,
+          "index_value": 137.617685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-07",
+          "equity_usd": 1701.12047,
+          "index_value": 113.408031,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-07",
+          "equity_usd": 2027.145268,
+          "index_value": 135.143018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-08",
+          "equity_usd": 1720.35047,
+          "index_value": 114.690031,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-08",
+          "equity_usd": 2213.035268,
+          "index_value": 147.535685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-11",
+          "equity_usd": 1730.97047,
+          "index_value": 115.398031,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-11",
+          "equity_usd": 2315.695268,
+          "index_value": 154.379685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-12",
+          "equity_usd": 1724.19047,
+          "index_value": 114.946031,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-12",
+          "equity_usd": 2250.155268,
+          "index_value": 150.010351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-13",
+          "equity_usd": 1732.634114,
+          "index_value": 115.508941,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-13",
+          "equity_usd": 2329.035268,
+          "index_value": 155.269018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-14",
+          "equity_usd": 1728.314114,
+          "index_value": 115.220941,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-14",
+          "equity_usd": 2266.395268,
+          "index_value": 151.093018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-15",
+          "equity_usd": 1720.714114,
+          "index_value": 114.714274,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-15",
+          "equity_usd": 2156.195268,
+          "index_value": 143.746351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-18",
+          "equity_usd": 1714.634114,
+          "index_value": 114.308941,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-18",
+          "equity_usd": 2068.035268,
+          "index_value": 137.869018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-19",
+          "equity_usd": 1716.954114,
+          "index_value": 114.463608,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-19",
+          "equity_usd": 2101.675268,
+          "index_value": 140.111685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-20",
+          "equity_usd": 1720.788978,
+          "index_value": 114.719265,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-20",
+          "equity_usd": 2165.185268,
+          "index_value": 144.345685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-21",
+          "equity_usd": 1726.848978,
+          "index_value": 115.123265,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-21",
+          "equity_usd": 2223.765268,
+          "index_value": 148.251018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-22",
+          "equity_usd": 1724.478978,
+          "index_value": 114.965265,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-22",
+          "equity_usd": 2200.855268,
+          "index_value": 146.723685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-26",
+          "equity_usd": 1755.318978,
+          "index_value": 117.021265,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-26",
+          "equity_usd": 2498.975268,
+          "index_value": 166.598351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-27",
+          "equity_usd": 1763.418978,
+          "index_value": 117.561265,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-27",
+          "equity_usd": 2577.275268,
+          "index_value": 171.818351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-28",
+          "equity_usd": 1762.241022,
+          "index_value": 117.482735,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-28",
+          "equity_usd": 2564.225268,
+          "index_value": 170.948351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-05-29",
+          "equity_usd": 1770.401022,
+          "index_value": 118.026735,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-05-29",
+          "equity_usd": 2682.545268,
+          "index_value": 178.836351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-01",
+          "equity_usd": 1781.841022,
+          "index_value": 118.789401,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-01",
+          "equity_usd": 2848.425268,
+          "index_value": 189.895018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-02",
+          "equity_usd": 1787.061022,
+          "index_value": 119.137401,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-02",
+          "equity_usd": 2924.115268,
+          "index_value": 194.941018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-03",
+          "equity_usd": 1790.241022,
+          "index_value": 119.349401,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-03",
+          "equity_usd": 2970.225268,
+          "index_value": 198.015018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-04",
+          "equity_usd": 1774.531808,
+          "index_value": 118.302121,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-04",
+          "equity_usd": 2733.295268,
+          "index_value": 182.219685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-05",
+          "equity_usd": 1762.521808,
+          "index_value": 117.501454,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-05",
+          "equity_usd": 2385.005268,
+          "index_value": 159.000351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-08",
+          "equity_usd": 1768.941808,
+          "index_value": 117.929454,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-08",
+          "equity_usd": 2571.185268,
+          "index_value": 171.412351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-09",
+          "equity_usd": 1767.821808,
+          "index_value": 117.854787,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-09",
+          "equity_usd": 2538.705268,
+          "index_value": 169.247018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-10",
+          "equity_usd": 1764.131808,
+          "index_value": 117.608787,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-10",
+          "equity_usd": 2431.695268,
+          "index_value": 162.113018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-11",
+          "equity_usd": 1779.08467,
+          "index_value": 118.605645,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-11",
+          "equity_usd": 2668.335268,
+          "index_value": 177.889018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-12",
+          "equity_usd": 1776.48467,
+          "index_value": 118.432311,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-12",
+          "equity_usd": 2630.635268,
+          "index_value": 175.375685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-15",
+          "equity_usd": 1793.86467,
+          "index_value": 119.590978,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-15",
+          "equity_usd": 2882.645268,
+          "index_value": 192.176351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-16",
+          "equity_usd": 1782.10467,
+          "index_value": 118.806978,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-16",
+          "equity_usd": 2712.125268,
+          "index_value": 180.808351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-17",
+          "equity_usd": 1785.82467,
+          "index_value": 119.054978,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-17",
+          "equity_usd": 2766.065268,
+          "index_value": 184.404351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-18",
+          "equity_usd": 1798.914296,
+          "index_value": 119.92762,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-18",
+          "equity_usd": 2991.975268,
+          "index_value": 199.465018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-22",
+          "equity_usd": 1806.494296,
+          "index_value": 120.432953,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-22",
+          "equity_usd": 3211.795268,
+          "index_value": 214.119685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-23",
+          "equity_usd": 1790.314296,
+          "index_value": 119.354286,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-23",
+          "equity_usd": 2742.575268,
+          "index_value": 182.838351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-24",
+          "equity_usd": 1790.024296,
+          "index_value": 119.334953,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-24",
+          "equity_usd": 2734.165268,
+          "index_value": 182.277685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-25",
+          "equity_usd": 1804.034296,
+          "index_value": 120.268953,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-25",
+          "equity_usd": 3140.455268,
+          "index_value": 209.363685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-26",
+          "equity_usd": 1795.914296,
+          "index_value": 119.72762,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-26",
+          "equity_usd": 2904.975268,
+          "index_value": 193.665018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-29",
+          "equity_usd": 1797.334296,
+          "index_value": 119.822286,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-29",
+          "equity_usd": 2946.155268,
+          "index_value": 196.410351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-06-30",
+          "equity_usd": 1797.354296,
+          "index_value": 119.82362,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-06-30",
+          "equity_usd": 2946.735268,
+          "index_value": 196.449018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-07-01",
+          "equity_usd": 1787.414296,
+          "index_value": 119.160953,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-07-01",
+          "equity_usd": 2658.475268,
+          "index_value": 177.231685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-07-02",
+          "equity_usd": 1782.174296,
+          "index_value": 118.81162,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-07-02",
+          "equity_usd": 2506.515268,
+          "index_value": 167.101018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-07-06",
+          "equity_usd": 1780.906366,
+          "index_value": 118.727091,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-07-06",
+          "equity_usd": 2527.975268,
+          "index_value": 168.531685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-07-07",
+          "equity_usd": 1773.766366,
+          "index_value": 118.251091,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-07-07",
+          "equity_usd": 2424.445268,
+          "index_value": 161.629685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-07-08",
+          "equity_usd": 1775.206366,
+          "index_value": 118.347091,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-07-08",
+          "equity_usd": 2445.325268,
+          "index_value": 163.021685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-07-09",
+          "equity_usd": 1781.366366,
+          "index_value": 118.757758,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-07-09",
+          "equity_usd": 2534.645268,
+          "index_value": 168.976351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-07-10",
+          "equity_usd": 1779.446366,
+          "index_value": 118.629758,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-07-10",
+          "equity_usd": 2506.805268,
+          "index_value": 167.120351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-07-13",
+          "equity_usd": 1772.726366,
+          "index_value": 118.181758,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-07-13",
+          "equity_usd": 2409.365268,
+          "index_value": 160.624351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-07-14",
+          "equity_usd": 1779.166366,
+          "index_value": 118.611091,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-07-14",
+          "equity_usd": 2502.745268,
+          "index_value": 166.849685,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-07-15",
+          "equity_usd": 1767.446366,
+          "index_value": 117.829758,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-07-15",
+          "equity_usd": 2332.805268,
+          "index_value": 155.520351,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        },
+        {
+          "date": "2026-07-16",
+          "equity_usd": 1759.926366,
+          "index_value": 117.328424,
+          "risk_policy": "10% risk target, weekly rebalance",
+          "series": "周频风险控制策略"
+        },
+        {
+          "date": "2026-07-16",
+          "equity_usd": 2223.765268,
+          "index_value": 148.251018,
+          "risk_policy": "one initial allocation, no rebalance",
+          "series": "一次买入持有（风险漂移）"
+        }
+      ]
+    },
+    "generatedAt": "2026-07-24T13:16:31.057989+00:00",
+    "status": "ready",
+    "version": 1
+  },
+  "sources": [
+    {
+      "id": "daily_k_research_run",
+      "label": "本地 IBKR MU/MUU 历史日 K 研究",
+      "path": "research/results/daily_k_research.json",
+      "query": {
+        "description": "本地 Python 回测：MU 收盘信号、MUU 整股执行、下一交易日开盘成交、锚定式 walk-forward。",
+        "engine": "DuckDB",
+        "executed_at": "2026-07-24T13:16:31.057989+00:00",
+        "filters": [
+          "regular trading session daily TRADES bars",
+          "aligned MU and MUU dates only",
+          "2024-10-10 through 2026-07-23",
+          "whole shares only",
+          "no shorting and no margin borrowing",
+          "three complete 63-session out-of-sample folds"
+        ],
+        "language": "sql",
+        "metric_definitions": [
+          "样本外回报 = 期末账户权益 / 期初账户权益 - 1；包含佣金和滑点。",
+          "最大回撤 = 样本外账户权益相对此前权益峰值的最大跌幅。",
+          "目标风险暴露 = 账户权益的 10%；MUU 按 2 倍暴露折算为约 5% 名义仓位。",
+          "最差单日 = 相邻样本外账户权益之间的最低日收益。"
+        ],
+        "sql": "SELECT * FROM read_json_auto('research/results/daily_k_research.json');",
+        "tables_used": [
+          "20260724T120505Z_1b4e4692c862.json",
+          "20260724T120505Z_9a0574349abb.json"
+        ]
+      }
+    }
+  ],
+  "surface": "report"
+}

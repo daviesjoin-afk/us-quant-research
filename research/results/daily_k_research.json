@@ -1,0 +1,2154 @@
+{
+  "capital_sensitivity": [
+    {
+      "commission": 9.45,
+      "initial_equity": 1000.0,
+      "max_drawdown": 0.029006598169394625,
+      "oos_return": 0.156543998,
+      "selected_parameters": [
+        "20/100",
+        "20/100",
+        "20/100"
+      ],
+      "trade_count": 27
+    },
+    {
+      "commission": 11.55,
+      "initial_equity": 1500.0,
+      "max_drawdown": 0.030608803896615577,
+      "oos_return": 0.173284244,
+      "selected_parameters": [
+        "20/100",
+        "20/100",
+        "20/100"
+      ],
+      "trade_count": 33
+    },
+    {
+      "commission": 11.9,
+      "initial_equity": 2000.0,
+      "max_drawdown": 0.03323306238463315,
+      "oos_return": 0.172899502,
+      "selected_parameters": [
+        "20/100",
+        "20/100",
+        "20/100"
+      ],
+      "trade_count": 34
+    }
+  ],
+  "chart_data": {
+    "fold_returns": [
+      {
+        "commission": 4.55,
+        "fold": "Fold 1",
+        "oos_return": 0.05576366666666667,
+        "parameters": "20/100",
+        "test_end": "2026-01-13",
+        "test_start": "2025-10-14",
+        "trade_count": 13
+      },
+      {
+        "commission": 3.85,
+        "fold": "Fold 2",
+        "oos_return": 0.03762787694594529,
+        "parameters": "20/100",
+        "test_end": "2026-04-15",
+        "test_start": "2026-01-14",
+        "trade_count": 11
+      },
+      {
+        "commission": 3.15,
+        "fold": "Fold 3",
+        "oos_return": 0.07101337789529347,
+        "parameters": "20/100",
+        "test_end": "2026-07-16",
+        "test_start": "2026-04-16",
+        "trade_count": 9
+      }
+    ],
+    "out_of_sample_equity": [
+      {
+        "benchmark_equity": 1499.345268,
+        "benchmark_index": 99.956351,
+        "buy_hold_equity": 1499.345268,
+        "buy_hold_index": 99.956351,
+        "date": "2025-10-14",
+        "strategy_equity": 1499.345268,
+        "strategy_index": 99.956351
+      },
+      {
+        "benchmark_equity": 1503.405268,
+        "benchmark_index": 100.227018,
+        "buy_hold_equity": 1503.405268,
+        "buy_hold_index": 100.227018,
+        "date": "2025-10-15",
+        "strategy_equity": 1503.405268,
+        "strategy_index": 100.227018
+      },
+      {
+        "benchmark_equity": 1511.815268,
+        "benchmark_index": 100.787685,
+        "buy_hold_equity": 1511.815268,
+        "buy_hold_index": 100.787685,
+        "date": "2025-10-16",
+        "strategy_equity": 1511.815268,
+        "strategy_index": 100.787685
+      },
+      {
+        "benchmark_equity": 1511.525268,
+        "benchmark_index": 100.768351,
+        "buy_hold_equity": 1511.525268,
+        "buy_hold_index": 100.768351,
+        "date": "2025-10-17",
+        "strategy_equity": 1511.525268,
+        "strategy_index": 100.768351
+      },
+      {
+        "benchmark_equity": 1515.295268,
+        "benchmark_index": 101.019685,
+        "buy_hold_equity": 1515.295268,
+        "buy_hold_index": 101.019685,
+        "date": "2025-10-20",
+        "strategy_equity": 1515.295268,
+        "strategy_index": 101.019685
+      },
+      {
+        "benchmark_equity": 1511.452852,
+        "benchmark_index": 100.763523,
+        "buy_hold_equity": 1511.525268,
+        "buy_hold_index": 100.768351,
+        "date": "2025-10-21",
+        "strategy_equity": 1511.452852,
+        "strategy_index": 100.763523
+      },
+      {
+        "benchmark_equity": 1508.702852,
+        "benchmark_index": 100.58019,
+        "buy_hold_equity": 1508.335268,
+        "buy_hold_index": 100.555685,
+        "date": "2025-10-22",
+        "strategy_equity": 1508.702852,
+        "strategy_index": 100.58019
+      },
+      {
+        "benchmark_equity": 1514.452852,
+        "benchmark_index": 100.963523,
+        "buy_hold_equity": 1515.005268,
+        "buy_hold_index": 101.000351,
+        "date": "2025-10-23",
+        "strategy_equity": 1514.452852,
+        "strategy_index": 100.963523
+      },
+      {
+        "benchmark_equity": 1523.702852,
+        "benchmark_index": 101.58019,
+        "buy_hold_equity": 1525.735268,
+        "buy_hold_index": 101.715685,
+        "date": "2025-10-24",
+        "strategy_equity": 1523.702852,
+        "strategy_index": 101.58019
+      },
+      {
+        "benchmark_equity": 1524.452852,
+        "benchmark_index": 101.63019,
+        "buy_hold_equity": 1526.605268,
+        "buy_hold_index": 101.773685,
+        "date": "2025-10-27",
+        "strategy_equity": 1524.452852,
+        "strategy_index": 101.63019
+      },
+      {
+        "benchmark_equity": 1525.080794,
+        "benchmark_index": 101.672053,
+        "buy_hold_equity": 1528.055268,
+        "buy_hold_index": 101.870351,
+        "date": "2025-10-28",
+        "strategy_equity": 1525.080794,
+        "strategy_index": 101.672053
+      },
+      {
+        "benchmark_equity": 1528.600794,
+        "benchmark_index": 101.90672,
+        "buy_hold_equity": 1532.695268,
+        "buy_hold_index": 102.179685,
+        "date": "2025-10-29",
+        "strategy_equity": 1528.600794,
+        "strategy_index": 101.90672
+      },
+      {
+        "benchmark_equity": 1526.840794,
+        "benchmark_index": 101.789386,
+        "buy_hold_equity": 1530.375268,
+        "buy_hold_index": 102.025018,
+        "date": "2025-10-30",
+        "strategy_equity": 1526.840794,
+        "strategy_index": 101.789386
+      },
+      {
+        "benchmark_equity": 1526.180794,
+        "benchmark_index": 101.745386,
+        "buy_hold_equity": 1529.505268,
+        "buy_hold_index": 101.967018,
+        "date": "2025-10-31",
+        "strategy_equity": 1526.180794,
+        "strategy_index": 101.745386
+      },
+      {
+        "benchmark_equity": 1534.100794,
+        "benchmark_index": 102.273386,
+        "buy_hold_equity": 1539.945268,
+        "buy_hold_index": 102.663018,
+        "date": "2025-11-03",
+        "strategy_equity": 1534.100794,
+        "strategy_index": 102.273386
+      },
+      {
+        "benchmark_equity": 1521.79009,
+        "benchmark_index": 101.452673,
+        "buy_hold_equity": 1523.995268,
+        "buy_hold_index": 101.599685,
+        "date": "2025-11-04",
+        "strategy_equity": 1521.79009,
+        "strategy_index": 101.452673
+      },
+      {
+        "benchmark_equity": 1534.18009,
+        "benchmark_index": 102.278673,
+        "buy_hold_equity": 1541.105268,
+        "buy_hold_index": 102.740351,
+        "date": "2025-11-05",
+        "strategy_equity": 1534.18009,
+        "strategy_index": 102.278673
+      },
+      {
+        "benchmark_equity": 1534.60009,
+        "benchmark_index": 102.306673,
+        "buy_hold_equity": 1541.685268,
+        "buy_hold_index": 102.779018,
+        "date": "2025-11-06",
+        "strategy_equity": 1534.60009,
+        "strategy_index": 102.306673
+      },
+      {
+        "benchmark_equity": 1534.39009,
+        "benchmark_index": 102.292673,
+        "buy_hold_equity": 1541.395268,
+        "buy_hold_index": 102.759685,
+        "date": "2025-11-07",
+        "strategy_equity": 1534.39009,
+        "strategy_index": 102.292673
+      },
+      {
+        "benchmark_equity": 1545.10009,
+        "benchmark_index": 103.006673,
+        "buy_hold_equity": 1556.185268,
+        "buy_hold_index": 103.745685,
+        "date": "2025-11-10",
+        "strategy_equity": 1545.10009,
+        "strategy_index": 103.006673
+      },
+      {
+        "benchmark_equity": 1536.546642,
+        "benchmark_index": 102.436443,
+        "buy_hold_equity": 1543.425268,
+        "buy_hold_index": 102.895018,
+        "date": "2025-11-11",
+        "strategy_equity": 1536.546642,
+        "strategy_index": 102.436443
+      },
+      {
+        "benchmark_equity": 1538.926642,
+        "benchmark_index": 102.595109,
+        "buy_hold_equity": 1547.485268,
+        "buy_hold_index": 103.165685,
+        "date": "2025-11-12",
+        "strategy_equity": 1538.926642,
+        "strategy_index": 102.595109
+      },
+      {
+        "benchmark_equity": 1534.166642,
+        "benchmark_index": 102.277776,
+        "buy_hold_equity": 1539.365268,
+        "buy_hold_index": 102.624351,
+        "date": "2025-11-13",
+        "strategy_equity": 1534.166642,
+        "strategy_index": 102.277776
+      },
+      {
+        "benchmark_equity": 1539.776642,
+        "benchmark_index": 102.651776,
+        "buy_hold_equity": 1548.935268,
+        "buy_hold_index": 103.262351,
+        "date": "2025-11-14",
+        "strategy_equity": 1539.776642,
+        "strategy_index": 102.651776
+      },
+      {
+        "benchmark_equity": 1536.886642,
+        "benchmark_index": 102.459109,
+        "buy_hold_equity": 1544.005268,
+        "buy_hold_index": 102.933685,
+        "date": "2025-11-17",
+        "strategy_equity": 1536.886642,
+        "strategy_index": 102.459109
+      },
+      {
+        "benchmark_equity": 1528.235102,
+        "benchmark_index": 101.88234,
+        "buy_hold_equity": 1530.665268,
+        "buy_hold_index": 102.044351,
+        "date": "2025-11-18",
+        "strategy_equity": 1528.235102,
+        "strategy_index": 101.88234
+      },
+      {
+        "benchmark_equity": 1526.145102,
+        "benchmark_index": 101.743007,
+        "buy_hold_equity": 1527.475268,
+        "buy_hold_index": 101.831685,
+        "date": "2025-11-19",
+        "strategy_equity": 1526.145102,
+        "strategy_index": 101.743007
+      },
+      {
+        "benchmark_equity": 1511.895102,
+        "benchmark_index": 100.793007,
+        "buy_hold_equity": 1505.725268,
+        "buy_hold_index": 100.381685,
+        "date": "2025-11-20",
+        "strategy_equity": 1511.895102,
+        "strategy_index": 100.793007
+      },
+      {
+        "benchmark_equity": 1515.125102,
+        "benchmark_index": 101.00834,
+        "buy_hold_equity": 1510.655268,
+        "buy_hold_index": 100.710351,
+        "date": "2025-11-21",
+        "strategy_equity": 1515.125102,
+        "strategy_index": 101.00834
+      },
+      {
+        "benchmark_equity": 1523.865102,
+        "benchmark_index": 101.591007,
+        "buy_hold_equity": 1523.995268,
+        "buy_hold_index": 101.599685,
+        "date": "2025-11-24",
+        "strategy_equity": 1523.865102,
+        "strategy_index": 101.591007
+      },
+      {
+        "benchmark_equity": 1524.53251,
+        "benchmark_index": 101.635501,
+        "buy_hold_equity": 1524.575268,
+        "buy_hold_index": 101.638351,
+        "date": "2025-11-25",
+        "strategy_equity": 1524.53251,
+        "strategy_index": 101.635501
+      },
+      {
+        "benchmark_equity": 1528.67251,
+        "benchmark_index": 101.911501,
+        "buy_hold_equity": 1529.795268,
+        "buy_hold_index": 101.986351,
+        "date": "2025-11-26",
+        "strategy_equity": 1528.67251,
+        "strategy_index": 101.911501
+      },
+      {
+        "benchmark_equity": 1533.04251,
+        "benchmark_index": 102.202834,
+        "buy_hold_equity": 1535.305268,
+        "buy_hold_index": 102.353685,
+        "date": "2025-11-28",
+        "strategy_equity": 1533.04251,
+        "strategy_index": 102.202834
+      },
+      {
+        "benchmark_equity": 1535.80251,
+        "benchmark_index": 102.386834,
+        "buy_hold_equity": 1538.785268,
+        "buy_hold_index": 102.585685,
+        "date": "2025-12-01",
+        "strategy_equity": 1535.80251,
+        "strategy_index": 102.386834
+      },
+      {
+        "benchmark_equity": 1535.11251,
+        "benchmark_index": 102.340834,
+        "buy_hold_equity": 1537.915268,
+        "buy_hold_index": 102.527685,
+        "date": "2025-12-02",
+        "strategy_equity": 1535.11251,
+        "strategy_index": 102.340834
+      },
+      {
+        "benchmark_equity": 1530.920242,
+        "benchmark_index": 102.061349,
+        "buy_hold_equity": 1532.695268,
+        "buy_hold_index": 102.179685,
+        "date": "2025-12-03",
+        "strategy_equity": 1530.920242,
+        "strategy_index": 102.061349
+      },
+      {
+        "benchmark_equity": 1526.120242,
+        "benchmark_index": 101.741349,
+        "buy_hold_equity": 1525.735268,
+        "buy_hold_index": 101.715685,
+        "date": "2025-12-04",
+        "strategy_equity": 1526.120242,
+        "strategy_index": 101.741349
+      },
+      {
+        "benchmark_equity": 1532.520242,
+        "benchmark_index": 102.168016,
+        "buy_hold_equity": 1535.015268,
+        "buy_hold_index": 102.334351,
+        "date": "2025-12-05",
+        "strategy_equity": 1532.520242,
+        "strategy_index": 102.168016
+      },
+      {
+        "benchmark_equity": 1538.720242,
+        "benchmark_index": 102.581349,
+        "buy_hold_equity": 1544.005268,
+        "buy_hold_index": 102.933685,
+        "date": "2025-12-08",
+        "strategy_equity": 1538.720242,
+        "strategy_index": 102.581349
+      },
+      {
+        "benchmark_equity": 1542.320242,
+        "benchmark_index": 102.821349,
+        "buy_hold_equity": 1549.225268,
+        "buy_hold_index": 103.281685,
+        "date": "2025-12-09",
+        "strategy_equity": 1542.320242,
+        "strategy_index": 102.821349
+      },
+      {
+        "benchmark_equity": 1545.208578,
+        "benchmark_index": 103.013905,
+        "buy_hold_equity": 1554.735268,
+        "buy_hold_index": 103.649018,
+        "date": "2025-12-10",
+        "strategy_equity": 1545.208578,
+        "strategy_index": 103.013905
+      },
+      {
+        "benchmark_equity": 1542.148578,
+        "benchmark_index": 102.809905,
+        "buy_hold_equity": 1549.805268,
+        "buy_hold_index": 103.320351,
+        "date": "2025-12-11",
+        "strategy_equity": 1542.148578,
+        "strategy_index": 102.809905
+      },
+      {
+        "benchmark_equity": 1531.708578,
+        "benchmark_index": 102.113905,
+        "buy_hold_equity": 1532.985268,
+        "buy_hold_index": 102.199018,
+        "date": "2025-12-12",
+        "strategy_equity": 1531.708578,
+        "strategy_index": 102.113905
+      },
+      {
+        "benchmark_equity": 1529.728578,
+        "benchmark_index": 101.981905,
+        "buy_hold_equity": 1529.795268,
+        "buy_hold_index": 101.986351,
+        "date": "2025-12-15",
+        "strategy_equity": 1529.728578,
+        "strategy_index": 101.981905
+      },
+      {
+        "benchmark_equity": 1527.028578,
+        "benchmark_index": 101.801905,
+        "buy_hold_equity": 1525.445268,
+        "buy_hold_index": 101.696351,
+        "date": "2025-12-16",
+        "strategy_equity": 1527.028578,
+        "strategy_index": 101.801905
+      },
+      {
+        "benchmark_equity": 1522.116448,
+        "benchmark_index": 101.47443,
+        "buy_hold_equity": 1519.645268,
+        "buy_hold_index": 101.309685,
+        "date": "2025-12-17",
+        "strategy_equity": 1522.116448,
+        "strategy_index": 101.47443
+      },
+      {
+        "benchmark_equity": 1535.766448,
+        "benchmark_index": 102.38443,
+        "buy_hold_equity": 1538.495268,
+        "buy_hold_index": 102.566351,
+        "date": "2025-12-18",
+        "strategy_equity": 1535.766448,
+        "strategy_index": 102.38443
+      },
+      {
+        "benchmark_equity": 1547.106448,
+        "benchmark_index": 103.14043,
+        "buy_hold_equity": 1554.155268,
+        "buy_hold_index": 103.610351,
+        "date": "2025-12-19",
+        "strategy_equity": 1547.106448,
+        "strategy_index": 103.14043
+      },
+      {
+        "benchmark_equity": 1554.456448,
+        "benchmark_index": 103.63043,
+        "buy_hold_equity": 1564.305268,
+        "buy_hold_index": 104.287018,
+        "date": "2025-12-22",
+        "strategy_equity": 1554.456448,
+        "strategy_index": 103.63043
+      },
+      {
+        "benchmark_equity": 1553.616448,
+        "benchmark_index": 103.57443,
+        "buy_hold_equity": 1563.145268,
+        "buy_hold_index": 104.209685,
+        "date": "2025-12-23",
+        "strategy_equity": 1553.616448,
+        "strategy_index": 103.57443
+      },
+      {
+        "benchmark_equity": 1559.481658,
+        "benchmark_index": 103.965444,
+        "buy_hold_equity": 1573.875268,
+        "buy_hold_index": 104.925018,
+        "date": "2025-12-24",
+        "strategy_equity": 1559.481658,
+        "strategy_index": 103.965444
+      },
+      {
+        "benchmark_equity": 1558.201658,
+        "benchmark_index": 103.880111,
+        "buy_hold_equity": 1571.555268,
+        "buy_hold_index": 104.770351,
+        "date": "2025-12-26",
+        "strategy_equity": 1558.201658,
+        "strategy_index": 103.880111
+      },
+      {
+        "benchmark_equity": 1563.641658,
+        "benchmark_index": 104.242777,
+        "buy_hold_equity": 1581.415268,
+        "buy_hold_index": 105.427685,
+        "date": "2025-12-29",
+        "strategy_equity": 1563.641658,
+        "strategy_index": 104.242777
+      },
+      {
+        "benchmark_equity": 1562.681658,
+        "benchmark_index": 104.178777,
+        "buy_hold_equity": 1579.675268,
+        "buy_hold_index": 105.311685,
+        "date": "2025-12-30",
+        "strategy_equity": 1562.681658,
+        "strategy_index": 104.178777
+      },
+      {
+        "benchmark_equity": 1558.521658,
+        "benchmark_index": 103.901444,
+        "buy_hold_equity": 1572.135268,
+        "buy_hold_index": 104.809018,
+        "date": "2025-12-31",
+        "strategy_equity": 1558.521658,
+        "strategy_index": 103.901444
+      },
+      {
+        "benchmark_equity": 1573.509514,
+        "benchmark_index": 104.900634,
+        "buy_hold_equity": 1602.585268,
+        "buy_hold_index": 106.839018,
+        "date": "2026-01-02",
+        "strategy_equity": 1573.509514,
+        "strategy_index": 104.900634
+      },
+      {
+        "benchmark_equity": 1571.549514,
+        "benchmark_index": 104.769968,
+        "buy_hold_equity": 1598.525268,
+        "buy_hold_index": 106.568351,
+        "date": "2026-01-05",
+        "strategy_equity": 1571.549514,
+        "strategy_index": 104.769968
+      },
+      {
+        "benchmark_equity": 1588.209514,
+        "benchmark_index": 105.880634,
+        "buy_hold_equity": 1633.035268,
+        "buy_hold_index": 108.869018,
+        "date": "2026-01-06",
+        "strategy_equity": 1588.209514,
+        "strategy_index": 105.880634
+      },
+      {
+        "benchmark_equity": 1585.549514,
+        "benchmark_index": 105.703301,
+        "buy_hold_equity": 1627.525268,
+        "buy_hold_index": 108.501685,
+        "date": "2026-01-07",
+        "strategy_equity": 1585.549514,
+        "strategy_index": 105.703301
+      },
+      {
+        "benchmark_equity": 1578.689514,
+        "benchmark_index": 105.245968,
+        "buy_hold_equity": 1613.315268,
+        "buy_hold_index": 107.554351,
+        "date": "2026-01-08",
+        "strategy_equity": 1578.689514,
+        "strategy_index": 105.245968
+      },
+      {
+        "benchmark_equity": 1586.9455,
+        "benchmark_index": 105.796367,
+        "buy_hold_equity": 1634.195268,
+        "buy_hold_index": 108.946351,
+        "date": "2026-01-09",
+        "strategy_equity": 1586.9455,
+        "strategy_index": 105.796367
+      },
+      {
+        "benchmark_equity": 1587.1655,
+        "benchmark_index": 105.811033,
+        "buy_hold_equity": 1634.775268,
+        "buy_hold_index": 108.985018,
+        "date": "2026-01-12",
+        "strategy_equity": 1587.1655,
+        "strategy_index": 105.811033
+      },
+      {
+        "benchmark_equity": 1583.6455,
+        "benchmark_index": 105.576367,
+        "buy_hold_equity": 1625.495268,
+        "buy_hold_index": 108.366351,
+        "date": "2026-01-13",
+        "strategy_equity": 1583.6455,
+        "strategy_index": 105.576367
+      },
+      {
+        "benchmark_equity": 1581.4455,
+        "benchmark_index": 105.4297,
+        "buy_hold_equity": 1619.695268,
+        "buy_hold_index": 107.979685,
+        "date": "2026-01-14",
+        "strategy_equity": 1581.4455,
+        "strategy_index": 105.4297
+      },
+      {
+        "benchmark_equity": 1582.8755,
+        "benchmark_index": 105.525033,
+        "buy_hold_equity": 1623.465268,
+        "buy_hold_index": 108.231018,
+        "date": "2026-01-15",
+        "strategy_equity": 1582.8755,
+        "strategy_index": 105.525033
+      },
+      {
+        "benchmark_equity": 1593.794004,
+        "benchmark_index": 106.252934,
+        "buy_hold_equity": 1654.205268,
+        "buy_hold_index": 110.280351,
+        "date": "2026-01-16",
+        "strategy_equity": 1593.794004,
+        "strategy_index": 106.252934
+      },
+      {
+        "benchmark_equity": 1594.794004,
+        "benchmark_index": 106.3196,
+        "buy_hold_equity": 1657.105268,
+        "buy_hold_index": 110.473685,
+        "date": "2026-01-20",
+        "strategy_equity": 1594.794004,
+        "strategy_index": 106.3196
+      },
+      {
+        "benchmark_equity": 1605.294004,
+        "benchmark_index": 107.0196,
+        "buy_hold_equity": 1687.555268,
+        "buy_hold_index": 112.503685,
+        "date": "2026-01-21",
+        "strategy_equity": 1605.294004,
+        "strategy_index": 107.0196
+      },
+      {
+        "benchmark_equity": 1609.194004,
+        "benchmark_index": 107.2796,
+        "buy_hold_equity": 1698.865268,
+        "buy_hold_index": 113.257685,
+        "date": "2026-01-22",
+        "strategy_equity": 1609.194004,
+        "strategy_index": 107.2796
+      },
+      {
+        "benchmark_equity": 1610.094004,
+        "benchmark_index": 107.3396,
+        "buy_hold_equity": 1701.475268,
+        "buy_hold_index": 113.431685,
+        "date": "2026-01-23",
+        "strategy_equity": 1610.094004,
+        "strategy_index": 107.3396
+      },
+      {
+        "benchmark_equity": 1605.320288,
+        "benchmark_index": 107.021353,
+        "buy_hold_equity": 1686.975268,
+        "buy_hold_index": 112.465018,
+        "date": "2026-01-26",
+        "strategy_equity": 1605.320288,
+        "strategy_index": 107.021353
+      },
+      {
+        "benchmark_equity": 1613.000288,
+        "benchmark_index": 107.533353,
+        "buy_hold_equity": 1714.815268,
+        "buy_hold_index": 114.321018,
+        "date": "2026-01-27",
+        "strategy_equity": 1613.000288,
+        "strategy_index": 107.533353
+      },
+      {
+        "benchmark_equity": 1622.760288,
+        "benchmark_index": 108.184019,
+        "buy_hold_equity": 1750.195268,
+        "buy_hold_index": 116.679685,
+        "date": "2026-01-28",
+        "strategy_equity": 1622.760288,
+        "strategy_index": 108.184019
+      },
+      {
+        "benchmark_equity": 1623.000288,
+        "benchmark_index": 108.200019,
+        "buy_hold_equity": 1751.065268,
+        "buy_hold_index": 116.737685,
+        "date": "2026-01-29",
+        "strategy_equity": 1623.000288,
+        "strategy_index": 108.200019
+      },
+      {
+        "benchmark_equity": 1614.360288,
+        "benchmark_index": 107.624019,
+        "buy_hold_equity": 1719.745268,
+        "buy_hold_index": 114.649685,
+        "date": "2026-01-30",
+        "strategy_equity": 1614.360288,
+        "strategy_index": 107.624019
+      },
+      {
+        "benchmark_equity": 1623.320288,
+        "benchmark_index": 108.221353,
+        "buy_hold_equity": 1752.225268,
+        "buy_hold_index": 116.815018,
+        "date": "2026-02-02",
+        "strategy_equity": 1623.320288,
+        "strategy_index": 108.221353
+      },
+      {
+        "benchmark_equity": 1615.720288,
+        "benchmark_index": 107.714686,
+        "buy_hold_equity": 1724.675268,
+        "buy_hold_index": 114.978351,
+        "date": "2026-02-03",
+        "strategy_equity": 1615.720288,
+        "strategy_index": 107.714686
+      },
+      {
+        "benchmark_equity": 1599.960288,
+        "benchmark_index": 106.664019,
+        "buy_hold_equity": 1667.545268,
+        "buy_hold_index": 111.169685,
+        "date": "2026-02-04",
+        "strategy_equity": 1599.960288,
+        "strategy_index": 106.664019
+      },
+      {
+        "benchmark_equity": 1601.080288,
+        "benchmark_index": 106.738686,
+        "buy_hold_equity": 1671.605268,
+        "buy_hold_index": 111.440351,
+        "date": "2026-02-05",
+        "strategy_equity": 1601.080288,
+        "strategy_index": 106.738686
+      },
+      {
+        "benchmark_equity": 1605.160288,
+        "benchmark_index": 107.010686,
+        "buy_hold_equity": 1686.395268,
+        "buy_hold_index": 112.426351,
+        "date": "2026-02-06",
+        "strategy_equity": 1605.160288,
+        "strategy_index": 107.010686
+      },
+      {
+        "benchmark_equity": 1600.778622,
+        "benchmark_index": 106.718575,
+        "buy_hold_equity": 1671.315268,
+        "buy_hold_index": 111.421018,
+        "date": "2026-02-09",
+        "strategy_equity": 1600.778622,
+        "strategy_index": 106.718575
+      },
+      {
+        "benchmark_equity": 1596.818622,
+        "benchmark_index": 106.454575,
+        "buy_hold_equity": 1658.555268,
+        "buy_hold_index": 110.570351,
+        "date": "2026-02-10",
+        "strategy_equity": 1596.818622,
+        "strategy_index": 106.454575
+      },
+      {
+        "benchmark_equity": 1611.218622,
+        "benchmark_index": 107.414575,
+        "buy_hold_equity": 1704.955268,
+        "buy_hold_index": 113.663685,
+        "date": "2026-02-11",
+        "strategy_equity": 1611.218622,
+        "strategy_index": 107.414575
+      },
+      {
+        "benchmark_equity": 1612.658622,
+        "benchmark_index": 107.510575,
+        "buy_hold_equity": 1709.595268,
+        "buy_hold_index": 113.973018,
+        "date": "2026-02-12",
+        "strategy_equity": 1612.658622,
+        "strategy_index": 107.510575
+      },
+      {
+        "benchmark_equity": 1611.668622,
+        "benchmark_index": 107.444575,
+        "buy_hold_equity": 1706.405268,
+        "buy_hold_index": 113.760351,
+        "date": "2026-02-13",
+        "strategy_equity": 1611.668622,
+        "strategy_index": 107.444575
+      },
+      {
+        "benchmark_equity": 1606.40679,
+        "benchmark_index": 107.093786,
+        "buy_hold_equity": 1690.455268,
+        "buy_hold_index": 112.697018,
+        "date": "2026-02-17",
+        "strategy_equity": 1606.40679,
+        "strategy_index": 107.093786
+      },
+      {
+        "benchmark_equity": 1613.92679,
+        "benchmark_index": 107.595119,
+        "buy_hold_equity": 1717.715268,
+        "buy_hold_index": 114.514351,
+        "date": "2026-02-18",
+        "strategy_equity": 1613.92679,
+        "strategy_index": 107.595119
+      },
+      {
+        "benchmark_equity": 1612.56679,
+        "benchmark_index": 107.504453,
+        "buy_hold_equity": 1712.785268,
+        "buy_hold_index": 114.185685,
+        "date": "2026-02-19",
+        "strategy_equity": 1612.56679,
+        "strategy_index": 107.504453
+      },
+      {
+        "benchmark_equity": 1616.56679,
+        "benchmark_index": 107.771119,
+        "buy_hold_equity": 1727.285268,
+        "buy_hold_index": 115.152351,
+        "date": "2026-02-20",
+        "strategy_equity": 1616.56679,
+        "strategy_index": 107.771119
+      },
+      {
+        "benchmark_equity": 1613.68679,
+        "benchmark_index": 107.579119,
+        "buy_hold_equity": 1716.845268,
+        "buy_hold_index": 114.456351,
+        "date": "2026-02-23",
+        "strategy_equity": 1613.68679,
+        "strategy_index": 107.579119
+      },
+      {
+        "benchmark_equity": 1612.79471,
+        "benchmark_index": 107.519647,
+        "buy_hold_equity": 1713.075268,
+        "buy_hold_index": 114.205018,
+        "date": "2026-02-24",
+        "strategy_equity": 1612.79471,
+        "strategy_index": 107.519647
+      },
+      {
+        "benchmark_equity": 1616.15471,
+        "benchmark_index": 107.743647,
+        "buy_hold_equity": 1726.995268,
+        "buy_hold_index": 115.133018,
+        "date": "2026-02-25",
+        "strategy_equity": 1616.15471,
+        "strategy_index": 107.743647
+      },
+      {
+        "benchmark_equity": 1611.81471,
+        "benchmark_index": 107.454314,
+        "buy_hold_equity": 1709.015268,
+        "buy_hold_index": 113.934351,
+        "date": "2026-02-26",
+        "strategy_equity": 1611.81471,
+        "strategy_index": 107.454314
+      },
+      {
+        "benchmark_equity": 1610.69471,
+        "benchmark_index": 107.379647,
+        "buy_hold_equity": 1704.375268,
+        "buy_hold_index": 113.625018,
+        "date": "2026-02-27",
+        "strategy_equity": 1610.69471,
+        "strategy_index": 107.379647
+      },
+      {
+        "benchmark_equity": 1610.55471,
+        "benchmark_index": 107.370314,
+        "buy_hold_equity": 1703.795268,
+        "buy_hold_index": 113.586351,
+        "date": "2026-03-02",
+        "strategy_equity": 1610.55471,
+        "strategy_index": 107.370314
+      },
+      {
+        "benchmark_equity": 1599.201378,
+        "benchmark_index": 106.613425,
+        "buy_hold_equity": 1660.295268,
+        "buy_hold_index": 110.686351,
+        "date": "2026-03-03",
+        "strategy_equity": 1599.201378,
+        "strategy_index": 106.613425
+      },
+      {
+        "benchmark_equity": 1607.121378,
+        "benchmark_index": 107.141425,
+        "buy_hold_equity": 1685.815268,
+        "buy_hold_index": 112.387685,
+        "date": "2026-03-04",
+        "strategy_equity": 1607.121378,
+        "strategy_index": 107.141425
+      },
+      {
+        "benchmark_equity": 1605.321378,
+        "benchmark_index": 107.021425,
+        "buy_hold_equity": 1680.015268,
+        "buy_hold_index": 112.001018,
+        "date": "2026-03-05",
+        "strategy_equity": 1605.321378,
+        "strategy_index": 107.021425
+      },
+      {
+        "benchmark_equity": 1594.971378,
+        "benchmark_index": 106.331425,
+        "buy_hold_equity": 1646.665268,
+        "buy_hold_index": 109.777685,
+        "date": "2026-03-06",
+        "strategy_equity": 1594.971378,
+        "strategy_index": 106.331425
+      },
+      {
+        "benchmark_equity": 1601.901378,
+        "benchmark_index": 106.793425,
+        "buy_hold_equity": 1668.995268,
+        "buy_hold_index": 111.266351,
+        "date": "2026-03-09",
+        "strategy_equity": 1601.901378,
+        "strategy_index": 106.793425
+      },
+      {
+        "benchmark_equity": 1607.211378,
+        "benchmark_index": 107.147425,
+        "buy_hold_equity": 1686.105268,
+        "buy_hold_index": 112.407018,
+        "date": "2026-03-10",
+        "strategy_equity": 1607.211378,
+        "strategy_index": 107.147425
+      },
+      {
+        "benchmark_equity": 1613.421378,
+        "benchmark_index": 107.561425,
+        "buy_hold_equity": 1706.115268,
+        "buy_hold_index": 113.741018,
+        "date": "2026-03-11",
+        "strategy_equity": 1613.421378,
+        "strategy_index": 107.561425
+      },
+      {
+        "benchmark_equity": 1607.841378,
+        "benchmark_index": 107.189425,
+        "buy_hold_equity": 1688.135268,
+        "buy_hold_index": 112.542351,
+        "date": "2026-03-12",
+        "strategy_equity": 1607.841378,
+        "strategy_index": 107.189425
+      },
+      {
+        "benchmark_equity": 1616.121378,
+        "benchmark_index": 107.741425,
+        "buy_hold_equity": 1714.815268,
+        "buy_hold_index": 114.321018,
+        "date": "2026-03-13",
+        "strategy_equity": 1616.121378,
+        "strategy_index": 107.741425
+      },
+      {
+        "benchmark_equity": 1622.691378,
+        "benchmark_index": 108.179425,
+        "buy_hold_equity": 1735.985268,
+        "buy_hold_index": 115.732351,
+        "date": "2026-03-16",
+        "strategy_equity": 1622.691378,
+        "strategy_index": 108.179425
+      },
+      {
+        "benchmark_equity": 1630.036906,
+        "benchmark_index": 108.669127,
+        "buy_hold_equity": 1763.825268,
+        "buy_hold_index": 117.588351,
+        "date": "2026-03-17",
+        "strategy_equity": 1630.036906,
+        "strategy_index": 108.669127
+      },
+      {
+        "benchmark_equity": 1630.036906,
+        "benchmark_index": 108.669127,
+        "buy_hold_equity": 1763.825268,
+        "buy_hold_index": 117.588351,
+        "date": "2026-03-18",
+        "strategy_equity": 1630.036906,
+        "strategy_index": 108.669127
+      },
+      {
+        "benchmark_equity": 1623.736906,
+        "benchmark_index": 108.249127,
+        "buy_hold_equity": 1737.725268,
+        "buy_hold_index": 115.848351,
+        "date": "2026-03-19",
+        "strategy_equity": 1623.736906,
+        "strategy_index": 108.249127
+      },
+      {
+        "benchmark_equity": 1616.526906,
+        "benchmark_index": 107.76846,
+        "buy_hold_equity": 1707.855268,
+        "buy_hold_index": 113.857018,
+        "date": "2026-03-20",
+        "strategy_equity": 1616.526906,
+        "strategy_index": 107.76846
+      },
+      {
+        "benchmark_equity": 1610.506906,
+        "benchmark_index": 107.367127,
+        "buy_hold_equity": 1682.915268,
+        "buy_hold_index": 112.194351,
+        "date": "2026-03-23",
+        "strategy_equity": 1610.506906,
+        "strategy_index": 107.367127
+      },
+      {
+        "benchmark_equity": 1606.783426,
+        "benchmark_index": 107.118895,
+        "buy_hold_equity": 1671.025268,
+        "buy_hold_index": 111.401685,
+        "date": "2026-03-24",
+        "strategy_equity": 1606.783426,
+        "strategy_index": 107.118895
+      },
+      {
+        "benchmark_equity": 1601.563426,
+        "benchmark_index": 106.770895,
+        "buy_hold_equity": 1654.205268,
+        "buy_hold_index": 110.280351,
+        "date": "2026-03-25",
+        "strategy_equity": 1601.563426,
+        "strategy_index": 106.770895
+      },
+      {
+        "benchmark_equity": 1591.483426,
+        "benchmark_index": 106.098895,
+        "buy_hold_equity": 1621.725268,
+        "buy_hold_index": 108.115018,
+        "date": "2026-03-26",
+        "strategy_equity": 1591.483426,
+        "strategy_index": 106.098895
+      },
+      {
+        "benchmark_equity": 1592.203426,
+        "benchmark_index": 106.146895,
+        "buy_hold_equity": 1624.045268,
+        "buy_hold_index": 108.269685,
+        "date": "2026-03-27",
+        "strategy_equity": 1592.203426,
+        "strategy_index": 106.146895
+      },
+      {
+        "benchmark_equity": 1580.143426,
+        "benchmark_index": 105.342895,
+        "buy_hold_equity": 1585.185268,
+        "buy_hold_index": 105.679018,
+        "date": "2026-03-30",
+        "strategy_equity": 1580.143426,
+        "strategy_index": 105.342895
+      },
+      {
+        "benchmark_equity": 1587.257946,
+        "benchmark_index": 105.817196,
+        "buy_hold_equity": 1600.555268,
+        "buy_hold_index": 106.703685,
+        "date": "2026-03-31",
+        "strategy_equity": 1587.257946,
+        "strategy_index": 105.817196
+      },
+      {
+        "benchmark_equity": 1602.237946,
+        "benchmark_index": 106.815863,
+        "buy_hold_equity": 1631.585268,
+        "buy_hold_index": 108.772351,
+        "date": "2026-04-01",
+        "strategy_equity": 1602.237946,
+        "strategy_index": 106.815863
+      },
+      {
+        "benchmark_equity": 1601.257946,
+        "benchmark_index": 106.75053,
+        "buy_hold_equity": 1629.555268,
+        "buy_hold_index": 108.637018,
+        "date": "2026-04-02",
+        "strategy_equity": 1601.257946,
+        "strategy_index": 106.75053
+      },
+      {
+        "benchmark_equity": 1607.277946,
+        "benchmark_index": 107.151863,
+        "buy_hold_equity": 1642.025268,
+        "buy_hold_index": 109.468351,
+        "date": "2026-04-06",
+        "strategy_equity": 1607.277946,
+        "strategy_index": 107.151863
+      },
+      {
+        "benchmark_equity": 1607.137946,
+        "benchmark_index": 107.14253,
+        "buy_hold_equity": 1641.735268,
+        "buy_hold_index": 109.449018,
+        "date": "2026-04-07",
+        "strategy_equity": 1607.137946,
+        "strategy_index": 107.14253
+      },
+      {
+        "benchmark_equity": 1624.439026,
+        "benchmark_index": 108.295935,
+        "buy_hold_equity": 1674.795268,
+        "buy_hold_index": 111.653018,
+        "date": "2026-04-08",
+        "strategy_equity": 1624.439026,
+        "strategy_index": 108.295935
+      },
+      {
+        "benchmark_equity": 1630.109026,
+        "benchmark_index": 108.673935,
+        "buy_hold_equity": 1693.065268,
+        "buy_hold_index": 112.871018,
+        "date": "2026-04-09",
+        "strategy_equity": 1630.109026,
+        "strategy_index": 108.673935
+      },
+      {
+        "benchmark_equity": 1629.569026,
+        "benchmark_index": 108.637935,
+        "buy_hold_equity": 1691.325268,
+        "buy_hold_index": 112.755018,
+        "date": "2026-04-10",
+        "strategy_equity": 1629.569026,
+        "strategy_index": 108.637935
+      },
+      {
+        "benchmark_equity": 1631.999026,
+        "benchmark_index": 108.799935,
+        "buy_hold_equity": 1699.155268,
+        "buy_hold_index": 113.277018,
+        "date": "2026-04-13",
+        "strategy_equity": 1631.999026,
+        "strategy_index": 108.799935
+      },
+      {
+        "benchmark_equity": 1647.299026,
+        "benchmark_index": 109.819935,
+        "buy_hold_equity": 1748.455268,
+        "buy_hold_index": 116.563685,
+        "date": "2026-04-14",
+        "strategy_equity": 1647.299026,
+        "strategy_index": 109.819935
+      },
+      {
+        "benchmark_equity": 1643.234718,
+        "benchmark_index": 109.548981,
+        "buy_hold_equity": 1735.985268,
+        "buy_hold_index": 115.732351,
+        "date": "2026-04-15",
+        "strategy_equity": 1643.234718,
+        "strategy_index": 109.548981
+      },
+      {
+        "benchmark_equity": 1643.444718,
+        "benchmark_index": 109.562981,
+        "buy_hold_equity": 1736.855268,
+        "buy_hold_index": 115.790351,
+        "date": "2026-04-16",
+        "strategy_equity": 1643.444718,
+        "strategy_index": 109.562981
+      },
+      {
+        "benchmark_equity": 1642.744718,
+        "benchmark_index": 109.516315,
+        "buy_hold_equity": 1733.955268,
+        "buy_hold_index": 115.597018,
+        "date": "2026-04-17",
+        "strategy_equity": 1642.744718,
+        "strategy_index": 109.516315
+      },
+      {
+        "benchmark_equity": 1640.644718,
+        "benchmark_index": 109.376315,
+        "buy_hold_equity": 1725.255268,
+        "buy_hold_index": 115.017018,
+        "date": "2026-04-20",
+        "strategy_equity": 1640.644718,
+        "strategy_index": 109.376315
+      },
+      {
+        "benchmark_equity": 1640.994718,
+        "benchmark_index": 109.399648,
+        "buy_hold_equity": 1726.705268,
+        "buy_hold_index": 115.113685,
+        "date": "2026-04-21",
+        "strategy_equity": 1640.994718,
+        "strategy_index": 109.399648
+      },
+      {
+        "benchmark_equity": 1653.174718,
+        "benchmark_index": 110.211648,
+        "buy_hold_equity": 1777.165268,
+        "buy_hold_index": 118.477685,
+        "date": "2026-04-22",
+        "strategy_equity": 1653.174718,
+        "strategy_index": 110.211648
+      },
+      {
+        "benchmark_equity": 1651.074718,
+        "benchmark_index": 110.071648,
+        "buy_hold_equity": 1768.465268,
+        "buy_hold_index": 117.897685,
+        "date": "2026-04-23",
+        "strategy_equity": 1651.074718,
+        "strategy_index": 110.071648
+      },
+      {
+        "benchmark_equity": 1655.974718,
+        "benchmark_index": 110.398315,
+        "buy_hold_equity": 1788.765268,
+        "buy_hold_index": 119.251018,
+        "date": "2026-04-24",
+        "strategy_equity": 1655.974718,
+        "strategy_index": 110.398315
+      },
+      {
+        "benchmark_equity": 1666.194718,
+        "benchmark_index": 111.079648,
+        "buy_hold_equity": 1831.105268,
+        "buy_hold_index": 122.073685,
+        "date": "2026-04-27",
+        "strategy_equity": 1666.194718,
+        "strategy_index": 111.079648
+      },
+      {
+        "benchmark_equity": 1658.424718,
+        "benchmark_index": 110.561648,
+        "buy_hold_equity": 1798.915268,
+        "buy_hold_index": 119.927685,
+        "date": "2026-04-28",
+        "strategy_equity": 1658.424718,
+        "strategy_index": 110.561648
+      },
+      {
+        "benchmark_equity": 1664.069114,
+        "benchmark_index": 110.937941,
+        "buy_hold_equity": 1820.375268,
+        "buy_hold_index": 121.358351,
+        "date": "2026-04-29",
+        "strategy_equity": 1664.069114,
+        "strategy_index": 110.937941
+      },
+      {
+        "benchmark_equity": 1663.769114,
+        "benchmark_index": 110.917941,
+        "buy_hold_equity": 1818.635268,
+        "buy_hold_index": 121.242351,
+        "date": "2026-04-30",
+        "strategy_equity": 1663.769114,
+        "strategy_index": 110.917941
+      },
+      {
+        "benchmark_equity": 1670.019114,
+        "benchmark_index": 111.334608,
+        "buy_hold_equity": 1854.885268,
+        "buy_hold_index": 123.659018,
+        "date": "2026-05-01",
+        "strategy_equity": 1670.019114,
+        "strategy_index": 111.334608
+      },
+      {
+        "benchmark_equity": 1679.569114,
+        "benchmark_index": 111.971274,
+        "buy_hold_equity": 1910.275268,
+        "buy_hold_index": 127.351685,
+        "date": "2026-05-04",
+        "strategy_equity": 1679.569114,
+        "strategy_index": 111.971274
+      },
+      {
+        "benchmark_equity": 1698.019114,
+        "benchmark_index": 113.201274,
+        "buy_hold_equity": 2017.285268,
+        "buy_hold_index": 134.485685,
+        "date": "2026-05-05",
+        "strategy_equity": 1698.019114,
+        "strategy_index": 113.201274
+      },
+      {
+        "benchmark_equity": 1704.96047,
+        "benchmark_index": 113.664031,
+        "buy_hold_equity": 2064.265268,
+        "buy_hold_index": 137.617685,
+        "date": "2026-05-06",
+        "strategy_equity": 1704.96047,
+        "strategy_index": 113.664031
+      },
+      {
+        "benchmark_equity": 1701.12047,
+        "benchmark_index": 113.408031,
+        "buy_hold_equity": 2027.145268,
+        "buy_hold_index": 135.143018,
+        "date": "2026-05-07",
+        "strategy_equity": 1701.12047,
+        "strategy_index": 113.408031
+      },
+      {
+        "benchmark_equity": 1720.35047,
+        "benchmark_index": 114.690031,
+        "buy_hold_equity": 2213.035268,
+        "buy_hold_index": 147.535685,
+        "date": "2026-05-08",
+        "strategy_equity": 1720.35047,
+        "strategy_index": 114.690031
+      },
+      {
+        "benchmark_equity": 1730.97047,
+        "benchmark_index": 115.398031,
+        "buy_hold_equity": 2315.695268,
+        "buy_hold_index": 154.379685,
+        "date": "2026-05-11",
+        "strategy_equity": 1730.97047,
+        "strategy_index": 115.398031
+      },
+      {
+        "benchmark_equity": 1724.19047,
+        "benchmark_index": 114.946031,
+        "buy_hold_equity": 2250.155268,
+        "buy_hold_index": 150.010351,
+        "date": "2026-05-12",
+        "strategy_equity": 1724.19047,
+        "strategy_index": 114.946031
+      },
+      {
+        "benchmark_equity": 1732.634114,
+        "benchmark_index": 115.508941,
+        "buy_hold_equity": 2329.035268,
+        "buy_hold_index": 155.269018,
+        "date": "2026-05-13",
+        "strategy_equity": 1732.634114,
+        "strategy_index": 115.508941
+      },
+      {
+        "benchmark_equity": 1728.314114,
+        "benchmark_index": 115.220941,
+        "buy_hold_equity": 2266.395268,
+        "buy_hold_index": 151.093018,
+        "date": "2026-05-14",
+        "strategy_equity": 1728.314114,
+        "strategy_index": 115.220941
+      },
+      {
+        "benchmark_equity": 1720.714114,
+        "benchmark_index": 114.714274,
+        "buy_hold_equity": 2156.195268,
+        "buy_hold_index": 143.746351,
+        "date": "2026-05-15",
+        "strategy_equity": 1720.714114,
+        "strategy_index": 114.714274
+      },
+      {
+        "benchmark_equity": 1714.634114,
+        "benchmark_index": 114.308941,
+        "buy_hold_equity": 2068.035268,
+        "buy_hold_index": 137.869018,
+        "date": "2026-05-18",
+        "strategy_equity": 1714.634114,
+        "strategy_index": 114.308941
+      },
+      {
+        "benchmark_equity": 1716.954114,
+        "benchmark_index": 114.463608,
+        "buy_hold_equity": 2101.675268,
+        "buy_hold_index": 140.111685,
+        "date": "2026-05-19",
+        "strategy_equity": 1716.954114,
+        "strategy_index": 114.463608
+      },
+      {
+        "benchmark_equity": 1720.788978,
+        "benchmark_index": 114.719265,
+        "buy_hold_equity": 2165.185268,
+        "buy_hold_index": 144.345685,
+        "date": "2026-05-20",
+        "strategy_equity": 1720.788978,
+        "strategy_index": 114.719265
+      },
+      {
+        "benchmark_equity": 1726.848978,
+        "benchmark_index": 115.123265,
+        "buy_hold_equity": 2223.765268,
+        "buy_hold_index": 148.251018,
+        "date": "2026-05-21",
+        "strategy_equity": 1726.848978,
+        "strategy_index": 115.123265
+      },
+      {
+        "benchmark_equity": 1724.478978,
+        "benchmark_index": 114.965265,
+        "buy_hold_equity": 2200.855268,
+        "buy_hold_index": 146.723685,
+        "date": "2026-05-22",
+        "strategy_equity": 1724.478978,
+        "strategy_index": 114.965265
+      },
+      {
+        "benchmark_equity": 1755.318978,
+        "benchmark_index": 117.021265,
+        "buy_hold_equity": 2498.975268,
+        "buy_hold_index": 166.598351,
+        "date": "2026-05-26",
+        "strategy_equity": 1755.318978,
+        "strategy_index": 117.021265
+      },
+      {
+        "benchmark_equity": 1763.418978,
+        "benchmark_index": 117.561265,
+        "buy_hold_equity": 2577.275268,
+        "buy_hold_index": 171.818351,
+        "date": "2026-05-27",
+        "strategy_equity": 1763.418978,
+        "strategy_index": 117.561265
+      },
+      {
+        "benchmark_equity": 1762.241022,
+        "benchmark_index": 117.482735,
+        "buy_hold_equity": 2564.225268,
+        "buy_hold_index": 170.948351,
+        "date": "2026-05-28",
+        "strategy_equity": 1762.241022,
+        "strategy_index": 117.482735
+      },
+      {
+        "benchmark_equity": 1770.401022,
+        "benchmark_index": 118.026735,
+        "buy_hold_equity": 2682.545268,
+        "buy_hold_index": 178.836351,
+        "date": "2026-05-29",
+        "strategy_equity": 1770.401022,
+        "strategy_index": 118.026735
+      },
+      {
+        "benchmark_equity": 1781.841022,
+        "benchmark_index": 118.789401,
+        "buy_hold_equity": 2848.425268,
+        "buy_hold_index": 189.895018,
+        "date": "2026-06-01",
+        "strategy_equity": 1781.841022,
+        "strategy_index": 118.789401
+      },
+      {
+        "benchmark_equity": 1787.061022,
+        "benchmark_index": 119.137401,
+        "buy_hold_equity": 2924.115268,
+        "buy_hold_index": 194.941018,
+        "date": "2026-06-02",
+        "strategy_equity": 1787.061022,
+        "strategy_index": 119.137401
+      },
+      {
+        "benchmark_equity": 1790.241022,
+        "benchmark_index": 119.349401,
+        "buy_hold_equity": 2970.225268,
+        "buy_hold_index": 198.015018,
+        "date": "2026-06-03",
+        "strategy_equity": 1790.241022,
+        "strategy_index": 119.349401
+      },
+      {
+        "benchmark_equity": 1774.531808,
+        "benchmark_index": 118.302121,
+        "buy_hold_equity": 2733.295268,
+        "buy_hold_index": 182.219685,
+        "date": "2026-06-04",
+        "strategy_equity": 1774.531808,
+        "strategy_index": 118.302121
+      },
+      {
+        "benchmark_equity": 1762.521808,
+        "benchmark_index": 117.501454,
+        "buy_hold_equity": 2385.005268,
+        "buy_hold_index": 159.000351,
+        "date": "2026-06-05",
+        "strategy_equity": 1762.521808,
+        "strategy_index": 117.501454
+      },
+      {
+        "benchmark_equity": 1768.941808,
+        "benchmark_index": 117.929454,
+        "buy_hold_equity": 2571.185268,
+        "buy_hold_index": 171.412351,
+        "date": "2026-06-08",
+        "strategy_equity": 1768.941808,
+        "strategy_index": 117.929454
+      },
+      {
+        "benchmark_equity": 1767.821808,
+        "benchmark_index": 117.854787,
+        "buy_hold_equity": 2538.705268,
+        "buy_hold_index": 169.247018,
+        "date": "2026-06-09",
+        "strategy_equity": 1767.821808,
+        "strategy_index": 117.854787
+      },
+      {
+        "benchmark_equity": 1764.131808,
+        "benchmark_index": 117.608787,
+        "buy_hold_equity": 2431.695268,
+        "buy_hold_index": 162.113018,
+        "date": "2026-06-10",
+        "strategy_equity": 1764.131808,
+        "strategy_index": 117.608787
+      },
+      {
+        "benchmark_equity": 1779.08467,
+        "benchmark_index": 118.605645,
+        "buy_hold_equity": 2668.335268,
+        "buy_hold_index": 177.889018,
+        "date": "2026-06-11",
+        "strategy_equity": 1779.08467,
+        "strategy_index": 118.605645
+      },
+      {
+        "benchmark_equity": 1776.48467,
+        "benchmark_index": 118.432311,
+        "buy_hold_equity": 2630.635268,
+        "buy_hold_index": 175.375685,
+        "date": "2026-06-12",
+        "strategy_equity": 1776.48467,
+        "strategy_index": 118.432311
+      },
+      {
+        "benchmark_equity": 1793.86467,
+        "benchmark_index": 119.590978,
+        "buy_hold_equity": 2882.645268,
+        "buy_hold_index": 192.176351,
+        "date": "2026-06-15",
+        "strategy_equity": 1793.86467,
+        "strategy_index": 119.590978
+      },
+      {
+        "benchmark_equity": 1782.10467,
+        "benchmark_index": 118.806978,
+        "buy_hold_equity": 2712.125268,
+        "buy_hold_index": 180.808351,
+        "date": "2026-06-16",
+        "strategy_equity": 1782.10467,
+        "strategy_index": 118.806978
+      },
+      {
+        "benchmark_equity": 1785.82467,
+        "benchmark_index": 119.054978,
+        "buy_hold_equity": 2766.065268,
+        "buy_hold_index": 184.404351,
+        "date": "2026-06-17",
+        "strategy_equity": 1785.82467,
+        "strategy_index": 119.054978
+      },
+      {
+        "benchmark_equity": 1798.914296,
+        "benchmark_index": 119.92762,
+        "buy_hold_equity": 2991.975268,
+        "buy_hold_index": 199.465018,
+        "date": "2026-06-18",
+        "strategy_equity": 1798.914296,
+        "strategy_index": 119.92762
+      },
+      {
+        "benchmark_equity": 1806.494296,
+        "benchmark_index": 120.432953,
+        "buy_hold_equity": 3211.795268,
+        "buy_hold_index": 214.119685,
+        "date": "2026-06-22",
+        "strategy_equity": 1806.494296,
+        "strategy_index": 120.432953
+      },
+      {
+        "benchmark_equity": 1790.314296,
+        "benchmark_index": 119.354286,
+        "buy_hold_equity": 2742.575268,
+        "buy_hold_index": 182.838351,
+        "date": "2026-06-23",
+        "strategy_equity": 1790.314296,
+        "strategy_index": 119.354286
+      },
+      {
+        "benchmark_equity": 1790.024296,
+        "benchmark_index": 119.334953,
+        "buy_hold_equity": 2734.165268,
+        "buy_hold_index": 182.277685,
+        "date": "2026-06-24",
+        "strategy_equity": 1790.024296,
+        "strategy_index": 119.334953
+      },
+      {
+        "benchmark_equity": 1804.034296,
+        "benchmark_index": 120.268953,
+        "buy_hold_equity": 3140.455268,
+        "buy_hold_index": 209.363685,
+        "date": "2026-06-25",
+        "strategy_equity": 1804.034296,
+        "strategy_index": 120.268953
+      },
+      {
+        "benchmark_equity": 1795.914296,
+        "benchmark_index": 119.72762,
+        "buy_hold_equity": 2904.975268,
+        "buy_hold_index": 193.665018,
+        "date": "2026-06-26",
+        "strategy_equity": 1795.914296,
+        "strategy_index": 119.72762
+      },
+      {
+        "benchmark_equity": 1797.334296,
+        "benchmark_index": 119.822286,
+        "buy_hold_equity": 2946.155268,
+        "buy_hold_index": 196.410351,
+        "date": "2026-06-29",
+        "strategy_equity": 1797.334296,
+        "strategy_index": 119.822286
+      },
+      {
+        "benchmark_equity": 1797.354296,
+        "benchmark_index": 119.82362,
+        "buy_hold_equity": 2946.735268,
+        "buy_hold_index": 196.449018,
+        "date": "2026-06-30",
+        "strategy_equity": 1797.354296,
+        "strategy_index": 119.82362
+      },
+      {
+        "benchmark_equity": 1787.414296,
+        "benchmark_index": 119.160953,
+        "buy_hold_equity": 2658.475268,
+        "buy_hold_index": 177.231685,
+        "date": "2026-07-01",
+        "strategy_equity": 1787.414296,
+        "strategy_index": 119.160953
+      },
+      {
+        "benchmark_equity": 1782.174296,
+        "benchmark_index": 118.81162,
+        "buy_hold_equity": 2506.515268,
+        "buy_hold_index": 167.101018,
+        "date": "2026-07-02",
+        "strategy_equity": 1782.174296,
+        "strategy_index": 118.81162
+      },
+      {
+        "benchmark_equity": 1780.906366,
+        "benchmark_index": 118.727091,
+        "buy_hold_equity": 2527.975268,
+        "buy_hold_index": 168.531685,
+        "date": "2026-07-06",
+        "strategy_equity": 1780.906366,
+        "strategy_index": 118.727091
+      },
+      {
+        "benchmark_equity": 1773.766366,
+        "benchmark_index": 118.251091,
+        "buy_hold_equity": 2424.445268,
+        "buy_hold_index": 161.629685,
+        "date": "2026-07-07",
+        "strategy_equity": 1773.766366,
+        "strategy_index": 118.251091
+      },
+      {
+        "benchmark_equity": 1775.206366,
+        "benchmark_index": 118.347091,
+        "buy_hold_equity": 2445.325268,
+        "buy_hold_index": 163.021685,
+        "date": "2026-07-08",
+        "strategy_equity": 1775.206366,
+        "strategy_index": 118.347091
+      },
+      {
+        "benchmark_equity": 1781.366366,
+        "benchmark_index": 118.757758,
+        "buy_hold_equity": 2534.645268,
+        "buy_hold_index": 168.976351,
+        "date": "2026-07-09",
+        "strategy_equity": 1781.366366,
+        "strategy_index": 118.757758
+      },
+      {
+        "benchmark_equity": 1779.446366,
+        "benchmark_index": 118.629758,
+        "buy_hold_equity": 2506.805268,
+        "buy_hold_index": 167.120351,
+        "date": "2026-07-10",
+        "strategy_equity": 1779.446366,
+        "strategy_index": 118.629758
+      },
+      {
+        "benchmark_equity": 1772.726366,
+        "benchmark_index": 118.181758,
+        "buy_hold_equity": 2409.365268,
+        "buy_hold_index": 160.624351,
+        "date": "2026-07-13",
+        "strategy_equity": 1772.726366,
+        "strategy_index": 118.181758
+      },
+      {
+        "benchmark_equity": 1779.166366,
+        "benchmark_index": 118.611091,
+        "buy_hold_equity": 2502.745268,
+        "buy_hold_index": 166.849685,
+        "date": "2026-07-14",
+        "strategy_equity": 1779.166366,
+        "strategy_index": 118.611091
+      },
+      {
+        "benchmark_equity": 1767.446366,
+        "benchmark_index": 117.829758,
+        "buy_hold_equity": 2332.805268,
+        "buy_hold_index": 155.520351,
+        "date": "2026-07-15",
+        "strategy_equity": 1767.446366,
+        "strategy_index": 117.829758
+      },
+      {
+        "benchmark_equity": 1759.926366,
+        "benchmark_index": 117.328424,
+        "buy_hold_equity": 2223.765268,
+        "buy_hold_index": 148.251018,
+        "date": "2026-07-16",
+        "strategy_equity": 1759.926366,
+        "strategy_index": 117.328424
+      }
+    ]
+  },
+  "cost_stress": [
+    {
+      "commission": 0.0,
+      "max_drawdown": 0.030260827072261926,
+      "minimum_commission": 0.0,
+      "oos_return": 0.18108666666666667,
+      "scenario": "no_cost",
+      "selected_parameters": [
+        "20/100",
+        "20/100",
+        "20/100"
+      ],
+      "slippage_bps": 0.0,
+      "trade_count": 33
+    },
+    {
+      "commission": 11.55,
+      "max_drawdown": 0.030608803896615577,
+      "minimum_commission": 0.35,
+      "oos_return": 0.173284244,
+      "scenario": "configured",
+      "selected_parameters": [
+        "20/100",
+        "20/100",
+        "20/100"
+      ],
+      "slippage_bps": 2.0,
+      "trade_count": 33
+    },
+    {
+      "commission": 11.55,
+      "max_drawdown": 0.030613783734235518,
+      "minimum_commission": 0.35,
+      "oos_return": 0.17313061,
+      "scenario": "slippage_5bps",
+      "selected_parameters": [
+        "20/100",
+        "20/100",
+        "20/100"
+      ],
+      "slippage_bps": 5.0,
+      "trade_count": 33
+    },
+    {
+      "commission": 11.55,
+      "max_drawdown": 0.030622084748834866,
+      "minimum_commission": 0.35,
+      "oos_return": 0.17287455333333332,
+      "scenario": "slippage_10bps",
+      "selected_parameters": [
+        "20/100",
+        "20/100",
+        "20/100"
+      ],
+      "slippage_bps": 10.0,
+      "trade_count": 33
+    }
+  ],
+  "data_quality": {
+    "issues": [
+      {
+        "code": "short_muu_history",
+        "message": "The aligned MU/MUU history is under two full trading years, so regime coverage is limited.",
+        "severity": "medium"
+      }
+    ],
+    "profiles": {
+      "MU": {
+        "daily_volatility": 0.03482335295110676,
+        "duplicate_dates": 0,
+        "first_date": "2021-07-26",
+        "invalid_ohlc_rows": 0,
+        "last_date": "2026-07-23",
+        "max_daily_return": 0.19291611185086552,
+        "min_daily_return": -0.16179018286814245,
+        "row_count": 1254,
+        "sorted_dates": true,
+        "zero_volume_rows": 0
+      },
+      "MUU": {
+        "daily_volatility": 0.08989313555469222,
+        "duplicate_dates": 0,
+        "first_date": "2024-10-10",
+        "invalid_ohlc_rows": 0,
+        "last_date": "2026-07-23",
+        "max_daily_return": 0.3847305389221557,
+        "min_daily_return": -0.3252032520325203,
+        "row_count": 446,
+        "sorted_dates": true,
+        "zero_volume_rows": 0
+      }
+    },
+    "status": "passed_with_notes",
+    "tracking": {
+      "annualized_tracking_error_vs_2x_mu": 0.08772120387651247,
+      "daily_beta_to_mu": 1.9895138468159361,
+      "daily_reset_2x_mu_cumulative_return": 34.2268838224895,
+      "daily_return_correlation": 0.9981226686845167,
+      "mu_cumulative_return": 8.3690036900369,
+      "muu_cumulative_return": 26.02962962962963,
+      "muu_minus_daily_reset_2x_mu": -8.19725419285987,
+      "observation_count": 445
+    }
+  },
+  "frequency_sensitivity": [
+    {
+      "commission": 31.85,
+      "cost_drag": 0.02805819599999998,
+      "frequency": "daily",
+      "max_drawdown": 0.03333156941025808,
+      "no_cost_oos_return": 0.16743333333333332,
+      "oos_return": 0.13937513733333334,
+      "rebalance_interval_days": 1,
+      "selected_parameters": [
+        "20/100",
+        "20/100",
+        "20/100"
+      ],
+      "trade_count": 91
+    },
+    {
+      "commission": 11.55,
+      "cost_drag": 0.00780242266666667,
+      "frequency": "weekly",
+      "max_drawdown": 0.030608803896615577,
+      "no_cost_oos_return": 0.18108666666666667,
+      "oos_return": 0.173284244,
+      "rebalance_interval_days": 5,
+      "selected_parameters": [
+        "20/100",
+        "20/100",
+        "20/100"
+      ],
+      "trade_count": 33
+    },
+    {
+      "commission": 2.45,
+      "cost_drag": 0.001688320000000021,
+      "frequency": "monthly",
+      "max_drawdown": 0.033275287907915375,
+      "no_cost_oos_return": 0.19506,
+      "oos_return": 0.19337168,
+      "rebalance_interval_days": 21,
+      "selected_parameters": [
+        "10/50",
+        "20/100",
+        "20/100"
+      ],
+      "trade_count": 7
+    }
+  ],
+  "in_sample_candidates": [
+    {
+      "annualized_return": 0.16369215543153381,
+      "annualized_sharpe": 2.425641518560985,
+      "annualized_volatility": 0.06334164268795972,
+      "best_day": 0.019332682721704658,
+      "commission": 15.75,
+      "commission_pct_initial": 0.0105,
+      "days": 246,
+      "end_date": "2026-07-23",
+      "final_equity": 1739.249118,
+      "initial_equity": 1500.0,
+      "max_drawdown": 0.03436615698666224,
+      "parameters": "5/20",
+      "return_to_drawdown": 4.641176843308459,
+      "start_date": "2025-07-31",
+      "total_return": 0.159499412,
+      "trade_count": 45,
+      "worst_day": -0.010043016093495224
+    },
+    {
+      "annualized_return": 0.19365520828116267,
+      "annualized_sharpe": 2.609183855974479,
+      "annualized_volatility": 0.06877381004534916,
+      "best_day": 0.017813284842630065,
+      "commission": 14.7,
+      "commission_pct_initial": 0.0098,
+      "days": 246,
+      "end_date": "2026-07-23",
+      "final_equity": 1782.952226,
+      "initial_equity": 1500.0,
+      "max_drawdown": 0.03185835280798695,
+      "parameters": "10/50",
+      "return_to_drawdown": 5.921047408516433,
+      "start_date": "2025-07-31",
+      "total_return": 0.18863481733333334,
+      "trade_count": 42,
+      "worst_day": -0.013471799895192314
+    },
+    {
+      "annualized_return": 0.24915780546361876,
+      "annualized_sharpe": 3.242511082008472,
+      "annualized_volatility": 0.06938143414456832,
+      "best_day": 0.017957118987037137,
+      "commission": 15.75,
+      "commission_pct_initial": 0.0105,
+      "days": 246,
+      "end_date": "2026-07-23",
+      "final_equity": 1863.837962,
+      "initial_equity": 1500.0,
+      "max_drawdown": 0.032763597978063275,
+      "parameters": "20/100",
+      "return_to_drawdown": 7.403296838635898,
+      "start_date": "2025-07-31",
+      "total_return": 0.24255864133333332,
+      "trade_count": 45,
+      "worst_day": -0.009815365056216784
+    },
+    {
+      "annualized_return": 0.24915780546361876,
+      "annualized_sharpe": 3.242511082008472,
+      "annualized_volatility": 0.06938143414456832,
+      "best_day": 0.017957118987037137,
+      "commission": 15.75,
+      "commission_pct_initial": 0.0105,
+      "days": 246,
+      "end_date": "2026-07-23",
+      "final_equity": 1863.837962,
+      "initial_equity": 1500.0,
+      "max_drawdown": 0.032763597978063275,
+      "parameters": "50/200",
+      "return_to_drawdown": 7.403296838635898,
+      "start_date": "2025-07-31",
+      "total_return": 0.24255864133333332,
+      "trade_count": 45,
+      "worst_day": -0.009815365056216784
+    }
+  ],
+  "limitations": [
+    "MUU history begins in October 2024, leaving only three complete 63-session out-of-sample folds.",
+    "Daily bars cannot evaluate intraday T-trading, spread dynamics, partial fills, or same-day stop execution.",
+    "The study is descriptive and out-of-sample tested, but does not establish future profitability."
+  ],
+  "methodology": {
+    "candidate_parameters": [
+      "5/20",
+      "10/50",
+      "20/100",
+      "50/200"
+    ],
+    "configured_costs": {
+      "minimum_commission": 0.35,
+      "per_share_commission": 0.0035,
+      "slippage_bps": 2.0
+    },
+    "excluded_tail_days": 5,
+    "full_test_folds_only": true,
+    "minimum_train_days": 252,
+    "primary_rebalance_interval_days": 5,
+    "selection_metric": "training annualized Sharpe after commission and slippage",
+    "signal_timing": "close signal, next regular-session open fill",
+    "test_days": 63,
+    "walk_forward": "anchored"
+  },
+  "out_of_sample": {
+    "buy_and_hold_benchmark": {
+      "annualized_return": 0.6904289111721791,
+      "annualized_sharpe": 1.2634646436856807,
+      "annualized_volatility": 0.524982400900503,
+      "best_day": 0.1485974548631418,
+      "commission": 0.35,
+      "commission_pct_initial": 0.00023333333333333333,
+      "days": 189,
+      "end_date": "2026-07-16",
+      "final_equity": 2223.765268,
+      "initial_equity": 1500.0,
+      "max_drawdown": 0.3076254610136626,
+      "return_to_drawdown": 1.568498839714821,
+      "start_date": "2025-10-14",
+      "total_return": 0.4825101786666667,
+      "trade_count": 1,
+      "worst_day": -0.14609274902263167
+    },
+    "folds": [
+      {
+        "fold": 1,
+        "oos_commission": 4.55,
+        "oos_return": 0.05576366666666667,
+        "oos_trade_count": 13,
+        "selected_parameters": "20/100",
+        "test_end": "2026-01-13",
+        "test_start": "2025-10-14",
+        "train_end": "2025-10-13",
+        "train_start": "2024-10-10",
+        "training_max_drawdown": 0.01071955707044559,
+        "training_return": 0.05616256,
+        "training_sharpe": 2.1448803667924374
+      },
+      {
+        "fold": 2,
+        "oos_commission": 3.85,
+        "oos_return": 0.03762787694594529,
+        "oos_trade_count": 11,
+        "selected_parameters": "20/100",
+        "test_end": "2026-04-15",
+        "test_start": "2026-01-14",
+        "train_end": "2026-01-13",
+        "train_start": "2024-10-10",
+        "training_max_drawdown": 0.022228180712465052,
+        "training_return": 0.11187762933333334,
+        "training_sharpe": 2.285054648872754
+      },
+      {
+        "fold": 3,
+        "oos_commission": 3.15,
+        "oos_return": 0.07101337789529347,
+        "oos_trade_count": 9,
+        "selected_parameters": "20/100",
+        "test_end": "2026-07-16",
+        "test_start": "2026-04-16",
+        "train_end": "2026-04-15",
+        "train_start": "2024-10-10",
+        "training_max_drawdown": 0.032763597978063275,
+        "training_return": 0.15026538,
+        "training_sharpe": 2.1416795643037356
+      }
+    ],
+    "strategy": {
+      "annualized_return": 0.23747846928970473,
+      "annualized_sharpe": 2.9532012541461268,
+      "annualized_volatility": 0.07308403452654245,
+      "best_day": 0.017883662482083326,
+      "commission": 11.55,
+      "commission_pct_initial": 0.0077,
+      "days": 189,
+      "end_date": "2026-07-16",
+      "final_equity": 1759.926366,
+      "initial_equity": 1500.0,
+      "max_drawdown": 0.030608803896615577,
+      "return_to_drawdown": 5.661254996610961,
+      "start_date": "2025-10-14",
+      "total_return": 0.173284244,
+      "trade_count": 33,
+      "worst_day": -0.009754163587008199
+    },
+    "weekly_constant_risk_benchmark": {
+      "annualized_return": 0.23747846928970473,
+      "annualized_sharpe": 2.9532012541461268,
+      "annualized_volatility": 0.07308403452654245,
+      "best_day": 0.017883662482083326,
+      "commission": 11.55,
+      "commission_pct_initial": 0.0077,
+      "days": 189,
+      "end_date": "2026-07-16",
+      "final_equity": 1759.926366,
+      "initial_equity": 1500.0,
+      "max_drawdown": 0.030608803896615577,
+      "return_to_drawdown": 5.661254996610961,
+      "start_date": "2025-10-14",
+      "total_return": 0.173284244,
+      "trade_count": 33,
+      "worst_day": -0.009754163587008199
+    }
+  },
+  "research_version": 1,
+  "scope": {
+    "aligned_rows": 446,
+    "bar_size": "1 day",
+    "execution_policy": "always use approved MUU substitute",
+    "execution_symbol": "MUU",
+    "first_date": "2024-10-10",
+    "initial_equity": 1500.0,
+    "last_date": "2026-07-23",
+    "margin_borrowing": false,
+    "price_type": "IBKR historical TRADES, regular session",
+    "signal_symbol": "MU",
+    "target_risk_weight": 0.1,
+    "whole_shares_only": true
+  },
+  "sources": {
+    "MU": {
+      "normalized_file": "20260724T120505Z_1b4e4692c862.json",
+      "source_sha256": "1b4e4692c86278bf0ebb74501f1caa3b600f3064f9da0c27a450a7cbb27e74ab"
+    },
+    "MUU": {
+      "normalized_file": "20260724T120505Z_9a0574349abb.json",
+      "source_sha256": "9a0574349abbdea80732ca777661386175f4dc877fa5dea9e516cc8e82023fed"
+    }
+  }
+}

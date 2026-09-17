@@ -336,3 +336,65 @@ def test_no_path_hands_the_order_service_back_to_the_window(name: str) -> None:
     """Ownership must never be reassigned onto the window again."""
 
     assert "paper_order_service =" not in _source(name)
+
+
+def test_the_raw_candidate_bridge_is_confined_to_one_critical_wiring_point() -> None:
+    """``candidate_service()`` is a borrowed reference, not a second owner.
+
+    It exists only so the current arm/publish wiring can hand the workflow an
+    order port.  Every other call site would be a new direct dependency on the
+    broker adapter, so the allowlist is pinned structurally.
+    """
+
+    allowed = {"_auto_order_service_connected"}
+    used_in = set()
+    for name, member in inspect.getmembers(MainWindow, inspect.isfunction):
+        if "candidate_service(" in inspect.getsource(member):
+            used_in.add(name)
+
+    assert used_in == allowed
+
+    # And the window must never store the borrowed reference.
+    source = _source("_auto_order_service_connected")
+    assert "self.paper_order_service" not in source
+    for line in source.splitlines():
+        if "candidate_service(" in line:
+            assert line.lstrip().startswith("service = "), line
+
+
+def test_a_failed_finalization_keeps_the_active_ownership() -> None:
+    """HALTED still needs the same order/journal session context.
+
+    The §21 scenario: the session reached STOPPING, the zero-state proof ran and
+    the connection was closed, but confirmation failed.  Ownership must survive
+    an already-disconnected service -- which is exactly the state where a stray
+    ``clear_active()`` would succeed silently and drop the session context that
+    manual reconciliation still needs.
+    """
+
+    window = _window()
+    try:
+        _install_fake_service(window, connected=False)
+        # The connection is already gone, as it is when confirmation fails.
+        window.paper_trading.disconnect()
+        assert window.paper_trading.is_connected() is False
+        assert window.paper_trading.has_order_service() is True
+
+        class _HaltedWorkflow:
+            phase = PaperWorkflowPhase.HALTED
+            reconciliation_evidence = None
+            fail_calls = 0
+
+            def fail_finalization_refresh(self) -> None:
+                type(self).fail_calls += 1
+
+        workflow = _HaltedWorkflow()
+        window.paper_workflow = workflow  # type: ignore[assignment]
+
+        window._paper_finalization_failed("zero-state proof failed")
+
+        assert workflow.fail_calls == 1
+        # Still owned: the disconnect was not a finalization.
+        assert window.paper_trading.has_order_service() is True
+    finally:
+        window.deleteLater()

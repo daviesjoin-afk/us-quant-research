@@ -100,7 +100,21 @@ self.paper_trading = PaperTradingService(
 `probe_order_channel(...)` 是操作员的「订单通道通不通」检查：连接、读、断开，
 **既不登记候选，也不打扰 active 槽位**。
 
-### 3.5 锁的纪律
+### 3.5 临时的 raw-service bridge（本阶段唯一 escape hatch）
+
+`candidate_service(candidate_id)` 借出候选的原始 order service，只为了让现有的
+arm / publish 接线把 order port 交给 workflow。它不是第二份 ownership：
+
+- `MainWindow` **不保存**它、不赋给成员变量，只在
+  `_auto_order_service_connected()` 的当前调用栈里临时借用；
+- 有**结构测试**钉住调用点白名单——`candidate_service(` 只允许出现在
+  `_auto_order_service_connected` 里，且该行必须是 `service = ...` 赋值形式。
+  新增一个调用点会让测试失败（已用注入验证过它真的会红）。
+
+本阶段的目标是「ownership 已迁移，submit / cancel 未迁移」，因此这个 bridge 是
+有意保留的，并在第五步之前一直存在。
+
+### 3.6 锁的纪律
 
 `RLock` **只保护所有权状态的读与提交**，绝不包裹网络调用：
 `connect` / `disconnect` 一律在锁外执行。`closeEvent` 与心跳路径因此不会因
@@ -129,7 +143,7 @@ self.paper_trading = PaperTradingService(
 | `expected_service` 与当前 active 不符 | `PaperTradingLifecycleError`，零变更 |
 | discard 期间该候选被替换 | `PaperTradingLifecycleError`，拒绝移除「另一个」service |
 
-## 6. 验收数字（全部由脚本导出，见 `_count4.py`）
+## 6. 验收数字（全部由脚本导出，不是目测）
 
 | 指标 | 迁移前 | 迁移后 |
 | --- | --- | --- |
@@ -144,9 +158,10 @@ self.paper_trading = PaperTradingService(
 `desktop.py` 只净增 **2 行**：窗口丢掉了一整类职责（构造、连接、持有、清空
 order service），代价是若干行 `self.paper_trading.*` 调用点。
 
-测试：**466 → 510 passed**（新增 44：service 单元 56 − 旧 24 + 接线 21 − 旧 9，
-净 +44）。`check_publish_safety.py` → **scanned 193 publishable text files / OK**
-（193 = 191 tracked + 3 未跟踪新文件 − 1 个已从索引移除的旧 facade）。
+测试：**466 → 512 passed**（新增 46：service 单元 56 − 旧 24 + 接线 23 − 旧 9，
+净 +46）。`check_publish_safety.py` → **scanned 191 publishable text files / OK**
+（191 = 全部已跟踪文本文件；旧 facade 已从索引移除，新 service 与两个新测试文件
+都在扫描范围内）。
 
 ## 7. 仍然 NOT MIGRATED（有意留在 desktop）
 

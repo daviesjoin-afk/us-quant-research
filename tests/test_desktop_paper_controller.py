@@ -41,9 +41,12 @@ def test_shadow_uses_the_shared_lease_and_releases_it_on_stop() -> None:
 
 def test_close_blocks_unfinalized_paper_before_any_disconnect() -> None:
     source = _source("closeEvent")
-    assert "paper_result is not None and not paper_result.state.finalized" in source
-    assert source.index("paper_result is not None") < source.index(
-        "self.paper_order_service.disconnect()"
+    # The gate now reads the controller through the Paper trading facade; the
+    # guarantee is unchanged -- an unfinalized session is refused before any
+    # disconnect runs.
+    assert "self.paper_trading.is_finalized()" in source
+    assert source.index("self.paper_trading.is_finalized()") < source.index(
+        "self.paper_trading.disconnect()"
     )
 
 

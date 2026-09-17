@@ -1,30 +1,54 @@
-$ErrorActionPreference = "Stop"
+param(
+    [switch]$CoreOnly
+)
 
+$ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $projectRoot
 
+function Invoke-Checked {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][string[]]$CommandArguments
+    )
+    & $Executable @CommandArguments
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+
 try {
     $env:PYTHONPATH = "src"
-    $localPython = Join-Path $projectRoot ".venv313\Scripts\python.exe"
-    $python = if (Test-Path -LiteralPath $localPython) {
-        $localPython
-    } else {
+    $managedPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
+    $legacyPython = Join-Path $projectRoot ".venv313\Scripts\python.exe"
+    $python = if (Test-Path -LiteralPath $managedPython) {
+        $managedPython
+    }
+    elseif (Test-Path -LiteralPath $legacyPython) {
+        $legacyPython
+    }
+    else {
         "python"
     }
 
-    & $python -m unittest discover -s tests -v
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
+    Invoke-Checked -Executable $python -CommandArguments @("-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 2)")
+    Invoke-Checked -Executable $python -CommandArguments @("-m", "pytest", "-q")
+    Invoke-Checked -Executable $python -CommandArguments @("-m", "us_quant", "doctor")
+    Invoke-Checked -Executable $python -CommandArguments @("-m", "compileall", "-q", "src", "tests")
 
-    & $python -m us_quant doctor
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
-
-    & $python -m compileall -q src tests
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
+    if (-not $CoreOnly) {
+        Invoke-Checked -Executable $python -CommandArguments @("-c", "import PySide6")
+        $previousSelfTest = $env:US_QUANT_SELF_TEST
+        $previousQtPlatform = $env:QT_QPA_PLATFORM
+        try {
+            $env:US_QUANT_SELF_TEST = "1"
+            $env:QT_QPA_PLATFORM = "offscreen"
+            Invoke-Checked -Executable $python -CommandArguments @("desktop_main.py")
+        }
+        finally {
+            $env:US_QUANT_SELF_TEST = $previousSelfTest
+            $env:QT_QPA_PLATFORM = $previousQtPlatform
+        }
     }
 }
 finally {

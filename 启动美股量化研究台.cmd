@@ -1,5 +1,5 @@
 @echo off
-rem 便携启动器：不写入任何本机绝对路径，可直接随仓库分发。
+rem 便携启动器：优先已打包版本，其次使用仓库管理的虚拟环境。
 setlocal
 set "PROJECT_ROOT=%~dp0"
 cd /d "%PROJECT_ROOT%"
@@ -18,15 +18,47 @@ if defined PACKAGED_APP (
     exit /b 0
 )
 
-rem 否则用本地虚拟环境（存在时）或系统 Python 直接运行源码
-if exist "%PROJECT_ROOT%.venv313\Scripts\python.exe" (
-    "%PROJECT_ROOT%.venv313\Scripts\python.exe" "%PROJECT_ROOT%desktop_main.py"
-) else (
-    python "%PROJECT_ROOT%desktop_main.py"
+rem 源码启动只使用仓库自己的虚拟环境，避免随机落到缺依赖的系统 Python。
+set "PYTHON_EXE="
+if exist "%PROJECT_ROOT%.venv\Scripts\python.exe" (
+    set "PYTHON_EXE=%PROJECT_ROOT%.venv\Scripts\python.exe"
+) else if exist "%PROJECT_ROOT%.venv313\Scripts\python.exe" (
+    rem 兼容旧开发环境；新安装统一使用 .venv。
+    set "PYTHON_EXE=%PROJECT_ROOT%.venv313\Scripts\python.exe"
 )
+
+if not defined PYTHON_EXE (
+    echo.
+    echo No managed Python environment was found.
+    echo Run this once from PowerShell:
+    echo   powershell -ExecutionPolicy Bypass -File scripts\bootstrap_windows.ps1
+    echo.
+    pause
+    exit /b 2
+)
+
+"%PYTHON_EXE%" -c "import sys; raise SystemExit(0 if sys.version_info ^>= (3, 12) else 2)"
 if errorlevel 1 (
     echo.
-    echo Launch failed. Keep this window open and send me the error text.
+    echo Python 3.12 or newer is required. Recreate the environment with:
+    echo   powershell -ExecutionPolicy Bypass -File scripts\bootstrap_windows.ps1
+    pause
+    exit /b 2
+)
+
+"%PYTHON_EXE%" -c "import PySide6"
+if errorlevel 1 (
+    echo.
+    echo Desktop dependencies are missing. Repair the environment with:
+    echo   powershell -ExecutionPolicy Bypass -File scripts\bootstrap_windows.ps1
+    pause
+    exit /b 3
+)
+
+"%PYTHON_EXE%" "%PROJECT_ROOT%desktop_main.py"
+if errorlevel 1 (
+    echo.
+    echo Launch failed. Run scripts\verify.ps1 and keep this window open for the error text.
     pause
 )
 endlocal

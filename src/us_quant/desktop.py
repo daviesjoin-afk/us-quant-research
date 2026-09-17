@@ -177,6 +177,7 @@ from us_quant.auto_launch import (
     build_auto_launch_plan,
 )
 from us_quant.risk import LayeredRiskLimits
+from us_quant.runtime_supervisor import RuntimeSnapshot, RuntimeSupervisor
 from us_quant.ibkr_paper_orders import (
     IBKRPaperOrderError,
     IBKRPaperOrderUncertainError,
@@ -1003,6 +1004,11 @@ class MainWindow(QMainWindow):
         self.workers = self.task_controller.workers
         self.universe_refresh_cancel_event: Event | None = None
         self.universe_refresh_worker: TaskThread | None = None
+        # Admission gate for new background work.  The runtime supervisor
+        # raises it as the first step of teardown so a close cannot race a
+        # task that is still being admitted.
+        self._closing = False
+        self.runtime_supervisor = RuntimeSupervisor()
 
         self.setWindowTitle(APP_TITLE)
         self.resize(1440, 900)
@@ -1010,6 +1016,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._finalize_layout_behavior()
         self._apply_style()
+        self._register_runtime_components()
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -5262,11 +5269,8 @@ class MainWindow(QMainWindow):
         self.auto_pause_button.setEnabled(phase is PaperWorkflowPhase.RUNNING)
         self.auto_resume_button.setEnabled(phase is PaperWorkflowPhase.PAUSED)
         self.auto_stop_button.setEnabled(phase in {PaperWorkflowPhase.RUNNING, PaperWorkflowPhase.PAUSED})
-        self.auto_reconcile_button.setEnabled(phase is PaperWorkflowPhase.HALTED)
-        self.auto_resume_from_reconciliation_button.setEnabled(
-            phase is PaperWorkflowPhase.RECONCILING_READY
-            and self.paper_workflow.reconciliation_evidence is not None
-        )
+        # Reconciliation buttons *and* the refused-close recovery hook.
+        self._apply_paper_workflow_button_state()
         if (
             phase is PaperWorkflowPhase.STOPPING
             and not result.state.finalized
@@ -5326,6 +5330,9 @@ class MainWindow(QMainWindow):
             start_message="Paper safe finalization check in progress...",
             resource_group="broker",
             suppress_busy_message=True,
+            # This task is part of the close path itself, not new work: it is
+            # what proves broker zero-state so the session can be finalized.
+            shutdown_essential=True,
         )
         if not started:
             # A busy broker resource group defers the proof instead of
@@ -5347,6 +5354,8 @@ class MainWindow(QMainWindow):
         self._paper_finalization_inflight = False
         self.paper_workflow.fail_finalization_refresh()
         self._log(message)
+        # ``fail_finalization_refresh`` moves STOPPING -> HALTED, the automatic
+        # failure route; the button-state helper carries the recovery hook.
         self._apply_paper_workflow_button_state()
 
     def _pause_auto_quant_entries(self) -> None:
@@ -5485,7 +5494,14 @@ class MainWindow(QMainWindow):
         self._apply_paper_workflow_result(result)  # type: ignore[arg-type]
 
     def _apply_paper_workflow_button_state(self) -> None:
-        """Render reconciliation actions only from controller truth."""
+        """Render reconciliation actions only from controller truth.
+
+        This is the one place every route into ``HALTED``/``RECONCILING*``
+        passes through -- the automatic ``STOPPING`` -> ``HALTED``
+        (finalization failure) as well as each explicit operator step -- so
+        the refused-close recovery hook lives here rather than being repeated
+        at each call site.
+        """
 
         phase = self.paper_workflow.phase
         self.auto_reconcile_button.setEnabled(phase is PaperWorkflowPhase.HALTED)
@@ -5493,6 +5509,7 @@ class MainWindow(QMainWindow):
             phase is PaperWorkflowPhase.RECONCILING_READY
             and self.paper_workflow.reconciliation_evidence is not None
         )
+        self._release_close_drain_if_recovery_required()
 
     def _finish_auto_quant_session_if_safe(self) -> None:
         result = self.paper_workflow.result
@@ -8563,10 +8580,181 @@ class MainWindow(QMainWindow):
         self._set_connection_settings_enabled(True)
         self._activate_pending_stream_switch()
 
+    def _register_runtime_components(self) -> None:
+        """Hand generic runtime lifecycle to the supervisor.
+
+        Only resources whose teardown is unconditional and carries no
+        trading semantics are registered here.  Paper order submission,
+        reconciliation, the execution lease and the workflow state machine
+        deliberately stay owned by ``MainWindow`` (see
+        ``docs/DESKTOP_DECOMPOSITION.md``).
+        """
+
+        supervisor = self.runtime_supervisor
+        # Order 5: the admission gate.  ``begin_shutdown`` calls this the
+        # moment the operator asks to close, before any task is joined, so it
+        # must be a drain component -- without the flag the gate would only
+        # ever be raised by the *release* pass, which runs after the running
+        # tasks it is supposed to exclude.
+        supervisor.register(
+            "closing_gate",
+            stop=self._close_admission_gate,
+            order=5,
+            drain=True,
+        )
+        # Order 10-30: stop the heartbeats first so no new work is scheduled
+        # while the rest of the stack is being released.  These timers are
+        # started in ``_build_ui``; the probe makes them releasable anyway.
+        # None of them is a drain component: stopping the timer *is* the
+        # release, so ``begin_shutdown`` must not touch it.
+        supervisor.register(
+            "paper_order_heartbeat",
+            stop=self.paper_order_timer.stop,
+            is_running=self.paper_order_timer.isActive,
+            order=10,
+        )
+        supervisor.register(
+            "extended_session_heartbeat",
+            stop=self.extended_session_timer.stop,
+            is_running=self.extended_session_timer.isActive,
+            order=20,
+        )
+        supervisor.register(
+            "stream_snapshot_timer",
+            stop=self.stream_timer.stop,
+            is_running=self.stream_timer.isActive,
+            order=30,
+        )
+        # Order 100+: release the market data stream.  ``_stop_stream`` owns
+        # the trading-safety guards (it refuses while a Paper session holds
+        # positions) and returns False rather than raising, so the return
+        # value is mapped to a join verdict for the supervisor.
+        supervisor.register(
+            "market_data_stream",
+            stop=self._stop_stream,
+            join=lambda: not (
+                self.stream_worker is not None
+                and self.stream_worker.isRunning()
+            ),
+            is_running=lambda: (
+                self.stream_worker is not None
+                and self.stream_worker.isRunning()
+            ),
+            order=100,
+        )
+        # Order 200+: background research/data workers.  ``wait`` is the Qt
+        # join; it returns False when the thread did not exit in time.
+        supervisor.register(
+            "background_workers",
+            stop=self._request_worker_stops,
+            join=self._join_background_workers,
+            is_running=lambda: bool(self._running_workers()),
+            order=200,
+            # A worker's ``stop`` is a cancel request, not a release: ask the
+            # cancellable ones to wind down as soon as closing starts.
+            drain=True,
+        )
+
+    def _close_admission_gate(self) -> None:
+        """First teardown step: refuse any new background work."""
+
+        self._closing = True
+
+    def _paper_needs_manual_recovery(self) -> bool:
+        """Whether leaving this Paper phase is *only* possible via the operator.
+
+        ``RUNNING``/``PAUSED`` are excluded on purpose: closing those still
+        has an automatic route (``request_stop`` -> ``STOPPING`` -> the
+        zero-state proof), so the gate stays down while that runs.  The three
+        phases below have no automatic exit -- each is left by an explicit
+        human reconciliation step -- and every one of those steps is a task.
+        """
+
+        return self.paper_workflow.phase in {
+            PaperWorkflowPhase.HALTED,
+            PaperWorkflowPhase.RECONCILING,
+            PaperWorkflowPhase.RECONCILING_READY,
+        }
+
+    def _cancel_close_drain(self) -> None:
+        """Undo phase one: this close was refused, so the client stays usable.
+
+        A refused close hands control back to the operator -- reconcile, then
+        confirm -- and that recovery runs through ``_start_task`` like any
+        other work.  Leaving ``_closing`` up would refuse the very task that
+        can finalize the session, so the client would be stuck: halted,
+        unable to reconcile, unable to finalize, unable to exit.
+
+        This only lifts the admission gate; the supervisor starts nothing,
+        restarts nothing, creates no thread and performs no I/O.  If the
+        drain can no longer be undone (something was already released) the
+        gate stays *down* and the failure is logged: a half-released runtime
+        must never be presented as open.
+        """
+
+        if not self._closing:
+            return
+        try:
+            self.runtime_supervisor.cancel_shutdown()
+        except RuntimeError as error:
+            self._log(f"关闭流程无法撤销，保持关闭状态：{error}")
+            return
+        self._closing = False
+
+    def _release_close_drain_if_recovery_required(self) -> None:
+        """Undo a refused close once Paper can only be left by the operator.
+
+        Called from every route that can leave the session in
+        ``HALTED``/``RECONCILING``/``RECONCILING_READY`` -- including the
+        automatic one (``RUNNING`` -> ``STOPPING`` -> finalization failure ->
+        ``HALTED``), which is *not* covered by checking the phase at close
+        time.  Without this the operator would be told to reconcile while the
+        gate that admits the reconciliation task is still down.
+        """
+
+        if not self._closing:
+            return
+        if not self._paper_needs_manual_recovery():
+            return
+        self._cancel_close_drain()
+
+    def _running_workers(self) -> list[TaskThread]:
+        return [worker for worker in self.workers if worker.isRunning()]
+
+    def _request_worker_stops(self) -> None:
+        """Ask every cancellable worker to stop.
+
+        ``TaskThread`` has no generic cancel hook -- each task owns its own
+        ``Event`` -- so the only universal signal is the universe refresh
+        cancel event, which is the one long-running network task the desktop
+        can interrupt.  The thread is never terminated: a half-written
+        reference file is worse than a slow close.
+        """
+
+        event = self.universe_refresh_cancel_event
+        if event is not None:
+            event.set()
+
+    def _join_background_workers(self) -> bool:
+        """Wait for running workers; report whether all of them exited."""
+
+        all_exited = True
+        for worker in self._running_workers():
+            if not worker.wait(3_000):
+                all_exited = False
+                self._log(
+                    "后台任务线程未在 3 秒内退出；已记录并继续释放其他资源。"
+                )
+        return all_exited
+
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
-        running_tasks = [
-            worker for worker in self.workers if worker.isRunning()
-        ]
+        # Phase one, before any other check: close the admission gate and ask
+        # the cancellable tasks to stop.  This ordering is the point -- while
+        # a task is still running the window must already refuse new work, and
+        # a second close must not re-admit anything.  ``begin_shutdown`` never
+        # joins and never releases, so no in-flight write is disturbed.
+        self.runtime_supervisor.begin_shutdown()
+        running_tasks = self._running_workers()
         if running_tasks:
             event.ignore()
             QMessageBox.information(
@@ -8574,7 +8762,8 @@ class MainWindow(QMainWindow):
                 "后台任务仍在运行",
                 (
                     f"仍有 {len(running_tasks)} 个数据/研究任务运行中。"
-                    "为防止半写入产物，任务完成后再关闭程序。"
+                    "已请求可取消的任务停止；为防止半写入产物，"
+                    "请等任务自行结束后再关闭程序。"
                 ),
             )
             return
@@ -8584,7 +8773,16 @@ class MainWindow(QMainWindow):
                 PaperWorkflowPhase.RUNNING,
                 PaperWorkflowPhase.PAUSED,
             }:
+                # Automatic safe stop: request_stop -> STOPPING -> the
+                # zero-state proof.  The gate stays down while that runs.
                 self._stop_auto_quant()
+            # But if no automatic route is left -- HALTED, RECONCILING or
+            # RECONCILING_READY can only be left by the operator, and every
+            # one of those steps is a task -- this close has been refused in
+            # practice.  Hand the client back, or the recovery task itself
+            # would be refused by the gate and the session could never be
+            # finalized.
+            self._release_close_drain_if_recovery_required()
             event.ignore()
             QMessageBox.information(
                 self,
@@ -8600,7 +8798,12 @@ class MainWindow(QMainWindow):
             self.shadow_engine.stop()
             if self.shadow_workflow.active:
                 self.shadow_workflow.stop()
-        self._stop_stream()
+        # Generic runtime teardown: stop new work, release the heartbeats and
+        # the market data stream, join the workers, and keep going even if
+        # one of them fails.  Trading-safety ordering above is unchanged --
+        # the supervisor only runs after the Paper session is finalized.
+        snapshot = self.runtime_supervisor.shutdown()
+        self._report_runtime_shutdown(snapshot)
         if (
             self.stream_worker is not None
             and self.stream_worker.isRunning()
@@ -8613,6 +8816,35 @@ class MainWindow(QMainWindow):
             )
             return
         event.accept()
+
+    def _report_runtime_shutdown(self, snapshot: RuntimeSnapshot) -> None:
+        """Surface supervisor teardown failures instead of swallowing them.
+
+        Reports the *snapshot that was returned by the shutdown call* rather
+        than re-reading the supervisor, so a component whose error arrived
+        from an earlier phase (``drain``) is still visible even when the
+        release pass itself was clean.
+        """
+
+        messages = list(self.runtime_supervisor.errors())
+        for component in snapshot.components:
+            if component.exit_ok is False and component.last_error is not None:
+                if not any(
+                    component.last_error in message for message in messages
+                ):
+                    messages.append(f"{component.name}: {component.last_error}")
+        if messages:
+            for message in messages:
+                self._log(f"运行期资源释放异常：{message}")
+            self._record_runtime_event(
+                severity="warning",
+                component="runtime",
+                code="RUNTIME_SHUTDOWN_PARTIAL",
+                message="；".join(messages),
+            )
+        else:
+            self._log("运行期资源已全部释放。")
+
 
     def _populate_artifact_table(self) -> None:
         translations = {
@@ -8908,7 +9140,17 @@ class MainWindow(QMainWindow):
         start_message: str,
         resource_group: str = "research",
         suppress_busy_message: bool = False,
+        shutdown_essential: bool = False,
     ) -> bool:
+        if self._closing and not shutdown_essential:
+            # Closing raises the admission gate before releasing anything,
+            # so no new work is admitted while teardown is in flight.  The
+            # teardown's own mandatory proof is the one exception: the Paper
+            # zero-state finalization is what lets the session reach
+            # ``finalized``, and refusing it would leave the window
+            # permanently unclosable.
+            self._log("程序正在关闭；拒绝启动新的后台任务。")
+            return False
         if not self.task_controller.can_start(resource_group):
             message = (
                 f"已有{resource_group}任务在运行。为避免同类文件和数据库"

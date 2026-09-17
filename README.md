@@ -229,3 +229,4 @@ Windows 打包：
 - [成熟量化软件案例复盘](docs/MATURE_QUANT_CASE_REVIEW.md)
 - [项目架构](docs/PROJECT_BLUEPRINT.md)
 - [需求与决策](docs/PROJECT_INTAKE.md)
+- [桌面运行时职责分解](docs/DESKTOP_DECOMPOSITION.md)

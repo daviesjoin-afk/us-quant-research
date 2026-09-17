@@ -349,8 +349,8 @@ reconciliation、`max_broker_order_id` 正确、**并且能继续追加新订单
 adapter 净减 **638 行 / 22,877 字节**，且没有任何一份代码被复制两份。
 
 测试：**512 → 532 passed**（新增 20：models 契约 10 + journal 模块/兼容 10）。
-`check_publish_safety.py` → **scanned 199 publishable text files / OK**
-（199 = 191 已跟踪 + 4 个新文件 + 4 个未跟踪的临时脚本）。
+`check_publish_safety.py` → **scanned 195 publishable text files / OK**
+（195 = 191 已跟踪 + 4 个新文件；一次性脚本清理后复测）。
 
 一个既有结构断言随之更新：`test_the_wrapped_service_is_still_far_larger_than_
 this_boundary` 原本比较单个文件大小，拆分后被包裹的实现变成三个文件，故按原意改为

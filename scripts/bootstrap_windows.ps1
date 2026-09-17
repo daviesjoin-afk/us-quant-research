@@ -11,11 +11,11 @@ Push-Location $projectRoot
 function Invoke-Checked {
     param(
         [Parameter(Mandatory = $true)][string]$Executable,
-        [Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments
+        [Parameter(Mandatory = $true)][string[]]$CommandArguments
     )
-    & $Executable @Arguments
+    & $Executable @CommandArguments
     if ($LASTEXITCODE -ne 0) {
-        throw "Command failed with exit code $LASTEXITCODE: $Executable $($Arguments -join ' ')"
+        throw "Command failed with exit code $LASTEXITCODE: $Executable $($CommandArguments -join ' ')"
     }
 }
 
@@ -45,17 +45,17 @@ try {
         }
     }
 
-    Invoke-Checked $venvPython -m pip install --upgrade pip setuptools wheel
+    Invoke-Checked -Executable $venvPython -CommandArguments @("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel")
     if ($CoreOnly) {
-        Invoke-Checked $venvPython -m pip install -e ".[test]"
+        Invoke-Checked -Executable $venvPython -CommandArguments @("-m", "pip", "install", "-e", ".[test]")
     }
     else {
-        Invoke-Checked $venvPython -m pip install -e ".[desktop,test]"
+        Invoke-Checked -Executable $venvPython -CommandArguments @("-m", "pip", "install", "-e", ".[desktop,test]")
     }
 
-    Invoke-Checked $venvPython -m us_quant doctor
-    Invoke-Checked $venvPython -m pytest -q
-    Invoke-Checked $venvPython -m compileall -q src tests
+    Invoke-Checked -Executable $venvPython -CommandArguments @("-m", "us_quant", "doctor")
+    Invoke-Checked -Executable $venvPython -CommandArguments @("-m", "pytest", "-q")
+    Invoke-Checked -Executable $venvPython -CommandArguments @("-m", "compileall", "-q", "src", "tests")
 
     if (-not $CoreOnly) {
         $previousSelfTest = $env:US_QUANT_SELF_TEST
@@ -63,7 +63,7 @@ try {
         try {
             $env:US_QUANT_SELF_TEST = "1"
             $env:QT_QPA_PLATFORM = "offscreen"
-            Invoke-Checked $venvPython desktop_main.py
+            Invoke-Checked -Executable $venvPython -CommandArguments @("desktop_main.py")
         }
         finally {
             $env:US_QUANT_SELF_TEST = $previousSelfTest

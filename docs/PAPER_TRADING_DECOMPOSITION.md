@@ -1,4 +1,4 @@
-# Paper 交易模块拆分（第四步 ownership + 第五步 domain/journal 分层 + 第六步 持久化归位）
+# Paper 交易模块拆分（第四步 ownership + 第五步 domain/journal 分层 + 第五步补遗）
 
 审计对象：`src/us_quant/desktop.py`（第四步开始时 9,911 行）与
 `src/us_quant/ibkr_paper_orders.py`（第五步开始时 2,208 行）。
@@ -9,10 +9,10 @@
   ownership 交给 `PaperTradingService`。见 §1–§9。
 - **第五步**：把 `ibkr_paper_orders.py` 里的纯数据模型与 SQLite Journal 拆出去，
   adapter 只剩 broker 语义。见 §10–§18。
-- **第六步**：把第五步漏拆的 `sessions()` 持久化查询从 adapter 移回 journal，
+- **第五步补遗**：把第五步漏拆的 `sessions()` 持久化查询从 adapter 移回 journal，
   adapter 只留一行代理。见 §19–§23。
 
-第五步与第六步**只做模块搬迁**：交易行为 0 变化、SQLite schema 0 变化、旧 import
+第五步与第五步补遗**只做模块搬迁**：交易行为 0 变化、SQLite schema 0 变化、旧 import
 路径继续有效、旧数据库继续可读。本阶段**不**继续拆 IBKR network adapter。
 
 ---
@@ -265,7 +265,7 @@ adapter，所以它必须位于两者共同的**叶子模块**；定义两份等
 `record_execution` / `intent_for_broker_order` / `intent_for_idempotency_key` /
 `executed_quantity` / `max_broker_order_id` / `execution_rows` /
 `reconciliation_rows` / `reconciliation_summary` / `pending_orders_for_session`
-（含 `_dicts` 变体）/ `audit_rows` / `_initialize`；**第六步**又把漏拆的
+（含 `_dicts` 变体）/ `audit_rows` / `_initialize`；**第五步补遗**又把漏拆的
 `sessions()` 归位到这里（见 §19）。
 
 **helper 归属按 §8 的真实用法判定，不是按名字猜**：
@@ -282,7 +282,7 @@ adapter，所以它必须位于两者共同的**叶子模块**；定义两份等
 该模块**不 import** `IBKRPaperOrderService`、`ibapi`、`PaperTradingService`、
 `desktop`、`PySide6`、`QThread`、`MainWindow`、`ExecutionLease`。
 
-**IBKR adapter 不直接访问 SQLite**（第六步之后）：`closing` 与 `connect_sqlite`
+**IBKR adapter 不直接访问 SQLite**（第五步补遗之后）：`closing` 与 `connect_sqlite`
 两个 import 已删除，adapter 里不再出现 `connect_sqlite(` / `self.path` /
 任何 `FROM paper_order_intent`；旧 `service.sessions()` 仅保留 compatibility
 delegate，把调用原样转给 journal（见 §20）。
@@ -347,18 +347,18 @@ reconciliation、`max_broker_order_id` 正确、**并且能继续追加新订单
 
 | 指标 | 迁移前 | 迁移后 |
 | --- | --- | --- |
-| `ibkr_paper_orders.py` | 2,208 行 / 81,537 字节 | **1,541 行 / 57,519 字节**（含第六步） |
+| `ibkr_paper_orders.py` | 2,208 行 / 81,537 字节 | **1,541 行 / 57,519 字节**（含第五步补遗） |
 | `paper_order_models.py` | — | 148 行 / 3,532 字节 |
-| `paper_order_journal.py` | — | 588 行 / 22,670 字节（含第六步） |
+| `paper_order_journal.py` | — | 588 行 / 22,670 字节（含第五步补遗） |
 | adapter re-export 名称 | — | 12 / 12 |
 | 每个迁移类的定义份数 | 1（在 adapter 内） | **1**（在新模块内） |
 | 从旧路径 import 的文件 | 8 | 8（**有意不迁移**） |
 
-adapter 净减 **667 行 / 24,018 字节**（其中第六步再减 29 行 / 1,141 字节），
+adapter 净减 **667 行 / 24,018 字节**（其中第五步补遗再减 29 行 / 1,141 字节），
 且没有任何一份代码被复制两份。
 
 测试：**512 → 540 passed**（新增 28：models 契约 10 + journal 模块 16 + adapter delegate 2；
-其中第六步新增 8 —— journal 行为 3、结构守卫 3、adapter delegate 2）。
+其中第五步补遗新增 8 —— journal 行为 3、结构守卫 3、adapter delegate 2）。
 `check_publish_safety.py` → **scanned 195 publishable text files / OK**
 （195 = 191 已跟踪 + 4 个新文件；一次性脚本清理后复测）。
 
@@ -424,7 +424,7 @@ lifecycle / candidate lifecycle / `PaperTradingService` ownership / workflow /
 
 ---
 
-# 第三部分：第六步（把漏拆的持久化查询归位）
+# 第三部分：第五步补遗（把漏拆的持久化查询归位）
 
 ## 19. 被漏掉的东西：一个**从未能运行**的方法
 
@@ -478,9 +478,9 @@ def sessions(self, *, limit: int = 50) -> tuple[dict[str, object], ...]:
 | 只有 intent、没有任何 update 的 session 仍出现且以 `generated_at` 计时 | `LEFT JOIN` / `COALESCE` 被改成内连接后静默隐藏最新 session |
 | 空库返回 `()` | 聚合在无数据时炸掉或返回伪造行 |
 
-## 22. 第六步验收数字（脚本实测）
+## 22. 第五步补遗验收数字（脚本实测）
 
-| 指标 | 第五步后 | 第六步后 |
+| 指标 | 第五步后 | 第五步补遗后 |
 | --- | --- | --- |
 | `ibkr_paper_orders.py` | 1,570 行 / 58,660 字节 | **1,541 行 / 57,519 字节** |
 | `paper_order_journal.py` | 544 行 / 21,032 字节 | **588 行 / 22,670 字节** |
@@ -494,7 +494,7 @@ adapter 再减 **29 行 / 1,141 字节**，journal 增 **44 行 / 1,638 字节**
 是方法本身加 docstring）。两个文件的**行为面 0 变化**：`sessions()` 的签名、返回值
 形状、SQL 语义一字未改。
 
-## 23. 第六步未做的事
+## 23. 第五步补遗未做的事
 
 未改 `sessions()` 的 SQL、排序、`limit` 语义、返回字段；未动
 `record_intent` / `record_update` / `record_execution` / reconciliation 系列方法；

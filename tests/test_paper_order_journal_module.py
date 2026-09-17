@@ -435,7 +435,7 @@ def test_sessions_rolls_up_each_session_with_its_own_totals() -> None:
             )
         )
 
-        # s-2: two intents, later start, only one of them filled.
+        # s-2: two intents, later start, one settled and one still working.
         journal.record_intent(
             _intent(
                 intent_id="i-2",
@@ -445,6 +445,14 @@ def test_sessions_rolls_up_each_session_with_its_own_totals() -> None:
             ),
             broker_order_id=11,
             account_alias="DU***17",
+        )
+        journal.record_execution(
+            _execution(
+                intent_id="i-2",
+                broker_order_id=11,
+                execution_id="e-2",
+                occurred_at="2026-07-26T13:00:04+00:00",
+            )
         )
         journal.record_update(
             _update(
@@ -464,6 +472,15 @@ def test_sessions_rolls_up_each_session_with_its_own_totals() -> None:
             ),
             broker_order_id=12,
             account_alias="DU***17",
+        )
+        journal.record_execution(
+            _execution(
+                intent_id="i-3",
+                broker_order_id=12,
+                execution_id="e-3",
+                quantity=Decimal("0"),
+                occurred_at="2026-07-26T13:01:02+00:00",
+            )
         )
         journal.record_update(
             _update(
@@ -648,14 +665,21 @@ def _update(
     )
 
 
-def _execution() -> PaperExecution:
+def _execution(
+    *,
+    intent_id: str = "i-1",
+    broker_order_id: int = 10,
+    execution_id: str = "e-1",
+    quantity: Decimal | None = None,
+    occurred_at: str = "2026-07-26T12:00:04+00:00",
+) -> PaperExecution:
     return PaperExecution(
-        intent_id="i-1",
-        broker_order_id=10,
-        execution_id="e-1",
+        intent_id=intent_id,
+        broker_order_id=broker_order_id,
+        execution_id=execution_id,
         symbol="AAPL",
         side="BUY",
-        quantity=Decimal("1"),
+        quantity=quantity if quantity is not None else Decimal("1"),
         price=Decimal("200"),
-        occurred_at="2026-07-26T12:00:04+00:00",
+        occurred_at=occurred_at,
     )

@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-full:
+    name: Windows / Python ${{ matrix.python-version }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    env:
+      QT_QPA_PLATFORM: offscreen
+      US_QUANT_SELF_TEST: "1"
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package and verification dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -e ".[desktop,test]"
+
+      - name: Run test suite
+        run: python -m pytest -q
+
+      - name: Run configuration doctor
+        run: python -m us_quant doctor
+
+      - name: Run desktop startup smoke test
+        run: python desktop_main.py
+
+      - name: Compile Python sources
+        run: python -m compileall -q src tests

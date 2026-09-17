@@ -120,18 +120,45 @@
 
 ## 6. 迁移后 desktop.py 的关闭顺序
 
-`closeEvent` 中的顺序（保持交易安全不变）：
+`closeEvent` 分两个阶段。第一阶段在**任何其他检查之前**执行，这是修复的核心：
+原先「先查后台任务 → 有则 ignore 并 return」，导致任务运行期间 `_closing` 不被
+置位、新任务仍可被准入、可取消任务收不到停止请求，`background_workers` 实际上
+从未参与「存在运行任务时」的关闭流程。
 
-1. 有后台任务运行 → `event.ignore()` + 弹窗（原有行为，未改）
-2. Paper 会话未 finalized → `event.ignore()` + 弹窗（原有行为，未改）
-3. `paper_order_service.disconnect()`（原有行为，未改）
-4. Shadow 引擎/工作流停止（原有行为，未改）
-5. `runtime_supervisor.shutdown()` —— 新增，内部顺序：
+### 阶段一：`runtime_supervisor.begin_shutdown()`（每次关闭请求都执行）
+
+1. `closing_gate`（order=5，`drain=True`）→ `_closing = True`，此后 `_start_task()`
+   一律拒绝新任务。
+2. `background_workers`（order=200，`drain=True`）→ `_request_worker_stops()`：
+   设置 `universe_refresh_cancel_event`。**只发请求，不 join、不 terminate。**
+3. 有后台任务运行 → `event.ignore()` + 弹窗，等待任务自行安全结束。
+4. Paper 会话未 finalized → `event.ignore()` + 弹窗；若是 RUNNING/PAUSED 会先
+   `_stop_auto_quant()`（原有行为，未改）。
+
+阶段一**不释放任何资源**：定时器、行情线程、Paper/broker 连接全部保持原状，
+正在写入的数据不受干扰。
+
+### 阶段二：仅当上述检查全部通过后
+
+5. `paper_order_service.disconnect()`（原有行为，未改）
+6. Shadow 引擎/工作流停止（原有行为，未改）
+7. `runtime_supervisor.shutdown()` —— 内部顺序：
    `closing_gate`(5) → `paper_order_heartbeat`(10) → `extended_session_heartbeat`(20)
    → `stream_snapshot_timer`(30) → `market_data_stream`(100)
    → `background_workers`(200)
-6. 行情线程仍存活 → `event.ignore()` + 弹窗（原有行为，未改）
-7. `event.accept()`
+8. 行情线程仍存活 → `event.ignore()` + 弹窗（原有行为，未改）
+9. `event.accept()`
 
-第 5 步取代了原来单独一行的 `self._stop_stream()`。交易安全判断全部在第 1–4 步
-完成，supervisor 只在会话已 finalized 之后运行，**不改变任何交易语义**。
+交易安全判断全部在第 5–6 步之前完成，supervisor 的完整 `shutdown()` 只在会话已
+finalized 之后运行，**不改变任何交易语义**。
+
+### 6.1 闸门的唯一例外：`shutdown_essential`
+
+`_start_task(..., shutdown_essential=True)` 是关闭期间唯一能被准入的任务。
+原因是一个真实的死锁：Paper 的零状态收尾证明
+（`_start_paper_finalization_refresh`）本身就是通过
+`_start_task(resource_group="broker")` 启动的，而它正是让会话进入 `finalized`
+的那一步。如果闸门无条件关闭，证明永远无法启动 → 会话永远无法 finalized →
+窗口永远关不掉。该参数只在这一处使用，并由
+`tests/test_desktop_runtime_teardown.py::test_a_non_essential_task_is_still_refused_once_closing`
+锁定其窄度（其余任何资源组仍被拒绝）。

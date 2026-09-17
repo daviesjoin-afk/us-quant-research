@@ -15,7 +15,15 @@ Design constraints (deliberate, kept small on purpose):
 * a resource the supervisor did not start is still released if its
   liveness probe says it is live, so "started before the supervisor
   existed" is not a leak;
+* shutdown has two explicit phases -- :meth:`RuntimeSupervisor.begin_shutdown`
+  raises the admission gate and signals the cancellable work, and
+  :meth:`RuntimeSupervisor.shutdown` releases everything -- so a caller can
+  refuse new work immediately while a long-running task is still finishing
+  its writes;
 * shutdown never lets one failure skip the remaining components;
+* only ``Exception`` is caught around component callables: a
+  ``KeyboardInterrupt``/``SystemExit`` means the operator is aborting the
+  process and must keep propagating;
 * every failure is recorded on the component and surfaced through
   :meth:`RuntimeSupervisor.snapshot` instead of being swallowed;
 * a resource with no ``stop``/``join`` can still register, so that "this
@@ -62,6 +70,7 @@ class _Component:
     stop: Callable[[], None] | None = None
     join: Callable[[], object] | None = None
     is_running: Callable[[], bool] | None = None
+    drain: bool = False
     state: str = STATE_REGISTERED
     started: bool = False
     released: bool = False
@@ -99,12 +108,20 @@ class RuntimeSupervisor:
         join: Callable[[], object] | None = None,
         is_running: Callable[[], bool] | None = None,
         order: int | None = None,
+        drain: bool = False,
     ) -> None:
         """Register a resource under ``name``.
 
         ``start``/``stop``/``join`` are optional so an already-running or
         externally owned resource can be *observed* (via ``is_running``)
         without the supervisor pretending it can release it.
+
+        ``drain`` marks the ``stop`` callable as a *request* to stop rather
+        than a release: :meth:`begin_shutdown` calls it first, without
+        joining, so a long-running task is asked to wind down while the
+        caller is still waiting.  ``stop`` and ``drain`` are deliberately
+        separate: for a Qt timer ``stop`` really is the release, while for a
+        worker thread it is only a cancel signal.
         """
 
         if self._shutting_down:
@@ -123,6 +140,7 @@ class RuntimeSupervisor:
             stop=stop,
             join=join,
             is_running=is_running,
+            drain=drain,
         )
 
     @property
@@ -152,7 +170,7 @@ class RuntimeSupervisor:
             raise RuntimeError(f"runtime component has no start callable: {name}")
         try:
             component.start()
-        except BaseException as error:
+        except Exception as error:
             self._record_error(component, error, phase="start")
             component.state = STATE_FAILED
             component.exit_ok = False
@@ -180,6 +198,34 @@ class RuntimeSupervisor:
             if component.start is None or component.started:
                 continue
             self.start(component.name)
+
+    def begin_shutdown(self) -> RuntimeSnapshot:
+        """Phase one: refuse new work and signal cancellable work to stop.
+
+        Called the moment the operator asks to close, while a long-running
+        task may still be finishing its writes.  It raises the admission
+        gate, drains every component registered with ``drain=True`` (a
+        *request* to stop, never a join), and deliberately releases nothing
+        else: the caller still has to keep the close event ignored until the
+        workers exit on their own.
+
+        Safe to call repeatedly -- it only ever signals, so calling it again
+        after the admission gate is already down is a no-op for the
+        components that have nothing left to signal.
+        """
+
+        self._shutting_down = True
+        for component in self._in_order():
+            if not component.drain:
+                continue
+            action = component.stop
+            if action is None:
+                continue
+            try:
+                action()
+            except Exception as error:  # noqa: BLE001 - recorded, never fatal
+                self._record_error(component, error, phase="drain")
+        return self.snapshot()
 
     def shutdown(self) -> RuntimeSnapshot:
         """Release every live resource, isolating each failure.
@@ -245,7 +291,7 @@ class RuntimeSupervisor:
         if component.is_running is not None:
             try:
                 running = bool(component.is_running())
-            except BaseException as error:
+            except Exception as error:
                 self._record_error(component, error, phase="probe")
                 return STATE_FAILED
             return STATE_RUNNING if running else STATE_STOPPED
@@ -274,7 +320,7 @@ class RuntimeSupervisor:
             return True
         try:
             return bool(component.is_running())
-        except BaseException as error:
+        except Exception as error:
             self._record_error(component, error, phase="probe")
             return True
 
@@ -294,7 +340,7 @@ class RuntimeSupervisor:
                 continue
             try:
                 result = action()
-            except BaseException as error:
+            except Exception as error:
                 self._record_error(component, error, phase=label)
                 failed = True
                 if not tolerate:

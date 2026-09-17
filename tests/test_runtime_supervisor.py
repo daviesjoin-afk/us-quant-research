@@ -523,3 +523,196 @@ def _raiser(message: str):
         raise RuntimeError(message)
 
     return _raise
+
+
+def _interrupter(error: BaseException):
+    """A callable that raises a *non*-``Exception`` -- Ctrl-C / interpreter exit."""
+
+    def _raise() -> None:
+        raise error
+
+    return _raise
+
+
+# -- phase one: draining without releasing -------------------------------
+
+
+def test_begin_shutdown_signals_drain_components_but_releases_nothing() -> None:
+    log: list[str] = []
+    supervisor = RuntimeSupervisor()
+    timer = RecordingResource("timer", log=log)
+    workers = RecordingResource("workers", log=log)
+    supervisor.register(
+        "timer",
+        start=timer.start,
+        stop=timer.stop,
+        join=timer.join,
+        is_running=timer.is_running,
+        order=10,
+    )
+    supervisor.register(
+        "workers",
+        start=workers.start,
+        stop=workers.stop,
+        join=workers.join,
+        is_running=workers.is_running,
+        order=20,
+        drain=True,
+    )
+    supervisor.start_all()
+
+    result = supervisor.begin_shutdown()
+
+    # Only the drain component was asked to stop, and only as a *request*:
+    # no join, and the non-drain component was not touched at all.
+    assert log == ["timer:start", "workers:start", "workers:stop"]
+    assert workers.stop_calls == 1
+    assert workers.join_calls == 0
+    assert timer.stop_calls == 0
+    assert timer.join_calls == 0
+    assert result.shutting_down
+
+    # A cancel request is asynchronous: the thread is still alive when the
+    # release pass runs, which is exactly why ``begin_shutdown`` must not be
+    # the thing that joins it.
+    workers.running = True
+    supervisor.shutdown()
+
+    assert timer.stop_calls == 1
+    assert timer.join_calls == 1
+    assert workers.join_calls == 1
+    assert timer.running is False
+
+
+def test_begin_shutdown_raises_the_admission_gate_immediately() -> None:
+    supervisor = RuntimeSupervisor()
+    supervisor.register("worker", start=lambda: None)
+
+    supervisor.begin_shutdown()
+
+    assert supervisor.shutting_down
+    with pytest.raises(RuntimeError, match="shutting down"):
+        supervisor.register("late")
+    with pytest.raises(RuntimeError, match="shutting down"):
+        supervisor.start("worker")
+
+
+def test_begin_shutdown_is_repeatable_and_only_ever_signals() -> None:
+    """The close path calls it on every close attempt while draining."""
+
+    supervisor = RuntimeSupervisor()
+    workers = RecordingResource("workers")
+    supervisor.register(
+        "workers",
+        stop=workers.stop,
+        join=workers.join,
+        is_running=workers.is_running,
+        drain=True,
+    )
+
+    supervisor.begin_shutdown()
+    supervisor.begin_shutdown()
+
+    assert workers.stop_calls == 2
+    assert workers.join_calls == 0
+
+
+def test_begin_shutdown_skips_drain_components_without_a_stop_callable() -> None:
+    supervisor = RuntimeSupervisor()
+    supervisor.register("observe-only", is_running=lambda: False, drain=True)
+
+    result = supervisor.begin_shutdown()
+
+    assert result.components[0].last_error is None
+    assert supervisor.errors() == ()
+
+
+def test_begin_shutdown_records_a_failing_drain_without_raising() -> None:
+    """A cancel signal that explodes must not abort the close path."""
+
+    supervisor = RuntimeSupervisor()
+    supervisor.register("workers", stop=_raiser("cancel exploded"), drain=True)
+
+    result = supervisor.begin_shutdown()
+
+    (component,) = result.components
+    assert component.last_error is not None
+    assert "cancel exploded" in component.last_error
+    assert supervisor.errors() == (
+        "workers: drain failed: RuntimeError: cancel exploded",
+    )
+
+
+def test_a_failed_drain_does_not_prevent_the_later_release() -> None:
+    log: list[str] = []
+    supervisor = RuntimeSupervisor()
+    workers = RecordingResource("workers", log=log)
+    workers.running = True
+    workers.stop_error = RuntimeError("first signal failed")
+    supervisor.register(
+        "workers",
+        stop=workers.stop,
+        join=workers.join,
+        is_running=workers.is_running,
+        drain=True,
+    )
+
+    supervisor.begin_shutdown()
+    workers.stop_error = None
+    supervisor.shutdown()
+
+    assert log == ["workers:stop", "workers:stop", "workers:join"]
+
+
+# -- non-Exception failures are never swallowed --------------------------
+
+
+def test_keyboard_interrupt_from_a_stop_callable_is_not_swallowed() -> None:
+    """Ctrl-C during teardown must abort the process, not be logged as a
+    component failure and then quietly release everything anyway."""
+
+    supervisor = RuntimeSupervisor()
+    supervisor.register(
+        "worker", stop=_interrupter(KeyboardInterrupt()), is_running=lambda: True
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        supervisor.shutdown()
+
+
+def test_system_exit_from_a_drain_callable_is_not_swallowed() -> None:
+    supervisor = RuntimeSupervisor()
+    supervisor.register("workers", stop=_interrupter(SystemExit(3)), drain=True)
+
+    with pytest.raises(SystemExit):
+        supervisor.begin_shutdown()
+
+
+def test_keyboard_interrupt_from_a_probe_is_not_swallowed() -> None:
+    supervisor = RuntimeSupervisor()
+    supervisor.register("worker", is_running=_interrupter(KeyboardInterrupt()))
+
+    with pytest.raises(KeyboardInterrupt):
+        supervisor.snapshot()
+
+
+def test_keyboard_interrupt_from_a_start_callable_is_not_swallowed() -> None:
+    supervisor = RuntimeSupervisor()
+    supervisor.register("worker", start=_interrupter(KeyboardInterrupt()))
+
+    with pytest.raises(KeyboardInterrupt):
+        supervisor.start("worker")
+
+
+def test_ordinary_component_failures_are_still_recorded_not_raised() -> None:
+    """The ``Exception`` narrowing must not weaken failure isolation."""
+
+    supervisor = RuntimeSupervisor()
+    supervisor.register("worker", stop=_raiser("boom"), is_running=lambda: True)
+
+    result = supervisor.shutdown()
+
+    (component,) = result.components
+    assert component.state == STATE_FAILED
+    assert component.exit_ok is False
+    assert "boom" in (component.last_error or "")

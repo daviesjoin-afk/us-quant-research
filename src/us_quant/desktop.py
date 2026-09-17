@@ -5333,6 +5333,9 @@ class MainWindow(QMainWindow):
             start_message="Paper safe finalization check in progress...",
             resource_group="broker",
             suppress_busy_message=True,
+            # This task is part of the close path itself, not new work: it is
+            # what proves broker zero-state so the session can be finalized.
+            shutdown_essential=True,
         )
         if not started:
             # A busy broker resource group defers the proof instead of
@@ -8581,9 +8584,22 @@ class MainWindow(QMainWindow):
         """
 
         supervisor = self.runtime_supervisor
+        # Order 5: the admission gate.  ``begin_shutdown`` calls this the
+        # moment the operator asks to close, before any task is joined, so it
+        # must be a drain component -- without the flag the gate would only
+        # ever be raised by the *release* pass, which runs after the running
+        # tasks it is supposed to exclude.
+        supervisor.register(
+            "closing_gate",
+            stop=self._close_admission_gate,
+            order=5,
+            drain=True,
+        )
         # Order 10-30: stop the heartbeats first so no new work is scheduled
         # while the rest of the stack is being released.  These timers are
         # started in ``_build_ui``; the probe makes them releasable anyway.
+        # None of them is a drain component: stopping the timer *is* the
+        # release, so ``begin_shutdown`` must not touch it.
         supervisor.register(
             "paper_order_heartbeat",
             stop=self.paper_order_timer.stop,
@@ -8627,11 +8643,9 @@ class MainWindow(QMainWindow):
             join=self._join_background_workers,
             is_running=lambda: bool(self._running_workers()),
             order=200,
-        )
-        supervisor.register(
-            "closing_gate",
-            stop=self._close_admission_gate,
-            order=5,
+            # A worker's ``stop`` is a cancel request, not a release: ask the
+            # cancellable ones to wind down as soon as closing starts.
+            drain=True,
         )
 
     def _close_admission_gate(self) -> None:
@@ -8648,7 +8662,8 @@ class MainWindow(QMainWindow):
         ``TaskThread`` has no generic cancel hook -- each task owns its own
         ``Event`` -- so the only universal signal is the universe refresh
         cancel event, which is the one long-running network task the desktop
-        can interrupt.
+        can interrupt.  The thread is never terminated: a half-written
+        reference file is worse than a slow close.
         """
 
         event = self.universe_refresh_cancel_event
@@ -8668,9 +8683,13 @@ class MainWindow(QMainWindow):
         return all_exited
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
-        running_tasks = [
-            worker for worker in self.workers if worker.isRunning()
-        ]
+        # Phase one, before any other check: close the admission gate and ask
+        # the cancellable tasks to stop.  This ordering is the point -- while
+        # a task is still running the window must already refuse new work, and
+        # a second close must not re-admit anything.  ``begin_shutdown`` never
+        # joins and never releases, so no in-flight write is disturbed.
+        self.runtime_supervisor.begin_shutdown()
+        running_tasks = self._running_workers()
         if running_tasks:
             event.ignore()
             QMessageBox.information(
@@ -8678,7 +8697,8 @@ class MainWindow(QMainWindow):
                 "后台任务仍在运行",
                 (
                     f"仍有 {len(running_tasks)} 个数据/研究任务运行中。"
-                    "为防止半写入产物，任务完成后再关闭程序。"
+                    "已请求可取消的任务停止；为防止半写入产物，"
+                    "请等任务自行结束后再关闭程序。"
                 ),
             )
             return
@@ -8724,16 +8744,29 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def _report_runtime_shutdown(self, snapshot: RuntimeSnapshot) -> None:
-        """Surface supervisor teardown failures instead of swallowing them."""
+        """Surface supervisor teardown failures instead of swallowing them.
 
-        if self.runtime_supervisor.errors():
-            for message in self.runtime_supervisor.errors():
+        Reports the *snapshot that was returned by the shutdown call* rather
+        than re-reading the supervisor, so a component whose error arrived
+        from an earlier phase (``drain``) is still visible even when the
+        release pass itself was clean.
+        """
+
+        messages = list(self.runtime_supervisor.errors())
+        for component in snapshot.components:
+            if component.exit_ok is False and component.last_error is not None:
+                if not any(
+                    component.last_error in message for message in messages
+                ):
+                    messages.append(f"{component.name}: {component.last_error}")
+        if messages:
+            for message in messages:
                 self._log(f"运行期资源释放异常：{message}")
             self._record_runtime_event(
                 severity="warning",
                 component="runtime",
                 code="RUNTIME_SHUTDOWN_PARTIAL",
-                message="；".join(self.runtime_supervisor.errors()),
+                message="；".join(messages),
             )
         else:
             self._log("运行期资源已全部释放。")
@@ -9033,10 +9066,15 @@ class MainWindow(QMainWindow):
         start_message: str,
         resource_group: str = "research",
         suppress_busy_message: bool = False,
+        shutdown_essential: bool = False,
     ) -> bool:
-        if self._closing:
-            # Shutdown raises the admission gate before releasing anything,
-            # so a task cannot be admitted while teardown is in flight.
+        if self._closing and not shutdown_essential:
+            # Closing raises the admission gate before releasing anything,
+            # so no new work is admitted while teardown is in flight.  The
+            # teardown's own mandatory proof is the one exception: the Paper
+            # zero-state finalization is what lets the session reach
+            # ``finalized``, and refusing it would leave the window
+            # permanently unclosable.
             self._log("程序正在关闭；拒绝启动新的后台任务。")
             return False
         if not self.task_controller.can_start(resource_group):

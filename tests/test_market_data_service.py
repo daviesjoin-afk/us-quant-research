@@ -763,9 +763,16 @@ def test_update_config_is_refused_while_a_stream_is_live(
     assert service.config == before
 
 
-def test_update_config_is_allowed_once_the_stream_is_stopped(
+def test_update_config_is_allowed_when_the_stream_was_stopped_before_it_ran(
     monkeypatch,
 ) -> None:
+    """The one releasable case: built, stopped, never run.
+
+    This stream can never finish on its own, so refusing would wedge the
+    service until restart.  It is *not* a general "stop is enough" --
+    see ``test_a_stop_request_does_not_release_the_live_stream``.
+    """
+
     _install(monkeypatch, "IBKRReadOnlyStream")
     service = _service()
     service.build_stream(

@@ -9,9 +9,9 @@ Push-Location $projectRoot
 function Invoke-Checked {
     param(
         [Parameter(Mandatory = $true)][string]$Executable,
-        [Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments
+        [Parameter(Mandatory = $true)][string[]]$CommandArguments
     )
-    & $Executable @Arguments
+    & $Executable @CommandArguments
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
@@ -31,19 +31,19 @@ try {
         "python"
     }
 
-    Invoke-Checked $python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 2)"
-    Invoke-Checked $python -m pytest -q
-    Invoke-Checked $python -m us_quant doctor
-    Invoke-Checked $python -m compileall -q src tests
+    Invoke-Checked -Executable $python -CommandArguments @("-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 2)")
+    Invoke-Checked -Executable $python -CommandArguments @("-m", "pytest", "-q")
+    Invoke-Checked -Executable $python -CommandArguments @("-m", "us_quant", "doctor")
+    Invoke-Checked -Executable $python -CommandArguments @("-m", "compileall", "-q", "src", "tests")
 
     if (-not $CoreOnly) {
-        Invoke-Checked $python -c "import PySide6"
+        Invoke-Checked -Executable $python -CommandArguments @("-c", "import PySide6")
         $previousSelfTest = $env:US_QUANT_SELF_TEST
         $previousQtPlatform = $env:QT_QPA_PLATFORM
         try {
             $env:US_QUANT_SELF_TEST = "1"
             $env:QT_QPA_PLATFORM = "offscreen"
-            Invoke-Checked $python desktop_main.py
+            Invoke-Checked -Executable $python -CommandArguments @("desktop_main.py")
         }
         finally {
             $env:US_QUANT_SELF_TEST = $previousSelfTest

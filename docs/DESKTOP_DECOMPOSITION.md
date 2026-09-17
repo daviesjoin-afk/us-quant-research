@@ -243,25 +243,52 @@ listener 会让每笔行情发布两次。
 build_stream  →  run  →  stop / 自然结束
 ```
 
+四个状态分别是 `built`、`running`、`stop_requested`、`finished`，由
+`_run_started` / `_stop_requested` / `_finished` 三个标志表示（不额外维护
+「当前是否在跑」，它恒等于 `_run_started and not _finished`）。
+
 * `run()` 由 service 提供，`finally` 清除 running，正常返回与异常退出都不会留下
   假 running；异常同时写入 `last_error` 后重新抛出，由 `StreamWorker` 带到 GUI
   线程。`StreamWorker` 是纯 Qt 线程外壳（`self.market_data.run()`），不再直接
   `self.service.run()`。
+* **`stop()` 不等于 stream 已结束**。`stop()` 只是请求 adapter 收摊，`run()` 可能
+  仍在其内部执行——IBKR socket 循环退出要数秒，阻塞中的网络读则可能更久。因此
+  `stop_requested=True` 而 `run()` 尚未返回时，`build_stream()` 与
+  `update_config()` 都必须继续拒绝；否则会在旧流仍在跑的情况下建起第二条流、或
+  换掉它正在使用的连接配置。放行条件只有两个：`run()` 已返回，或 stream 被 build
+  但从未 run 且已被 stop（aborted-before-run，否则该 stream 永远无法结束，service
+  会被永久卡死）。
 * `stop()` 与 `snapshot()` 都由 `StreamWorker` 真实调用（`request_stop()` 走
   service），不是假接口。
-* 已有未停止的 stream 时再次 `build_stream()` 抛
-  `MarketDataStreamActive`，**不自动 stop、不偷偷替换**：覆盖 `self._stream` 会让
-  旧流脱离生命周期管理，旧流继续跑而 service 报告新流。旧流 stop/finished 之后
-  才能被替换。
+* 已有未结束的 stream 时再次 `build_stream()` 抛 `MarketDataStreamActive`，
+  **不自动 stop、不偷偷替换**：覆盖 `self._stream` 会让旧流脱离生命周期管理，旧流
+  继续跑而 service 报告新流。旧流 finished（或 aborted-before-run）之后才能被替换。
 * `update_config()` 只在没有活动 stream 时接受，且只影响**未来**的
   `build_stream()`：不做网络操作、不自动 reconnect、不创建 stream。活动 stream
   期间拒绝（fail closed），因为已建立的连接就是按构造时那份配置连的，改了会让
   service 描述的连接与实际打开的连接不一致。
 
-`MainWindow._apply_preferences_to_config()` 在更新 `self.config` 之前先问
-service，顺序保证两者不会互相矛盾；设置保存也先应用再落盘，否则会出现「提示已
-保存、下一次连接仍用旧值」。初始化顺序用 `getattr(self, "market_data_service",
-None)` 兜底，且配置未变化时视为 no-op 而非误报拒绝。
+### 7.4.1 配置检查与配置应用分开
+
+`ensure_config_update_allowed(config)` 只检查、不改状态、不做 I/O：配置相同直接放
+行，否则在没有活动 stream 时才放行，`update_config()` 是它的薄封装。存在的理由是
+设置保存必须在写盘**之前**知道这次变更会不会被接受，同时**不能**在写盘之前就把
+runtime 改掉——否则写盘失败会出现「提示未保存、runtime 却已用新 client id」。
+
+`MainWindow._save_user_preferences()` 的顺序因此是：
+
+```text
+构造并 validated preferences
+  → 生成新的 IBKRConnectionConfig
+  → service.ensure_config_update_allowed(new_config)   # 只检查，失败即弹窗返回
+  → preferences_store.save(preferences)                 # 提交点：失败则什么都没变
+  → _apply_preferences_to_config(saved)                 # 落盘成功后才动 runtime
+  → 更新 self.preferences / 主题 / UI
+```
+
+`_apply_preferences_to_config()` 在更新 `self.config` 之前先问 service，顺序保证
+两者不会互相矛盾。初始化顺序用 `getattr(self, "market_data_service", None)`
+兜底。这一段全部在同步 GUI 调用里，因此刻意不引入锁或事务框架。
 
 ### 7.5 与 supervisor 的关系
 

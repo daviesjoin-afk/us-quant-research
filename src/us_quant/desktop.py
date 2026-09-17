@@ -9434,13 +9434,22 @@ class MainWindow(QMainWindow):
                     self.settings_extended_hours_paper.isChecked()
                 ),
             ).validated()
-            # Applied *before* persisting, and deliberately so.  While a
+            ibkr = self._ibkr_config_from_preferences(preferences)
+            # Checked *before* persisting, and deliberately so.  While a
             # stream is live the service refuses to change its connection
             # config, and saving first would leave the settings file and
             # the live service disagreeing about the port and client id --
             # the operator would be told the change was saved while the
             # next stream still used the old values.
-            self._apply_preferences_to_config(preferences)
+            #
+            # ``ensure_config_update_allowed`` only *checks*: it changes no
+            # state and performs no I/O.  That is what keeps the two failure
+            # modes apart -- a refused change leaves nothing behind, and a
+            # failed write below cannot leave the runtime already moved to
+            # values the operator was just told were not saved.
+            service = getattr(self, "market_data_service", None)
+            if service is not None:
+                service.ensure_config_update_allowed(ibkr)
             saved = self.preferences_store.save(preferences)
         except UserSettingsError as error:
             QMessageBox.warning(self, "设置未保存", str(error))
@@ -9448,6 +9457,10 @@ class MainWindow(QMainWindow):
         except MarketDataStreamActive as error:
             QMessageBox.warning(self, "设置未保存", str(error))
             return
+        # Only once the file is on disk does the runtime move.  Applying
+        # after a successful save is what makes the three views -- the
+        # persisted settings, ``self.config`` and the service -- agree.
+        self._apply_preferences_to_config(saved)
         self.preferences = saved
         self._apply_theme(saved.theme)
         index = self.stream_mode.findData(saved.market_provider)
@@ -9467,10 +9480,18 @@ class MainWindow(QMainWindow):
         self._refresh_auto_quant_preflight()
         self._refresh_extended_hours_status()
 
-    def _apply_preferences_to_config(
+    def _ibkr_config_from_preferences(
         self, preferences: UserPreferences
-    ) -> None:
-        ibkr = IBKRConnectionConfig(
+    ) -> IBKRConnectionConfig:
+        """The IBKR connection config ``preferences`` describe.
+
+        Split out of :meth:`_apply_preferences_to_config` so the settings
+        save path can build the config it is *about to* apply and ask the
+        service whether that change would be accepted -- before it writes
+        the file.  Read-only: it touches no state.
+        """
+
+        return IBKRConnectionConfig(
             host=preferences.ibkr_host,
             port=preferences.ibkr_port,
             client_id=preferences.ibkr_client_id,
@@ -9480,6 +9501,11 @@ class MainWindow(QMainWindow):
                 preferences.connection_timeout_seconds
             ),
         )
+
+    def _apply_preferences_to_config(
+        self, preferences: UserPreferences
+    ) -> None:
+        ibkr = self._ibkr_config_from_preferences(preferences)
         # The service holds its own copy of the IBKR config and builds
         # every future stream from it, so saving settings has to reach it
         # too -- otherwise the next stream silently reconnects with the

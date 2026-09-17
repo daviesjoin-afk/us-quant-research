@@ -37,6 +37,7 @@ from us_quant.market_data_service import (
     MarketDataService,
 )
 from us_quant.paths import STATE_ROOT_ENV
+from us_quant.user_settings import UserSettingsError
 
 
 _APP = QApplication.instance() or QApplication([])
@@ -403,6 +404,90 @@ def test_saving_identical_settings_while_streaming_is_not_a_refusal(
         assert (tmp_path / "settings" / "preferences.json").exists()
     finally:
         window._stop_stream()
+        window.deleteLater()
+
+
+def test_a_failed_settings_write_leaves_the_runtime_untouched(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """The write is the commit point: if it fails, nothing may have moved.
+
+    Applying the config before persisting would leave the operator told
+    "not saved" while the runtime had already adopted the new client id --
+    the next stream would then connect with values the settings file does
+    not contain.  ``ensure_config_update_allowed`` exists so the *check*
+    can happen before the write without the *change* happening with it.
+    """
+
+    _install(monkeypatch, "IBKRReadOnlyStream")
+    warnings = _capture_warnings(monkeypatch)
+    window = _window_with_tmp_state(monkeypatch, tmp_path)
+    try:
+        # Establish a known on-disk baseline first.
+        window._save_user_preferences()
+        assert warnings == []
+        saved_file = tmp_path / "settings" / "preferences.json"
+        assert saved_file.exists()
+        on_disk = saved_file.read_text(encoding="utf-8")
+
+        config_before = window.config.ibkr
+        service_before = window.market_data_service.config
+        preferences_before = window.preferences
+        new_client_id = _next_client_id(window)
+        assert new_client_id != config_before.client_id
+
+        def failing_save(preferences):
+            raise UserSettingsError("disk is full")
+
+        monkeypatch.setattr(
+            window.preferences_store, "save", failing_save
+        )
+        window.settings_ibkr_client_id.setValue(new_client_id)
+        window._save_user_preferences()
+
+        # The operator is told, and told the truth.
+        assert len(warnings) == 1
+        assert "设置未保存" in warnings[0][0][1]
+        # Nothing moved: not the window, not the service, not the file.
+        assert window.config.ibkr == config_before
+        assert window.market_data_service.config == service_before
+        assert window.preferences == preferences_before
+        assert saved_file.read_text(encoding="utf-8") == on_disk
+    finally:
+        window._stop_stream()
+        window.deleteLater()
+
+
+def test_a_failed_settings_write_does_not_need_a_live_stream(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """The check passes with no stream, so the failure is purely the write.
+
+    This separates the two failure modes: the previous test would also pass
+    if the refusal came from the live-stream guard rather than from the
+    write, so this one proves the write is what rejected it.
+    """
+
+    _install(monkeypatch, "IBKRReadOnlyStream")
+    warnings = _capture_warnings(monkeypatch)
+    window = _window_with_tmp_state(monkeypatch, tmp_path)
+    try:
+        assert window.stream_worker is None
+
+        def failing_save(preferences):
+            raise UserSettingsError("disk is full")
+
+        monkeypatch.setattr(
+            window.preferences_store, "save", failing_save
+        )
+        window.settings_ibkr_client_id.setValue(_next_client_id(window))
+        window._save_user_preferences()
+
+        assert len(warnings) == 1
+        assert not (tmp_path / "settings" / "preferences.json").exists()
+    finally:
         window.deleteLater()
 
 

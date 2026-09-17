@@ -166,9 +166,18 @@ class MarketDataService:
         self._stream: Any | None = None
         self._provider: str = ""
         self._symbols: tuple[str, ...] = ()
+        # Lifecycle is three separate flags rather than a state machine, but
+        # they are *not* interchangeable: ``stop()`` only asks the adapter to
+        # wind down and says nothing about whether ``run()`` has returned.
+        # Collapsing them into one "ended" flag is what let a second stream
+        # be built while the first was still executing.  The four states are
+        # ``built`` (neither flag), ``running`` (started, not finished),
+        # ``stop_requested`` (its own flag) and ``finished``.
         self._stop_requested = False
-        # Set once ``run`` returns, however it returns.  Without it a
-        # stream that ended on its own would keep reading as running.
+        #: Whether ``run()`` has been entered at least once for this stream.
+        self._run_started = False
+        #: Set once ``run`` returns, however it returns.  Without it a
+        #: stream that ended on its own would keep reading as running.
         self._finished = False
         self._last_error: str | None = None
 
@@ -188,11 +197,13 @@ class MarketDataService:
         later :meth:`snapshot` cannot claim a stream that does not exist.
 
         Raises ``RuntimeError`` if the service still holds a stream that
-        has neither been stopped nor finished.  Overwriting it would take
-        that stream out of the service's lifecycle management -- it would
-        keep running while the service reported the new one -- so the
-        order is enforced instead of guessed: ``build``, ``run``,
-        ``stop``/finished, then the next ``build``.  The old stream is
+        has neither finished nor been stopped before it ever ran.
+        Overwriting it would take that stream out of the service's
+        lifecycle management -- it would keep running while the service
+        reported the new one -- so the order is enforced instead of
+        guessed: ``build``, ``run``, ``stop``/finished, then the next
+        ``build``.  A ``stop`` request alone is not enough: until ``run``
+        has returned, the old stream is still executing.  The old stream is
         deliberately *not* stopped or silently replaced here; the caller
         owns that decision.
         """
@@ -228,6 +239,7 @@ class MarketDataService:
             getattr(stream, "symbols", request.symbols)
         )
         self._stop_requested = False
+        self._run_started = False
         self._finished = False
         self._last_error = None
         return stream
@@ -320,11 +332,29 @@ class MarketDataService:
     def _lifecycle_ended(self) -> bool:
         """Whether the built stream may be replaced.
 
-        True once the stream has been asked to stop *or* has returned on
-        its own.  Both mean the service no longer owns a live stream.
+        Only two states qualify:
+
+        * ``run()`` has returned -- normally or by raising -- so nothing is
+          executing any more; or
+        * the stream was built but never run, and has since been asked to
+          stop, so there is no execution left to protect.
+
+        ``stop()`` on its own is deliberately *not* enough.  It only asks
+        the adapter to wind down; ``run()`` can still be inside the adapter
+        for an unbounded time afterwards (an IBKR socket loop takes seconds
+        to unwind, and a blocked network read takes as long as it takes).
+        Treating "stop requested" as "finished" would let a second stream be
+        built -- and a new connection config be applied -- while the first
+        one is still running.
+
+        A separate "is running right now" flag is not kept: it would be
+        exactly ``self._run_started and not self._finished``, and two flags
+        that must always agree are one more way to get the lifecycle wrong.
         """
 
-        return self._stop_requested or self._finished
+        if self._finished:
+            return True
+        return self._stop_requested and not self._run_started
 
     def run(self) -> None:
         """Run the built stream to completion, then mark it finished.
@@ -333,6 +363,11 @@ class MarketDataService:
         cannot outlive the call: ``finally`` clears it whether the stream
         returned normally or raised.  An exception is recorded and
         re-raised -- the caller decides what to tell the operator.
+
+        ``_run_started`` is what makes ``stop()`` safe to call from another
+        thread while this is executing: until the ``finally`` below has run,
+        the service refuses to build a replacement stream or accept a new
+        connection config.
         """
 
         stream = self._stream
@@ -341,7 +376,7 @@ class MarketDataService:
                 "no market data stream has been built: call build_stream "
                 "before run"
             )
-        self._finished = False
+        self._run_started = True
         try:
             stream.run()
         except Exception as error:
@@ -349,6 +384,30 @@ class MarketDataService:
             raise
         finally:
             self._finished = True
+
+    def ensure_config_update_allowed(
+        self, config: IBKRConnectionConfig
+    ) -> None:
+        """Raise if ``config`` could not be applied right now.
+
+        Split out of :meth:`update_config` so a caller can *check* before it
+        commits to anything irreversible.  Saving settings has to know the
+        change will be accepted before it writes the file: applying first
+        and failing the write leaves the runtime on values the operator was
+        told were not saved.
+
+        Checks only -- it changes no state and performs no I/O.  An
+        identical config is always allowed, because re-saving unchanged
+        settings must not be blocked by an unrelated live stream.
+        """
+
+        if config == self.config:
+            return
+        if self._stream is not None and not self._lifecycle_ended:
+            raise MarketDataStreamActive(
+                "cannot change the IBKR connection config while a market "
+                "data stream is active: stop it first"
+            )
 
     def update_config(self, config: IBKRConnectionConfig) -> None:
         """Replace the IBKR connection config used by future builds.
@@ -362,11 +421,7 @@ class MarketDataService:
         stream creation.  Only the *next* :meth:`build_stream` sees it.
         """
 
-        if self._stream is not None and not self._lifecycle_ended:
-            raise MarketDataStreamActive(
-                "cannot change the IBKR connection config while a market "
-                "data stream is active: stop it first"
-            )
+        self.ensure_config_update_allowed(config)
         self.config = config
 
     def stop(self) -> None:

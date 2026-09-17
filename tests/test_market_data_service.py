@@ -18,6 +18,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import inspect
+import threading
 from pathlib import Path
 
 import pytest
@@ -556,13 +557,178 @@ def test_run_records_an_exception_and_still_clears_running(
     assert snapshot.last_error == "RuntimeError: boom"
 
 
-# -- lifecycle: updating the IBKR config --------------------------------
+# -- lifecycle: a stop request is not a finished stream ------------------
 
 
-def test_update_config_is_refused_while_a_stream_is_live(
+def _run_in_a_thread(service: MarketDataService) -> tuple:
+    """Start ``service.run()`` in its own thread and return its handles.
+
+    Returns ``(thread, entered, release)``: the caller waits on ``entered``
+    so the test only proceeds once ``run`` is genuinely inside the adapter,
+    then sets ``release`` to let it return.  Waiting on an ``Event`` rather
+    than sleeping is what makes this deterministic instead of timing-based.
+    """
+
+    entered = threading.Event()
+    release = threading.Event()
+    outcome: list[BaseException | None] = []
+
+    original_run = service._stream.run
+
+    def blocking_run() -> None:
+        entered.set()
+        release.wait(5)
+        return original_run()
+
+    service._stream.run = blocking_run
+
+    def target() -> None:
+        try:
+            service.run()
+        except BaseException as error:  # noqa: BLE001 - reported to the test
+            outcome.append(error)
+        else:
+            outcome.append(None)
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    assert entered.wait(5), "run() never reached the adapter"
+    return thread, release, outcome
+
+
+def test_a_stop_request_does_not_release_the_live_stream(
     monkeypatch,
 ) -> None:
-    """The open connection is the one the stream was built with."""
+    """The regression: ``stop()`` asked for a wind-down, not a completion.
+
+    ``run()`` is still executing inside the adapter -- an IBKR socket loop
+    takes real time to unwind.  Treating the stop request as "finished"
+    would let a second stream be built, and a new connection config be
+    applied, while the first one is still running.
+    """
+
+    created = _install(monkeypatch, "IBKRReadOnlyStream")
+    service = _service()
+    service.build_stream(
+        MarketDataRequest(provider=PROVIDER_IBKR, symbols=("A",))
+    )
+    thread, release, outcome = _run_in_a_thread(service)
+    try:
+        service.stop()
+        assert created[0].stopped is True
+
+        # Still executing: nothing may be replaced or reconfigured yet.
+        with pytest.raises(module.MarketDataStreamActive):
+            service.build_stream(
+                MarketDataRequest(provider=PROVIDER_IBKR, symbols=("B",))
+            )
+        with pytest.raises(module.MarketDataStreamActive):
+            service.update_config(replace_config(client_id=99))
+        with pytest.raises(module.MarketDataStreamActive):
+            service.ensure_config_update_allowed(
+                replace_config(client_id=99)
+            )
+
+        assert len(created) == 1
+        assert service.snapshot().running is True
+    finally:
+        release.set()
+        thread.join(5)
+
+    assert not thread.is_alive()
+    assert outcome == [None]
+
+    # Only now that run() has returned is the slot free.  The config
+    # change goes first because building B would make B live again, and a
+    # live stream is exactly what the guard protects.
+    service.update_config(replace_config(client_id=99))
+    service.build_stream(
+        MarketDataRequest(provider=PROVIDER_IBKR, symbols=("B",))
+    )
+
+    assert len(created) == 2
+    assert service.snapshot().symbols == ("B",)
+    assert service.config.client_id == 99
+    # The replacement really did see the updated config.
+    assert created[1].args[0].client_id == 99
+
+
+def test_a_stop_request_before_run_does_release_the_stream(
+    monkeypatch,
+) -> None:
+    """Built but never run, then stopped: there is no execution to protect.
+
+    This is the aborted-before-run case.  Refusing here would wedge the
+    service permanently, because a stream that never ran can never finish.
+    """
+
+    created = _install(monkeypatch, "IBKRReadOnlyStream")
+    service = _service()
+    service.build_stream(
+        MarketDataRequest(provider=PROVIDER_IBKR, symbols=("A",))
+    )
+
+    service.stop()
+
+    # The stream really was asked to wind down before being dropped.
+    assert created[0].stopped is True
+    service.update_config(replace_config(client_id=99))
+    service.build_stream(
+        MarketDataRequest(provider=PROVIDER_IBKR, symbols=("B",))
+    )
+
+    assert len(created) == 2
+    assert service.config.client_id == 99
+    assert created[1].args[0].client_id == 99
+
+
+def test_a_failed_run_still_releases_the_stream(monkeypatch) -> None:
+    """``run`` raising must free the slot: the exception is reported, but
+    the service must not stay wedged behind a stream that no longer runs.
+    """
+
+    created = _install(monkeypatch, "IBKRReadOnlyStream")
+    service = _service()
+    service.build_stream(
+        MarketDataRequest(provider=PROVIDER_IBKR, symbols=("A",))
+    )
+
+    def explode() -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(created[0], "run", explode)
+
+    with pytest.raises(RuntimeError):
+        service.run()
+
+    service.build_stream(
+        MarketDataRequest(provider=PROVIDER_IBKR, symbols=("B",))
+    )
+
+    assert len(created) == 2
+
+
+def test_ensure_config_update_allowed_changes_nothing(monkeypatch) -> None:
+    """It is a check, not an application: state must be untouched.
+
+    The settings save path calls it *before* writing the file, so an
+    accepted check that had already mutated the config would defeat the
+    ordering it exists to establish.
+    """
+
+    _install(monkeypatch, "IBKRReadOnlyStream")
+    service = _service()
+    before = service.config
+
+    service.ensure_config_update_allowed(replace_config(client_id=99))
+
+    assert service.config == before
+
+
+def test_ensure_config_update_allowed_allows_an_unchanged_config(
+    monkeypatch,
+) -> None:
+    """Re-saving identical settings must not be blocked by a live stream."""
 
     _install(monkeypatch, "IBKRReadOnlyStream")
     service = _service()
@@ -570,11 +736,31 @@ def test_update_config_is_refused_while_a_stream_is_live(
         MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",))
     )
 
+    service.ensure_config_update_allowed(_config())  # must not raise
+
+
+def test_update_config_is_refused_while_a_stream_is_live(
+    monkeypatch,
+) -> None:
+    """The open connection is the one the stream was built with.
+
+    The refusal is about a *change*: an identical config is a no-op, so
+    re-saving unchanged settings is not blocked (see
+    ``ensure_config_update_allowed``).
+    """
+
+    _install(monkeypatch, "IBKRReadOnlyStream")
+    service = _service()
+    service.build_stream(
+        MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",))
+    )
+    before = service.config
+
     with pytest.raises(module.MarketDataStreamActive):
-        service.update_config(_config())
+        service.update_config(replace_config(client_id=99))
 
     # Refused means unchanged, not half-applied.
-    assert service.config == _config()
+    assert service.config == before
 
 
 def test_update_config_is_allowed_once_the_stream_is_stopped(

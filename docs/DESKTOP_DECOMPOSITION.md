@@ -1,10 +1,11 @@
-# Desktop 运行时职责分解（第一步：RuntimeSupervisor）
+# Desktop 运行时职责分解（第一步：RuntimeSupervisor；第二步：MarketDataService）
 
 审计对象：`src/us_quant/desktop.py`（审计前 9,624 行 / 371,474 字节）。
 
-本次只做第一步：把**通用 runtime 生命周期**从 `MainWindow` 里抽出来交给
-`src/us_quant/runtime_supervisor.py`。策略、IBKR Paper 下单核心、MarketDataService、
-工作流状态机一律不动。下面每一行都对应当前代码里的真实位置。
+第一步：把**通用 runtime 生命周期**从 `MainWindow` 里抽出来交给
+`src/us_quant/runtime_supervisor.py`。第二步：把**行情 provider 的选择与构造**
+抽出来交给 `src/us_quant/market_data_service.py`（见 §7）。策略、IBKR Paper 下单
+核心、reconciliation、工作流状态机一律不动。下面每一行都对应当前代码里的真实位置。
 
 ## 1. 责任矩阵
 
@@ -13,7 +14,7 @@
 | `paper_order_timer`（1s 心跳，`_build_ui` 内 `start()`） | `MainWindow` | `RuntimeSupervisor`（`paper_order_heartbeat`, order=10） | **高**：审计前全文件无 `.stop()`，只在 `QTimer(self)` 上依赖父对象销毁 | `tests/test_runtime_supervisor.py` |
 | `extended_session_timer`（15s 心跳，`_build_ui` 内 `start()`） | `MainWindow` | `RuntimeSupervisor`（`extended_session_heartbeat`, order=20） | **高**：同上，且回调 `_maybe_rotate_extended_ibkr_session` 会发起行情源切换 | `tests/test_runtime_supervisor.py` |
 | `stream_timer`（500ms 轮询，`_start_stream` 内 `start()`） | `MainWindow` | `RuntimeSupervisor`（`stream_snapshot_timer`, order=30） | 中：有 `.stop()`，但分散在 3 处（`_stop_stream`、`_stream_finished`、停止失败分支） | `tests/test_runtime_supervisor.py` |
-| `StreamWorker`（QThread，行情网络线程） | `MainWindow`（`self.stream_worker`） | `RuntimeSupervisor` 只负责**释放**，创建/重连仍在 `MainWindow` | 中：`_stop_stream` 内含交易安全门（Paper 有持仓时拒绝停止） | `tests/test_runtime_supervisor.py`、`tests/test_ibkr_stream.py`、`tests/test_alpaca_stream.py` |
+| `StreamWorker`（QThread，行情网络线程） | `MainWindow`（`self.stream_worker`） | `RuntimeSupervisor` 只负责**释放**，创建/重连仍在 `MainWindow`；**provider 构造**已移出，见 §7 | 中：`_stop_stream` 内含交易安全门（Paper 有持仓时拒绝停止） | `tests/test_runtime_supervisor.py`、`tests/test_desktop_market_data_wiring.py`、`tests/test_ibkr_stream.py`、`tests/test_alpaca_stream.py` |
 | `TaskThread` 集合（`self.workers`） | `DesktopTaskController` | `RuntimeSupervisor` 只负责 stop/join；准入仍在 `DesktopTaskController` | 中：`TaskThread` 无通用取消钩子，每个 task 自带 `Event` | `tests/test_desktop_tasks.py` |
 | `universe_refresh_cancel_event`（`Event`） | `MainWindow` | `MainWindow`（唯一可取消的长网络任务） | 低：已有 `_cancel_universe_refresh` 与 `_reset_universe_refresh_controls` 成对管理 | `tests/test_desktop_tasks.py` |
 | 关闭准入闸门 `_closing` | 无（本次新增） | `RuntimeSupervisor`（`closing_gate`, order=5） | 低：`_start_task` 新任务入口 | `tests/test_runtime_supervisor.py` |
@@ -192,3 +193,105 @@ HALTED` 在关闭那一刻的相位上是**看不出来的**（当时还是 RUNN
 **范围界定。** `RUNNING`/`PAUSED` 被 `_paper_needs_manual_recovery()` 明确排除：
 关闭这两个相位仍有自动出路（`request_stop` → `STOPPING` → 零状态证明），所以
 证明运行期间闸门应当保持关闭。只有那三个「没有自动出口」的相位才触发撤销。
+
+## 7. 第二步：`MarketDataService`（provider 边界）
+
+### 7.1 被移出的知识
+
+`StreamWorker.__init__` 原来按 `provider` 分支构造三种 adapter，于是 UI 层知道：
+每种 provider 的构造签名、凭据参数名、stale 超时、IBKR 的 extended-hours venue、
+coverage 文案、provider label。这些都不是展示决策，现已全部移入
+`src/us_quant/market_data_service.py`（零 PySide6/QThread/QWidget/MainWindow 依赖）。
+
+分工：
+
+```text
+StreamWorker        = Qt 线程适配器（只负责线程 + 信号）
+MarketDataService   = provider 选择 / 构造 / 生命周期（应用服务）
+ibkr|alpaca|finnhub = adapter（WebSocket 实现一行未改）
+```
+
+`MainWindow` 只负责读 combobox、symbol 输入与凭据存储，然后构造
+`MarketDataRequest`；它不再 import 或实例化任何 provider 类。仍需要
+`StreamSnapshot` / `MARKET_DATA_TYPE_NAMES`（UI 展示用）的 import 保留不动。
+
+### 7.2 fail closed
+
+provider 采用显式白名单 `ibkr` / `ibkr_extended` / `alpaca_iex` / `finnhub_trades`；
+其他值一律 `raise ValueError`，**没有 catch-all 分支**。原来的 `else:
+IBKRReadOnlyStream(...)` 会把 typo 静默解释成券商连接。构造失败时不保存任何
+半初始化 stream，`snapshot()` 也不会报告 `running`。
+
+### 7.3 行为逐字保持，不「顺便优化」
+
+Alpaca `stale_after_seconds=8` + listener、Finnhub `20` + listener、IBKR
+`requested_market_data_type=1` / `stale=8` / `market_exchange`、
+extended 的 `provider_label="IBKR 5×24"` 与 coverage 文案，全部与原值逐字一致，
+并由 `tests/test_market_data_service.py` 的突变测试锁定。
+
+**IBKR 刻意不给 listener**：它一直是靠 desktop 的 snapshot timer 轮询的，加
+listener 会让每笔行情发布两次。
+
+### 7.4 `MarketDataServiceSnapshot` 只描述生命周期
+
+`provider` / `symbols` / `running` / `last_error`。quote 真值仍由
+`StreamSnapshot` 独占，service snapshot 不复制任何报价字段。
+
+生命周期只有一条路径，且状态不可造假：
+
+```text
+build_stream  →  run  →  stop / 自然结束
+```
+
+四个状态分别是 `built`、`running`、`stop_requested`、`finished`，由
+`_run_started` / `_stop_requested` / `_finished` 三个标志表示（不额外维护
+「当前是否在跑」，它恒等于 `_run_started and not _finished`）。
+
+* `run()` 由 service 提供，`finally` 清除 running，正常返回与异常退出都不会留下
+  假 running；异常同时写入 `last_error` 后重新抛出，由 `StreamWorker` 带到 GUI
+  线程。`StreamWorker` 是纯 Qt 线程外壳（`self.market_data.run()`），不再直接
+  `self.service.run()`。
+* **`stop()` 不等于 stream 已结束**。`stop()` 只是请求 adapter 收摊，`run()` 可能
+  仍在其内部执行——IBKR socket 循环退出要数秒，阻塞中的网络读则可能更久。因此
+  `stop_requested=True` 而 `run()` 尚未返回时，`build_stream()` 与
+  `update_config()` 都必须继续拒绝；否则会在旧流仍在跑的情况下建起第二条流、或
+  换掉它正在使用的连接配置。放行条件只有两个：`run()` 已返回，或 stream 被 build
+  但从未 run 且已被 stop（aborted-before-run，否则该 stream 永远无法结束，service
+  会被永久卡死）。
+* `stop()` 与 `snapshot()` 都由 `StreamWorker` 真实调用（`request_stop()` 走
+  service），不是假接口。
+* 已有未结束的 stream 时再次 `build_stream()` 抛 `MarketDataStreamActive`，
+  **不自动 stop、不偷偷替换**：覆盖 `self._stream` 会让旧流脱离生命周期管理，旧流
+  继续跑而 service 报告新流。旧流 finished（或 aborted-before-run）之后才能被替换。
+* `update_config()` 只在没有活动 stream 时接受，且只影响**未来**的
+  `build_stream()`：不做网络操作、不自动 reconnect、不创建 stream。活动 stream
+  期间拒绝（fail closed），因为已建立的连接就是按构造时那份配置连的，改了会让
+  service 描述的连接与实际打开的连接不一致。
+
+### 7.4.1 配置检查与配置应用分开
+
+`ensure_config_update_allowed(config)` 只检查、不改状态、不做 I/O：配置相同直接放
+行，否则在没有活动 stream 时才放行，`update_config()` 是它的薄封装。存在的理由是
+设置保存必须在写盘**之前**知道这次变更会不会被接受，同时**不能**在写盘之前就把
+runtime 改掉——否则写盘失败会出现「提示未保存、runtime 却已用新 client id」。
+
+`MainWindow._save_user_preferences()` 的顺序因此是：
+
+```text
+构造并 validated preferences
+  → 生成新的 IBKRConnectionConfig
+  → service.ensure_config_update_allowed(new_config)   # 只检查，失败即弹窗返回
+  → preferences_store.save(preferences)                 # 提交点：失败则什么都没变
+  → _apply_preferences_to_config(saved)                 # 落盘成功后才动 runtime
+  → 更新 self.preferences / 主题 / UI
+```
+
+`_apply_preferences_to_config()` 在更新 `self.config` 之前先问 service，顺序保证
+两者不会互相矛盾。初始化顺序用 `getattr(self, "market_data_service", None)`
+兜底。这一段全部在同步 GUI 调用里，因此刻意不引入锁或事务框架。
+
+### 7.5 与 supervisor 的关系
+
+行情停止仍走既有的 `runtime_supervisor`（`market_data_stream`, order=100），
+没有第二套 shutdown 管理。第二步只改变「谁来构造 adapter」，关闭顺序、Paper
+安全顺序、`begin_shutdown`/`cancel_shutdown` 一律未动。

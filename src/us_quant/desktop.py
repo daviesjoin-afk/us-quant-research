@@ -116,21 +116,18 @@ from us_quant.ibkr_readonly import (
     intraday_market_data_reasons,
 )
 from us_quant.ibkr_stream import (
-    IBKRReadOnlyStream,
     MARKET_DATA_TYPE_NAMES,
     StreamSnapshot,
 )
-from us_quant.alpaca_stream import (
+from us_quant.market_data_service import (
     AlpacaCredentialsMissing,
-    AlpacaIEXStream,
-)
-from us_quant.finnhub_stream import (
     FinnhubCredentialsMissing,
-    FinnhubTradeStream,
+    MarketDataRequest,
+    MarketDataService,
+    MarketDataStreamActive,
 )
 from us_quant.extended_hours import (
     USEquitySession,
-    ibkr_market_data_exchange,
     paper_order_routing,
     us_equity_session,
 )
@@ -530,68 +527,54 @@ class TaskThread(QThread):
 
 
 class StreamWorker(QThread):
+    """Qt thread adapter over a stream built by ``MarketDataService``.
+
+    This class owns *threading only*: it runs the stream, carries its
+    snapshots across the thread boundary and forwards the stop request.
+    Which provider to construct, with which credentials, timeouts, venue
+    and labels is decided by :class:`MarketDataService`; the worker never
+    inspects ``provider`` to build anything.
+
+    The worker asks the service for the stream (rather than being handed
+    one) so that the push listener is ``snapshot_ready.emit``: a signal
+    emitted from this thread is delivered *queued* to the GUI thread, and
+    a listener that called the desktop directly would touch widgets from
+    the stream thread.
+    """
+
     snapshot_ready = Signal(object)
     failed = Signal(str)
 
     def __init__(
         self,
-        config,
-        *,
-        symbols: tuple[str, ...],
-        provider: str = "ibkr",
-        api_key: str = "",
-        api_secret: str = "",
-        finnhub_key: str = "",
-        market_exchange: str = "SMART",
+        market_data: MarketDataService,
+        request: MarketDataRequest,
     ) -> None:
         super().__init__()
-        self.provider = provider
-        self.symbols = symbols
-        self.market_exchange = market_exchange
-        if provider == "alpaca_iex":
-            self.service = AlpacaIEXStream(
-                symbols=symbols,
-                api_key=api_key,
-                api_secret=api_secret,
-                stale_after_seconds=8,
-                listener=self.snapshot_ready.emit,
-            )
-        elif provider == "finnhub_trades":
-            self.service = FinnhubTradeStream(
-                symbols=symbols,
-                api_key=finnhub_key,
-                stale_after_seconds=20,
-                listener=self.snapshot_ready.emit,
-            )
-        else:
-            is_extended = provider == "ibkr_extended"
-            self.service = IBKRReadOnlyStream(
-                config,
-                symbols=symbols,
-                requested_market_data_type=1,
-                stale_after_seconds=8,
-                market_exchange=market_exchange,
-                provider_label=(
-                    "IBKR 5×24" if is_extended else "IBKR"
-                ),
-                coverage=(
-                    "IBKR 5×24：盘前/盘后 SMART；隔夜直接 OVERNIGHT；"
-                    "实际权限与标的资格以券商回调为准"
-                    if is_extended
-                    else "由 IBKR 订阅权限决定"
-                ),
-            )
+        self.provider = request.provider
+        # The service that built this stream, so the worker can hand the
+        # stop request and any runtime failure back through it instead of
+        # reaching for the adapter directly.
+        self.market_data = market_data
+        self.service = market_data.build_stream(
+            request, listener=self.snapshot_ready.emit
+        )
+        # Mirrors the venue the stream was built for; the desktop compares
+        # it against the service's current session venue to decide whether
+        # an extended-hours stream has to be rotated.
+        self.market_exchange = market_data.market_exchange_for(request)
 
     def run(self) -> None:
+        # ``market_data.run()`` owns the lifecycle half -- it marks the
+        # stream finished and records the failure itself, so this only
+        # has to carry the message to the GUI thread.
         try:
-            self.service.run()
+            self.market_data.run()
         except Exception as error:
-            self.failed.emit(
-                f"{type(error).__name__}: {error}"
-            )
+            self.failed.emit(f"{type(error).__name__}: {error}")
 
     def request_stop(self) -> None:
-        self.service.stop()
+        self.market_data.stop()
 
 
 class MetricCard(QFrame):
@@ -1009,6 +992,11 @@ class MainWindow(QMainWindow):
         # task that is still being admitted.
         self._closing = False
         self.runtime_supervisor = RuntimeSupervisor()
+        # Provider selection, credentials, timeouts and the IBKR venue all
+        # belong to the service, not to the UI: the desktop supplies a
+        # request and gets a ready stream back (see
+        # ``docs/DESKTOP_DECOMPOSITION.md``).
+        self.market_data_service = MarketDataService(self.config.ibkr)
 
         self.setWindowTitle(APP_TITLE)
         self.resize(1440, 900)
@@ -7701,7 +7689,9 @@ class MainWindow(QMainWindow):
             or self._pending_stream_switch is not None
         ):
             return
-        desired_exchange = ibkr_market_data_exchange()
+        desired_exchange = self.market_data_service.desired_market_exchange(
+            worker.provider
+        )
         if desired_exchange == worker.market_exchange:
             return
         self._log(
@@ -7754,11 +7744,6 @@ class MainWindow(QMainWindow):
             )
             return
         provider = str(self.stream_mode.currentData() or "ibkr")
-        market_exchange = (
-            ibkr_market_data_exchange()
-            if provider == "ibkr_extended"
-            else "SMART"
-        )
         try:
             finnhub_key = self._load_stream_credential(
                 "finnhub_api_key", "FINNHUB_API_KEY"
@@ -7769,20 +7754,29 @@ class MainWindow(QMainWindow):
             alpaca_secret = self._load_stream_credential(
                 "alpaca_api_secret", "APCA_API_SECRET_KEY"
             )
-            worker = StreamWorker(
-                self.config.ibkr,
-                symbols=symbols,
+            # The UI knows *what the operator selected* (provider id,
+            # watchlist, credential store values).  Everything else --
+            # constructor, timeouts, venue, labels, coverage -- is the
+            # service's business.
+            request = MarketDataRequest(
                 provider=provider,
-                api_key=alpaca_key,
-                api_secret=alpaca_secret,
-                finnhub_key=finnhub_key,
-                market_exchange=market_exchange,
+                symbols=symbols,
+                alpaca_api_key=alpaca_key,
+                alpaca_api_secret=alpaca_secret,
+                finnhub_api_key=finnhub_key,
             )
+            worker = StreamWorker(self.market_data_service, request)
+            market_exchange = worker.market_exchange
         except (
             AlpacaCredentialsMissing,
             FinnhubCredentialsMissing,
+            MarketDataStreamActive,
             ValueError,
         ) as error:
+            # ``MarketDataStreamActive`` is a ``RuntimeError``, so it has to
+            # be named here: the service refuses to build while it still
+            # holds a live stream, and an uncaught exception escaping a Qt
+            # slot would abort the process instead of telling the operator.
             self._task_failed(str(error))
             return
         self.stream_worker = worker
@@ -9439,13 +9433,35 @@ class MainWindow(QMainWindow):
                 extended_hours_paper_enabled=(
                     self.settings_extended_hours_paper.isChecked()
                 ),
-            )
+            ).validated()
+            ibkr = self._ibkr_config_from_preferences(preferences)
+            # Checked *before* persisting, and deliberately so.  While a
+            # stream is live the service refuses to change its connection
+            # config, and saving first would leave the settings file and
+            # the live service disagreeing about the port and client id --
+            # the operator would be told the change was saved while the
+            # next stream still used the old values.
+            #
+            # ``ensure_config_update_allowed`` only *checks*: it changes no
+            # state and performs no I/O.  That is what keeps the two failure
+            # modes apart -- a refused change leaves nothing behind, and a
+            # failed write below cannot leave the runtime already moved to
+            # values the operator was just told were not saved.
+            service = getattr(self, "market_data_service", None)
+            if service is not None:
+                service.ensure_config_update_allowed(ibkr)
             saved = self.preferences_store.save(preferences)
         except UserSettingsError as error:
             QMessageBox.warning(self, "设置未保存", str(error))
             return
-        self.preferences = saved
+        except MarketDataStreamActive as error:
+            QMessageBox.warning(self, "设置未保存", str(error))
+            return
+        # Only once the file is on disk does the runtime move.  Applying
+        # after a successful save is what makes the three views -- the
+        # persisted settings, ``self.config`` and the service -- agree.
         self._apply_preferences_to_config(saved)
+        self.preferences = saved
         self._apply_theme(saved.theme)
         index = self.stream_mode.findData(saved.market_provider)
         if index >= 0:
@@ -9464,22 +9480,47 @@ class MainWindow(QMainWindow):
         self._refresh_auto_quant_preflight()
         self._refresh_extended_hours_status()
 
+    def _ibkr_config_from_preferences(
+        self, preferences: UserPreferences
+    ) -> IBKRConnectionConfig:
+        """The IBKR connection config ``preferences`` describe.
+
+        Split out of :meth:`_apply_preferences_to_config` so the settings
+        save path can build the config it is *about to* apply and ask the
+        service whether that change would be accepted -- before it writes
+        the file.  Read-only: it touches no state.
+        """
+
+        return IBKRConnectionConfig(
+            host=preferences.ibkr_host,
+            port=preferences.ibkr_port,
+            client_id=preferences.ibkr_client_id,
+            api_read_only=True,
+            paper_order_submission_enabled=False,
+            connection_timeout_seconds=(
+                preferences.connection_timeout_seconds
+            ),
+        )
+
     def _apply_preferences_to_config(
         self, preferences: UserPreferences
     ) -> None:
-        self.config = replace(
-            self.config,
-            ibkr=IBKRConnectionConfig(
-                host=preferences.ibkr_host,
-                port=preferences.ibkr_port,
-                client_id=preferences.ibkr_client_id,
-                api_read_only=True,
-                paper_order_submission_enabled=False,
-                connection_timeout_seconds=(
-                    preferences.connection_timeout_seconds
-                ),
-            ),
-        )
+        ibkr = self._ibkr_config_from_preferences(preferences)
+        # The service holds its own copy of the IBKR config and builds
+        # every future stream from it, so saving settings has to reach it
+        # too -- otherwise the next stream silently reconnects with the
+        # values from start-up.
+        #
+        # Order matters: the service is asked first and ``self.config`` is
+        # only updated once it accepted, so the two cannot end up
+        # disagreeing.  While a stream is live the service refuses (the
+        # open connection is the one it was built with) and this raises;
+        # ``getattr`` keeps initialisation order safe, and an unchanged
+        # config is a no-op rather than a spurious refusal.
+        service = getattr(self, "market_data_service", None)
+        if service is not None and service.config != ibkr:
+            service.update_config(ibkr)
+        self.config = replace(self.config, ibkr=ibkr)
 
     def _save_api_credentials(self) -> None:
         provider = str(

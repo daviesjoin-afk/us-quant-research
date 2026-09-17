@@ -408,6 +408,194 @@ def test_legacy_schema_matches_what_the_journal_creates_today() -> None:
         assert _normalise(created[name]) == _normalise(sql), name
 
 
+def test_sessions_rolls_up_each_session_with_its_own_totals() -> None:
+    """The per-session rollup groups, counts, sums and orders correctly.
+
+    Two sessions with deliberately different shapes: ``s-2`` starts later and
+    carries two intents (one still working), ``s-1`` has one settled intent.
+    Reading the values back from the API rather than recomputing them here is
+    the point -- the query is the thing under test.
+    """
+
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "orders.sqlite3"
+        journal = PaperOrderJournal(path)
+
+        # s-1: one intent, one execution, settled.
+        journal.record_intent(
+            _intent(generated_at="2026-07-26T12:00:00+00:00"),
+            broker_order_id=10,
+            account_alias="DU***17",
+        )
+        journal.record_execution(_execution())
+        journal.record_update(
+            _update(
+                filled=Decimal("1"),
+                observed_at="2026-07-26T12:00:05+00:00",
+            )
+        )
+
+        # s-2: two intents, later start, only one of them filled.
+        journal.record_intent(
+            _intent(
+                intent_id="i-2",
+                session_id="s-2",
+                idempotency_key="k-2",
+                generated_at="2026-07-26T13:00:00+00:00",
+            ),
+            broker_order_id=11,
+            account_alias="DU***17",
+        )
+        journal.record_update(
+            _update(
+                intent_id="i-2",
+                broker_order_id=11,
+                status="Filled",
+                filled=Decimal("2"),
+                observed_at="2026-07-26T13:00:07+00:00",
+            )
+        )
+        journal.record_intent(
+            _intent(
+                intent_id="i-3",
+                session_id="s-2",
+                idempotency_key="k-3",
+                generated_at="2026-07-26T13:01:00+00:00",
+            ),
+            broker_order_id=12,
+            account_alias="DU***17",
+        )
+        journal.record_update(
+            _update(
+                intent_id="i-3",
+                broker_order_id=12,
+                status="Submitted",
+                filled=Decimal("0"),
+                observed_at="2026-07-26T13:01:03+00:00",
+            )
+        )
+
+        rows = journal.sessions()
+        assert [row["session_id"] for row in rows] == ["s-2", "s-1"]
+
+        later, earlier = rows
+        assert later["started_at"] == "2026-07-26T13:00:00+00:00"
+        assert later["last_activity_at"] == "2026-07-26T13:01:03+00:00"
+        assert later["intent_count"] == 2
+        assert later["filled_quantity"] == Decimal("2")
+        # Equality alone would not catch a float leaking through: Decimal("2")
+        # == 2.0 is True, so the type has to be asserted on its own.
+        assert isinstance(later["filled_quantity"], Decimal)
+        # MAX(status) over the newest update per intent: "Submitted" > "Filled".
+        assert later["latest_status"] == "Submitted"
+
+        assert earlier["started_at"] == "2026-07-26T12:00:00+00:00"
+        assert earlier["last_activity_at"] == "2026-07-26T12:00:05+00:00"
+        assert earlier["intent_count"] == 1
+        assert earlier["filled_quantity"] == Decimal("1")
+        assert isinstance(earlier["filled_quantity"], Decimal)
+        assert earlier["latest_status"] == "Filled"
+
+        # limit is applied after the ORDER BY, so the newest session survives.
+        limited = journal.sessions(limit=1)
+        assert [row["session_id"] for row in limited] == ["s-2"]
+
+
+def test_sessions_uses_the_intent_time_when_no_update_arrived() -> None:
+    """An intent with no broker update still reports, dated from its own time.
+
+    The LEFT JOIN plus COALESCE is what keeps a just-submitted order visible;
+    dropping either would silently hide the newest session.
+    """
+
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "orders.sqlite3"
+        journal = PaperOrderJournal(path)
+        journal.record_intent(
+            _intent(generated_at="2026-07-26T09:30:00+00:00"),
+            broker_order_id=10,
+            account_alias="DU***17",
+        )
+
+        rows = journal.sessions()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["session_id"] == "s-1"
+        assert row["started_at"] == "2026-07-26T09:30:00+00:00"
+        assert row["last_activity_at"] == "2026-07-26T09:30:00+00:00"
+        assert row["intent_count"] == 1
+        assert row["filled_quantity"] == Decimal("0")
+        assert row["latest_status"] == ""
+
+
+def test_sessions_rollup_returns_nothing_for_an_empty_journal() -> None:
+    with TemporaryDirectory() as directory:
+        journal = PaperOrderJournal(Path(directory) / "orders.sqlite3")
+        assert journal.sessions() == ()
+
+
+def test_adapter_no_longer_reaches_for_sqlite_directly() -> None:
+    """Persistence belongs to the journal; the adapter only delegates.
+
+    ``sessions`` was the last method running its own SQL against a
+    ``self.path`` the adapter never had. This guard exists so a future
+    persistence query cannot quietly move back into the adapter.
+    """
+
+    source = _adapter_source()
+
+    assert "connect_sqlite" not in source
+    assert "closing(" not in source
+    assert "self.path" not in source
+    assert "FROM paper_order_intent" not in source
+    assert "sqlite3" not in source
+
+
+def test_journal_owns_the_sessions_rollup() -> None:
+    """The query must live in the journal and be reachable as a method."""
+
+    assert callable(getattr(PaperOrderJournal, "sessions", None))
+
+    source = _journal_module_source()
+    assert "connect_sqlite(self.path)" in source
+    assert "FROM paper_order_intent" in source
+    assert "GROUP BY i.session_id" in source
+
+
+def test_adapter_sessions_is_a_pure_delegate() -> None:
+    """Structure check for the compatibility shim itself.
+
+    The delegate has to stay a one-liner: a re-implemented query here would
+    reintroduce exactly the split-brain this step removed.
+    """
+
+    import ast
+
+    source = _adapter_source()
+    tree = ast.parse(source)
+    found = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "sessions":
+            found = node
+            break
+
+    assert found is not None, "IBKRPaperOrderService.sessions disappeared"
+    body = [stmt for stmt in found.body if not isinstance(stmt, ast.Expr)]
+    assert len(body) == 1, f"delegate has {len(body)} statements"
+    returns = body[0]
+    assert isinstance(returns, ast.Return)
+    call = returns.value
+    assert isinstance(call, ast.Call)
+    assert isinstance(call.func, ast.Attribute)
+    assert call.func.attr == "sessions"
+    assert isinstance(call.func.value, ast.Attribute)
+    assert call.func.value.attr == "journal"
+
+
+def _adapter_source() -> str:
+    return Path(old_path.__file__ or "").read_text(encoding="utf-8")
+
+
 def _normalise(sql: str) -> str:
     return " ".join(sql.split()).replace("( ", "(").replace(" )", ")")
 
@@ -421,6 +609,7 @@ def _intent(
     intent_id: str = "i-1",
     session_id: str = "s-1",
     idempotency_key: str = "k-1",
+    generated_at: str = "2026-07-26T12:00:00+00:00",
 ):
     from us_quant.paper_order_models import PaperOrderIntent
 
@@ -433,7 +622,7 @@ def _intent(
         quantity=1,
         limit_price=Decimal("200"),
         reason="test",
-        generated_at="2026-07-26T12:00:00+00:00",
+        generated_at=generated_at,
         idempotency_key=idempotency_key,
     )
 
@@ -444,6 +633,7 @@ def _update(
     broker_order_id: int = 10,
     status: str = "Filled",
     filled: Decimal | None = None,
+    observed_at: str = "2026-07-26T12:00:05+00:00",
 ) -> PaperOrderUpdate:
     return PaperOrderUpdate(
         intent_id=intent_id,
@@ -454,7 +644,7 @@ def _update(
         average_fill_price=Decimal("200"),
         last_fill_price=Decimal("200"),
         message="done",
-        observed_at="2026-07-26T12:00:05+00:00",
+        observed_at=observed_at,
     )
 
 

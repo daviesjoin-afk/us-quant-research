@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import deque
-from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -36,7 +35,6 @@ from us_quant.paper_order_models import (
     ReconciliationSummary,
     TERMINAL_ORDER_STATUSES,
 )
-from us_quant.sqlite_support import connect_sqlite
 
 
 class IBKRPaperOrderError(RuntimeError):
@@ -1424,40 +1422,13 @@ class IBKRPaperOrderService:
     def sessions(
         self, *, limit: int = 50
     ) -> tuple[dict[str, object], ...]:
-        with closing(connect_sqlite(self.path)) as connection:
-            rows = connection.execute(
-                """
-                SELECT
-                    i.session_id,
-                    MIN(i.generated_at) AS started_at,
-                    MAX(COALESCE(u.observed_at, i.generated_at)) AS last_activity_at,
-                    COUNT(*) AS intent_count,
-                    SUM(CAST(COALESCE(u.filled, 0) AS REAL)) AS filled_quantity,
-                    MAX(COALESCE(u.status, '')) AS latest_status
-                FROM paper_order_intent i
-                LEFT JOIN paper_order_update u
-                  ON u.update_id = (
-                    SELECT MAX(u2.update_id)
-                    FROM paper_order_update u2
-                    WHERE u2.intent_id = i.intent_id
-                  )
-                GROUP BY i.session_id
-                ORDER BY started_at DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-        return tuple(
-            {
-                "session_id": row[0],
-                "started_at": row[1],
-                "last_activity_at": row[2],
-                "intent_count": row[3],
-                "filled_quantity": Decimal(str(row[4] or 0)),
-                "latest_status": row[5],
-            }
-            for row in rows
-        )
+        """Compatibility delegate; the journal owns this query.
+
+        Kept because callers outside this repository cannot be ruled out. The
+        adapter deliberately holds no SQLite handle of its own.
+        """
+
+        return self.journal.sessions(limit=limit)
 
 
 def new_paper_order_intent(

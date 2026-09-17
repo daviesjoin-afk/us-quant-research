@@ -1,17 +1,19 @@
-# Paper 交易模块拆分（第四步 ownership + 第五步 domain/journal 分层）
+# Paper 交易模块拆分（第四步 ownership + 第五步 domain/journal 分层 + 第六步 持久化归位）
 
 审计对象：`src/us_quant/desktop.py`（第四步开始时 9,911 行）与
 `src/us_quant/ibkr_paper_orders.py`（第五步开始时 2,208 行）。
 
-两条线互不重叠：
+三条线互不重叠：
 
 - **第四步**：`MainWindow` 不再构造、不再持有、不再清空 `IBKRPaperOrderService`，
   ownership 交给 `PaperTradingService`。见 §1–§9。
 - **第五步**：把 `ibkr_paper_orders.py` 里的纯数据模型与 SQLite Journal 拆出去，
   adapter 只剩 broker 语义。见 §10–§18。
+- **第六步**：把第五步漏拆的 `sessions()` 持久化查询从 adapter 移回 journal，
+  adapter 只留一行代理。见 §19–§23。
 
-第五步**只做模块搬迁**：交易行为 0 变化、SQLite schema 0 变化、旧 import 路径
-继续有效、旧数据库继续可读。本阶段**不**继续拆 IBKR network adapter。
+第五步与第六步**只做模块搬迁**：交易行为 0 变化、SQLite schema 0 变化、旧 import
+路径继续有效、旧数据库继续可读。本阶段**不**继续拆 IBKR network adapter。
 
 ---
 
@@ -257,13 +259,14 @@ adapter，所以它必须位于两者共同的**叶子模块**；定义两份等
 
 该模块**不 import** 任何 `us_quant` 模块、`ibapi`、`sqlite3`、PySide6、desktop。
 
-## 11. `paper_order_journal.py`（544 行，非空非注释 517 行）
+## 11. `paper_order_journal.py`（588 行，非空非注释 558 行）
 
 `PaperOrderJournal` 整体迁出，方法原样保留：`record_intent` / `record_update` /
 `record_execution` / `intent_for_broker_order` / `intent_for_idempotency_key` /
 `executed_quantity` / `max_broker_order_id` / `execution_rows` /
 `reconciliation_rows` / `reconciliation_summary` / `pending_orders_for_session`
-（含 `_dicts` 变体）/ `audit_rows` / `_initialize`。
+（含 `_dicts` 变体）/ `audit_rows` / `_initialize`；**第六步**又把漏拆的
+`sessions()` 归位到这里（见 §19）。
 
 **helper 归属按 §8 的真实用法判定，不是按名字猜**：
 
@@ -279,7 +282,12 @@ adapter，所以它必须位于两者共同的**叶子模块**；定义两份等
 该模块**不 import** `IBKRPaperOrderService`、`ibapi`、`PaperTradingService`、
 `desktop`、`PySide6`、`QThread`、`MainWindow`、`ExecutionLease`。
 
-## 12. `ibkr_paper_orders.py`（2,208 → 1,570 行；81,537 → 58,660 字节）
+**IBKR adapter 不直接访问 SQLite**（第六步之后）：`closing` 与 `connect_sqlite`
+两个 import 已删除，adapter 里不再出现 `connect_sqlite(` / `self.path` /
+任何 `FROM paper_order_intent`；旧 `service.sessions()` 仅保留 compatibility
+delegate，把调用原样转给 journal（见 §20）。
+
+## 12. `ibkr_paper_orders.py`（2,208 → 1,541 行；81,537 → 57,519 字节）
 
 adapter 保留 broker 语义，且**只有 import 来源发生变化**：`connect()` /
 `disconnect()` / `arm()` / `disarm()` / `submit()` / `cancel_intent()` /
@@ -339,16 +347,18 @@ reconciliation、`max_broker_order_id` 正确、**并且能继续追加新订单
 
 | 指标 | 迁移前 | 迁移后 |
 | --- | --- | --- |
-| `ibkr_paper_orders.py` | 2,208 行 / 81,537 字节 | **1,570 行 / 58,660 字节** |
+| `ibkr_paper_orders.py` | 2,208 行 / 81,537 字节 | **1,541 行 / 57,519 字节**（含第六步） |
 | `paper_order_models.py` | — | 148 行 / 3,532 字节 |
-| `paper_order_journal.py` | — | 544 行 / 21,032 字节 |
+| `paper_order_journal.py` | — | 588 行 / 22,670 字节（含第六步） |
 | adapter re-export 名称 | — | 12 / 12 |
 | 每个迁移类的定义份数 | 1（在 adapter 内） | **1**（在新模块内） |
 | 从旧路径 import 的文件 | 8 | 8（**有意不迁移**） |
 
-adapter 净减 **638 行 / 22,877 字节**，且没有任何一份代码被复制两份。
+adapter 净减 **667 行 / 24,018 字节**（其中第六步再减 29 行 / 1,141 字节），
+且没有任何一份代码被复制两份。
 
-测试：**512 → 532 passed**（新增 20：models 契约 10 + journal 模块/兼容 10）。
+测试：**512 → 540 passed**（新增 28：models 契约 10 + journal 模块 16 + adapter delegate 2；
+其中第六步新增 8 —— journal 行为 3、结构守卫 3、adapter delegate 2）。
 `check_publish_safety.py` → **scanned 195 publishable text files / OK**
 （195 = 191 已跟踪 + 4 个新文件；一次性脚本清理后复测）。
 
@@ -411,3 +421,82 @@ lifecycle / candidate lifecycle / `PaperTradingService` ownership / workflow /
 
 `doctor` 保持：`environment = paper`、`live_trading_enabled = false`、
 `whole_shares_only = true`、`allow_margin_borrowing = false`、`ibkr.port = 4002`。
+
+---
+
+# 第三部分：第六步（把漏拆的持久化查询归位）
+
+## 19. 被漏掉的东西：一个**从未能运行**的方法
+
+第五步把 `PaperOrderJournal` 整体搬走时，`sessions()` 留在了 adapter 里 —— 但它
+的实体依赖已经跟着 journal 走了：
+
+| adapter 里的 `sessions()` 依赖 | 实际情况 |
+| --- | --- |
+| `self.path` | **`IBKRPaperOrderService` 没有这个属性**（只有 `self.journal`） |
+| `connect_sqlite(...)` | 第五步后成为 adapter 里唯一的 SQLite 触点 |
+| `closing(...)` | 同上，唯一用途就是那个方法 |
+
+后果不是「分层不干净」，而是**调用即 `AttributeError`**。全仓 `grep` 确认没有任何
+调用点（`src/` / `tests/` / `scripts/` 全无 `.sessions(`），所以它是一段**从未被
+执行过、因而从未被测试覆盖**的死方法 —— 这也解释了为什么第五步的 532 个测试全绿
+却没有发现它：**没有任何测试碰过它**。
+
+这正好是「拆分必须逐符号核对依赖，而不是按行区间搬」的反面教材：按行区间搬迁时，
+方法体被完整搬走了，但它的**隐式接收者状态**（`self.path`）不属于它。
+
+## 20. 修法：查询归 journal，adapter 只留一行代理
+
+`PaperOrderJournal.sessions(*, limit: int = 50)` 现在持有原来的 SQL（逐字迁移：
+同一条 `GROUP BY i.session_id` 聚合、同一套 `MIN`/`MAX` 时间戳、同样的
+`Decimal` 转换、同样的排序与 `limit`）。adapter 侧保留同名方法作为**兼容代理**：
+
+```python
+def sessions(self, *, limit: int = 50) -> tuple[dict[str, object], ...]:
+    return self.journal.sessions(limit=limit)
+```
+
+保留代理的理由与 §13 的 re-export 一致：外部调用方按旧签名调用时行为不变；同时
+删除 adapter 里已成死码的 `from contextlib import closing` 与
+`from us_quant.sqlite_support import connect_sqlite` —— 迁走后它们各自只剩 import
+行本身，留着就是误导读者「这里还会碰数据库」。
+
+## 21. 行为等价性怎么证明
+
+不是「看起来一样」：新增测试直接对比两侧输出。
+
+| 断言 | 覆盖的缺陷 |
+| --- | --- |
+| 两个 session 的完整 rollup（intent 数、execution 数、成交股数之和、首末时间戳、状态） | 聚合语义被改写 |
+| 按 `MAX(observed_at)` 倒序、`limit` 截断 | 排序 / 截断被改 |
+| adapter `sessions(limit=7)` 只调用 journal 一次且**参数原样透传** | 代理悄悄改默认值或吞掉参数 |
+| adapter 不带参数调用时透传 `50` | 默认值漂移 |
+| 调用后 `service._connected is False` 且 `service._client is None` | 代理偷偷去连 broker |
+| adapter 源码不含 `connect_sqlite` / `closing(` / `self.path` / `FROM paper_order_intent` / `sqlite3` | 持久化查询回流 adapter |
+| adapter 的 `sessions` AST 体只有 **1 条**语句且是 `return self.journal.sessions(...)` | 代理被重新实现成一份查询 |
+| journal 源码含 `connect_sqlite(self.path)` / `FROM paper_order_intent` / `GROUP BY i.session_id` | 查询被「移走」但没落地 |
+
+## 22. 第六步验收数字（脚本实测）
+
+| 指标 | 第五步后 | 第六步后 |
+| --- | --- | --- |
+| `ibkr_paper_orders.py` | 1,570 行 / 58,660 字节 | **1,541 行 / 57,519 字节** |
+| `paper_order_journal.py` | 544 行 / 21,032 字节 | **588 行 / 22,670 字节** |
+| adapter 里的 SQLite 触点 | 1（`sessions`） | **0** |
+| adapter 里的 `self.path` | 1 | **0** |
+| 测试总数 | 532 passed | **540 passed** |
+| `check_publish_safety.py` | 195 OK | **195 OK** |
+| `verify.ps1` | exit 0 | **exit 0** |
+
+adapter 再减 **29 行 / 1,141 字节**，journal 增 **44 行 / 1,638 字节**（多出的部分
+是方法本身加 docstring）。两个文件的**行为面 0 变化**：`sessions()` 的签名、返回值
+形状、SQL 语义一字未改。
+
+## 23. 第六步未做的事
+
+未改 `sessions()` 的 SQL、排序、`limit` 语义、返回字段；未动
+`record_intent` / `record_update` / `record_execution` / reconciliation 系列方法；
+未改 schema、未加索引、未改 `pending_orders_for_session` 的「只返非终态」语义；
+未动 `PaperTradingService`、`desktop.py`、workflow、`ExecutionLease`、risk、strategy；
+未新增依赖。**没有**因为「顺手」把 `sessions()` 加进任何调用方 —— 它仍然没有调用者，
+本步只让「有调用者时它会正常工作」成立。

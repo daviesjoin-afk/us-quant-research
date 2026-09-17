@@ -485,6 +485,50 @@ class PaperOrderJournal:
             for row in rows
         )
 
+    def sessions(
+        self, *, limit: int = 50
+    ) -> tuple[dict[str, object], ...]:
+        """Per-session rollup: first intent, last activity, fills, status.
+
+        Moved here verbatim from the broker adapter, which used to run this
+        query against a ``self.path`` it never had.
+        """
+
+        with closing(connect_sqlite(self.path)) as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    i.session_id,
+                    MIN(i.generated_at) AS started_at,
+                    MAX(COALESCE(u.observed_at, i.generated_at)) AS last_activity_at,
+                    COUNT(*) AS intent_count,
+                    SUM(CAST(COALESCE(u.filled, 0) AS REAL)) AS filled_quantity,
+                    MAX(COALESCE(u.status, '')) AS latest_status
+                FROM paper_order_intent i
+                LEFT JOIN paper_order_update u
+                  ON u.update_id = (
+                    SELECT MAX(u2.update_id)
+                    FROM paper_order_update u2
+                    WHERE u2.intent_id = i.intent_id
+                  )
+                GROUP BY i.session_id
+                ORDER BY started_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return tuple(
+            {
+                "session_id": row[0],
+                "started_at": row[1],
+                "last_activity_at": row[2],
+                "intent_count": row[3],
+                "filled_quantity": Decimal(str(row[4] or 0)),
+                "latest_status": row[5],
+            }
+            for row in rows
+        )
+
     def _initialize(self) -> None:
         with closing(connect_sqlite(self.path)) as connection:
             with connection:

@@ -858,6 +858,73 @@ class IBKRPaperOrderTests(unittest.TestCase):
             self.assertEqual(results.count(False), 7)
             self.assertEqual(client.cancelled, [(10, "")])
 
+    def test_sessions_delegates_to_the_journal_without_touching_sqlite(
+        self,
+    ) -> None:
+        """The adapter must proxy the rollup, not own it.
+
+        ``sessions`` used to run its own SQL against ``self.path`` -- an
+        attribute this class never had, so every call raised AttributeError.
+        The journal is replaced with a recorder here: the adapter must not
+        touch a broker or a database to answer this question.
+        """
+
+        class RecordingJournal:
+            def __init__(self) -> None:
+                self.calls: list[int] = []
+
+            def sessions(self, *, limit: int = 50):
+                self.calls.append(limit)
+                return ({"session_id": "s-1", "intent_count": limit},)
+
+        with TemporaryDirectory() as directory:
+            journal = RecordingJournal()
+            service = IBKRPaperOrderService(
+                IBKRConnectionConfig(
+                    host="127.0.0.1",
+                    port=4002,
+                    client_id=81,
+                    api_read_only=False,
+                    paper_order_submission_enabled=True,
+                    connection_timeout_seconds=5,
+                ),
+                journal=journal,  # type: ignore[arg-type]
+            )
+
+            rows = service.sessions(limit=7)
+
+            self.assertEqual(journal.calls, [7])
+            self.assertEqual(rows, ({"session_id": "s-1", "intent_count": 7},))
+            # No broker connection was needed to answer this: the delegate
+            # never touches the client or the connection flags.
+            self.assertFalse(service._connected)
+            self.assertIsNone(service._client)
+
+    def test_sessions_delegate_defaults_to_the_journals_default(self) -> None:
+        class RecordingJournal:
+            def __init__(self) -> None:
+                self.calls: list[int] = []
+
+            def sessions(self, *, limit: int = 50):
+                self.calls.append(limit)
+                return ()
+
+        with TemporaryDirectory():
+            journal = RecordingJournal()
+            service = IBKRPaperOrderService(
+                IBKRConnectionConfig(
+                    host="127.0.0.1",
+                    port=4002,
+                    client_id=81,
+                    api_read_only=False,
+                    paper_order_submission_enabled=True,
+                    connection_timeout_seconds=5,
+                ),
+                journal=journal,  # type: ignore[arg-type]
+            )
+            self.assertEqual(service.sessions(), ())
+            self.assertEqual(journal.calls, [50])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -467,14 +467,16 @@ def sessions(self, *, limit: int = 50) -> tuple[dict[str, object], ...]:
 
 | 断言 | 覆盖的缺陷 |
 | --- | --- |
-| 两个 session 的完整 rollup（intent 数、execution 数、成交股数之和、首末时间戳、状态） | 聚合语义被改写 |
-| 按 `MAX(observed_at)` 倒序、`limit` 截断 | 排序 / 截断被改 |
+| 两个 session 的完整 rollup（intent 数、成交股数之和、首末时间戳、最新状态、`filled_quantity` 的 `Decimal` 类型） | 聚合语义被改写 |
+| 按 `started_at DESC`（即 `MIN(generated_at)`）倒序、`limit` 截断 | 排序 / 截断被改 |
 | adapter `sessions(limit=7)` 只调用 journal 一次且**参数原样透传** | 代理悄悄改默认值或吞掉参数 |
 | adapter 不带参数调用时透传 `50` | 默认值漂移 |
 | 调用后 `service._connected is False` 且 `service._client is None` | 代理偷偷去连 broker |
 | adapter 源码不含 `connect_sqlite` / `closing(` / `self.path` / `FROM paper_order_intent` / `sqlite3` | 持久化查询回流 adapter |
 | adapter 的 `sessions` AST 体只有 **1 条**语句且是 `return self.journal.sessions(...)` | 代理被重新实现成一份查询 |
 | journal 源码含 `connect_sqlite(self.path)` / `FROM paper_order_intent` / `GROUP BY i.session_id` | 查询被「移走」但没落地 |
+| 只有 intent、没有任何 update 的 session 仍出现且以 `generated_at` 计时 | `LEFT JOIN` / `COALESCE` 被改成内连接后静默隐藏最新 session |
+| 空库返回 `()` | 聚合在无数据时炸掉或返回伪造行 |
 
 ## 22. 第六步验收数字（脚本实测）
 

@@ -116,21 +116,17 @@ from us_quant.ibkr_readonly import (
     intraday_market_data_reasons,
 )
 from us_quant.ibkr_stream import (
-    IBKRReadOnlyStream,
     MARKET_DATA_TYPE_NAMES,
     StreamSnapshot,
 )
-from us_quant.alpaca_stream import (
+from us_quant.market_data_service import (
     AlpacaCredentialsMissing,
-    AlpacaIEXStream,
-)
-from us_quant.finnhub_stream import (
     FinnhubCredentialsMissing,
-    FinnhubTradeStream,
+    MarketDataRequest,
+    MarketDataService,
 )
 from us_quant.extended_hours import (
     USEquitySession,
-    ibkr_market_data_exchange,
     paper_order_routing,
     us_equity_session,
 )
@@ -530,68 +526,53 @@ class TaskThread(QThread):
 
 
 class StreamWorker(QThread):
+    """Qt thread adapter over a stream built by ``MarketDataService``.
+
+    This class owns *threading only*: it runs the stream, carries its
+    snapshots across the thread boundary and forwards the stop request.
+    Which provider to construct, with which credentials, timeouts, venue
+    and labels is decided by :class:`MarketDataService`; the worker never
+    inspects ``provider`` to build anything.
+
+    The worker asks the service for the stream (rather than being handed
+    one) so that the push listener is ``snapshot_ready.emit``: a signal
+    emitted from this thread is delivered *queued* to the GUI thread, and
+    a listener that called the desktop directly would touch widgets from
+    the stream thread.
+    """
+
     snapshot_ready = Signal(object)
     failed = Signal(str)
 
     def __init__(
         self,
-        config,
-        *,
-        symbols: tuple[str, ...],
-        provider: str = "ibkr",
-        api_key: str = "",
-        api_secret: str = "",
-        finnhub_key: str = "",
-        market_exchange: str = "SMART",
+        market_data: MarketDataService,
+        request: MarketDataRequest,
     ) -> None:
         super().__init__()
-        self.provider = provider
-        self.symbols = symbols
-        self.market_exchange = market_exchange
-        if provider == "alpaca_iex":
-            self.service = AlpacaIEXStream(
-                symbols=symbols,
-                api_key=api_key,
-                api_secret=api_secret,
-                stale_after_seconds=8,
-                listener=self.snapshot_ready.emit,
-            )
-        elif provider == "finnhub_trades":
-            self.service = FinnhubTradeStream(
-                symbols=symbols,
-                api_key=finnhub_key,
-                stale_after_seconds=20,
-                listener=self.snapshot_ready.emit,
-            )
-        else:
-            is_extended = provider == "ibkr_extended"
-            self.service = IBKRReadOnlyStream(
-                config,
-                symbols=symbols,
-                requested_market_data_type=1,
-                stale_after_seconds=8,
-                market_exchange=market_exchange,
-                provider_label=(
-                    "IBKR 5×24" if is_extended else "IBKR"
-                ),
-                coverage=(
-                    "IBKR 5×24：盘前/盘后 SMART；隔夜直接 OVERNIGHT；"
-                    "实际权限与标的资格以券商回调为准"
-                    if is_extended
-                    else "由 IBKR 订阅权限决定"
-                ),
-            )
+        self.provider = request.provider
+        # The service that built this stream, so the worker can hand the
+        # stop request and any runtime failure back through it instead of
+        # reaching for the adapter directly.
+        self.market_data = market_data
+        self.service = market_data.build_stream(
+            request, listener=self.snapshot_ready.emit
+        )
+        # Mirrors the venue the stream was built for; the desktop compares
+        # it against the service's current session venue to decide whether
+        # an extended-hours stream has to be rotated.
+        self.market_exchange = market_data.market_exchange_for(request)
 
     def run(self) -> None:
         try:
             self.service.run()
         except Exception as error:
-            self.failed.emit(
-                f"{type(error).__name__}: {error}"
-            )
+            message = f"{type(error).__name__}: {error}"
+            self.market_data.record_failure(message)
+            self.failed.emit(message)
 
     def request_stop(self) -> None:
-        self.service.stop()
+        self.market_data.stop()
 
 
 class MetricCard(QFrame):
@@ -1009,6 +990,11 @@ class MainWindow(QMainWindow):
         # task that is still being admitted.
         self._closing = False
         self.runtime_supervisor = RuntimeSupervisor()
+        # Provider selection, credentials, timeouts and the IBKR venue all
+        # belong to the service, not to the UI: the desktop supplies a
+        # request and gets a ready stream back (see
+        # ``docs/DESKTOP_DECOMPOSITION.md``).
+        self.market_data_service = MarketDataService(self.config.ibkr)
 
         self.setWindowTitle(APP_TITLE)
         self.resize(1440, 900)
@@ -7701,7 +7687,9 @@ class MainWindow(QMainWindow):
             or self._pending_stream_switch is not None
         ):
             return
-        desired_exchange = ibkr_market_data_exchange()
+        desired_exchange = self.market_data_service.desired_market_exchange(
+            worker.provider
+        )
         if desired_exchange == worker.market_exchange:
             return
         self._log(
@@ -7754,11 +7742,6 @@ class MainWindow(QMainWindow):
             )
             return
         provider = str(self.stream_mode.currentData() or "ibkr")
-        market_exchange = (
-            ibkr_market_data_exchange()
-            if provider == "ibkr_extended"
-            else "SMART"
-        )
         try:
             finnhub_key = self._load_stream_credential(
                 "finnhub_api_key", "FINNHUB_API_KEY"
@@ -7769,15 +7752,19 @@ class MainWindow(QMainWindow):
             alpaca_secret = self._load_stream_credential(
                 "alpaca_api_secret", "APCA_API_SECRET_KEY"
             )
-            worker = StreamWorker(
-                self.config.ibkr,
-                symbols=symbols,
+            # The UI knows *what the operator selected* (provider id,
+            # watchlist, credential store values).  Everything else --
+            # constructor, timeouts, venue, labels, coverage -- is the
+            # service's business.
+            request = MarketDataRequest(
                 provider=provider,
-                api_key=alpaca_key,
-                api_secret=alpaca_secret,
-                finnhub_key=finnhub_key,
-                market_exchange=market_exchange,
+                symbols=symbols,
+                alpaca_api_key=alpaca_key,
+                alpaca_api_secret=alpaca_secret,
+                finnhub_api_key=finnhub_key,
             )
+            worker = StreamWorker(self.market_data_service, request)
+            market_exchange = worker.market_exchange
         except (
             AlpacaCredentialsMissing,
             FinnhubCredentialsMissing,

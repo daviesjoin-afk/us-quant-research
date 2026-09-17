@@ -125,7 +125,14 @@ def test_snapshot_is_frozen_and_slotted() -> None:
         status_message="Idle",
     )
 
+    # Frozen assignment to a declared field has a stable public exception.
     with pytest.raises(FrozenInstanceError):
         snapshot.status_message = "Changed"  # type: ignore[misc]
-    with pytest.raises(FrozenInstanceError):
+
+    # The slots contract is the absence of per-instance dynamic storage.
+    # CPython versions differ in the exception raised when assigning an
+    # unknown attribute to a frozen+slotted dataclass, so assert the contract
+    # rather than an interpreter implementation detail.
+    assert not hasattr(snapshot, "__dict__")
+    with pytest.raises((AttributeError, TypeError, FrozenInstanceError)):
         snapshot.extra = "not allowed"  # type: ignore[attr-defined]

@@ -55,7 +55,7 @@ def test_unarmed_launch_rejection_is_controller_scoped() -> None:
     assert "paper_workflow.begin_connecting(plan)" in source
     assert "paper_workflow.reject_connecting(plan)" in source
     assert "paper_workflow.reject_connecting(plan)" in _source(
-        "_reject_unpublished_auto_service"
+        "_reject_unpublished_auto_candidate"
     )
 
 
@@ -92,9 +92,9 @@ def test_snapshot_renderer_does_not_enable_manual_resume_from_engine_flags() -> 
 def test_finalization_proves_zero_state_before_disconnect_and_lease_release() -> None:
     source = _source("_start_paper_finalization_refresh")
     assert source.index("capture_finalization_evidence()") < source.index(
-        "service.disconnect()"
+        "self.paper_trading.disconnect()"
     )
-    assert source.index("service.disconnect()") < source.index(
+    assert source.index("self.paper_trading.disconnect()") < source.index(
         "confirm_finalization_after_disconnect"
     )
     assert "resource_group=\"broker\"" in source

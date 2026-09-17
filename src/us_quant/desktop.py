@@ -178,7 +178,6 @@ from us_quant.runtime_supervisor import RuntimeSnapshot, RuntimeSupervisor
 from us_quant.ibkr_paper_orders import (
     IBKRPaperOrderError,
     IBKRPaperOrderUncertainError,
-    IBKRPaperOrderService,
     PaperOrderJournal,
     PaperOrderReconciliation,
 )
@@ -188,7 +187,7 @@ from us_quant.paper_execution_health import (
     evaluate_paper_execution_health,
 )
 from us_quant.paper_session import PaperSessionResult
-from us_quant.paper_trading_facade import PaperTradingFacade
+from us_quant.paper_trading_service import PaperTradingService
 from us_quant.workflow_state import (
     PaperWorkflowPhase,
     WorkflowStateError,
@@ -945,7 +944,6 @@ class MainWindow(QMainWindow):
         self.shadow_engine: ShadowPaperEngine | None = None
         self.shadow_snapshot: ShadowSnapshot | None = None
         self.target_preflight_result: TargetPreflightResult | None = None
-        self.paper_order_service: IBKRPaperOrderService | None = None
         self.auto_quant_engine: AutoQuantEngine | None = None
         self.auto_quant_snapshot: AutoQuantSnapshot | None = None
         self.paper_execution_health: PaperExecutionHealth | None = None
@@ -955,14 +953,14 @@ class MainWindow(QMainWindow):
         self.workflow_controller = WorkflowController()
         self.paper_workflow = self.workflow_controller.paper
         self.shadow_workflow = self.workflow_controller.shadow
-        # One boundary for the Paper reads and lifecycle this window
-        # performs.  Both getters resolve the live attribute on every
-        # call: the window still owns and replaces these objects, and the
-        # safety tests swap ``paper_workflow`` to drive the halted and
-        # refused-close paths.
-        self.paper_trading = PaperTradingFacade(
+        # One boundary for the Paper reads, lifecycle and order-service
+        # ownership this window performs.  The workflow getter resolves the
+        # live attribute on every call: the window still owns and replaces
+        # that controller, and the safety tests swap ``paper_workflow`` to
+        # drive the halted and refused-close paths.  The order service is
+        # owned *by* this service, never by the window.
+        self.paper_trading = PaperTradingService(
             workflow_getter=lambda: self.paper_workflow,
-            order_service_getter=lambda: self.paper_order_service,
         )
         self.auto_quant_candidates: tuple[
             AutoQuantCandidate, ...
@@ -4527,19 +4525,13 @@ class MainWindow(QMainWindow):
 
         def task(progress: Callable[[str], None]):
             progress("连接 IBKR Paper 订单通道并读取账户/订单；不下单…")
-            service = IBKRPaperOrderService(
-                order_config,
+            return self.paper_trading.probe_order_channel(
+                config=order_config,
                 journal=self.paper_order_journal,
                 extended_hours_enabled=(
                     self.preferences.extended_hours_paper_enabled
                 ),
             )
-            try:
-                connection = service.connect()
-                broker_state = service.broker_state()
-                return connection, broker_state
-            finally:
-                service.disconnect()
 
         started = self._start_task(
             task,
@@ -4861,22 +4853,31 @@ class MainWindow(QMainWindow):
             ),
         )
 
-    def _reject_unpublished_auto_service(
+    def _reject_unpublished_auto_candidate(
         self,
-        service: IBKRPaperOrderService,
+        candidate_id: object,
         plan: AutoLaunchPlan,
         message: str,
         *,
         show_message: bool,
     ) -> None:
-        """Dispose a late/pre-arm service without touching a newer attempt."""
+        """Dispose a late/pre-arm candidate without touching a newer attempt.
 
-        service.disconnect()
-        self.paper_workflow.reject_connecting(plan)
-        reset = self._reset_auto_launch_controls(plan)
-        self._log(message)
-        if reset and show_message:
-            QMessageBox.warning(self, "Paper 会话未启动", message)
+        Only this candidate is discarded -- the active order service and every
+        other candidate are untouched.  The workflow rejection runs in a
+        ``finally`` so a failing broker disconnect can never leave the session
+        stuck in ``CONNECTING``; the disconnect error itself still propagates.
+        """
+
+        try:
+            if self.paper_trading.has_candidate(candidate_id):
+                self.paper_trading.discard_candidate(candidate_id)
+        finally:
+            self.paper_workflow.reject_connecting(plan)
+            reset = self._reset_auto_launch_controls(plan)
+            self._log(message)
+            if reset and show_message:
+                QMessageBox.warning(self, "Paper 会话未启动", message)
 
     def _reject_auto_launch_without_service(
         self,
@@ -5038,26 +5039,25 @@ class MainWindow(QMainWindow):
             ),
         )
 
+        candidate_id = str(plan.attempt_id)
+
         def task(progress: Callable[[str], None]):
             progress("连接 IBKR Paper 订单通道…")
-            service: IBKRPaperOrderService | None = None
             try:
-                service = IBKRPaperOrderService(
-                    order_config,
+                connection = self.paper_trading.connect_candidate(
+                    candidate_id,
+                    config=order_config,
                     journal=self.paper_order_journal,
                     extended_hours_enabled=(
                         self.preferences.extended_hours_paper_enabled
                     ),
                 )
-                connection = service.connect()
             except Exception as error:
-                if service is not None:
-                    service.disconnect()
-                return None, plan, str(error)
+                return candidate_id, plan, str(error)
             progress(
                 f"已核验 {connection.account_alias}；准备逐会话武装…"
             )
-            return service, plan, None
+            return candidate_id, plan, None
 
         started = self._start_task(
             task,
@@ -5071,29 +5071,23 @@ class MainWindow(QMainWindow):
 
     def _auto_order_service_connected(self, result: object) -> None:
         try:
-            service, plan, connection_error = result  # type: ignore[misc]
+            candidate_id, plan, connection_error = result  # type: ignore[misc]
         except (TypeError, ValueError) as error:
             raise TypeError(
                 "unexpected auto order connection result"
             ) from error
         if not isinstance(plan, AutoLaunchPlan):
-            if isinstance(service, IBKRPaperOrderService):
-                service.disconnect()
             raise TypeError("unexpected Paper launch plan")
         if connection_error is not None:
-            if isinstance(service, IBKRPaperOrderService):
-                service.disconnect()
             self._reject_auto_launch_without_service(
                 plan,
                 "IBKR Paper 连接失败，未启动会话："
                 f"{connection_error}",
             )
             return
-        if not isinstance(service, IBKRPaperOrderService):
-            raise TypeError("unexpected Paper order service")
         if self._active_auto_launch_plan != plan:
-            self._reject_unpublished_auto_service(
-                service,
+            self._reject_unpublished_auto_candidate(
+                candidate_id,
                 plan,
                 "已忽略过期的 Paper 连接结果；不会武装订单会话。",
                 show_message=False,
@@ -5101,22 +5095,25 @@ class MainWindow(QMainWindow):
             return
         preflight = self._auto_quant_preflight()
         if not preflight.ready:
-            self._reject_unpublished_auto_service(
-                service,
+            self._reject_unpublished_auto_candidate(
+                candidate_id,
                 plan,
                 "连接期间启动条件发生变化，已断开未武装的 Paper 会话。",
                 show_message=True,
             )
             return
         if not self._current_auto_launch_matches(plan):
-            self._reject_unpublished_auto_service(
-                service,
+            self._reject_unpublished_auto_candidate(
+                candidate_id,
                 plan,
                 "连接期间策略、候选或资金上限已变化；已断开未武装的 Paper 会话。",
                 show_message=True,
             )
             return
         try:
+            # Borrowed for this call stack only: the window never stores it,
+            # never assigns it to a member, and never keeps it past promotion.
+            service = self.paper_trading.candidate_service(candidate_id)
             broker_state = service.broker_state()
             if (
                 broker_state.net_liquidation is None
@@ -5197,6 +5194,10 @@ class MainWindow(QMainWindow):
                 ),
                 sellable_quantities={},
             )
+            # Pure check, no mutation: promotion after ``publish_armed`` must not
+            # be able to fail for a reason that was already knowable here, so
+            # the published session can never end up without an owner.
+            self.paper_trading.ensure_candidate_can_promote(candidate_id)
             workflow_result = self.paper_workflow.publish_armed(
                 plan,
                 engine=engine,
@@ -5206,16 +5207,18 @@ class MainWindow(QMainWindow):
                     row.symbol for row in self.auto_quant_candidates
                 ),
             )
+            self.paper_trading.promote_candidate(candidate_id)
         except Exception as error:
-            self._reject_unpublished_auto_service(
-                service,
+            # Discards the candidate only -- once promotion succeeded there is
+            # no candidate left, so the live owner is never torn down here.
+            self._reject_unpublished_auto_candidate(
+                candidate_id,
                 plan,
                 "Paper 会话校验或武装失败，未提交自动订单："
                 f"{error}",
                 show_message=True,
             )
             return
-        self.paper_order_service = service
         self.auto_quant_engine = engine
         self.auto_quant_snapshot = workflow_result.engine_snapshot
         self._active_auto_launch_plan = None
@@ -5306,8 +5309,7 @@ class MainWindow(QMainWindow):
     def _start_paper_finalization_refresh(self) -> None:
         """Prove broker zero-state, disconnect, then release nothing yet."""
 
-        service = self.paper_order_service
-        if service is None:
+        if not self.paper_trading.has_order_service():
             self.paper_workflow.fail_finalization_refresh()
             self._apply_paper_workflow_button_state()
             return
@@ -5319,7 +5321,7 @@ class MainWindow(QMainWindow):
             result, evidence_id = self.paper_workflow.capture_finalization_evidence()
             if evidence_id is None:
                 return result
-            service.disconnect()
+            self.paper_trading.disconnect()
             return self.paper_workflow.confirm_finalization_after_disconnect(
                 evidence_id
             )
@@ -5442,8 +5444,7 @@ class MainWindow(QMainWindow):
             self._log(str(error))
 
     def _reconnect_auto_order_service(self) -> None:
-        service = self.paper_order_service
-        if service is None:
+        if not self.paper_trading.has_order_service():
             return
         try:
             attempt_id = self.paper_workflow.begin_manual_reconciliation()
@@ -5458,8 +5459,8 @@ class MainWindow(QMainWindow):
 
         def task(progress: Callable[[str], None]):
             progress("重新连接 IBKR Paper 并恢复订单快照…")
-            if not service.connection_snapshot().connected:
-                service.connect()
+            if not self.paper_trading.is_connected():
+                self.paper_trading.connect_active()
             return self.paper_workflow.complete_manual_reconciliation(attempt_id)
 
         started = self._start_task(
@@ -5517,9 +5518,8 @@ class MainWindow(QMainWindow):
         if result is None or not result.state.finalized:
             return
         snapshot = result.engine_snapshot
-        service = self.paper_order_service
-        if service is not None:
-            broker_state = service.broker_state()
+        if self.paper_trading.has_order_service():
+            broker_state = self.paper_trading.broker_state()
             reconciliations = (
                 self.paper_order_journal.reconciliation_rows(
                     session_id=snapshot.session_id
@@ -5529,10 +5529,12 @@ class MainWindow(QMainWindow):
                 not row.reconciled for row in reconciliations
             ):
                 return
-            service.disconnect()
+            self.paper_trading.disconnect()
         if not self.paper_workflow.finalize_if_safe():
             return
-        self.paper_order_service = None
+        # Ownership is released only now, after the workflow itself reported the
+        # session finalized -- a successful disconnect alone proves nothing.
+        self.paper_trading.clear_active()
         self.auto_quant_engine = None
         self.paper_execution_health = None
         self.auto_execution_health_label.setText(
@@ -8791,7 +8793,7 @@ class MainWindow(QMainWindow):
             return
         if self.paper_trading.has_order_service():
             self.paper_trading.disconnect()
-            self.paper_order_service = None
+            self.paper_trading.clear_active()
         if self.shadow_engine is not None and self.shadow_engine.active:
             self.shadow_engine.stop()
             if self.shadow_workflow.active:

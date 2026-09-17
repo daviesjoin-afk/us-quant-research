@@ -188,6 +188,7 @@ from us_quant.paper_execution_health import (
     evaluate_paper_execution_health,
 )
 from us_quant.paper_session import PaperSessionResult
+from us_quant.paper_trading_facade import PaperTradingFacade
 from us_quant.workflow_state import (
     PaperWorkflowPhase,
     WorkflowStateError,
@@ -954,6 +955,15 @@ class MainWindow(QMainWindow):
         self.workflow_controller = WorkflowController()
         self.paper_workflow = self.workflow_controller.paper
         self.shadow_workflow = self.workflow_controller.shadow
+        # One boundary for the Paper reads and lifecycle this window
+        # performs.  Both getters resolve the live attribute on every
+        # call: the window still owns and replaces these objects, and the
+        # safety tests swap ``paper_workflow`` to drive the halted and
+        # refused-close paths.
+        self.paper_trading = PaperTradingFacade(
+            workflow_getter=lambda: self.paper_workflow,
+            order_service_getter=lambda: self.paper_order_service,
+        )
         self.auto_quant_candidates: tuple[
             AutoQuantCandidate, ...
         ] = ()
@@ -4489,7 +4499,7 @@ class MainWindow(QMainWindow):
 
     def _check_auto_order_channel(self) -> None:
         if (
-            self.paper_order_service is not None
+            self.paper_trading.has_order_service()
             or self.auto_quant_engine is not None
         ):
             QMessageBox.information(
@@ -4625,7 +4635,7 @@ class MainWindow(QMainWindow):
     def _auto_candidate_preparation_failed(self, _message: str) -> None:
         """Release PREPARING after an asynchronous scan failure."""
 
-        if self.paper_workflow.phase is PaperWorkflowPhase.PREPARING:
+        if self.paper_trading.phase() is PaperWorkflowPhase.PREPARING:
             self.paper_workflow.cancel_preparing()
         self.auto_prepare_button.setEnabled(True)
 
@@ -4651,14 +4661,14 @@ class MainWindow(QMainWindow):
 
     def _select_auto_quant_candidates(self) -> None:
         if self.scan is None or self.universe is None:
-            if self.paper_workflow.phase is PaperWorkflowPhase.PREPARING:
+            if self.paper_trading.phase() is PaperWorkflowPhase.PREPARING:
                 self.paper_workflow.cancel_preparing()
             self.auto_prepare_button.setEnabled(True)
             return
         limit = self.auto_candidate_limit.value()
         paper_capital = self._paper_simulation_capital()
         if paper_capital is None:
-            if self.paper_workflow.phase is PaperWorkflowPhase.PREPARING:
+            if self.paper_trading.phase() is PaperWorkflowPhase.PREPARING:
                 self.paper_workflow.cancel_preparing()
             self.auto_prepare_button.setEnabled(True)
             QMessageBox.information(
@@ -4720,7 +4730,7 @@ class MainWindow(QMainWindow):
                 )
             )
         if len(candidates) < 3:
-            if self.paper_workflow.phase is PaperWorkflowPhase.PREPARING:
+            if self.paper_trading.phase() is PaperWorkflowPhase.PREPARING:
                 self.paper_workflow.cancel_preparing()
             QMessageBox.warning(
                 self,
@@ -4734,7 +4744,7 @@ class MainWindow(QMainWindow):
             self.auto_prepare_button.setEnabled(True)
             return
         self.auto_quant_candidates = tuple(candidates)
-        if self.paper_workflow.phase is PaperWorkflowPhase.PREPARING:
+        if self.paper_trading.phase() is PaperWorkflowPhase.PREPARING:
             self.paper_workflow.mark_ready()
         self._populate_auto_quant_candidates()
         symbols = tuple(row.symbol for row in candidates)
@@ -4824,7 +4834,10 @@ class MainWindow(QMainWindow):
             return False
         self._active_auto_launch_plan = None
         self.auto_arm_confirm.setChecked(False)
-        if self.paper_order_service is None and self.auto_quant_engine is None:
+        if (
+            not self.paper_trading.has_order_service()
+            and self.auto_quant_engine is None
+        ):
             self.auto_start_button.setEnabled(True)
             self.auto_prepare_button.setEnabled(True)
             self.auto_strategy_combo.setEnabled(True)
@@ -5253,7 +5266,7 @@ class MainWindow(QMainWindow):
             self._populate_auto_quant_snapshot(self.auto_quant_snapshot)
         for event in result.events:
             self._record_runtime_event(severity=event.severity, component="paper_execution", code=event.code, message=event.message)
-        phase = self.paper_workflow.phase
+        phase = self.paper_trading.phase()
         self.auto_pause_button.setEnabled(phase is PaperWorkflowPhase.RUNNING)
         self.auto_resume_button.setEnabled(phase is PaperWorkflowPhase.PAUSED)
         self.auto_stop_button.setEnabled(phase in {PaperWorkflowPhase.RUNNING, PaperWorkflowPhase.PAUSED})
@@ -5376,7 +5389,7 @@ class MainWindow(QMainWindow):
         Pending broker rows remain review evidence.  This path deliberately
         never creates replacement intents or submits orders.
         """
-        if self.paper_workflow.phase is not PaperWorkflowPhase.RECONCILING_READY:
+        if self.paper_trading.phase() is not PaperWorkflowPhase.RECONCILING_READY:
             self._log("A fresh reconciliation proof is required before Paper can resume.")
             return
         evidence = self.paper_workflow.reconciliation_evidence
@@ -5417,7 +5430,7 @@ class MainWindow(QMainWindow):
             # Stream ticks already drove the identical watchdog sequence
             # (drain, stale-BUY cancel, SELL intervention, health).
             return
-        if self.paper_workflow.phase not in {
+        if self.paper_trading.phase() not in {
             PaperWorkflowPhase.RUNNING,
             PaperWorkflowPhase.PAUSED,
             PaperWorkflowPhase.STOPPING,
@@ -5491,11 +5504,11 @@ class MainWindow(QMainWindow):
         at each call site.
         """
 
-        phase = self.paper_workflow.phase
+        phase = self.paper_trading.phase()
         self.auto_reconcile_button.setEnabled(phase is PaperWorkflowPhase.HALTED)
         self.auto_resume_from_reconciliation_button.setEnabled(
             phase is PaperWorkflowPhase.RECONCILING_READY
-            and self.paper_workflow.reconciliation_evidence is not None
+            and self.paper_trading.reconciliation_status().awaiting_confirmation
         )
         self._release_close_drain_if_recovery_required()
 
@@ -5598,14 +5611,10 @@ class MainWindow(QMainWindow):
         self, snapshot: AutoQuantSnapshot
     ) -> None:
         rows: list[tuple[str, str, str, str, str]] = []
-        reconciliations = ()
-        if self.paper_order_service is not None:
-            reconciliations = (
-                self.paper_order_service.reconciliation_rows_with_latency(
-                    session_id=snapshot.session_id,
-                    limit=100,
-                )
-            )
+        reconciliations = self.paper_trading.reconciliation_rows_with_latency(
+            session_id=snapshot.session_id,
+            limit=100,
+        )
         for row in reconciliations:
             latency_ms = row.get("submit_latency_ms")
             if latency_ms is None:
@@ -5646,11 +5655,7 @@ class MainWindow(QMainWindow):
             if self.portfolio_view is not None
             else None
         )
-        broker_state = (
-            self.paper_order_service.broker_state()
-            if self.paper_order_service is not None
-            else None
-        )
+        broker_state = self.paper_trading.broker_state()
         candidate_symbols = {
             row.symbol for row in self.auto_quant_candidates
         }
@@ -7963,7 +7968,7 @@ class MainWindow(QMainWindow):
         self._refresh_target_preflight()
         if (
             not getattr(self, "_paper_finalization_inflight", False)
-            and self.paper_workflow.phase in {
+            and self.paper_trading.phase() in {
             PaperWorkflowPhase.RUNNING,
             PaperWorkflowPhase.PAUSED,
             PaperWorkflowPhase.STOPPING,
@@ -8664,7 +8669,7 @@ class MainWindow(QMainWindow):
         human reconciliation step -- and every one of those steps is a task.
         """
 
-        return self.paper_workflow.phase in {
+        return self.paper_trading.phase() in {
             PaperWorkflowPhase.HALTED,
             PaperWorkflowPhase.RECONCILING,
             PaperWorkflowPhase.RECONCILING_READY,
@@ -8761,9 +8766,8 @@ class MainWindow(QMainWindow):
                 ),
             )
             return
-        paper_result = self.paper_workflow.result
-        if paper_result is not None and not paper_result.state.finalized:
-            if self.paper_workflow.phase in {
+        if not self.paper_trading.is_finalized():
+            if self.paper_trading.phase() in {
                 PaperWorkflowPhase.RUNNING,
                 PaperWorkflowPhase.PAUSED,
             }:
@@ -8785,8 +8789,8 @@ class MainWindow(QMainWindow):
                 "客户端不会在未 finalized 时断开订单会话或退出。",
             )
             return
-        if self.paper_order_service is not None:
-            self.paper_order_service.disconnect()
+        if self.paper_trading.has_order_service():
+            self.paper_trading.disconnect()
             self.paper_order_service = None
         if self.shadow_engine is not None and self.shadow_engine.active:
             self.shadow_engine.stop()
@@ -9191,7 +9195,7 @@ class MainWindow(QMainWindow):
             self.backtest_compare_button.setEnabled(True)
         if (
             hasattr(self, "auto_channel_check_button")
-            and self.paper_order_service is None
+            and not self.paper_trading.has_order_service()
         ):
             self.auto_channel_check_button.setEnabled(True)
 
@@ -9202,7 +9206,7 @@ class MainWindow(QMainWindow):
         self.queue_progress.setValue(0)
         if (
             hasattr(self, "auto_start_button")
-            and self.paper_order_service is None
+            and not self.paper_trading.has_order_service()
             and self.auto_quant_engine is None
         ):
             self.auto_arm_confirm.setChecked(False)

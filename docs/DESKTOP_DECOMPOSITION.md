@@ -61,6 +61,21 @@
    `event.ignore()` 并弹窗，不做 join。这是**有意的安全设计**（避免半写入产物），
    本次保留该行为，只在 supervisor 里补一条 `wait(3000)` 兜底路径。
 
+### 3.1 已逐项核查、确认 desktop.py 中不存在的类别
+
+需求清单里的下面这些类别在 `desktop.py` 中**没有**对应实现。记录在此是为了把
+「已检查且不存在」与「漏检」区分开——否则后来者无法判断审计是否覆盖过：
+
+| 类别 | `desktop.py` 中的情况 |
+| --- | --- |
+| `Lock` / `RLock` | 无。锁只在更底层：`ibkr_paper_orders.py`（`_id_lock`/`_state_lock`/`_event_lock`/`_correlation_lock`/`_refresh_lock`）、`ibkr_stream.py`（`_lock`）。这些属于交易/连接层，本次不迁移。 |
+| executor | 无。`ThreadPoolExecutor` 只出现在 `finnhub_stream.py` 与 `public_history.py` 的 `with` 块内（作用域受限、自带 join），不是常驻资源。 |
+| daemon thread | `desktop.py` 中无。仅存在于 `ibkr.py`、`ibkr_history.py`、`ibkr_paper_orders.py`、`ibkr_readonly.py`、`finnhub_stream.py`。 |
+| `asyncio` / `async def` | 全 `src/` 无。项目是纯线程模型。 |
+| websocket 客户端 | `desktop.py` 中无；行情走 `ibkr_stream.py` / `alpaca_stream.py` / `finnhub_stream.py` 的线程封装。 |
+| 原始 `threading.Thread` | `desktop.py` 中无。后台任务统一经 `TaskThread`（`QThread` 子类）。 |
+| `reconnect` | 存在但**已由任务系统承载**：`_reconnect_auto_order_service` 走 `_start_task`，属于交易相关重连，本次不迁移。 |
+
 ## 4. 记录在案、本次不修的高风险问题
 
 以下问题已定位但不属于第一步范围，按需求要求只记录：

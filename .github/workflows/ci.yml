@@ -40,14 +40,6 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install -e ".[desktop,test]"
 
-      - name: Run test suite
-        run: python -m pytest -q
-
-      - name: Run configuration doctor
-        run: python -m us_quant doctor
-
-      - name: Run desktop startup smoke test
-        run: python desktop_main.py
-
-      - name: Compile Python sources
-        run: python -m compileall -q src tests
+      - name: Verify repository
+        shell: pwsh
+        run: .\scripts\verify.ps1

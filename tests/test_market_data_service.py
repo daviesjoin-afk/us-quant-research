@@ -98,6 +98,17 @@ def _service() -> MarketDataService:
     return MarketDataService(_config())
 
 
+def replace_config(**changes) -> IBKRConnectionConfig:
+    """A copy of the baseline config with ``changes`` applied.
+
+    Named after ``dataclasses.replace`` because that is what it does; the
+    point of the tests using it is that the *value* differs from the
+    baseline, so an ignored ``update_config`` cannot pass by accident.
+    """
+
+    return dataclasses.replace(_config(), **changes)
+
+
 # -- provider selection ------------------------------------------------
 
 
@@ -270,6 +281,8 @@ def test_every_supported_provider_builds(monkeypatch) -> None:
             finnhub_api_key="f",
         )
         assert service.build_stream(request) is not None
+        # One live stream at a time: release it before building the next.
+        service.stop()
 
 
 # -- listener routing --------------------------------------------------
@@ -285,6 +298,7 @@ def test_listener_reaches_the_push_providers(monkeypatch) -> None:
         MarketDataRequest(provider=PROVIDER_ALPACA_IEX, symbols=("A",)),
         listener=listener,
     )
+    service.stop()
     service.build_stream(
         MarketDataRequest(provider=PROVIDER_FINNHUB_TRADES, symbols=("B",)),
         listener=listener,
@@ -374,10 +388,12 @@ def test_stop_is_forwarded_and_safe_before_any_build(monkeypatch) -> None:
 def test_a_runtime_failure_is_recorded_without_tearing_down(
     monkeypatch,
 ) -> None:
-    """``record_failure`` notes the error; the caller still drives stop.
+    """A stream that raises is recorded, and never left reading as running.
 
-    Tearing the stream down from here would race the desktop's stop
-    ordering, so the service only records.
+    ``run`` owns the lifecycle half, so the failure is recorded there and
+    ``finally`` clears ``running``.  The stream is deliberately *not* torn
+    down from inside the service -- whoever caught the failure drives the
+    shutdown, so that this cannot race the desktop's stop ordering.
     """
 
     created = _install(monkeypatch, "AlpacaIEXStream")
@@ -386,12 +402,18 @@ def test_a_runtime_failure_is_recorded_without_tearing_down(
         MarketDataRequest(provider=PROVIDER_ALPACA_IEX, symbols=("A",))
     )
 
-    service.record_failure("RuntimeError: socket exploded")
+    def explode() -> None:
+        raise RuntimeError("socket exploded")
+
+    monkeypatch.setattr(created[0], "run", explode)
+
+    with pytest.raises(RuntimeError):
+        service.run()
 
     snapshot = service.snapshot()
     assert snapshot.last_error == "RuntimeError: socket exploded"
-    # Still reported as running: nobody asked it to stop yet.
-    assert snapshot.running is True
+    # The failure must not leave a fake running state behind.
+    assert snapshot.running is False
     assert created[0].stopped is False
 
 
@@ -432,6 +454,185 @@ def test_a_successful_rebuild_clears_a_previous_error(monkeypatch) -> None:
     )
 
     assert service.snapshot().last_error is None
+
+
+# -- lifecycle: one stream at a time ------------------------------------
+
+
+def test_a_second_build_is_refused_while_a_stream_is_live(
+    monkeypatch,
+) -> None:
+    """Overwriting ``self._stream`` would drop the first stream out of
+    management: it would keep running while the service reported the new
+    one.  The service must refuse instead of stopping or replacing it.
+    """
+
+    created = _install(monkeypatch, "AlpacaIEXStream")
+    service = _service()
+    first = service.build_stream(
+        MarketDataRequest(provider=PROVIDER_ALPACA_IEX, symbols=("A",))
+    )
+
+    with pytest.raises(module.MarketDataStreamActive):
+        service.build_stream(
+            MarketDataRequest(provider=PROVIDER_ALPACA_IEX, symbols=("B",))
+        )
+
+    # The first stream is still held, untouched, and nothing new was built.
+    assert len(created) == 1
+    assert service.snapshot().symbols == ("A",)
+    assert service.snapshot().running is True
+    # Refusing is not a stream failure: the old one is not stopped for us.
+    assert first.stopped is False
+
+
+def test_a_finished_stream_can_be_replaced(monkeypatch) -> None:
+    """``build`` -> ``run`` -> finished -> the next ``build`` is legal."""
+
+    created = _install(monkeypatch, "AlpacaIEXStream")
+    service = _service()
+    service.build_stream(
+        MarketDataRequest(provider=PROVIDER_ALPACA_IEX, symbols=("A",))
+    )
+    service.run()  # returns immediately: the recorder's run() is inert
+
+    assert service.snapshot().running is False
+
+    service.build_stream(
+        MarketDataRequest(provider=PROVIDER_ALPACA_IEX, symbols=("B",))
+    )
+
+    assert len(created) == 2
+    assert service.snapshot().symbols == ("B",)
+    assert service.snapshot().running is True
+
+
+def test_a_stream_that_returns_normally_stops_reporting_running(
+    monkeypatch,
+) -> None:
+    """``run`` returning on its own must clear ``running``, not just stop()."""
+
+    _install(monkeypatch, "IBKRReadOnlyStream")
+    service = _service()
+    service.build_stream(
+        MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",))
+    )
+    assert service.snapshot().running is True
+
+    service.run()
+
+    snapshot = service.snapshot()
+    assert snapshot.running is False
+    # Ending on its own is not an error.
+    assert snapshot.last_error is None
+
+
+def test_run_without_a_stream_is_refused() -> None:
+    with pytest.raises(RuntimeError):
+        _service().run()
+
+
+def test_run_records_an_exception_and_still_clears_running(
+    monkeypatch,
+) -> None:
+    """The fake-running regression: an exception must not leave ``True``."""
+
+    created = _install(monkeypatch, "IBKRReadOnlyStream")
+    service = _service()
+    service.build_stream(
+        MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",))
+    )
+
+    def explode() -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(created[0], "run", explode)
+
+    with pytest.raises(RuntimeError):
+        service.run()
+
+    snapshot = service.snapshot()
+    assert snapshot.running is False
+    assert snapshot.last_error == "RuntimeError: boom"
+
+
+# -- lifecycle: updating the IBKR config --------------------------------
+
+
+def test_update_config_is_refused_while_a_stream_is_live(
+    monkeypatch,
+) -> None:
+    """The open connection is the one the stream was built with."""
+
+    _install(monkeypatch, "IBKRReadOnlyStream")
+    service = _service()
+    service.build_stream(
+        MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",))
+    )
+
+    with pytest.raises(module.MarketDataStreamActive):
+        service.update_config(_config())
+
+    # Refused means unchanged, not half-applied.
+    assert service.config == _config()
+
+
+def test_update_config_is_allowed_once_the_stream_is_stopped(
+    monkeypatch,
+) -> None:
+    _install(monkeypatch, "IBKRReadOnlyStream")
+    service = _service()
+    service.build_stream(
+        MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",))
+    )
+    service.stop()
+
+    updated = replace_config(client_id=99)
+
+    service.update_config(updated)
+
+    assert service.config == updated
+
+
+def test_update_config_is_allowed_after_the_stream_finished(
+    monkeypatch,
+) -> None:
+    _install(monkeypatch, "IBKRReadOnlyStream")
+    service = _service()
+    service.build_stream(
+        MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",))
+    )
+    service.run()
+
+    updated = replace_config(client_id=99)
+
+    service.update_config(updated)
+
+    assert service.config == updated
+
+
+def test_update_config_only_affects_future_builds(monkeypatch) -> None:
+    """No network work, no reconnect, no stream: the *next* build sees it."""
+
+    created = _install(monkeypatch, "IBKRReadOnlyStream")
+    service = _service()
+    service.build_stream(
+        MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",))
+    )
+    assert created[0].args == (_config(),)
+    service.stop()
+
+    updated = replace_config(client_id=99)
+    service.update_config(updated)
+
+    # Updating built nothing and ran nothing.
+    assert len(created) == 1
+
+    service.build_stream(
+        MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",))
+    )
+
+    assert created[1].args == (updated,)
 
 
 def test_snapshot_is_immutable() -> None:

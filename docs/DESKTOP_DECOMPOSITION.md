@@ -237,9 +237,31 @@ listener 会让每笔行情发布两次。
 `provider` / `symbols` / `running` / `last_error`。quote 真值仍由
 `StreamSnapshot` 独占，service snapshot 不复制任何报价字段。
 
-`stop()` 与 `snapshot()` 都由 `StreamWorker` 真实调用（`request_stop()` 走
-service，运行期失败经 `record_failure()` 回报），不是假接口。`record_failure()`
-**只记录不拆流**：拆流会与 desktop 的停止顺序竞争，由捕获方驱动停机。
+生命周期只有一条路径，且状态不可造假：
+
+```text
+build_stream  →  run  →  stop / 自然结束
+```
+
+* `run()` 由 service 提供，`finally` 清除 running，正常返回与异常退出都不会留下
+  假 running；异常同时写入 `last_error` 后重新抛出，由 `StreamWorker` 带到 GUI
+  线程。`StreamWorker` 是纯 Qt 线程外壳（`self.market_data.run()`），不再直接
+  `self.service.run()`。
+* `stop()` 与 `snapshot()` 都由 `StreamWorker` 真实调用（`request_stop()` 走
+  service），不是假接口。
+* 已有未停止的 stream 时再次 `build_stream()` 抛
+  `MarketDataStreamActive`，**不自动 stop、不偷偷替换**：覆盖 `self._stream` 会让
+  旧流脱离生命周期管理，旧流继续跑而 service 报告新流。旧流 stop/finished 之后
+  才能被替换。
+* `update_config()` 只在没有活动 stream 时接受，且只影响**未来**的
+  `build_stream()`：不做网络操作、不自动 reconnect、不创建 stream。活动 stream
+  期间拒绝（fail closed），因为已建立的连接就是按构造时那份配置连的，改了会让
+  service 描述的连接与实际打开的连接不一致。
+
+`MainWindow._apply_preferences_to_config()` 在更新 `self.config` 之前先问
+service，顺序保证两者不会互相矛盾；设置保存也先应用再落盘，否则会出现「提示已
+保存、下一次连接仍用旧值」。初始化顺序用 `getattr(self, "market_data_service",
+None)` 兜底，且配置未变化时视为 no-op 而非误报拒绝。
 
 ### 7.5 与 supervisor 的关系
 

@@ -36,6 +36,7 @@ from us_quant.market_data_service import (
     MarketDataRequest,
     MarketDataService,
 )
+from us_quant.paths import STATE_ROOT_ENV
 
 
 _APP = QApplication.instance() or QApplication([])
@@ -43,6 +44,7 @@ _APP = QApplication.instance() or QApplication([])
 
 @dataclasses.dataclass
 class _Recorder:
+    args: tuple = ()
     kwargs: dict = dataclasses.field(default_factory=dict)
     stopped: bool = False
     ran: bool = False
@@ -72,7 +74,7 @@ def _install(monkeypatch, name: str) -> list[_Recorder]:
     created: list[_Recorder] = []
 
     def factory(*args, **kwargs) -> _Recorder:
-        recorder = _Recorder(kwargs=kwargs)
+        recorder = _Recorder(args=args, kwargs=kwargs)
         created.append(recorder)
         return recorder
 
@@ -255,6 +257,155 @@ def test_main_window_owns_a_market_data_service() -> None:
         window.deleteLater()
 
 
+def _window_with_tmp_state(monkeypatch, tmp_path) -> MainWindow:
+    """A window whose writable state root is ``tmp_path``.
+
+    Saving preferences writes ``settings/preferences.json``, and the state
+    root is read in ``MainWindow.__init__``, so it has to be redirected
+    before construction -- otherwise these tests would overwrite the
+    operator's real settings file, and would also inherit whatever client
+    id it happens to hold.
+    """
+
+    monkeypatch.setenv(STATE_ROOT_ENV, str(tmp_path))
+    return _window()
+
+
+def _capture_warnings(monkeypatch) -> list[tuple]:
+    """Record ``QMessageBox.warning`` calls instead of blocking on them."""
+
+    calls: list[tuple] = []
+
+    def warning(*args, **kwargs):
+        calls.append((args, kwargs))
+        return None
+
+    monkeypatch.setattr(
+        "us_quant.desktop.QMessageBox.warning", staticmethod(warning)
+    )
+    return calls
+
+
+def _next_client_id(window: MainWindow) -> int:
+    """A client id that differs from the one the window is showing.
+
+    Derived rather than hard-coded so the test does not depend on the
+    baseline config, and clamped to the spin box range so ``setValue``
+    cannot silently ignore it.
+    """
+
+    current = window.settings_ibkr_client_id.value()
+    return current + 1 if current < 999_999 else current - 1
+
+
+def test_saving_settings_reaches_the_service_before_the_next_stream(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """The regression this whole change exists for.
+
+    ``MarketDataService`` holds its own ``IBKRConnectionConfig`` and builds
+    every stream from it.  Saving settings used to update only
+    ``self.config``, so the next stream silently reconnected with the
+    values captured at start-up.
+    """
+
+    created = _install(monkeypatch, "IBKRReadOnlyStream")
+    window = _window_with_tmp_state(monkeypatch, tmp_path)
+    try:
+        startup_config = window.config.ibkr
+        new_client_id = _next_client_id(window)
+        assert new_client_id != startup_config.client_id
+
+        window.settings_ibkr_client_id.setValue(new_client_id)
+        window._save_user_preferences()
+
+        # The service -- not just the window -- carries the new config.
+        assert window.config.ibkr.client_id == new_client_id
+        assert window.market_data_service.config == window.config.ibkr
+
+        index = window.stream_mode.findData(PROVIDER_IBKR)
+        assert index >= 0
+        window.stream_mode.setCurrentIndex(index)
+        window.stream_symbols.setText("SPY")
+        window._start_stream()
+
+        assert len(created) == 1
+        # The adapter is constructed with the *saved* config, and it is a
+        # new object rather than the start-up one.
+        built_with = created[0].args[0]
+        assert isinstance(built_with, IBKRConnectionConfig)
+        assert built_with is not startup_config
+        assert built_with.client_id == new_client_id
+    finally:
+        window._stop_stream()
+        window.deleteLater()
+
+
+def test_saving_settings_is_refused_while_a_stream_is_live(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A live stream must not have its connection config swapped underneath.
+
+    The stream is built directly on the service so the assertion is
+    deterministic: no thread has to start for the service to hold a live
+    stream.  The refusal surfaces as an operator warning, not an escaping
+    exception, so that is what the test pins.
+    """
+
+    _install(monkeypatch, "IBKRReadOnlyStream")
+    warnings = _capture_warnings(monkeypatch)
+    window = _window_with_tmp_state(monkeypatch, tmp_path)
+    try:
+        window.market_data_service.build_stream(
+            MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",))
+        )
+        before = window.market_data_service.config
+
+        window.settings_ibkr_client_id.setValue(_next_client_id(window))
+        window._save_user_preferences()
+
+        assert len(warnings) == 1, "the refusal must be reported"
+        # Refused means *nothing* moved: the service kept its config, the
+        # window kept its config, and the settings file was not rewritten
+        # behind the refusal.
+        assert window.market_data_service.config == before
+        assert window.config.ibkr == before
+        assert not (tmp_path / "settings" / "preferences.json").exists()
+    finally:
+        window._stop_stream()
+        window.deleteLater()
+
+
+def test_saving_identical_settings_while_streaming_is_not_a_refusal(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Only a *change* is refused, so re-saving the same values still works.
+
+    Otherwise the operator would be blocked from saving an unrelated
+    setting (the theme, say) purely because a stream happened to be
+    running.
+    """
+
+    _install(monkeypatch, "IBKRReadOnlyStream")
+    warnings = _capture_warnings(monkeypatch)
+    window = _window_with_tmp_state(monkeypatch, tmp_path)
+    try:
+        window.market_data_service.build_stream(
+            MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",))
+        )
+
+        window._save_user_preferences()  # unchanged values: must not refuse
+
+        assert warnings == []
+        assert (tmp_path / "settings" / "preferences.json").exists()
+    finally:
+        window._stop_stream()
+        window.deleteLater()
+
+
 def test_starting_the_stream_uses_the_service_built_adapter(
     monkeypatch,
 ) -> None:
@@ -277,6 +428,41 @@ def test_starting_the_stream_uses_the_service_built_adapter(
         assert worker.provider == PROVIDER_IBKR
         assert created[0].kwargs["symbols"] == ("SPY", "QQQ")
         assert created[0].kwargs["provider_label"] == "IBKR"
+    finally:
+        window._stop_stream()
+        window.deleteLater()
+
+
+def test_a_refused_build_is_reported_instead_of_escaping(
+    monkeypatch,
+) -> None:
+    """The service's live-stream refusal must not escape the Qt slot.
+
+    ``MarketDataStreamActive`` is a ``RuntimeError``; an exception leaving
+    ``_start_stream`` would abort the process rather than tell the
+    operator.  The window is left with no worker while the service still
+    holds a live stream, which is exactly the state the guard exists for.
+    """
+
+    _install(monkeypatch, "IBKRReadOnlyStream")
+    warnings = _capture_warnings(monkeypatch)
+    window = _window()
+    try:
+        window.market_data_service.build_stream(
+            MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",))
+        )
+        index = window.stream_mode.findData(PROVIDER_IBKR)
+        assert index >= 0
+        window.stream_mode.setCurrentIndex(index)
+        window.stream_symbols.setText("SPY")
+
+        window._start_stream()  # must not raise
+
+        # The operator is told, rather than the process dying.
+        assert len(warnings) == 1
+        # No second stream was built, and nothing was adopted as a worker.
+        assert window.stream_worker is None
+        assert window.market_data_service.snapshot().running is True
     finally:
         window._stop_stream()
         window.deleteLater()

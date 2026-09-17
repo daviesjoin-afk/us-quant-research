@@ -35,6 +35,15 @@ Design constraints (deliberate, kept small on purpose):
 * :class:`MarketDataServiceSnapshot` describes the *service* lifecycle
   only.  Quote truth stays with ``StreamSnapshot``; thread liveness stays
   with the Qt adapter's ``QThread.isRunning()``.
+* the service owns the lifecycle half of the adapter -- ``build_stream``,
+  ``run`` and ``stop`` -- so ``running`` cannot outlive the stream.  A
+  stream that returns or raises is marked finished by ``run``'s
+  ``finally``; ``QThread`` stays in the Qt shell.
+* two operations fail closed rather than guess: a second
+  ``build_stream`` while a stream is live raises instead of silently
+  dropping the first one out of management, and ``update_config`` refuses
+  while a stream is live because the open connection is the one the
+  stream was built with.
 """
 
 from __future__ import annotations
@@ -99,6 +108,17 @@ IBKR_EXTENDED_COVERAGE = (
 DEFAULT_MARKET_EXCHANGE = "SMART"
 
 
+class MarketDataStreamActive(RuntimeError):
+    """A live stream would be disturbed by the operation.
+
+    A ``RuntimeError`` subclass on purpose: refusing is a runtime state
+    conflict, not a programming error in the caller's arguments.  It is a
+    distinct class so the UI can catch *this* refusal without also
+    swallowing the ``RuntimeError``s the IBKR adapter raises for a real
+    connection failure.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class MarketDataRequest:
     """What the operator asked for, with no provider knowledge attached.
@@ -147,6 +167,9 @@ class MarketDataService:
         self._provider: str = ""
         self._symbols: tuple[str, ...] = ()
         self._stop_requested = False
+        # Set once ``run`` returns, however it returns.  Without it a
+        # stream that ended on its own would keep reading as running.
+        self._finished = False
         self._last_error: str | None = None
 
     # -- construction ---------------------------------------------------
@@ -163,8 +186,22 @@ class MarketDataService:
         whatever the adapter raises for missing credentials or bad broker
         configuration.  In every failure case nothing is stored, so a
         later :meth:`snapshot` cannot claim a stream that does not exist.
+
+        Raises ``RuntimeError`` if the service still holds a stream that
+        has neither been stopped nor finished.  Overwriting it would take
+        that stream out of the service's lifecycle management -- it would
+        keep running while the service reported the new one -- so the
+        order is enforced instead of guessed: ``build``, ``run``,
+        ``stop``/finished, then the next ``build``.  The old stream is
+        deliberately *not* stopped or silently replaced here; the caller
+        owns that decision.
         """
 
+        if self._stream is not None and not self._lifecycle_ended:
+            raise MarketDataStreamActive(
+                "market data stream is still active: stop it before "
+                "building another one"
+            )
         if request.provider not in _SUPPORTED_PROVIDER_SET:
             self._last_error = (
                 f"unsupported market data provider: {request.provider!r}"
@@ -191,6 +228,7 @@ class MarketDataService:
             getattr(stream, "symbols", request.symbols)
         )
         self._stop_requested = False
+        self._finished = False
         self._last_error = None
         return stream
 
@@ -278,6 +316,59 @@ class MarketDataService:
 
     # -- lifecycle ------------------------------------------------------
 
+    @property
+    def _lifecycle_ended(self) -> bool:
+        """Whether the built stream may be replaced.
+
+        True once the stream has been asked to stop *or* has returned on
+        its own.  Both mean the service no longer owns a live stream.
+        """
+
+        return self._stop_requested or self._finished
+
+    def run(self) -> None:
+        """Run the built stream to completion, then mark it finished.
+
+        The service owns the lifecycle half of the adapter, so ``running``
+        cannot outlive the call: ``finally`` clears it whether the stream
+        returned normally or raised.  An exception is recorded and
+        re-raised -- the caller decides what to tell the operator.
+        """
+
+        stream = self._stream
+        if stream is None:
+            raise RuntimeError(
+                "no market data stream has been built: call build_stream "
+                "before run"
+            )
+        self._finished = False
+        try:
+            stream.run()
+        except Exception as error:
+            self._last_error = f"{type(error).__name__}: {error}"
+            raise
+        finally:
+            self._finished = True
+
+    def update_config(self, config: IBKRConnectionConfig) -> None:
+        """Replace the IBKR connection config used by future builds.
+
+        Fails closed while a stream is live: the running adapter is
+        connected with the config it was built from, so changing it here
+        would make the service describe a connection that is not the one
+        actually open.  The caller stops the stream first.
+
+        Deliberately inert otherwise -- no network call, no reconnect, no
+        stream creation.  Only the *next* :meth:`build_stream` sees it.
+        """
+
+        if self._stream is not None and not self._lifecycle_ended:
+            raise MarketDataStreamActive(
+                "cannot change the IBKR connection config while a market "
+                "data stream is active: stop it first"
+            )
+        self.config = config
+
     def stop(self) -> None:
         """Ask the built adapter to wind down.  Safe to call repeatedly."""
 
@@ -287,23 +378,11 @@ class MarketDataService:
             return
         stream.stop()
 
-    def record_failure(self, message: str) -> None:
-        """Note a runtime stream failure.
-
-        Construction failures are recorded by :meth:`build_stream`; this
-        is for a failure that surfaces once the stream is already running
-        (the adapter raised out of its own loop).  The stream is not torn
-        down here -- whoever caught the failure drives the shutdown, so
-        that this cannot race the desktop's stop ordering.
-        """
-
-        self._last_error = message
-
     def snapshot(self) -> MarketDataServiceSnapshot:
         return MarketDataServiceSnapshot(
             provider=self._provider,
             symbols=self._symbols,
-            running=self._stream is not None and not self._stop_requested,
+            running=self._stream is not None and not self._lifecycle_ended,
             last_error=self._last_error,
         )
 
@@ -321,6 +400,7 @@ __all__ = [
     "MarketDataRequest",
     "MarketDataService",
     "MarketDataServiceSnapshot",
+    "MarketDataStreamActive",
     "PROVIDER_ALPACA_IEX",
     "PROVIDER_FINNHUB_TRADES",
     "PROVIDER_IBKR",

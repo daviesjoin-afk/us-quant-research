@@ -124,6 +124,7 @@ from us_quant.market_data_service import (
     FinnhubCredentialsMissing,
     MarketDataRequest,
     MarketDataService,
+    MarketDataStreamActive,
 )
 from us_quant.extended_hours import (
     USEquitySession,
@@ -564,12 +565,13 @@ class StreamWorker(QThread):
         self.market_exchange = market_data.market_exchange_for(request)
 
     def run(self) -> None:
+        # ``market_data.run()`` owns the lifecycle half -- it marks the
+        # stream finished and records the failure itself, so this only
+        # has to carry the message to the GUI thread.
         try:
-            self.service.run()
+            self.market_data.run()
         except Exception as error:
-            message = f"{type(error).__name__}: {error}"
-            self.market_data.record_failure(message)
-            self.failed.emit(message)
+            self.failed.emit(f"{type(error).__name__}: {error}")
 
     def request_stop(self) -> None:
         self.market_data.stop()
@@ -7768,8 +7770,13 @@ class MainWindow(QMainWindow):
         except (
             AlpacaCredentialsMissing,
             FinnhubCredentialsMissing,
+            MarketDataStreamActive,
             ValueError,
         ) as error:
+            # ``MarketDataStreamActive`` is a ``RuntimeError``, so it has to
+            # be named here: the service refuses to build while it still
+            # holds a live stream, and an uncaught exception escaping a Qt
+            # slot would abort the process instead of telling the operator.
             self._task_failed(str(error))
             return
         self.stream_worker = worker
@@ -9426,13 +9433,22 @@ class MainWindow(QMainWindow):
                 extended_hours_paper_enabled=(
                     self.settings_extended_hours_paper.isChecked()
                 ),
-            )
+            ).validated()
+            # Applied *before* persisting, and deliberately so.  While a
+            # stream is live the service refuses to change its connection
+            # config, and saving first would leave the settings file and
+            # the live service disagreeing about the port and client id --
+            # the operator would be told the change was saved while the
+            # next stream still used the old values.
+            self._apply_preferences_to_config(preferences)
             saved = self.preferences_store.save(preferences)
         except UserSettingsError as error:
             QMessageBox.warning(self, "设置未保存", str(error))
             return
+        except MarketDataStreamActive as error:
+            QMessageBox.warning(self, "设置未保存", str(error))
+            return
         self.preferences = saved
-        self._apply_preferences_to_config(saved)
         self._apply_theme(saved.theme)
         index = self.stream_mode.findData(saved.market_provider)
         if index >= 0:
@@ -9454,19 +9470,31 @@ class MainWindow(QMainWindow):
     def _apply_preferences_to_config(
         self, preferences: UserPreferences
     ) -> None:
-        self.config = replace(
-            self.config,
-            ibkr=IBKRConnectionConfig(
-                host=preferences.ibkr_host,
-                port=preferences.ibkr_port,
-                client_id=preferences.ibkr_client_id,
-                api_read_only=True,
-                paper_order_submission_enabled=False,
-                connection_timeout_seconds=(
-                    preferences.connection_timeout_seconds
-                ),
+        ibkr = IBKRConnectionConfig(
+            host=preferences.ibkr_host,
+            port=preferences.ibkr_port,
+            client_id=preferences.ibkr_client_id,
+            api_read_only=True,
+            paper_order_submission_enabled=False,
+            connection_timeout_seconds=(
+                preferences.connection_timeout_seconds
             ),
         )
+        # The service holds its own copy of the IBKR config and builds
+        # every future stream from it, so saving settings has to reach it
+        # too -- otherwise the next stream silently reconnects with the
+        # values from start-up.
+        #
+        # Order matters: the service is asked first and ``self.config`` is
+        # only updated once it accepted, so the two cannot end up
+        # disagreeing.  While a stream is live the service refuses (the
+        # open connection is the one it was built with) and this raises;
+        # ``getattr`` keeps initialisation order safe, and an unchanged
+        # config is a no-op rather than a spurious refusal.
+        service = getattr(self, "market_data_service", None)
+        if service is not None and service.config != ibkr:
+            service.update_config(ibkr)
+        self.config = replace(self.config, ibkr=ibkr)
 
     def _save_api_credentials(self) -> None:
         provider = str(

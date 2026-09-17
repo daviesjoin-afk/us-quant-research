@@ -177,6 +177,7 @@ from us_quant.auto_launch import (
     build_auto_launch_plan,
 )
 from us_quant.risk import LayeredRiskLimits
+from us_quant.runtime_supervisor import RuntimeSnapshot, RuntimeSupervisor
 from us_quant.ibkr_paper_orders import (
     IBKRPaperOrderError,
     IBKRPaperOrderUncertainError,
@@ -1003,6 +1004,11 @@ class MainWindow(QMainWindow):
         self.workers = self.task_controller.workers
         self.universe_refresh_cancel_event: Event | None = None
         self.universe_refresh_worker: TaskThread | None = None
+        # Admission gate for new background work.  The runtime supervisor
+        # raises it as the first step of teardown so a close cannot race a
+        # task that is still being admitted.
+        self._closing = False
+        self.runtime_supervisor = RuntimeSupervisor()
 
         self.setWindowTitle(APP_TITLE)
         self.resize(1440, 900)
@@ -1010,6 +1016,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._finalize_layout_behavior()
         self._apply_style()
+        self._register_runtime_components()
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -8563,6 +8570,103 @@ class MainWindow(QMainWindow):
         self._set_connection_settings_enabled(True)
         self._activate_pending_stream_switch()
 
+    def _register_runtime_components(self) -> None:
+        """Hand generic runtime lifecycle to the supervisor.
+
+        Only resources whose teardown is unconditional and carries no
+        trading semantics are registered here.  Paper order submission,
+        reconciliation, the execution lease and the workflow state machine
+        deliberately stay owned by ``MainWindow`` (see
+        ``docs/DESKTOP_DECOMPOSITION.md``).
+        """
+
+        supervisor = self.runtime_supervisor
+        # Order 10-30: stop the heartbeats first so no new work is scheduled
+        # while the rest of the stack is being released.  These timers are
+        # started in ``_build_ui``; the probe makes them releasable anyway.
+        supervisor.register(
+            "paper_order_heartbeat",
+            stop=self.paper_order_timer.stop,
+            is_running=self.paper_order_timer.isActive,
+            order=10,
+        )
+        supervisor.register(
+            "extended_session_heartbeat",
+            stop=self.extended_session_timer.stop,
+            is_running=self.extended_session_timer.isActive,
+            order=20,
+        )
+        supervisor.register(
+            "stream_snapshot_timer",
+            stop=self.stream_timer.stop,
+            is_running=self.stream_timer.isActive,
+            order=30,
+        )
+        # Order 100+: release the market data stream.  ``_stop_stream`` owns
+        # the trading-safety guards (it refuses while a Paper session holds
+        # positions) and returns False rather than raising, so the return
+        # value is mapped to a join verdict for the supervisor.
+        supervisor.register(
+            "market_data_stream",
+            stop=self._stop_stream,
+            join=lambda: not (
+                self.stream_worker is not None
+                and self.stream_worker.isRunning()
+            ),
+            is_running=lambda: (
+                self.stream_worker is not None
+                and self.stream_worker.isRunning()
+            ),
+            order=100,
+        )
+        # Order 200+: background research/data workers.  ``wait`` is the Qt
+        # join; it returns False when the thread did not exit in time.
+        supervisor.register(
+            "background_workers",
+            stop=self._request_worker_stops,
+            join=self._join_background_workers,
+            is_running=lambda: bool(self._running_workers()),
+            order=200,
+        )
+        supervisor.register(
+            "closing_gate",
+            stop=self._close_admission_gate,
+            order=5,
+        )
+
+    def _close_admission_gate(self) -> None:
+        """First teardown step: refuse any new background work."""
+
+        self._closing = True
+
+    def _running_workers(self) -> list[TaskThread]:
+        return [worker for worker in self.workers if worker.isRunning()]
+
+    def _request_worker_stops(self) -> None:
+        """Ask every cancellable worker to stop.
+
+        ``TaskThread`` has no generic cancel hook -- each task owns its own
+        ``Event`` -- so the only universal signal is the universe refresh
+        cancel event, which is the one long-running network task the desktop
+        can interrupt.
+        """
+
+        event = self.universe_refresh_cancel_event
+        if event is not None:
+            event.set()
+
+    def _join_background_workers(self) -> bool:
+        """Wait for running workers; report whether all of them exited."""
+
+        all_exited = True
+        for worker in self._running_workers():
+            if not worker.wait(3_000):
+                all_exited = False
+                self._log(
+                    "后台任务线程未在 3 秒内退出；已记录并继续释放其他资源。"
+                )
+        return all_exited
+
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         running_tasks = [
             worker for worker in self.workers if worker.isRunning()
@@ -8600,7 +8704,12 @@ class MainWindow(QMainWindow):
             self.shadow_engine.stop()
             if self.shadow_workflow.active:
                 self.shadow_workflow.stop()
-        self._stop_stream()
+        # Generic runtime teardown: stop new work, release the heartbeats and
+        # the market data stream, join the workers, and keep going even if
+        # one of them fails.  Trading-safety ordering above is unchanged --
+        # the supervisor only runs after the Paper session is finalized.
+        snapshot = self.runtime_supervisor.shutdown()
+        self._report_runtime_shutdown(snapshot)
         if (
             self.stream_worker is not None
             and self.stream_worker.isRunning()
@@ -8613,6 +8722,22 @@ class MainWindow(QMainWindow):
             )
             return
         event.accept()
+
+    def _report_runtime_shutdown(self, snapshot: RuntimeSnapshot) -> None:
+        """Surface supervisor teardown failures instead of swallowing them."""
+
+        if self.runtime_supervisor.errors():
+            for message in self.runtime_supervisor.errors():
+                self._log(f"运行期资源释放异常：{message}")
+            self._record_runtime_event(
+                severity="warning",
+                component="runtime",
+                code="RUNTIME_SHUTDOWN_PARTIAL",
+                message="；".join(self.runtime_supervisor.errors()),
+            )
+        else:
+            self._log("运行期资源已全部释放。")
+
 
     def _populate_artifact_table(self) -> None:
         translations = {
@@ -8909,6 +9034,11 @@ class MainWindow(QMainWindow):
         resource_group: str = "research",
         suppress_busy_message: bool = False,
     ) -> bool:
+        if self._closing:
+            # Shutdown raises the admission gate before releasing anything,
+            # so a task cannot be admitted while teardown is in flight.
+            self._log("程序正在关闭；拒绝启动新的后台任务。")
+            return False
         if not self.task_controller.can_start(resource_group):
             message = (
                 f"已有{resource_group}任务在运行。为避免同类文件和数据库"

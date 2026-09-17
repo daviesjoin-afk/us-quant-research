@@ -1,11 +1,28 @@
 param(
-    [string]$Python = ".\.venv313\Scripts\python.exe",
+    [string]$Python = "",
     [string]$OutputRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$PythonPath = (Resolve-Path (Join-Path $ProjectRoot $Python)).Path
+
+if ([string]::IsNullOrWhiteSpace($Python)) {
+    $managedPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+    $legacyPython = Join-Path $ProjectRoot ".venv313\Scripts\python.exe"
+    if (Test-Path -LiteralPath $managedPython) {
+        $PythonPath = $managedPython
+    }
+    elseif (Test-Path -LiteralPath $legacyPython) {
+        $PythonPath = $legacyPython
+    }
+    else {
+        throw "No managed virtual environment was found. Run scripts\bootstrap_windows.ps1 first."
+    }
+}
+else {
+    $PythonPath = (Resolve-Path (Join-Path $ProjectRoot $Python)).Path
+}
+
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $DistributionRoot = Join-Path $ProjectRoot "dist"
 }
@@ -21,23 +38,49 @@ $ArchivePath = Join-Path $DistributionRoot "USQuantResearch-win64.zip"
 Push-Location $ProjectRoot
 try {
     $env:PYTHONPATH = Join-Path $ProjectRoot "src"
-    & $PythonPath -m PyInstaller `
-        --noconfirm `
-        --clean `
-        --distpath $DistributionRoot `
-        --workpath $BuildRoot `
-        --windowed `
-        --name "USQuantResearch" `
-        --version-file "scripts\windows_version_info.txt" `
-        --contents-directory "." `
-        --paths "src" `
-        --collect-submodules "ibapi" `
-        --hidden-import "google.protobuf" `
-        --add-data "configs;configs" `
-        --add-data "data\reference;data\reference" `
-        --add-data "data\normalized\ibkr\daily;data\normalized\ibkr\daily" `
-        --add-data "research\results;research\results" `
-        "desktop_main.py"
+
+    & $PythonPath -c "import PySide6; import ibapi"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Desktop packaging requires PySide6 and the official IBKR Python API. Run scripts\bootstrap_windows.ps1, then scripts\install_ibkr_api.ps1."
+    }
+
+    $Version = (& $PythonPath -c "from importlib.metadata import version; print(version('us-quant'))").Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($Version)) {
+        throw "Unable to read the installed us-quant package version."
+    }
+
+    $pyInstallerArgs = @(
+        "--noconfirm",
+        "--clean",
+        "--distpath", $DistributionRoot,
+        "--workpath", $BuildRoot,
+        "--windowed",
+        "--name", "USQuantResearch",
+        "--version-file", "scripts\windows_version_info.txt",
+        "--contents-directory", ".",
+        "--paths", "src",
+        "--collect-submodules", "ibapi",
+        "--hidden-import", "google.protobuf"
+    )
+
+    $dataMappings = @(
+        @{ Source = "configs"; Destination = "configs" },
+        @{ Source = "data\reference"; Destination = "data\reference" },
+        @{ Source = "data\normalized\ibkr\daily"; Destination = "data\normalized\ibkr\daily" },
+        @{ Source = "research\results"; Destination = "research\results" }
+    )
+    foreach ($mapping in $dataMappings) {
+        $sourcePath = Join-Path $ProjectRoot $mapping.Source
+        if (Test-Path -LiteralPath $sourcePath) {
+            $pyInstallerArgs += @("--add-data", "$($mapping.Source);$($mapping.Destination)")
+        }
+        else {
+            Write-Warning "Optional build data not found; skipping: $($mapping.Source)"
+        }
+    }
+    $pyInstallerArgs += "desktop_main.py"
+
+    & $PythonPath -m PyInstaller @pyInstallerArgs
     if ($LASTEXITCODE -ne 0) {
         throw "PyInstaller build failed with exit code $LASTEXITCODE"
     }
@@ -75,7 +118,7 @@ try {
         -LiteralPath $ArchivePath `
         -Algorithm SHA256).Hash
     $ReleaseInfo = @(
-        "USQuantResearch 0.23.0"
+        "USQuantResearch $Version"
         "BuiltAt=$([DateTime]::UtcNow.ToString('o'))"
         "Archive=$(Split-Path -Leaf $ArchivePath)"
         "SHA256=$ArchiveHash"
@@ -87,6 +130,7 @@ try {
 
     Write-Output "Application: $ApplicationDirectory"
     Write-Output "Archive: $ArchivePath"
+    Write-Output "Version: $Version"
     Write-Output "SHA256: $ArchiveHash"
 }
 finally {

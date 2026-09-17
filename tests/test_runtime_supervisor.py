@@ -716,3 +716,123 @@ def test_ordinary_component_failures_are_still_recorded_not_raised() -> None:
     assert component.state == STATE_FAILED
     assert component.exit_ok is False
     assert "boom" in (component.last_error or "")
+
+
+# -- cancelling a refused close ------------------------------------------
+
+
+class _DrainableWorker:
+    """A worker whose ``stop`` is a *request*: it is still running after it.
+
+    This is the real shape of the drain contract (``_request_worker_stops``
+    sets an ``Event``; the thread keeps finishing its writes), so the probe
+    deliberately stays live until ``join`` is reached.
+    """
+
+    def __init__(self) -> None:
+        self.cancel_requests = 0
+        self.join_calls = 0
+
+    def stop(self) -> None:
+        self.cancel_requests += 1
+
+    def join(self) -> bool:
+        self.join_calls += 1
+        return True
+
+    def is_running(self) -> bool:
+        return self.join_calls == 0
+
+
+def test_cancel_shutdown_lifts_the_gate_after_phase_one_only() -> None:
+    """A refused close must hand the client back, not leave it gated."""
+
+    supervisor = RuntimeSupervisor()
+    workers = _DrainableWorker()
+    supervisor.register(
+        "workers",
+        stop=workers.stop,
+        join=workers.join,
+        is_running=workers.is_running,
+        drain=True,
+    )
+    supervisor.begin_shutdown()
+
+    supervisor.cancel_shutdown()
+
+    assert supervisor.shutting_down is False
+    # Phase one only *asked*; cancelling must not join, release or re-signal.
+    assert workers.join_calls == 0
+    assert workers.cancel_requests == 1
+    assert workers.is_running() is True
+
+
+def test_cancel_shutdown_restores_admission_for_later_work() -> None:
+    """The recovery path is ordinary gated work, so registration must work."""
+
+    supervisor = RuntimeSupervisor()
+    supervisor.register("worker", start=lambda: None)
+    supervisor.begin_shutdown()
+    supervisor.cancel_shutdown()
+
+    supervisor.register("recovery", start=lambda: None)
+    supervisor.start("recovery")
+
+    assert supervisor.is_registered("recovery")
+    assert supervisor.shutting_down is False
+
+
+def test_cancel_shutdown_is_safe_without_a_preceding_begin() -> None:
+    supervisor = RuntimeSupervisor()
+    supervisor.register("worker", start=lambda: None)
+
+    supervisor.cancel_shutdown()
+
+    assert supervisor.shutting_down is False
+    supervisor.start("worker")
+
+
+def test_cancel_shutdown_refuses_once_resources_were_released() -> None:
+    """A released runtime must never be presented as open again."""
+
+    supervisor = RuntimeSupervisor()
+    worker = RecordingResource("worker")
+    _register(supervisor, worker)
+    supervisor.start("worker")
+    supervisor.begin_shutdown()
+    supervisor.shutdown()
+
+    with pytest.raises(RuntimeError, match="released resources"):
+        supervisor.cancel_shutdown()
+
+    # The refusal must not have reopened the gate either.
+    assert supervisor.shutting_down is True
+    assert worker.running is False
+
+
+def test_cancel_shutdown_refuses_after_a_single_component_stop() -> None:
+    """``stop`` releases too, so it is also past the point of no return."""
+
+    supervisor = RuntimeSupervisor()
+    worker = RecordingResource("worker")
+    _register(supervisor, worker)
+    supervisor.start("worker")
+    supervisor.begin_shutdown()
+    supervisor.stop("worker")
+
+    with pytest.raises(RuntimeError, match="released resources"):
+        supervisor.cancel_shutdown()
+
+
+def test_cancel_shutdown_after_begin_is_idempotent() -> None:
+    supervisor = RuntimeSupervisor()
+    workers = RecordingResource("workers")
+    supervisor.register("workers", stop=workers.stop, drain=True)
+
+    supervisor.begin_shutdown()
+    supervisor.cancel_shutdown()
+    supervisor.cancel_shutdown()
+
+    assert supervisor.shutting_down is False
+    # Cancelling is bookkeeping: it must not re-signal the drain either.
+    assert workers.stop_calls == 1

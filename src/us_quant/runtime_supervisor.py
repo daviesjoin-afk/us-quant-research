@@ -20,6 +20,12 @@ Design constraints (deliberate, kept small on purpose):
   :meth:`RuntimeSupervisor.shutdown` releases everything -- so a caller can
   refuse new work immediately while a long-running task is still finishing
   its writes;
+* phase one is reversible and phase two is not.  :meth:`RuntimeSupervisor.cancel_shutdown`
+  undoes a drain that released nothing, because a *refused* close (the
+  operator is told to reconcile first) has to hand the client back in a
+  usable state; once any resource has actually been released the drain can
+  no longer be cancelled and the call raises rather than pretending a
+  released runtime came back;
 * shutdown never lets one failure skip the remaining components;
 * only ``Exception`` is caught around component callables: a
   ``KeyboardInterrupt``/``SystemExit`` means the operator is aborting the
@@ -96,6 +102,11 @@ class RuntimeSupervisor:
     def __init__(self) -> None:
         self._components: dict[str, _Component] = {}
         self._shutting_down = False
+        # Set as soon as the *release* pass is entered or any single component
+        # is actually released.  From that point on phase one can no longer be
+        # undone: a released timer/thread/connection cannot be conjured back,
+        # so ``cancel_shutdown`` must refuse rather than pretend it can.
+        self._release_entered = False
 
     # -- registration ---------------------------------------------------
 
@@ -183,6 +194,7 @@ class RuntimeSupervisor:
         """Stop one resource.  A failure is recorded *and* re-raised."""
 
         component = self._require(name)
+        self._release_entered = True
         self._release(component, tolerate=False)
 
     # -- bulk operations -------------------------------------------------
@@ -227,6 +239,35 @@ class RuntimeSupervisor:
                 self._record_error(component, error, phase="drain")
         return self.snapshot()
 
+    def cancel_shutdown(self) -> None:
+        """Undo phase one after the close request was *refused*.
+
+        A refused close is not an aborted shutdown: the operator is told to
+        reconcile first and then keeps using the client, so the admission
+        gate has to come back up.  The Paper recovery path runs through the
+        same gated task entry point as ordinary work, and leaving the gate
+        down would lock it out permanently -- halted, unable to reconcile,
+        unable to finalize, unable to exit.
+
+        This restores *admission only*.  It starts nothing, restarts nothing,
+        creates no thread, touches no broker and performs no I/O; a drain
+        component's ``stop`` is a cancel request, so undoing it is purely
+        bookkeeping.  It is therefore only legal while nothing has actually
+        been released.
+
+        Raises:
+            RuntimeError: if the release pass has already run.  A released
+                timer, thread or connection cannot be restored, and silently
+                reporting success would hand the caller a runtime that looks
+                open but is half torn down.
+        """
+
+        if self._release_entered:
+            raise RuntimeError(
+                "cannot cancel a shutdown that already released resources"
+            )
+        self._shutting_down = False
+
     def shutdown(self) -> RuntimeSnapshot:
         """Release every live resource, isolating each failure.
 
@@ -238,9 +279,13 @@ class RuntimeSupervisor:
         A component whose ``stop`` or ``join`` raises never prevents the
         remaining components from being released, and its error stays
         visible in the returned snapshot.
+
+        Entering this method ends phase one for good: it is the point of no
+        return, so a later :meth:`cancel_shutdown` refuses.
         """
 
         self._shutting_down = True
+        self._release_entered = True
         for component in self._in_order():
             self._release(component, tolerate=True)
         return self.snapshot()

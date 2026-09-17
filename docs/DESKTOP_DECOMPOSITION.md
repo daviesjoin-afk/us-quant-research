@@ -162,3 +162,33 @@ finalized 之后运行，**不改变任何交易语义**。
 窗口永远关不掉。该参数只在这一处使用，并由
 `tests/test_desktop_runtime_teardown.py::test_a_non_essential_task_is_still_refused_once_closing`
 锁定其窄度（其余任何资源组仍被拒绝）。
+
+### 6.2 被拒绝的关闭必须能撤销：`cancel_shutdown()`
+
+阶段一有一个后果必须显式处理：**一次被 `event.ignore()` 拒绝的关闭，不是中止的
+关闭**。用户被要求先完成手工对账，然后继续使用客户端，但闸门已经抬起 —— 而
+HALTED/RECONCILING* 的唯一出口（对账、重新确认、最终收尾）全都是走
+`_start_task()` 的任务。闸门留在原处，就会锁死用户被要求执行的那一步：
+停在那里、无法对账、无法 finalize、无法退出。
+
+因此 supervisor 提供第二阶段入口的**逆操作**：
+
+- `RuntimeSupervisor.cancel_shutdown()` —— 仅恢复准入。它不启动任何东西、不重建
+  线程、不碰券商、不做 I/O。drain 组件的 `stop` 是取消请求，撤销它纯粹是记账。
+- 一旦**释放**阶段已经开始（`shutdown()` 或 `stop()` 被调用过），`cancel_shutdown()`
+  抛出 `RuntimeError`，闸门保持关闭并记录日志：一个已半释放的运行时绝不能对外
+  表现成「可用」。这就是 `_release_entered` 标志存在的唯一原因。
+
+`desktop.py` 侧对应 `_cancel_close_drain()`，只在 `_paper_needs_manual_recovery()`
+为真时由 `_release_close_drain_if_recovery_required()` 触发。
+
+**挂钩点是单一汇聚处。** 所有进入 HALTED/RECONCILING* 的路径（共 7 处调用）都
+经过 `_apply_paper_workflow_button_state()`，所以恢复钩子放在那里，而不是在每个
+调用点重复。这不是风格问题：**自动**路径 `RUNNING → STOPPING → 收尾证明失败 →
+HALTED` 在关闭那一刻的相位上是**看不出来的**（当时还是 RUNNING/PAUSED），只在
+证明失败之后才出现。只在 `closeEvent` 里检查相位，会漏掉这条路径，于是用户看到
+「请手工对账」的提示，而准入闸门正卡着对账任务本身。
+
+**范围界定。** `RUNNING`/`PAUSED` 被 `_paper_needs_manual_recovery()` 明确排除：
+关闭这两个相位仍有自动出路（`request_stop` → `STOPPING` → 零状态证明），所以
+证明运行期间闸门应当保持关闭。只有那三个「没有自动出口」的相位才触发撤销。

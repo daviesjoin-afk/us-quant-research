@@ -420,3 +420,337 @@ def test_a_non_essential_task_is_still_refused_once_closing(monkeypatch) -> None
                 )
     finally:
         window.deleteLater()
+
+
+# -- a refused close must not lock the Paper recovery path ---------------
+
+
+class _HaltedPaperWorkflow:
+    """A controller stub in a phase only the operator can leave.
+
+    ``HALTED``/``RECONCILING``/``RECONCILING_READY`` have no automatic exit:
+    each is left by an explicit reconciliation step, and every one of those
+    steps is a task.  This is the shape the deadlock came from.
+    """
+
+    def __init__(self, phase, *, finalized: bool = False) -> None:
+        from us_quant.paper_workflow import PaperWorkflowPhase  # noqa: F401
+
+        self.phase = phase
+        self._finalized = finalized
+        self._halted = False
+        self.stop_requests = 0
+
+    @property
+    def result(self):
+        """A ``PaperSessionResult``-shaped object the render path accepts."""
+
+        finalized = self._finalized
+
+        class _State:
+            pass
+
+        state = _State()
+        state.finalized = finalized  # type: ignore[attr-defined]
+        state.halted = self._halted  # type: ignore[attr-defined]
+
+        class _Result:
+            pass
+
+        result = _Result()
+        result.state = state  # type: ignore[attr-defined]
+        result.engine_snapshot = None  # type: ignore[attr-defined]
+        result.health = None  # type: ignore[attr-defined]
+        result.events = ()  # type: ignore[attr-defined]
+        return result
+
+    def halt(self) -> object:
+        """Model ``poll()`` discovering unsafe health: any phase -> HALTED."""
+
+        from us_quant.paper_workflow import PaperWorkflowPhase
+
+        self.phase = PaperWorkflowPhase.HALTED
+        self._halted = True
+        return self.result
+
+    def fail_finalization_refresh(self) -> bool:
+        from us_quant.paper_workflow import PaperWorkflowPhase
+
+        if self.phase is not PaperWorkflowPhase.STOPPING:
+            return False
+        self.phase = PaperWorkflowPhase.HALTED
+        return True
+
+    def request_stop(self, _snapshot: object) -> object:
+        """Model the real automatic route: RUNNING/PAUSED -> STOPPING.
+
+        An operator-only phase has no automatic stop, so asking for one there
+        is a test bug and must be loud rather than silently accepted.
+        """
+
+        from us_quant.paper_workflow import PaperWorkflowPhase
+
+        if self.phase not in {
+            PaperWorkflowPhase.RUNNING,
+            PaperWorkflowPhase.PAUSED,
+        }:
+            raise AssertionError(f"no automatic stop from {self.phase}")
+        self.stop_requests += 1
+        self.phase = PaperWorkflowPhase.STOPPING
+        return self.result
+
+
+def _install_paper_workflow(monkeypatch, window: MainWindow, workflow: object):
+    """Swap the controller and restore it, waiting out any worker it started."""
+
+    real = window.paper_workflow
+    window.paper_workflow = workflow  # type: ignore[assignment]
+    return real
+
+
+def _restore_paper_workflow(window: MainWindow, real: object) -> None:
+    window.paper_workflow = real  # type: ignore[assignment]
+    for worker in window._running_workers():
+        worker.wait(5_000)
+    _APP.processEvents()
+
+
+def test_close_on_a_halted_session_refuses_without_tearing_paper_down(
+    monkeypatch,
+) -> None:
+    """Requirement 1: HALTED + not finalized -> refused, nothing disconnected."""
+
+    from us_quant.paper_workflow import PaperWorkflowPhase
+
+    _silence_dialogs(monkeypatch)
+    window = _window()
+    real = _install_paper_workflow(
+        monkeypatch, window, _HaltedPaperWorkflow(PaperWorkflowPhase.HALTED)
+    )
+    try:
+        disconnected: list[str] = []
+
+        class _ServiceSpy:
+            def disconnect(self) -> None:  # pragma: no cover - must not run
+                disconnected.append("disconnect")
+
+        window.paper_order_service = _ServiceSpy()  # type: ignore[assignment]
+        shutdowns: list[str] = []
+        real_shutdown = window.runtime_supervisor.shutdown
+
+        def spy_shutdown():
+            shutdowns.append("shutdown")
+            return real_shutdown()
+
+        window.runtime_supervisor.shutdown = spy_shutdown  # type: ignore[method-assign]
+
+        assert _close_verdict(window) is False
+
+        # No Paper teardown, no full runtime release, service still held.
+        assert disconnected == []
+        assert shutdowns == []
+        assert window.paper_order_service is not None
+    finally:
+        _restore_paper_workflow(window, real)
+        window.deleteLater()
+
+
+def test_halted_close_does_not_lock_out_manual_reconciliation(
+    monkeypatch,
+) -> None:
+    """Requirement 2: the recovery task must be admitted after a refused close."""
+
+    from us_quant.paper_workflow import PaperWorkflowPhase
+
+    _silence_dialogs(monkeypatch)
+    window = _window()
+    real = _install_paper_workflow(
+        monkeypatch, window, _HaltedPaperWorkflow(PaperWorkflowPhase.HALTED)
+    )
+    try:
+        assert _close_verdict(window) is False
+        # The refused close handed the client back.
+        assert window._closing is False
+        assert window.runtime_supervisor.shutting_down is False
+
+        # And the real recovery entry point is admitted again.
+        admitted = window._start_task(
+            lambda report: None,
+            on_success=lambda result: None,
+            start_message="manual reconciliation",
+            resource_group="broker",
+            suppress_busy_message=True,
+        )
+        assert admitted is True
+    finally:
+        _restore_paper_workflow(window, real)
+        window.deleteLater()
+
+
+def test_reconciling_phases_also_release_the_close_drain(monkeypatch) -> None:
+    """RECONCILING / RECONCILING_READY are operator-only too."""
+
+    from us_quant.paper_workflow import PaperWorkflowPhase
+
+    for phase in (
+        PaperWorkflowPhase.RECONCILING,
+        PaperWorkflowPhase.RECONCILING_READY,
+    ):
+        _silence_dialogs(monkeypatch)
+        window = _window()
+        real = _install_paper_workflow(monkeypatch, window, _HaltedPaperWorkflow(phase))
+        try:
+            assert _close_verdict(window) is False
+            assert window._closing is False, phase
+            assert window.runtime_supervisor.shutting_down is False, phase
+        finally:
+            _restore_paper_workflow(window, real)
+            window.deleteLater()
+
+
+def test_finalization_failure_during_close_reopens_manual_recovery(
+    monkeypatch,
+) -> None:
+    """Requirement 3: RUNNING -> close -> STOPPING -> failure -> HALTED.
+
+    The automatic failure route is the one a phase check at close time cannot
+    see: the gate is raised while the phase is still ``RUNNING``, and only
+    later does the finalization failure land the session in ``HALTED``.
+    """
+
+    from us_quant.paper_workflow import PaperWorkflowPhase
+
+    _silence_dialogs(monkeypatch)
+    window = _window()
+    running = _HaltedPaperWorkflow(PaperWorkflowPhase.RUNNING)
+    real = _install_paper_workflow(monkeypatch, window, running)
+    try:
+        # Hold the zero-state proof in flight so the close path stops at
+        # STOPPING with the gate still down -- the real state while the proof
+        # runs.  Without this the missing service fails the proof immediately
+        # and the release below happens inside the same close call.
+        window._paper_finalization_inflight = True
+
+        assert _close_verdict(window) is False
+        # RUNNING has an automatic route, so the gate stays down for it.
+        assert window._closing is True
+        assert running.phase is PaperWorkflowPhase.STOPPING
+
+        # The proof then fails: STOPPING -> HALTED, the automatic route.
+        window._paper_finalization_failed("zero-state proof failed")
+
+        assert window.paper_workflow.phase is PaperWorkflowPhase.HALTED
+        assert window._closing is False
+        assert window.runtime_supervisor.shutting_down is False
+
+        admitted = window._start_task(
+            lambda report: None,
+            on_success=lambda result: None,
+            start_message="manual reconciliation",
+            resource_group="broker",
+            suppress_busy_message=True,
+        )
+        assert admitted is True
+    finally:
+        _restore_paper_workflow(window, real)
+        window.deleteLater()
+
+
+def test_ordinary_tasks_stay_refused_while_an_automatic_stop_drains(
+    monkeypatch,
+) -> None:
+    """Requirement 4: the automatic path must keep the gate down."""
+
+    from us_quant.paper_workflow import PaperWorkflowPhase
+
+    _silence_dialogs(monkeypatch)
+    window = _window()
+    running = _HaltedPaperWorkflow(PaperWorkflowPhase.RUNNING)
+    real = _install_paper_workflow(monkeypatch, window, running)
+    try:
+        with _BlockingWorker(window):
+            assert _close_verdict(window) is False
+
+        assert window._closing is True
+        assert window.runtime_supervisor.shutting_down is True
+        assert (
+            window._start_task(
+                lambda report: None,
+                on_success=lambda result: None,
+                start_message="ordinary task",
+                resource_group="research",
+                suppress_busy_message=True,
+            )
+            is False
+        )
+    finally:
+        _restore_paper_workflow(window, real)
+        window.deleteLater()
+
+
+def test_close_after_finalization_still_completes_the_teardown(
+    monkeypatch,
+) -> None:
+    """Requirement 5: a genuinely finalized session closes normally."""
+
+    from us_quant.paper_workflow import PaperWorkflowPhase
+
+    _silence_dialogs(monkeypatch)
+    window = _window()
+    real = _install_paper_workflow(
+        monkeypatch,
+        window,
+        _HaltedPaperWorkflow(PaperWorkflowPhase.FINALIZED, finalized=True),
+    )
+    try:
+        assert _close_verdict(window) is True
+
+        assert not window.paper_order_timer.isActive()
+        assert not window.extended_session_timer.isActive()
+        assert not window.stream_timer.isActive()
+        assert window.runtime_supervisor.errors() == ()
+    finally:
+        _restore_paper_workflow(window, real)
+        window.deleteLater()
+
+
+def test_a_halt_discovered_during_the_stop_reopens_manual_recovery(
+    monkeypatch,
+) -> None:
+    """Requirement 3 (second route): the *render* path is the other way in.
+
+    ``_apply_paper_workflow_result`` is where a poll that discovers unsafe
+    health lands the session in ``HALTED`` while a close is already draining.
+    That is a different call site from ``_paper_finalization_failed``, so it
+    needs its own regression.
+    """
+
+    from us_quant.paper_workflow import PaperWorkflowPhase
+
+    _silence_dialogs(monkeypatch)
+    window = _window()
+    running = _HaltedPaperWorkflow(PaperWorkflowPhase.RUNNING)
+    real = _install_paper_workflow(monkeypatch, window, running)
+    try:
+        window._paper_finalization_inflight = True
+        assert _close_verdict(window) is False
+        assert window._closing is True
+
+        # A watchdog poll reports unsafe health mid-drain: STOPPING -> HALTED.
+        window._apply_paper_workflow_result(running.halt())
+
+        assert window.paper_workflow.phase is PaperWorkflowPhase.HALTED
+        assert window._closing is False
+        assert window.runtime_supervisor.shutting_down is False
+
+        admitted = window._start_task(
+            lambda report: None,
+            on_success=lambda result: None,
+            start_message="manual reconciliation",
+            resource_group="broker",
+            suppress_busy_message=True,
+        )
+        assert admitted is True
+    finally:
+        _restore_paper_workflow(window, real)
+        window.deleteLater()

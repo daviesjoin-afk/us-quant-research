@@ -907,7 +907,7 @@ def test_the_wrapped_implementation_is_still_far_larger_than_this_boundary() -> 
 
     The wrapped implementation is spread over the adapter, the journal and the
     models; the boundary must stay a fraction of all three together. The
-    threshold is 2.5x rather than 3x because the sum sits at roughly 3.0x, and
+    threshold is 2.5x rather than 3x because the sum sits at roughly 4.0x, and
     a guard that close to the measured value would fail for no real reason.
     """
 

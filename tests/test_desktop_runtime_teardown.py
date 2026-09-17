@@ -275,10 +275,19 @@ def test_close_with_a_running_task_does_not_tear_down_paper_or_kill_threads(
             disconnected: list[str] = []
 
             class _ServiceSpy:
+                def connect(self) -> object:
+                    return self
+
+                def connection_snapshot(self):
+                    class _Connection:
+                        connected = False
+
+                    return _Connection()
+
                 def disconnect(self) -> None:  # pragma: no cover - must not run
                     disconnected.append("disconnect")
 
-            window.paper_order_service = _ServiceSpy()  # type: ignore[assignment]
+            _install_order_service_spy(window, _ServiceSpy())
             shutdowns: list[str] = []
             real_shutdown = window.runtime_supervisor.shutdown
 
@@ -294,7 +303,7 @@ def test_close_with_a_running_task_does_not_tear_down_paper_or_kill_threads(
             # No Paper/broker teardown, no supervisor release.
             assert disconnected == []
             assert shutdowns == []
-            assert window.paper_order_service is not None
+            assert window.paper_trading.has_order_service() is True
             # The heartbeat timers were not released either: phase one only
             # signals, it does not release.
             assert window.paper_order_timer.isActive()
@@ -500,6 +509,30 @@ class _HaltedPaperWorkflow:
         return self.result
 
 
+def _install_order_service_spy(window: MainWindow, spy: object) -> None:
+    """Give the window's Paper service one *owned* order service.
+
+    Ownership lives in ``PaperTradingService`` now, so a test can no longer
+    assign ``window.paper_order_service``.  It rebuilds the service with an
+    injected factory and promotes one candidate -- the production path -- so the
+    window really holds an order service when the close path runs.
+    """
+
+    from us_quant.paper_trading_service import PaperTradingService
+
+    window.paper_trading = PaperTradingService(
+        workflow_getter=lambda: window.paper_workflow,
+        order_service_factory=lambda config, *, journal, extended_hours_enabled: spy,
+    )
+    window.paper_trading.connect_candidate(
+        "teardown-spy",
+        config=object(),
+        journal=object(),
+        extended_hours_enabled=False,
+    )
+    window.paper_trading.promote_candidate("teardown-spy")
+
+
 def _install_paper_workflow(monkeypatch, window: MainWindow, workflow: object):
     """Swap the controller and restore it, waiting out any worker it started."""
 
@@ -531,10 +564,19 @@ def test_close_on_a_halted_session_refuses_without_tearing_paper_down(
         disconnected: list[str] = []
 
         class _ServiceSpy:
+            def connect(self) -> object:
+                return self
+
+            def connection_snapshot(self):
+                class _Connection:
+                    connected = False
+
+                return _Connection()
+
             def disconnect(self) -> None:  # pragma: no cover - must not run
                 disconnected.append("disconnect")
 
-        window.paper_order_service = _ServiceSpy()  # type: ignore[assignment]
+        _install_order_service_spy(window, _ServiceSpy())
         shutdowns: list[str] = []
         real_shutdown = window.runtime_supervisor.shutdown
 
@@ -549,7 +591,7 @@ def test_close_on_a_halted_session_refuses_without_tearing_paper_down(
         # No Paper teardown, no full runtime release, service still held.
         assert disconnected == []
         assert shutdowns == []
-        assert window.paper_order_service is not None
+        assert window.paper_trading.has_order_service() is True
     finally:
         _restore_paper_workflow(window, real)
         window.deleteLater()

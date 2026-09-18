@@ -61,6 +61,16 @@ REFACTORED_METHODS = (
     "_refresh_queue_table",
 )
 
+# Methods a *later* round legitimately rewrote.  Each round appends the
+# methods it declared; the union is what this guard tolerates relative to
+# its own base commit.  Adding a name here that no round declared is exactly
+# the scope violation this guard exists to catch -- and the round that adds
+# one must ship its own guard against its own base commit.
+LATER_ROUND_METHODS = (
+    "_settings_tab",  # step 11: the Settings page moved into a panel
+    "_refresh_universe",  # step 13: the refresh moved into a service
+)
+
 # Spec 34/58: these must stay byte-identical to the base commit.
 FROZEN_METHODS = (
     "_data_tab",
@@ -913,7 +923,7 @@ def test_only_the_declared_methods_changed() -> None:
         if before != after:
             changed.append(name)
 
-    declared = set(REFACTORED_METHODS) | {"_settings_tab"}
+    declared = set(REFACTORED_METHODS) | set(LATER_ROUND_METHODS)
     assert set(changed) <= declared
     for name in REFACTORED_METHODS:
         if name != "__init__":

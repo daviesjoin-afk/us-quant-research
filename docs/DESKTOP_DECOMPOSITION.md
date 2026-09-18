@@ -991,13 +991,12 @@ class HistoryQueueSnapshot:
     running: int
     completed: int
     failed: int
-    total: int
 
 
 class DesktopHistoryService:
     def __init__(self, *, queue_path: Path, data_root: Path) -> None: ...
 
-    def schedule_universe(self, universe, *, batch_size: int) -> HistoryScheduleResult
+    def schedule_universe(self, universe) -> HistoryScheduleResult
     def run_ibkr(self, config, *, maximum_jobs: int, progress=None) -> dict[str, int]
     def run_public(self, *, maximum_jobs: int, progress=None) -> dict[str, int]
     def reset_failed(self) -> int
@@ -1025,8 +1024,9 @@ class DesktopHistoryService:
 `MainWindow` 方法总数 **191 → 191**（不变）。其余 185 个方法与 Paper / AutoQuant /
 RuntimeSupervisor 全栈逐字节未变。
 
-`_refresh_queue_table` 只调用 `snapshot()` **一次**，`jobs` 与四个计数取自同一份快照——
-不存在「先查列表、再查计数」的两次读取窗口。
+`MainWindow` 每次 refresh 只调用 `service.snapshot()` **一次**；service 内部仍执行
+两个 store read，并**刻意保持旧版顺序：`list_jobs()` → `counts()`**。顺序是语义的一部分——
+runner 可能在这两次读取之间改动队列，反过来读会悄悄改掉旧 UI 的观察语义。
 
 ### 13.3 语义必须保持不变的四点
 
@@ -1057,7 +1057,7 @@ RuntimeSupervisor 全栈逐字节未变。
 | `desktop.py` | 9025 行 / 356,403 字节 | 9016 行 / 356,158 字节 |
 | `desktop_history_service.py` | — | 152 行 / 4,919 字节 |
 | `tests/test_desktop_history_service.py` | — | 1364 行 / 40,865 字节 |
-| 全套测试 | 924 passed | 977 passed |
+| 全套测试 | 924 passed | 979 passed |
 
 （同为 LF 归一化后的 blob 口径；before 取 `git show 2b3e3f53:src/us_quant/desktop.py`。
 行数不是本步的核心指标——本步的目的是把编排逻辑与 Qt 分离，见 §63。）
@@ -1095,3 +1095,191 @@ failed 都是 0，互换后不可见 → 补一个五个计数互不相同的用
 
 第二轮暴露 3 个存活，根因是 **harness 的期望测试名没跟着新测试改名**（`-k` 没选中），
 修正后全杀。这条与第十一步同款：**期望测试名必须实测确认，不能凭印象写**。
+
+## 14. 第十三步：`desktop_universe_service.py`（官方标的刷新边界）
+
+第十三步把 `MainWindow._refresh_universe()` 里「准备可写目录 → 下载官方标的 →
+SEC profile 增量核验」这段非 Qt 编排搬进
+`src/us_quant/desktop_universe_service.py`。这是 extraction：不改刷新语义、
+不改参数、不改中文文案、不改取消链路。
+
+```text
+MainWindow
+    ↓ Event / TaskThread / 中文 progress / buttons
+
+DesktopUniverseService
+    ↓
+ApplicationPaths.ensure_user_reference_catalog
+refresh_official_universe
+enrich_us_profiles
+```
+
+`MainWindow` 继续拥有 `Event`、`TaskThread` 与全部中文 presentation；
+service 是纯应用层代码——**不 import Qt、不开线程、无 `cancel()` / `stop()` /
+`request_stop()`**。
+
+### 14.1 边界形状
+
+```python
+@dataclass(frozen=True, slots=True)
+class UniverseRefreshProgress:
+    stage: str
+    done: int = 0
+    total: int = 0
+    detail: str = ""
+
+
+UniverseProgressCallback = Callable[[UniverseRefreshProgress], None]
+
+
+class DesktopUniverseService:
+    def __init__(self, *, paths: ApplicationPaths) -> None: ...
+
+    def refresh(
+        self,
+        *,
+        should_stop: Callable[[], bool] | None,
+        progress: UniverseProgressCallback | None = None,
+    ) -> UniverseSnapshot: ...
+```
+
+构造函数**只保存 `paths`**，不做任何 I/O：不 `ensure_user_reference_catalog()`、
+不 `mkdir`、不 `copytree`、不发网络请求、不读 `universe.json`、不碰 SEC。
+唯一被赋值的属性就是 `self.paths`（由 AST 守卫钉住：`self.<attr>` 的 Store
+集合必须恰好等于 `{"paths"}`）。
+
+`refresh()` 返回的仍是 `enrich_us_profiles(...)` 的原值——`UniverseSnapshot`，
+不再包一层业务结果，`TaskThread.succeeded → _universe_refreshed` 收到的还是原来那个对象。
+
+### 14.2 顺序是契约
+
+```text
+emit prepare_reference
+↓
+ensure_user_reference_catalog()
+↓
+emit download_official
+↓
+refresh_official_universe(...)
+↓
+emit enrich_sec_start
+↓
+enrich_us_profiles(...)
+```
+
+**先发 progress 再建目录**，不能反过来：旧代码就是这个顺序，且测试同时从两侧钉住
+（事件序列，以及「事件发生时目录尚不存在」）。
+
+四个 stage 名是模块常量，不散落 magic string：
+
+```python
+STAGE_PREPARE_REFERENCE = "prepare_reference"
+STAGE_DOWNLOAD_OFFICIAL = "download_official"
+STAGE_ENRICH_SEC_START = "enrich_sec_start"
+STAGE_ENRICH_SEC = "enrich_sec"
+```
+
+### 14.3 逐项保持的 domain 参数
+
+`refresh_official_universe`：`cache_root=reference_root`（来自
+`ensure_user_reference_catalog()`，**不是**自己拼 `state_root / data / reference`）、
+`leader_seed_path=resource_root/configs/sector_leaders.csv`、
+`china_denylist_path=resource_root/configs/china_concept_denylist.csv`、
+`should_stop=should_stop`、**`save_snapshot=False`**。
+
+`save_snapshot=False` 是安全语义，不是性能开关：第一阶段只下载完名单、尚未完成
+enrichment 时若写 `universe.json`，取消会把上一份完整可用的 snapshot 覆盖成半成品。
+只有 `enrich_us_profiles(...)` 完整结束后才由 domain 层保存最终快照。
+
+`enrich_us_profiles`：`snapshot` 原样传入、`cache_root=reference_root / "sec_profiles"`、
+`max_new_profiles=500`、`should_stop=should_stop`。**不传**
+`request_interval_seconds` / `user_agent` / `timeout`，继续走 `universe.py` 默认值。
+500 是产品常量（`SEC_PROFILE_BUDGET`），不是配置项——UI 文案引用了这个数字。
+
+### 14.4 取消与异常原样传播
+
+`should_stop` 是**同一个 callable**，原样透传给两次 domain 调用（测试断言
+`seen[0] is stop` 且 `seen[1] is stop`）。service 不新建 `Event`、不缓存 callback。
+
+`UniverseRefreshCancelled` 原样向上：不 catch、不返回 `False`/`None`、不转成
+`RuntimeError`。链路保持
+`should_stop() → UniverseRefreshCancelled → refresh() → TaskThread.run() →
+cancelled.emit() → _task_cancelled()`。
+
+其他异常同样不包装：没有 `except OSError` / `except Exception`，也不新建
+`DesktopUniverseError` 之类错误体系。`universe.py` 自己已有 fallback 语义，
+service 只做编排。
+
+### 14.5 中文 presentation 留在窗口
+
+service 不含任何中文文案。窗口在 task 内部把 domain event 翻成文本：
+
+| stage | 窗口显示 |
+|---|---|
+| `prepare_reference` | 正在准备可写的用户参考数据目录… |
+| `download_official` | 正在下载 Nasdaq Trader 与 SEC 官方标的清单… |
+| `enrich_sec_start` | 正在增量核验 500 家 SEC 注册地与行业… |
+| `enrich_sec` | SEC 核验 {done}/{total}：{detail} |
+
+未知 stage **fail closed**：`raise ValueError(f"unknown universe refresh stage: ...")`，
+让 service/window 协议漂移在测试里暴露，而不是静默丢一条进度。
+
+`detail` 原样透传：失败时 `universe.py` 可能传 `"XYZ 暂时失败: timeout"`，
+不 parse、不截断、不翻译。
+
+### 14.6 允许变化的两个方法
+
+| 方法 | before | after |
+|---|---|---|
+| `__init__` | 183 行 | 184 行 |
+| `_refresh_universe` | 46 行 | 38 行 |
+
+`MainWindow` 方法总数 **191 → 191**。其余 189 个方法逐字节未变，包括
+`_cancel_universe_refresh` / `_reset_universe_refresh_controls` /
+`_universe_refreshed` / `_request_worker_stops` / `_worker_finished` /
+`_task_cancelled` / `_run_scan` / `_scan_finished` /
+`_prepare_auto_quant_candidates` / `_auto_candidate_preparation_failed` /
+`_auto_market_scan_finished` / `_select_auto_quant_candidates` / `_start_task` /
+`closeEvent`（14 个 byte-equivalence 用例）。
+
+`_start_task` 返回 `False` 时语义不变：不保存 `cancel_event`、不设
+`universe_refresh_worker`、不动 refresh / cancel 按钮，直接 return。
+
+### 14.7 体积与测试
+
+| | before | after |
+|---|---|---|
+| `desktop.py` | 9015 行 / 356,078 字节 | 9014 行 / 356,115 字节 |
+| `desktop_universe_service.py` | — | 114 行 / 3,987 字节 |
+| `tests/test_desktop_universe_service.py` | — | 1261 行 / 37,905 字节 |
+| 全套测试 | 979 passed | 1032 passed |
+
+（同为 LF 归一化后的 blob 口径；before 取 `git show 5109a180:src/us_quant/desktop.py`。
+行数不是本步的重点——本步的价值是把 Qt 生命周期与 universe 应用编排分开。）
+
+### 14.8 覆盖强度
+
+`tests/test_desktop_universe_service.py` 共 **40 个测试函数**，参数化展开后 **53 个用例**：
+**10 个函数是结构守卫**（参数化后 23 个用例），30 个是行为断言（30 个用例）。
+
+结构守卫按 AST 读源码：service 的 import 集合**相等**（只允许 `__future__` /
+`collections.abc` / `dataclasses` / `us_quant.paths` / `us_quant.universe`）、
+不 import Qt、不 import 窗口或任何兄弟 service、不开线程、无取消 API、
+`self.<attr>` 的 Store 集合恰好是 `{"paths"}`、`desktop.py` 不再出现
+`refresh_official_universe(` / `enrich_us_profiles(` 且不再 import 这两个符号。
+
+一个值得记的细节：§28 要求 `prioritized_research_symbols` 继续保留，而它在
+`_auto_market_scan_finished` 正文里也出现——所以那条守卫查的是 **import 符号集合**，
+不是源码子串；子串断言在 import 被删掉后仍然通过（首轮 sweep 就抓到了这一点）。
+
+### 14.9 突变结果
+
+**49/49 全杀、0 存活、0 问题、0 挂起、0 SKIP。** 首轮 1 个存活
+（`prioritized-symbols-dropped`）暴露的正是上面那条弱断言：期望测试用的是
+`assert name in source`，删掉 import 后正文里的同名调用仍让断言成立。
+改成查 `_imported_names()` 集合后全杀。
+
+本轮同时修正了第十二步文档的四点漂移（§61）：`HistoryQueueSnapshot` 没有 `total`
+字段、`schedule_universe` 不接 `batch_size`、`snapshot()` 内部仍是**两次** store read
+且顺序必须是 `list_jobs() → counts()`、以及测试数改为 979。第三点不是文字问题——
+它是合并 PR #12 前最后修掉的行为漂移，写错就等于把错误语义固化成文档。

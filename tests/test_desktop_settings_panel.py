@@ -94,6 +94,10 @@ DECLARED_REFACTOR_SURFACE = frozenset(
         "_run_public_history",
         "_retry_failed",
         "_refresh_queue_table",
+        # Later rounds append the methods they declared.  This guard is
+        # relative to the step-11 base commit, so it tolerates everything
+        # the following rounds legitimately rewrote.
+        "_refresh_universe",  # step 13: the refresh moved into a service
     }
 )
 

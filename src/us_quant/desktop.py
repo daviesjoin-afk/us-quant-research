@@ -85,6 +85,7 @@ from us_quant.artifact_state import (
 from us_quant.paths import ApplicationPaths
 from us_quant.account_ledger import AccountLedger
 from us_quant.history_queue import HistoryJobStore, run_history_queue
+from us_quant.desktop_history_service import DesktopHistoryService
 from us_quant.ibkr import IBKRConnectionConfig, probe_ibkr_socket
 from us_quant.ibkr_readonly import (
     IBKRReadOnlySnapshot,
@@ -340,6 +341,10 @@ class MainWindow(QMainWindow):
         )
         self.queue_path = (
             self.paths.runtime_root / "history_jobs.sqlite3"
+        )
+        self.history_service = DesktopHistoryService(
+            queue_path=self.queue_path,
+            data_root=self.data_root,
         )
         self.scan_path = (
             self.paths.research_results_root / "market_scan.json"
@@ -2971,17 +2976,12 @@ class MainWindow(QMainWindow):
                 "请先刷新官方标的。",
             )
             return
-        symbols = prioritized_research_symbols(
-            self.universe,
-            limit=None,
-        )
-        store = HistoryJobStore(self.queue_path)
-        inserted = store.schedule(symbols)
+        result = self.history_service.schedule_universe(self.universe)
         self._refresh_queue_table()
         self._refresh_market_scope_summary()
         self._log(
-            f"全部非中概研究池已加入历史队列：新增 {inserted} 个，"
-            f"队列合计 {len(store.list_jobs()):,} 个；"
+            f"全部非中概研究池已加入历史队列：新增 {result.inserted} 个，"
+            f"队列合计 {result.total:,} 个；"
             "下载仍按页面所选批量执行。"
         )
 
@@ -2989,11 +2989,8 @@ class MainWindow(QMainWindow):
         maximum_jobs = self.batch_size.value()
 
         def task(progress: Callable[[str], None]) -> dict[str, int]:
-            store = HistoryJobStore(self.queue_path)
-            return run_history_queue(
+            return self.history_service.run_ibkr(
                 self.config.ibkr,
-                store,
-                data_root=self.data_root,
                 maximum_jobs=maximum_jobs,
                 progress=lambda done, total, symbol, status: (
                     progress(f"{done}/{total} {symbol}：{status}")
@@ -3027,11 +3024,7 @@ class MainWindow(QMainWindow):
         maximum_jobs = self.batch_size.value()
 
         def task(progress: Callable[[str], None]) -> dict[str, int]:
-            store = HistoryJobStore(self.queue_path)
-            store.reset_failed()
-            return run_public_history_queue(
-                store,
-                data_root=self.data_root,
+            return self.history_service.run_public(
                 maximum_jobs=maximum_jobs,
                 progress=lambda done, total, symbol, status: (
                     progress(f"{done}/{total} {symbol}：{status}")
@@ -3050,8 +3043,7 @@ class MainWindow(QMainWindow):
         )
 
     def _retry_failed(self) -> None:
-        store = HistoryJobStore(self.queue_path)
-        count = store.reset_failed()
+        count = self.history_service.reset_failed()
         self._refresh_queue_table()
         self._log(f"已将 {count} 个失败任务放回待处理队列。")
 
@@ -8191,15 +8183,14 @@ class MainWindow(QMainWindow):
             self._log(f"{symbol} 图表读取失败：{error}")
 
     def _refresh_queue_table(self) -> None:
-        store = HistoryJobStore(self.queue_path)
-        jobs = store.list_jobs()
-        counts = store.counts()
+        snapshot = self.history_service.snapshot()
+        jobs = snapshot.jobs
         visible_jobs = jobs[:2500]
         if hasattr(self, "history_queue_summary"):
             self.history_queue_summary.setText(
                 f"历史队列 {len(jobs):,} · 待处理 "
-                f"{counts['pending']:,} · 完成 {counts['completed']:,} · "
-                f"失败 {counts['failed']:,}。"
+                f"{snapshot.pending:,} · 完成 {snapshot.completed:,} · "
+                f"失败 {snapshot.failed:,}。"
                 + (
                     " 表格仅显示前 2,500 条，任务会全部保留并执行。"
                     if len(jobs) > 2500

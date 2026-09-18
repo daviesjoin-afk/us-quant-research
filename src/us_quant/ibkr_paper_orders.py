@@ -16,6 +16,11 @@ from us_quant.ibkr import (
     IBKRConnectionConfig,
     connect_ibkr_client,
 )
+from us_quant.ibkr_paper_gateway import (
+    IBKRPaperGatewayError,
+    PaperGatewayHandshake,
+    create_paper_gateway_app,
+)
 from us_quant.ibkr_readonly import (
     INFORMATIONAL_ERROR_CODES,
     mask_account_id,
@@ -183,6 +188,8 @@ class IBKRPaperOrderService:
         self._submit_latency: dict[str, dict[str, str]] = {}
         self._refresh_lock = Lock()
         self._refresh_attempt: _ReconciliationRefreshAttempt | None = None
+        # One connection-attempt truth: replaced by every connect().
+        self._handshake = PaperGatewayHandshake()
 
     def connect(self) -> PaperOrderConnection:
         if self._connected and self._client is not None:
@@ -196,343 +203,22 @@ class IBKRPaperOrderService:
         self._next_order_id_floor = (
             self.journal.max_broker_order_id() + 1
         )
+        handshake = PaperGatewayHandshake()
+        self._handshake = handshake
+        errors = handshake.errors
+        ready = handshake.ready
+        accounts_ready = handshake.accounts_ready
+        summary_ready = handshake.summary_ready
+        positions_ready = handshake.positions_ready
+        open_orders_ready = handshake.open_orders_ready
+        completed_orders_ready = handshake.completed_orders_ready
+        executions_ready = handshake.executions_ready
         try:
-            from ibapi.client import EClient
-            from ibapi.wrapper import EWrapper
-        except ImportError as error:
-            raise IBKRPaperOrderError(
-                "未安装 IBKR 官方 Python API"
-            ) from error
-
-        ready = Event()
-        accounts_ready = Event()
-        summary_ready = Event()
-        positions_ready = Event()
-        open_orders_ready = Event()
-        completed_orders_ready = Event()
-        executions_ready = Event()
-        errors: list[str] = []
-        service = self
-
-        class PaperApp(EWrapper, EClient):
-            def __init__(self) -> None:
-                EWrapper.__init__(self)
-                EClient.__init__(self, wrapper=self)
-
-            def _current(self) -> bool:
-                return service._is_current_connection(
-                    self, connection_epoch
-                )
-
-            def nextValidId(self, orderId: int) -> None:
-                if not self._current():
-                    return
-                # CR-4 fix: never let a Gateway restart regress the order-id
-                # counter.  IBKR order IDs must stay strictly increasing so a
-                # reused ID can never amend/cancel an earlier journal order.
-                service._next_order_id = max(
-                    int(orderId), service._next_order_id_floor
-                )
-                service._mark_state_changed()
-                ready.set()
-
-            def managedAccounts(self, accountsList: str) -> None:
-                if not self._current():
-                    return
-                accounts = tuple(
-                    row.strip()
-                    for row in accountsList.split(",")
-                    if row.strip()
-                )
-                if len(accounts) != 1:
-                    errors.append(
-                        "Paper 自动量化要求 Gateway 只返回一个账户"
-                    )
-                elif not accounts[0].upper().startswith("DU"):
-                    errors.append("拒绝非 DU 账户：Live 永久阻断")
-                else:
-                    service._account = accounts[0]
-                    service._mark_state_changed()
-                accounts_ready.set()
-
-            def error(
-                self,
-                reqId: int,
-                *args: Any,
-            ) -> None:
-                if not self._current():
-                    return
-                if len(args) >= 4:
-                    _, errorCode, errorString, *_ = args
-                elif len(args) >= 2:
-                    errorCode, errorString, *_ = args
-                else:
-                    return
-                errorCode = int(errorCode)
-                if errorCode not in INFORMATIONAL_ERROR_CODES:
-                    with service._correlation_lock:
-                        known_order = reqId in service._intent_by_order
-                    if not known_order:
-                        errors.append(
-                            f"{errorCode}: {str(errorString)}"
-                        )
-                    service._record_error(
-                        reqId, errorCode, str(errorString)
-                    )
-
-            def orderStatus(
-                self,
-                orderId: int,
-                status: str,
-                filled,
-                remaining,
-                avgFillPrice: float,
-                permId: int,
-                parentId: int,
-                lastFillPrice: float,
-                clientId: int,
-                whyHeld: str,
-                mktCapPrice: float,
-            ) -> None:
-                if not self._current():
-                    return
-                del permId, parentId, clientId, mktCapPrice
-                service._record_order_status(
-                    orderId=orderId,
-                    status=status,
-                    filled=Decimal(str(filled)),
-                    remaining=Decimal(str(remaining)),
-                    average_fill_price=(
-                        Decimal(str(avgFillPrice))
-                        if avgFillPrice > 0
-                        else None
-                    ),
-                    last_fill_price=(
-                        Decimal(str(lastFillPrice))
-                        if lastFillPrice > 0
-                        else None
-                    ),
-                    message=whyHeld or "",
-                )
-
-            def openOrder(
-                self,
-                orderId: int,
-                contract,
-                order,
-                orderState,
-            ) -> None:
-                if not self._current():
-                    return
-                attempt = service._refresh_attempt_for(
-                    self, connection_epoch
-                )
-                broker_order = _paper_broker_order(
-                    orderId, contract, order, orderState
-                )
-                if attempt is not None:
-                    attempt.open_orders[broker_order.broker_order_id] = (
-                        broker_order
-                    )
-                    return
-                service._recover_intent_mapping(orderId)
-                with service._state_lock:
-                    service._open_broker_orders[int(orderId)] = (
-                        f"{str(contract.symbol).upper()} "
-                        f"{str(order.action).upper()} "
-                        f"{order.totalQuantity} · "
-                        f"{str(orderState.status)}"
-                    )
-                    service._broker_observed_at = _now_iso()
-                    service._mark_state_changed_locked()
-
-            def openOrderEnd(self) -> None:
-                if not self._current():
-                    return
-                attempt = service._refresh_attempt_for(
-                    self, connection_epoch
-                )
-                if attempt is not None:
-                    attempt.open_orders_ready.set()
-                    return
-                open_orders_ready.set()
-
-            def accountSummary(
-                self,
-                reqId: int,
-                account: str,
-                tag: str,
-                value: str,
-                currency: str,
-            ) -> None:
-                if not self._current():
-                    return
-                del currency
-                if account != service._account:
-                    return
-                try:
-                    parsed = Decimal(value)
-                except Exception:
-                    return
-                attempt = service._refresh_attempt_for(
-                    self, connection_epoch
-                )
-                if attempt is not None and reqId == 91_101:
-                    attempt.account_metrics[tag] = parsed
-                    return
-                with service._state_lock:
-                    service._account_metrics[tag] = parsed
-                    service._broker_observed_at = _now_iso()
-                    service._mark_state_changed_locked()
-
-            def accountSummaryEnd(self, reqId: int) -> None:
-                if not self._current():
-                    return
-                attempt = service._refresh_attempt_for(
-                    self, connection_epoch
-                )
-                if attempt is not None and reqId == 91_101:
-                    attempt.summary_ready.set()
-                    return
-                if reqId == 91_001:
-                    summary_ready.set()
-
-            def position(
-                self,
-                account: str,
-                contract,
-                pos,
-                avgCost: float,
-            ) -> None:
-                if not self._current():
-                    return
-                if account != service._account:
-                    return
-                symbol = str(contract.symbol).upper()
-                row = PaperBrokerPosition(
-                    symbol=symbol,
-                    quantity=Decimal(str(pos)),
-                    average_cost=Decimal(str(avgCost)),
-                )
-                attempt = service._refresh_attempt_for(
-                    self, connection_epoch
-                )
-                if attempt is not None:
-                    if row.quantity != 0:
-                        attempt.positions[symbol] = row
-                    return
-                with service._state_lock:
-                    if row.quantity == 0:
-                        service._broker_positions.pop(
-                            symbol, None
-                        )
-                    else:
-                        service._broker_positions[symbol] = row
-                    service._broker_observed_at = _now_iso()
-                    service._mark_state_changed_locked()
-
-            def positionEnd(self) -> None:
-                if not self._current():
-                    return
-                attempt = service._refresh_attempt_for(
-                    self, connection_epoch
-                )
-                if attempt is not None:
-                    attempt.positions_ready.set()
-                    return
-                positions_ready.set()
-
-            def pnl(
-                self,
-                reqId: int,
-                dailyPnL: float,
-                unrealizedPnL: float,
-                realizedPnL: float,
-            ) -> None:
-                if not self._current():
-                    return
-                del reqId
-                with service._state_lock:
-                    service._daily_pnl = _optional_decimal(
-                        dailyPnL
-                    )
-                    service._unrealized_pnl = _optional_decimal(
-                        unrealizedPnL
-                    )
-                    service._realized_pnl = _optional_decimal(
-                        realizedPnL
-                    )
-                    service._broker_observed_at = _now_iso()
-                    service._mark_state_changed_locked()
-
-            def execDetails(
-                self, reqId: int, contract, execution
-            ) -> None:
-                if not self._current():
-                    return
-                attempt = service._refresh_attempt_for(
-                    self, connection_epoch
-                )
-                if attempt is not None and reqId == 91_103:
-                    attempt.executions.append((contract, execution))
-                    return
-                del reqId
-                service._record_execution(contract, execution)
-
-            def execDetailsEnd(self, reqId: int) -> None:
-                if not self._current():
-                    return
-                attempt = service._refresh_attempt_for(
-                    self, connection_epoch
-                )
-                if attempt is not None and reqId == 91_103:
-                    attempt.executions_ready.set()
-                    return
-                if reqId == 91_003:
-                    executions_ready.set()
-
-            def completedOrder(
-                self, contract, order, orderState
-            ) -> None:
-                if not self._current():
-                    return
-                order_id = int(order.orderId)
-                attempt = service._refresh_attempt_for(
-                    self, connection_epoch
-                )
-                broker_order = _paper_broker_order(
-                    order_id, contract, order, orderState
-                )
-                if attempt is not None:
-                    attempt.completed_orders[order_id] = broker_order
-                    return
-                service._recover_intent_mapping(order_id)
-                with service._state_lock:
-                    service._completed_broker_orders[order_id] = (
-                        str(orderState.status),
-                        Decimal(str(order.totalQuantity)),
-                    )
-                    service._broker_observed_at = _now_iso()
-                    service._mark_state_changed_locked()
-
-            def completedOrdersEnd(self) -> None:
-                if not self._current():
-                    return
-                attempt = service._refresh_attempt_for(
-                    self, connection_epoch
-                )
-                if attempt is not None:
-                    attempt.completed_orders_ready.set()
-                    return
-                completed_orders_ready.set()
-
-            def connectionClosed(self) -> None:
-                if not self._current():
-                    return
-                service._connected = False
-                service._invalidate_connection_snapshot()
-
-        app = PaperApp()
+            app = create_paper_gateway_app(
+                sink=self, epoch=connection_epoch
+            )
+        except IBKRPaperGatewayError as error:
+            raise IBKRPaperOrderError(str(error)) from error
         self._client = app
         try:
             connect_ibkr_client(app, self.config)
@@ -918,6 +604,306 @@ class IBKRPaperOrderService:
             self._connection_generation += 1
             self._snapshot_complete = True
             self._connection_observed_at = _now_iso()
+
+    # ------------------------------------------------------------------
+    # IBKR callback handlers.
+    #
+    # The bridge in ``us_quant.ibkr_paper_gateway`` only forwards callbacks;
+    # everything below is what a callback *means* for the Paper session.
+    # These bodies were relocated verbatim from the nested ``PaperApp`` class,
+    # so the ordering of the state writes is unchanged.
+    # ------------------------------------------------------------------
+
+    def gateway_is_current(self, app: Any, epoch: int) -> bool:
+        """Whether a callback still belongs to the live physical connection.
+
+        The bridge asks this before forwarding anything; the judgement itself
+        stays here, where the client identity and the epoch both live.
+        """
+
+        return self._is_current_connection(app, epoch)
+
+    def gateway_next_valid_id(
+        self, app: Any, epoch: int, order_id: int
+    ) -> None:
+        # CR-4 fix: never let a Gateway restart regress the order-id
+        # counter.  IBKR order IDs must stay strictly increasing so a
+        # reused ID can never amend/cancel an earlier journal order.
+        self._next_order_id = max(
+            int(order_id), self._next_order_id_floor
+        )
+        self._mark_state_changed()
+        self._handshake.ready.set()
+
+    def gateway_managed_accounts(
+        self, app: Any, epoch: int, accounts_list: str
+    ) -> None:
+        accounts = tuple(
+            row.strip()
+            for row in accounts_list.split(",")
+            if row.strip()
+        )
+        if len(accounts) != 1:
+            self._handshake.errors.append(
+                "Paper 自动量化要求 Gateway 只返回一个账户"
+            )
+        elif not accounts[0].upper().startswith("DU"):
+            self._handshake.errors.append("拒绝非 DU 账户：Live 永久阻断")
+        else:
+            self._account = accounts[0]
+            self._mark_state_changed()
+        self._handshake.accounts_ready.set()
+
+    def gateway_error(
+        self,
+        app: Any,
+        epoch: int,
+        req_id: int,
+        args: tuple[Any, ...],
+    ) -> None:
+        if len(args) >= 4:
+            _, errorCode, errorString, *_ = args
+        elif len(args) >= 2:
+            errorCode, errorString, *_ = args
+        else:
+            return
+        errorCode = int(errorCode)
+        if errorCode not in INFORMATIONAL_ERROR_CODES:
+            with self._correlation_lock:
+                known_order = req_id in self._intent_by_order
+            if not known_order:
+                self._handshake.errors.append(
+                    f"{errorCode}: {str(errorString)}"
+                )
+            self._record_error(
+                req_id, errorCode, str(errorString)
+            )
+
+    def gateway_order_status(
+        self,
+        app: Any,
+        epoch: int,
+        order_id: int,
+        status: str,
+        filled: Any,
+        remaining: Any,
+        average_fill_price: Any,
+        last_fill_price: Any,
+        message: str,
+    ) -> None:
+        self._record_order_status(
+            orderId=order_id,
+            status=status,
+            filled=Decimal(str(filled)),
+            remaining=Decimal(str(remaining)),
+            average_fill_price=(
+                Decimal(str(average_fill_price))
+                if average_fill_price > 0
+                else None
+            ),
+            last_fill_price=(
+                Decimal(str(last_fill_price))
+                if last_fill_price > 0
+                else None
+            ),
+            message=message or "",
+        )
+
+    def gateway_open_order(
+        self,
+        app: Any,
+        epoch: int,
+        order_id: int,
+        contract: Any,
+        order: Any,
+        order_state: Any,
+    ) -> None:
+        attempt = self._refresh_attempt_for(app, epoch)
+        broker_order = _paper_broker_order(
+            order_id, contract, order, order_state
+        )
+        if attempt is not None:
+            attempt.open_orders[broker_order.broker_order_id] = (
+                broker_order
+            )
+            return
+        self._recover_intent_mapping(order_id)
+        with self._state_lock:
+            self._open_broker_orders[int(order_id)] = (
+                f"{str(contract.symbol).upper()} "
+                f"{str(order.action).upper()} "
+                f"{order.totalQuantity} · "
+                f"{str(order_state.status)}"
+            )
+            self._broker_observed_at = _now_iso()
+            self._mark_state_changed_locked()
+
+    def gateway_open_order_end(self, app: Any, epoch: int) -> None:
+        attempt = self._refresh_attempt_for(app, epoch)
+        if attempt is not None:
+            attempt.open_orders_ready.set()
+            return
+        self._handshake.open_orders_ready.set()
+
+    def gateway_account_summary(
+        self,
+        app: Any,
+        epoch: int,
+        req_id: int,
+        account: str,
+        tag: str,
+        value: str,
+    ) -> None:
+        if account != self._account:
+            return
+        try:
+            parsed = Decimal(value)
+        except Exception:
+            return
+        attempt = self._refresh_attempt_for(app, epoch)
+        if attempt is not None and req_id == 91_101:
+            attempt.account_metrics[tag] = parsed
+            return
+        with self._state_lock:
+            self._account_metrics[tag] = parsed
+            self._broker_observed_at = _now_iso()
+            self._mark_state_changed_locked()
+
+    def gateway_account_summary_end(
+        self, app: Any, epoch: int, req_id: int
+    ) -> None:
+        attempt = self._refresh_attempt_for(app, epoch)
+        if attempt is not None and req_id == 91_101:
+            attempt.summary_ready.set()
+            return
+        if req_id == 91_001:
+            self._handshake.summary_ready.set()
+
+    def gateway_position(
+        self,
+        app: Any,
+        epoch: int,
+        account: str,
+        contract: Any,
+        position: Any,
+        average_cost: Any,
+    ) -> None:
+        if account != self._account:
+            return
+        symbol = str(contract.symbol).upper()
+        row = PaperBrokerPosition(
+            symbol=symbol,
+            quantity=Decimal(str(position)),
+            average_cost=Decimal(str(average_cost)),
+        )
+        attempt = self._refresh_attempt_for(app, epoch)
+        if attempt is not None:
+            if row.quantity != 0:
+                attempt.positions[symbol] = row
+            return
+        with self._state_lock:
+            if row.quantity == 0:
+                self._broker_positions.pop(
+                    symbol, None
+                )
+            else:
+                self._broker_positions[symbol] = row
+            self._broker_observed_at = _now_iso()
+            self._mark_state_changed_locked()
+
+    def gateway_position_end(self, app: Any, epoch: int) -> None:
+        attempt = self._refresh_attempt_for(app, epoch)
+        if attempt is not None:
+            attempt.positions_ready.set()
+            return
+        self._handshake.positions_ready.set()
+
+    def gateway_pnl(
+        self,
+        app: Any,
+        epoch: int,
+        req_id: int,
+        daily_pnl: Any,
+        unrealized_pnl: Any,
+        realized_pnl: Any,
+    ) -> None:
+        with self._state_lock:
+            self._daily_pnl = _optional_decimal(
+                daily_pnl
+            )
+            self._unrealized_pnl = _optional_decimal(
+                unrealized_pnl
+            )
+            self._realized_pnl = _optional_decimal(
+                realized_pnl
+            )
+            self._broker_observed_at = _now_iso()
+            self._mark_state_changed_locked()
+
+    def gateway_exec_details(
+        self,
+        app: Any,
+        epoch: int,
+        req_id: int,
+        contract: Any,
+        execution: Any,
+    ) -> None:
+        attempt = self._refresh_attempt_for(app, epoch)
+        if attempt is not None and req_id == 91_103:
+            attempt.executions.append((contract, execution))
+            return
+        self._record_execution(contract, execution)
+
+    def gateway_exec_details_end(
+        self, app: Any, epoch: int, req_id: int
+    ) -> None:
+        attempt = self._refresh_attempt_for(app, epoch)
+        if attempt is not None and req_id == 91_103:
+            attempt.executions_ready.set()
+            return
+        if req_id == 91_003:
+            self._handshake.executions_ready.set()
+
+    def gateway_completed_order(
+        self,
+        app: Any,
+        epoch: int,
+        contract: Any,
+        order: Any,
+        order_state: Any,
+    ) -> None:
+        order_id = int(order.orderId)
+        attempt = self._refresh_attempt_for(app, epoch)
+        broker_order = _paper_broker_order(
+            order_id, contract, order, order_state
+        )
+        if attempt is not None:
+            attempt.completed_orders[order_id] = broker_order
+            return
+        self._recover_intent_mapping(order_id)
+        with self._state_lock:
+            self._completed_broker_orders[order_id] = (
+                str(order_state.status),
+                Decimal(str(order.totalQuantity)),
+            )
+            self._broker_observed_at = _now_iso()
+            self._mark_state_changed_locked()
+
+    def gateway_completed_orders_end(
+        self, app: Any, epoch: int
+    ) -> None:
+        attempt = self._refresh_attempt_for(app, epoch)
+        if attempt is not None:
+            attempt.completed_orders_ready.set()
+            return
+        self._handshake.completed_orders_ready.set()
+
+    def gateway_connection_closed(
+        self, app: Any, epoch: int
+    ) -> None:
+        self._connected = False
+        self._invalidate_connection_snapshot()
+
 
     def arm(
         self,

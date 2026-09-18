@@ -502,3 +502,108 @@ adapter 再减 **29 行 / 1,141 字节**，journal 增 **44 行 / 1,638 字节**
 未动 `PaperTradingService`、`desktop.py`、workflow、`ExecutionLease`、risk、strategy；
 未新增依赖。**没有**因为「顺手」把 `sessions()` 加进任何调用方 —— 它仍然没有调用者，
 本步只让「有调用者时它会正常工作」成立。
+
+---
+
+# 第四部分：第六步（IBKR Paper callback bridge 拆出）
+
+## 24. 拆之前：一个类同时做两件事
+
+`IBKRPaperOrderService.connect()` 里内嵌着 `class PaperApp(EWrapper, EClient)`。
+这 16 个 callback 其实分成两层职责：
+
+```text
+IBKR transport          → 收到 callback、判断这条 callback 是否属于当前物理连接
+IBKRPaperOrderService   → 决定这条 callback 对 Paper 状态意味着什么
+```
+
+前者是纯转发，与交易语义无关；后者要改 `_account`、`_broker_positions`、
+`_next_order_id`、写 Journal、填 reconciliation attempt。两者混在一个类里，
+transport 的每一次改动都落在 1,542 行的交易 adapter 内。
+
+第六步**只拆 transport shell**。
+
+## 25. `ibkr_paper_gateway.py`（386 行）
+
+新模块只做四件事：创建 `EWrapper`/`EClient` bridge、持有 connection epoch、
+接收 callback、把 callback 原样转交 sink。
+
+| 导出 | 作用 |
+| --- | --- |
+| `PaperGatewaySink`（`Protocol`） | 17 个 `gateway_*` 方法，Gateway 唯一能看到的接口 |
+| `PaperGatewayHandshake`（`@dataclass(slots=True)`） | 7 个 `Event` + `errors` 的**定义** |
+| `create_paper_gateway_app(*, sink, epoch, handshake)` | 唯一工厂，内部 lazy import ibapi |
+
+**lazy ibapi 保持**：`from ibapi.client import EClient` 在工厂函数体内，
+模块顶层只有 `typing` / `threading` / `dataclasses`。`import
+us_quant.ibkr_paper_gateway` 在没有官方 API 的机器上不崩。
+
+**依赖方向单向**：Gateway 不 import `ibkr_paper_orders`、不 import models/journal、
+不 import `desktop`/workflow/risk。sink 是 `Protocol`，不是具体类 ——
+因此不存在循环依赖，也不需要 `TYPE_CHECKING` 绕路。
+
+## 26. callback 的业务 body 归位 Service
+
+每个 callback 的业务 body 机械搬迁为 Service 的私有 handler。以 `orderStatus`
+为例：
+
+```text
+PaperApp.orderStatus
+    ↓  if not self._current(): return
+sink.gateway_order_status(app, epoch, ...)
+    ↓
+service.gateway_order_status(...)
+    ↓  原来的 Decimal 转换
+_record_order_status(...)
+```
+
+**行为等价性是脚本证明的，不是目测的**：把旧 `PaperApp.<callback>` 去掉
+epoch 守卫后的 body，与新 `gateway_<callback>` 去掉同名守卫后的 body，
+按标识符重命名表（`service.X` → `self.X`，`self` → 规范记号）归一化后逐语句比对
+—— **16/16 IDENTICAL**。另有 16/16 的守卫集对照，确认没有 callback 丢掉
+`if not self._current()`。
+
+## 27. 第六步验收数字（脚本实测）
+
+| 指标 | main（`408e68d`） | 第六步后 |
+| --- | --- | --- |
+| `ibkr_paper_orders.py` | 1,542 行 / 57,519 字节 | **1,528 行 / 55,582 字节** |
+| `ibkr_paper_gateway.py` | 不存在 | **386 行 / 10,476 字节** |
+| adapter 内嵌 `class PaperApp` | 有 | **0** |
+| adapter 里的 `EWrapper` / `EClient` | 有 | **0** |
+| 测试总数 | 540 passed | **595 passed** |
+| `check_publish_safety.py` | 195 OK | **197 OK**（+2 新文件） |
+| `verify.ps1` | exit 0 | **exit 0** |
+
+adapter 减 **14 行 / 1,937 字节**；新增的 386 行 transport 从交易 adapter 中
+移出，adapter 的 `submit` / `cancel_intent` / `disconnect` / `arm` / `disarm` /
+`refresh_reconciliation_snapshot` 六个方法的 diff 均为 **0**。
+
+## 28. 新增测试（55 个）
+
+| 文件 | 数量 | 覆盖 |
+| --- | --- | --- |
+| `tests/test_ibkr_paper_gateway.py` | **41** | import isolation、lazy ibapi、16 个 callback 的转发与 stale 拦截、无状态、不碰 service 私有字段 |
+| `tests/test_ibkr_paper_orders.py` | **+14** | connect wiring、adapter 不再定义 transport、DU-only / 单账户 / `nextValidId` floor / 外账户守卫 / reconciliation execution 不进 Journal |
+
+## 29. 突变验证
+
+**16/16 全杀**，每个突变体的死因都落在指定的那个测试上。清单：
+gateway 去掉 stale-epoch 守卫、epoch 写死 99、交换 `avgFillPrice`/`lastFillPrice`、
+截断 `error` 变参、stale 的 `connectionClosed` 照转、模块顶层 import ibapi、
+`_current` 绕过 sink；service 只比 client 不比 epoch、只比 epoch 不比 client、
+去掉非 DU 拒绝、去掉单账户要求、`nextValidId` 允许回退到 floor 以下、
+`accountSummary`/`position` 去掉外账户守卫、reconciliation execution 直接进 Journal、
+停止记录 order status。
+
+## 30. 第六步未做的事
+
+未搬 `submit` / `cancel_intent` / `arm` / `disarm` / `disconnect` /
+`refresh_reconciliation_snapshot` / `_request_reconciliation_snapshot` /
+`_publish_reconciliation_snapshot` / `reconciliation_snapshot_is_current`；
+未改 request ID（`91_001`/`91_002`/`91_003`/`91_101`/`91_103`）、
+未改 network thread（仍是 `Thread(target=app.run, name="ibkr-paper-order-network", daemon=True)`）、
+未改 `connect()` 时序、未改 handshake 的 7 个阶段、未把 connection ownership
+转给 Gateway、未改任何安全不变式（paper only / DU only / port 4002 /
+whole shares / limit only / no short / no margin / no Live / no global cancel）。
+

@@ -463,6 +463,73 @@ def test_resolve_defaults_to_the_process_environment(
     assert "finnhub_api_key" not in store.loads
 
 
+
+def test_management_operations_follow_the_authoritative_mapping(
+    monkeypatch,
+) -> None:
+    """Save, status and clear must all read the one provider mapping.
+
+    If any method quietly hard-codes a secret name again, changing the
+    mapping here leaves that method behind and this regression fails.
+    """
+
+    monkeypatch.setitem(
+        STREAM_CREDENTIAL_SOURCES,
+        PROVIDER_FINNHUB_TRADES,
+        (("sentinel_finnhub_key", "FINNHUB_API_KEY"),),
+    )
+    store = _FakeStore()
+    service = _service(store)
+
+    service.save_provider(
+        PROVIDER_FINNHUB_TRADES, api_key="FIN-123"
+    )
+    assert store.saved == {"sentinel_finnhub_key": "FIN-123"}
+
+    status = service.status(PROVIDER_FINNHUB_TRADES)
+    assert status.api_key_saved is True
+    assert ("has_secret", "sentinel_finnhub_key") in store.calls
+
+    service.clear_provider(PROVIDER_FINNHUB_TRADES)
+    assert store.saved == {}
+    assert ("delete_secret", "sentinel_finnhub_key") in store.calls
+
+
+def test_secret_names_are_literal_only_in_the_mapping() -> None:
+    """The mapping is source, not documentation beside hard-coded logic."""
+
+    source = _MODULE_PATH.read_text(encoding="utf-8")
+    for name in (
+        "finnhub_api_key",
+        "alpaca_api_key",
+        "alpaca_api_secret",
+    ):
+        assert source.count(f'"{name}"') == 1, name
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["save", "clear", "status"],
+)
+def test_unknown_provider_is_refused_without_touching_the_store(
+    operation: str,
+) -> None:
+    """A typo must not masquerade as the no-key IBKR case."""
+
+    store = _FakeStore()
+    service = _service(store)
+
+    with pytest.raises(ValueError):
+        if operation == "save":
+            service.save_provider("typo-provider", api_key="x")
+        elif operation == "clear":
+            service.clear_provider("typo-provider")
+        else:
+            service.status("typo-provider")
+
+    assert store.calls == []
+
+
 # -- the shape of the thing -------------------------------------------
 
 

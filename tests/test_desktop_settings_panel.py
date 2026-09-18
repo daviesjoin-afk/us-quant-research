@@ -81,6 +81,22 @@ FROZEN_HANDLERS = (
     "_set_connection_settings_enabled",
 )
 
+# Every method a refactor step may legitimately rewrite, accumulated
+# across steps.  Step 11 owns ``_settings_tab``; step 12 owns the six
+# history-queue methods it is allowed to touch (spec 33).  A method that
+# changes without being declared here is a scope violation.
+DECLARED_REFACTOR_SURFACE = frozenset(
+    {
+        "_settings_tab",
+        "__init__",
+        "_schedule_history",
+        "_run_history",
+        "_run_public_history",
+        "_retry_failed",
+        "_refresh_queue_table",
+    }
+)
+
 # Spec 4: the seventeen controls the window keeps exposing.
 SETTINGS_WIDGETS = (
     "settings_theme_combo",
@@ -1270,11 +1286,12 @@ def test_the_settings_handler_is_unchanged(name: str) -> None:
 
 
 def test_only_the_settings_tab_was_rewritten() -> None:
-    """Every frozen handler is present and the tab method is the only edit.
+    """Every frozen handler is present and no undeclared method changed.
 
-    This is the aggregate form of the check above: the set of methods the
-    base commit and the head share must agree byte for byte, apart from
-    ``_settings_tab`` itself.
+    Step 11 rewrote ``_settings_tab``.  A later step legitimately rewrites
+    the methods it declares, so the guard asserts the changed set stays
+    inside the accumulated refactor surface -- the step-11 snapshot
+    (``changed == ['_settings_tab']``) could only ever hold at that commit.
     """
 
     base = _base_source("src/us_quant/desktop.py")
@@ -1313,7 +1330,8 @@ def test_only_the_settings_tab_was_rewritten() -> None:
         if base_body != current_body:
             changed.append(name)
 
-    assert changed == ["_settings_tab"]
+    assert set(changed) <= DECLARED_REFACTOR_SURFACE
+    assert "_settings_tab" in changed
 
 
 def test_the_frozen_settings_modules_are_untouched() -> None:

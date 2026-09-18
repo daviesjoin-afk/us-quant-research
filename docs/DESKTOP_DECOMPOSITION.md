@@ -958,3 +958,140 @@ harness 本轮另外两处经验：**前台超时会把 sweep 杀在中途并留
 （本轮实测 `appearance-title-changed` 的改写留在盘上）→ sweep 必须后台跑，且恢复后
 用「生成器重建 + 逐字节比对」自证工作树干净；**突变体的期望测试名必须从真实失败输出取**，
 不能凭模块语义推断。
+
+## 13. 第十二步：`desktop_history_service.py`（历史队列边界）
+
+第十二步把 `MainWindow` 里**日 K 队列的编排逻辑**搬进
+`src/us_quant/desktop_history_service.py`。这是 extraction：不重排队列语义、
+不改日志文案、不改 IBKR / 公开数据源的参数、不改 2500 行 UI 上限、
+不改 `_auto_market_scan_finished` 的自动扫描路径。
+
+```text
+MainWindow
+    ↓ dialogs / Qt task wrapper / rendering
+
+DesktopHistoryService
+    ↓
+HistoryJobStore
+IBKR history runner
+Public history runner
+Universe priority
+```
+
+`MainWindow` 仍是唯一持有 Qt 的地方：对话框、`_start_task` 包装、表格渲染全部留在窗口。
+service 是纯应用层代码——**不 import Qt、不开线程、无取消机制**。
+
+### 13.1 边界形状
+
+```python
+@dataclass(frozen=True, slots=True)
+class HistoryQueueSnapshot:
+    jobs: tuple[HistoryJob, ...]
+    pending: int
+    running: int
+    completed: int
+    failed: int
+    total: int
+
+
+class DesktopHistoryService:
+    def __init__(self, *, queue_path: Path, data_root: Path) -> None: ...
+
+    def schedule_universe(self, universe, *, batch_size: int) -> HistoryScheduleResult
+    def run_ibkr(self, config, *, maximum_jobs: int, progress=None) -> dict[str, int]
+    def run_public(self, *, maximum_jobs: int, progress=None) -> dict[str, int]
+    def reset_failed(self) -> int
+    def snapshot(self) -> HistoryQueueSnapshot
+```
+
+构造函数**必须 lazy 且不做 SQLite I/O**：它只记住 `queue_path` 与 `data_root`，
+每次调用时才构造 `HistoryJobStore`。窗口构造期间因此不会碰数据库文件，
+也不会把测试拖进真实的 `runtime_root`。
+
+`queue_path` 与 `data_root` 直接取自窗口（`self.queue_path` / `self.data_root`），
+不是从 scan path 反推。
+
+### 13.2 六个允许变化的方法
+
+| 方法 | before | after |
+|---|---|---|
+| `__init__` | — | 构造 service（+2 行） |
+| `_schedule_history` | 21 行 | 16 行 |
+| `_run_history` | 22 行 | 19 行 |
+| `_run_public_history` | 25 行 | 21 行 |
+| `_retry_failed` | 5 行 | 4 行 |
+| `_refresh_queue_table` | 41 行 | 40 行 |
+
+`MainWindow` 方法总数 **191 → 191**（不变）。其余 185 个方法与 Paper / AutoQuant /
+RuntimeSupervisor 全栈逐字节未变。
+
+`_refresh_queue_table` 只调用 `snapshot()` **一次**，`jobs` 与四个计数取自同一份快照——
+不存在「先查列表、再查计数」的两次读取窗口。
+
+### 13.3 语义必须保持不变的四点
+
+① `schedule_universe` 仍以 **`limit=None`** 调用 `prioritized_research_symbols`：
+全量研究池，不是前 N 个。
+
+② IBKR 与公开两条路径的 `maximum_jobs` 都来自 `self.batch_size.value()` 的透传，
+不是硬编码 25。
+
+③ 公开数据源路径**仍先 `reset_failed()`**：service 内部先重置失败任务再跑队列，
+窗口不再自己重置。
+
+④ `HistoryQueueSnapshot` **不做 2500 上限**：上限只作用于 UI 表格与「还有 N 条未显示」提示，
+快照本身携带完整 `jobs`。
+
+### 13.4 `_auto_market_scan_finished` 为什么故意不迁
+
+自动扫描结束后那段代码直接构造 `HistoryJobStore` 并调用
+`prioritized_research_symbols`，看起来与 `_schedule_history` 重复。但它属于
+**AutoQuant 扫描收尾**这条路径，本轮的重构面是「用户手动触发的历史队列编排」。
+把它一起迁进来会同时改动 AutoQuant 的收尾顺序，超出本步范围——因此
+`_auto_market_scan_finished`（19 行）**逐字节冻结**，并由 byte-equivalence 守卫钉住。
+
+### 13.5 体积与测试
+
+| | before | after |
+|---|---|---|
+| `desktop.py` | 9025 行 / 356,403 字节 | 9016 行 / 356,158 字节 |
+| `desktop_history_service.py` | — | 152 行 / 4,919 字节 |
+| `tests/test_desktop_history_service.py` | — | 1364 行 / 40,865 字节 |
+| 全套测试 | 924 passed | 977 passed |
+
+（同为 LF 归一化后的 blob 口径；before 取 `git show 2b3e3f53:src/us_quant/desktop.py`。
+行数不是本步的核心指标——本步的目的是把编排逻辑与 Qt 分离，见 §63。）
+
+### 13.6 覆盖强度
+
+`tests/test_desktop_history_service.py` 共 **40 个测试函数**，参数化展开后 **53 个用例**：
+**11 个函数是结构守卫**（参数化后 24 个用例），29 个是行为断言（29 个用例）。
+
+结构守卫按 AST 读源码：service 不 import Qt、不 import Paper / workflow 模块、
+不开线程、无取消 API、依赖面集合相等；`_refresh_queue_table` 不再构造 `HistoryJobStore`；
+`_auto_market_scan_finished` 与 base commit 逐字节相同。
+
+### 13.7 突变结果
+
+**54/54 全杀、0 存活、0 问题、0 挂起、0 SKIP。** 第一轮暴露 7 个存活，全部是
+**真实覆盖缺口**而非等价突变：
+
+① `summary-completed-is-failed` / `summary-failed-is-pending`——测试里 completed 与
+failed 都是 0，互换后不可见 → 补一个五个计数互不相同的用例。
+
+② `summary-cap-condition-widened`——只测了 2600 条一种场景，`> 2500` 放宽成 `> 0`
+不可见 → 补恰好 2500 条与 2501 条的边界用例。
+
+③ `public-start-message-changed`——断言只查子串 → 改为整段文案全等。
+
+④ `public-resets-failed-itself`——没有断言窗口**不再**自己 reset → 把 service 的
+`reset_failed` 打桩成抛 `AssertionError` 的哨兵。
+
+⑤ `table-snapshot-called-twice`——没有数 `snapshot()` 调用次数 → 加计数器。
+
+⑥ `ibkr-config-read-from-the-stream`——`market_data_service.config` 在构造后
+**恰好是同一个对象**，`is window.config.ibkr` 分辨不出两者。真缺口在于设置提交会替换
+`self.config` → 补一个「替换 `self.config` 后仍读到新对象」的用例。
+
+第二轮暴露 3 个存活，根因是 **harness 的期望测试名没跟着新测试改名**（`-k` 没选中），
+修正后全杀。这条与第十一步同款：**期望测试名必须实测确认，不能凭印象写**。

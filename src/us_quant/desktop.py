@@ -86,6 +86,14 @@ from us_quant.paths import ApplicationPaths
 from us_quant.account_ledger import AccountLedger
 from us_quant.history_queue import HistoryJobStore
 from us_quant.desktop_history_service import DesktopHistoryService
+from us_quant.desktop_universe_service import (
+    STAGE_DOWNLOAD_OFFICIAL,
+    STAGE_ENRICH_SEC,
+    STAGE_ENRICH_SEC_START,
+    STAGE_PREPARE_REFERENCE,
+    UniverseRefreshProgress,
+    DesktopUniverseService,
+)
 from us_quant.ibkr import IBKRConnectionConfig, probe_ibkr_socket
 from us_quant.ibkr_readonly import (
     IBKRReadOnlySnapshot,
@@ -254,10 +262,8 @@ from us_quant.executable_research import (
 )
 from us_quant.universe import (
     UniverseSnapshot,
-    enrich_us_profiles,
     load_universe_snapshot,
     prioritized_research_symbols,
-    refresh_official_universe,
 )
 from us_quant.ui_theme import (
     ThemePalette,
@@ -329,6 +335,7 @@ class MainWindow(QMainWindow):
         self.data_root = self.paths.user_data_root
         self.bundled_data_root = self.paths.bundled_data_root
         self.reference_root = self.data_root / "reference"
+        self.universe_service = DesktopUniverseService(paths=self.paths)
         writable_universe = self.reference_root / "universe.json"
         bundled_universe = (
             self.bundled_data_root / "reference" / "universe.json"
@@ -2894,33 +2901,25 @@ class MainWindow(QMainWindow):
         cancel_event = Event()
 
         def task(progress: Callable[[str], None]) -> UniverseSnapshot:
-            progress("正在准备可写的用户参考数据目录…")
-            reference_root = (
-                self.paths.ensure_user_reference_catalog()
-            )
-            progress("正在下载 Nasdaq Trader 与 SEC 官方标的清单…")
-            snapshot = refresh_official_universe(
-                cache_root=reference_root,
-                leader_seed_path=(
-                    self.root / "configs" / "sector_leaders.csv"
-                ),
-                china_denylist_path=(
-                    self.root
-                    / "configs"
-                    / "china_concept_denylist.csv"
-                ),
+            def report(event: UniverseRefreshProgress) -> None:
+                if event.stage == STAGE_PREPARE_REFERENCE:
+                    progress("正在准备可写的用户参考数据目录…")
+                elif event.stage == STAGE_DOWNLOAD_OFFICIAL:
+                    progress("正在下载 Nasdaq Trader 与 SEC 官方标的清单…")
+                elif event.stage == STAGE_ENRICH_SEC_START:
+                    progress("正在增量核验 500 家 SEC 注册地与行业…")
+                elif event.stage == STAGE_ENRICH_SEC:
+                    progress(
+                        f"SEC 核验 {event.done}/{event.total}：{event.detail}"
+                    )
+                else:
+                    raise ValueError(
+                        f"unknown universe refresh stage: {event.stage}"
+                    )
+
+            return self.universe_service.refresh(
                 should_stop=cancel_event.is_set,
-                save_snapshot=False,
-            )
-            progress("正在增量核验 500 家 SEC 注册地与行业…")
-            return enrich_us_profiles(
-                snapshot,
-                cache_root=reference_root / "sec_profiles",
-                max_new_profiles=500,
-                progress=lambda done, total, symbol: progress(
-                    f"SEC 核验 {done}/{total}：{symbol}"
-                ),
-                should_stop=cancel_event.is_set,
+                progress=report,
             )
 
         started = self._start_task(

@@ -688,9 +688,14 @@ class IBKRPaperOrderService:
         filled: Any,
         remaining: Any,
         average_fill_price: Any,
+        perm_id: int,
+        parent_id: int,
         last_fill_price: Any,
-        message: str,
+        client_id: int,
+        why_held: str,
+        market_cap_price: Any,
     ) -> None:
+        del perm_id, parent_id, client_id, market_cap_price
         self._record_order_status(
             orderId=order_id,
             status=status,
@@ -706,7 +711,7 @@ class IBKRPaperOrderService:
                 if last_fill_price > 0
                 else None
             ),
-            message=message or "",
+            message=why_held or "",
         )
 
     def gateway_open_order(
@@ -753,7 +758,9 @@ class IBKRPaperOrderService:
         account: str,
         tag: str,
         value: str,
+        currency: str,
     ) -> None:
+        del currency
         if account != self._account:
             return
         try:

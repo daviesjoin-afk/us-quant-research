@@ -225,15 +225,15 @@ FORWARDED_CALLS = (
     ("error", (91_003, 201, "Order rejected", "x"), (91_003, (201, "Order rejected", "x"))),
     (
         "orderStatus",
-        (7, "Filled", 2.0, 0.0, 10.0, 1, 0, 10.0, 9, "", 0.0),
-        (7, "Filled", 2.0, 0.0, 10.0, 10.0, ""),
+        (7, "Filled", 2, 1, 3, 101, 202, 4, 303, "held-marker", 5),
+        (7, "Filled", 2, 1, 3, 101, 202, 4, 303, "held-marker", 5),
     ),
     ("openOrder", (7, "contract", "order", "state"), (7, "contract", "order", "state")),
     ("openOrderEnd", (), ()),
     (
         "accountSummary",
-        (91_001, "DU1234567", "NetLiquidation", "100", "USD"),
-        (91_001, "DU1234567", "NetLiquidation", "100"),
+        (91_001, "DU1234567", "NetLiquidation", "100", "USD-marker"),
+        (91_001, "DU1234567", "NetLiquidation", "100", "USD-marker"),
     ),
     ("accountSummaryEnd", (91_001,), (91_001,)),
     ("position", ("DU1234567", "contract", 3.0, 100.0), ("DU1234567", "contract", 3.0, 100.0)),
@@ -300,23 +300,54 @@ def test_error_callback_forwards_the_variadic_arguments() -> None:
 
 
 def test_order_status_arguments_keep_their_positions() -> None:
-    """A permutation of the fill prices must be visible.
+    """All eleven IBKR arguments must reach the sink, in order.
 
-    ``avgFillPrice`` and ``lastFillPrice`` are given distinct values on
-    purpose: when both are 10.0 a swap is invisible and the argument order
-    is untested.  Only seven of IBKR's eleven arguments reach the sink --
-    ``permId``, ``parentId``, ``clientId`` and ``mktCapPrice`` are dropped,
-    which is the pre-existing contract, not a choice made by the split.
+    Every value is a distinct sentinel so a permutation, a truncation or a
+    dropped argument is visible.  The four arguments the service does not act
+    on (``permId``, ``parentId``, ``clientId``, ``mktCapPrice``) are the ones
+    most likely to be silently swallowed by the transport, so they get the
+    most distinctive values.
     """
 
     sink = RecordingSink()
     app = _build(sink, epoch=2)
 
-    app.orderStatus(7, "Filled", 2.0, 1.25, 3.75, 1, 0, 10.0, 9, "", 0.0)
+    app.orderStatus(7, "Filled", 2, 1, 3, 101, 202, 4, 303, "held-marker", 5)
 
     name, args = _forwarded(sink)[0]
     assert name == "gateway_order_status"
-    assert args[2:] == (7, "Filled", 2.0, 1.25, 3.75, 10.0, "")
+    assert args[2:] == (
+        7,
+        "Filled",
+        2,
+        1,
+        3,
+        101,
+        202,
+        4,
+        303,
+        "held-marker",
+        5,
+    )
+
+
+def test_account_summary_currency_reaches_the_sink() -> None:
+    """``currency`` is transport data even though the service discards it."""
+
+    sink = RecordingSink()
+    app = _build(sink, epoch=2)
+
+    app.accountSummary(91_001, "DU1234567", "NetLiquidation", "100", "USD-marker")
+
+    name, args = _forwarded(sink)[0]
+    assert name == "gateway_account_summary"
+    assert args[2:] == (
+        91_001,
+        "DU1234567",
+        "NetLiquidation",
+        "100",
+        "USD-marker",
+    )
 
 
 def test_transport_holds_no_state_of_its_own() -> None:
@@ -391,6 +422,120 @@ def test_every_callback_guards_on_the_current_connection() -> None:
         assert guard.test.operand.func.attr == "_current", callback.name
         assert isinstance(guard.body[0], ast.Return), callback.name
         assert guard.orelse == [], callback.name
+
+
+def test_no_callback_drops_an_ibkr_argument() -> None:
+    """Every parameter IBKR hands the transport must reach the sink.
+
+    The transport's only job is to move bytes.  A callback that accepts an
+    argument and never forwards it is silently reinterpreted at the transport
+    layer, which is exactly the boundary this split exists to draw.  ``self``
+    and ``*args`` are excluded; ``args`` is forwarded whole.
+    """
+
+    app_class = next(
+        node
+        for node in ast.walk(TREE)
+        if isinstance(node, ast.ClassDef) and node.name == "PaperApp"
+    )
+    callbacks = [
+        node
+        for node in app_class.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name not in {"__init__", "_current"}
+    ]
+
+    for callback in callbacks:
+        params = {
+            arg.arg
+            for arg in callback.args.args[1:]  # drop self
+            if arg.arg not in {"self"}
+        }
+        if callback.args.vararg is not None:
+            params.add(callback.args.vararg.arg)
+        forwarded: set[str] = set()
+        for node in ast.walk(callback):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr.startswith("gateway_")
+            ):
+                for arg in node.args:
+                    if isinstance(arg, ast.Name):
+                        forwarded.add(arg.id)
+                    elif isinstance(arg, ast.Starred) and isinstance(
+                        arg.value, ast.Name
+                    ):
+                        forwarded.add(arg.value.id)
+        dropped = params - forwarded
+        assert not dropped, f"{callback.name} drops {sorted(dropped)}"
+
+
+def test_gateway_performs_no_interpretation_of_callback_data() -> None:
+    """The transport may not convert, filter or interpret what it carries.
+
+    The boundary contract is "Gateway moves bytes, Service decides meaning".
+    This walks every callback and fails on any of the interpretation moves the
+    step-6 addendum forbids: type conversion, account filtering, status
+    interpretation, and mutation of anything other than its own two fields.
+    """
+
+    app_class = next(
+        node
+        for node in ast.walk(TREE)
+        if isinstance(node, ast.ClassDef) and node.name == "PaperApp"
+    )
+    callbacks = [
+        node
+        for node in app_class.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name not in {"__init__", "_current"}
+    ]
+    assert callbacks
+
+    converters = {"Decimal", "str", "int", "float", "bool", "round"}
+    own_attrs = {"_sink", "_epoch"}
+
+    for callback in callbacks:
+        params = {arg.arg for arg in callback.args.args[1:]}
+        for node in ast.walk(callback):
+            # No type conversion: that is the service's job.
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                assert node.func.id not in converters, (
+                    f"{callback.name} converts with {node.func.id}"
+                )
+                assert node.func.id in {"len"}, (
+                    f"{callback.name} calls {node.func.id}"
+                )
+            # No account filtering at the transport layer.
+            if isinstance(node, ast.Compare):
+                operands = [node.left, *node.comparators]
+                names = {
+                    operand.id
+                    for operand in operands
+                    if isinstance(operand, ast.Name)
+                }
+                assert "account" not in names, (
+                    f"{callback.name} filters on account"
+                )
+            # No state of its own beyond sink and epoch.
+            if isinstance(node, ast.Attribute) and isinstance(
+                node.value, ast.Name
+            ):
+                if node.value.id == "self" and isinstance(node.ctx, ast.Store):
+                    assert node.attr in own_attrs, (
+                        f"{callback.name} stores self.{node.attr}"
+                    )
+            # Only the sink may be called (plus its own guard).
+            if isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Attribute):
+                    assert func.attr == "_current" or func.attr.startswith(
+                        "gateway_"
+                    ), f"{callback.name} calls {func.attr}"
+                    if func.attr.startswith("gateway_"):
+                        assert isinstance(func.value, ast.Attribute)
+                        assert func.value.attr == "_sink"
 
 
 def test_current_check_delegates_to_the_sink() -> None:

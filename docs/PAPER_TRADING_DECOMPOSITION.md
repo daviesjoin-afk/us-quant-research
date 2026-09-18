@@ -607,3 +607,72 @@ gateway 去掉 stale-epoch 守卫、epoch 写死 99、交换 `avgFillPrice`/`las
 转给 Gateway、未改任何安全不变式（paper only / DU only / port 4002 /
 whole shares / limit only / no short / no margin / no Live / no global cancel）。
 
+---
+
+# 第五部分：第六步补遗（transport 层的参数完整性）
+
+## 31. 缺陷：Gateway 仍在解释 callback 参数
+
+第六步的 Gateway 已经做到了「不判断业务」，但**仍在丢字段**：
+
+```text
+orderStatus    丢 permId / parentId / clientId / mktCapPrice（11 → 7）
+               whyHeld 被重命名为 message（业务解释提前发生在 transport 层）
+accountSummary 丢 currency（5 → 4）
+```
+
+其余 13 个 callback 是全量转发。审计脚本按 AST 逐 callback 比对 IBKR 签名与
+实际转发实参，只有这两个不通过。
+
+这不是第六步拆分造成的回归 —— 搬迁时**照抄了旧 `PaperApp` 的签名形状**，
+而旧 `PaperApp` 里就有 `del permId, parentId, clientId, mktCapPrice` 和
+`del currency`。但 `del` 出现在**业务 body 里**是服务的选择；出现在
+**transport 层**则是 transport 替服务做了决定。边界要求后者消失。
+
+## 32. 修法：Gateway 全量搬运，Service 决定不用
+
+```text
+PaperApp.orderStatus（11 个参数）
+    ↓  if not self._current(): return
+sink.gateway_order_status(app, epoch, order_id, status, filled, remaining,
+                          average_fill_price, perm_id, parent_id,
+                          last_fill_price, client_id, why_held,
+                          market_cap_price)
+    ↓
+service.gateway_order_status(...)
+    ↓  del perm_id, parent_id, client_id, market_cap_price
+    ↓  why_held → message
+_record_order_status(...)      # 业务语义与拆分前逐字相同
+```
+
+`accountSummary` 同理：Gateway 传 `currency`，Service 首行 `del currency`。
+
+**这是 transport boundary 修复，不是行为变化**：`filled`/`remaining` 仍是
+`Decimal`、零价仍是 `None`、`whyHeld` 仍是 message、四个未用参数仍不进记录。
+
+## 33. 新增守卫：结构上禁止任何 callback 丢参数
+
+`test_no_callback_drops_an_ibkr_argument` 遍历 `PaperApp` 的每个 callback，
+把形参集合与转发实参集合求差 —— 非空即失败。`self` 与 `*args` 除外
+（`error(reqId, *args)` 整包转发是既有契约）。这条守卫覆盖全部 16 个
+callback，未来任何一处再丢字段都会在结构层被拦住，而不是等某个 sentinel
+测试恰好踩到。
+
+配套的 `test_account_summary_currency_reaches_the_sink` 与加严后的
+`test_order_status_arguments_keep_their_positions`（11 个互不相同的 sentinel）
+钉住真实转发值；Service 侧三个回归测试钉住「全量入、旧语义出」。
+
+## 34. 补遗验收数字（脚本实测）
+
+| 指标 | 第六步 | 第六步补遗 |
+| --- | --- | --- |
+| `ibkr_paper_gateway.py` | 385 行 / 10,476 字节 | **395 行 / 10,732 字节** |
+| `ibkr_paper_orders.py` | 1,527 行 / 55,582 字节 | **1,534 行 / 55,789 字节** |
+| 丢参数的 callback | 2（`orderStatus`、`accountSummary`） | **0** |
+| `tests/test_ibkr_paper_gateway.py` | 41 tests | **44 tests** |
+| `tests/test_ibkr_paper_orders.py` | 31 tests | **34 tests** |
+| 测试总数 | 595 passed | **601 passed** |
+| 突变 | 16/16 | **18/18**（新增丢参数与 sentinel 突变体） |
+| `verify.ps1` | exit 0 | **exit 0** |
+
+

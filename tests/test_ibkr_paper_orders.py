@@ -1128,6 +1128,113 @@ class IBKRPaperOrderTests(unittest.TestCase):
             ),
         )
 
+    def test_gateway_order_status_preserves_the_full_business_behaviour(
+        self,
+    ) -> None:
+        """Full transport payload in, unchanged trading semantics out.
+
+        The transport now hands over all eleven IBKR arguments.  The four the
+        service has no use for must not leak into the recorded status: only
+        the decimals and the ``whyHeld`` message may change, exactly as before
+        the split.
+        """
+
+        recorded: list[dict] = []
+
+        with TemporaryDirectory() as directory:
+            service = self._service_with_handshake(directory)
+            service._record_order_status = (  # type: ignore[method-assign]
+                lambda **kwargs: recorded.append(kwargs)
+            )
+            service._client = None
+            service._physical_connection_epoch = 4
+
+            with patch.dict(sys.modules, _ibapi_stub_modules()):
+                app = create_paper_gateway_app(sink=service, epoch=4)
+
+            service._client = app
+            app.orderStatus(
+                7, "Filled", 2, 1, 3, 101, 202, 4, 303, "held-marker", 5
+            )
+
+        self.assertEqual(len(recorded), 1)
+        entry = recorded[0]
+        self.assertEqual(entry["orderId"], 7)
+        self.assertEqual(entry["status"], "Filled")
+        # Decimal, not float: Decimal("2") == 2.0 would hide a type change.
+        self.assertIsInstance(entry["filled"], Decimal)
+        self.assertIsInstance(entry["remaining"], Decimal)
+        self.assertEqual(entry["filled"], Decimal("2"))
+        self.assertEqual(entry["remaining"], Decimal("1"))
+        self.assertIsInstance(entry["average_fill_price"], Decimal)
+        self.assertIsInstance(entry["last_fill_price"], Decimal)
+        self.assertEqual(entry["average_fill_price"], Decimal("3"))
+        self.assertEqual(entry["last_fill_price"], Decimal("4"))
+        self.assertEqual(entry["message"], "held-marker")
+        # The four unused arguments must not become part of the record.
+        self.assertEqual(
+            set(entry),
+            {
+                "orderId",
+                "status",
+                "filled",
+                "remaining",
+                "average_fill_price",
+                "last_fill_price",
+                "message",
+            },
+        )
+
+    def test_gateway_order_status_keeps_the_zero_and_empty_conventions(
+        self,
+    ) -> None:
+        """A zero price is ``None`` and an empty ``whyHeld`` is ``""``."""
+
+        recorded: list[dict] = []
+
+        with TemporaryDirectory() as directory:
+            service = self._service_with_handshake(directory)
+            service._record_order_status = (  # type: ignore[method-assign]
+                lambda **kwargs: recorded.append(kwargs)
+            )
+            service._client = None
+            service._physical_connection_epoch = 4
+
+            with patch.dict(sys.modules, _ibapi_stub_modules()):
+                app = create_paper_gateway_app(sink=service, epoch=4)
+
+            service._client = app
+            app.orderStatus(7, "Submitted", 0, 1, 0, 101, 0, 0, 303, "", 0)
+
+        entry = recorded[0]
+        self.assertIsNone(entry["average_fill_price"])
+        self.assertIsNone(entry["last_fill_price"])
+        self.assertEqual(entry["message"], "")
+
+    def test_gateway_account_summary_discards_currency(self) -> None:
+        """``currency`` reaches the service and is then dropped on purpose."""
+
+        with TemporaryDirectory() as directory:
+            service = self._service_with_handshake(directory)
+            service._account = "DU1234567"
+            service._client = None
+            service._physical_connection_epoch = 4
+
+            with patch.dict(sys.modules, _ibapi_stub_modules()):
+                app = create_paper_gateway_app(sink=service, epoch=4)
+
+            service._client = app
+            app.accountSummary(
+                91_001, "DU1234567", "NetLiquidation", "100", "USD-marker"
+            )
+
+            self.assertEqual(
+                service._account_metrics["NetLiquidation"], Decimal("100")
+            )
+            self.assertEqual(
+                [tag for tag in service._account_metrics], ["NetLiquidation"]
+            )
+
     def test_managed_accounts_rejects_a_non_du_account(self) -> None:
         """A live-looking account must be refused, permanently.
 

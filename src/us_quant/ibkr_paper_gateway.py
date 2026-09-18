@@ -72,8 +72,12 @@ class PaperGatewaySink(Protocol):
         filled: Any,
         remaining: Any,
         average_fill_price: Any,
+        perm_id: int,
+        parent_id: int,
         last_fill_price: Any,
-        message: str,
+        client_id: int,
+        why_held: str,
+        market_cap_price: Any,
     ) -> None: ...
 
     def gateway_open_order(
@@ -96,6 +100,7 @@ class PaperGatewaySink(Protocol):
         account: str,
         tag: str,
         value: str,
+        currency: str,
     ) -> None: ...
 
     def gateway_account_summary_end(
@@ -238,8 +243,12 @@ def create_paper_gateway_app(
                 filled,
                 remaining,
                 avgFillPrice,
+                permId,
+                parentId,
                 lastFillPrice,
+                clientId,
                 whyHeld,
+                mktCapPrice,
             )
 
         def openOrder(
@@ -282,6 +291,7 @@ def create_paper_gateway_app(
                 account,
                 tag,
                 value,
+                currency,
             )
 
         def accountSummaryEnd(self, reqId: int) -> None:

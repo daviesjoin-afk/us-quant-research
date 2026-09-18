@@ -101,16 +101,24 @@ from us_quant.ibkr_readonly import (
     collect_readonly_snapshot,
     intraday_market_data_reasons,
 )
-from us_quant.ibkr_stream import (
-    MARKET_DATA_TYPE_NAMES,
-    StreamSnapshot,
+from us_quant.trading.application.market_data import (
+    PUSH_LISTENER_SOURCES,
+    SOURCE_ALPACA_IEX,
+    SOURCE_FINNHUB_TRADES,
+    SOURCE_IBKR_EXTENDED,
+    MarketDataCredentials,
+    MarketDataStartRequest,
 )
-from us_quant.market_data_service import (
-    AlpacaCredentialsMissing,
-    FinnhubCredentialsMissing,
-    MarketDataRequest,
-    MarketDataService,
-    MarketDataStreamActive,
+from us_quant.trading.composition.market_data import (
+    build_market_data_application,
+)
+from us_quant.trading.domain.market import (
+    MarketDataMode,
+    MarketSnapshot,
+)
+from us_quant.trading.ports.market_data import (
+    MarketDataActiveError,
+    MarketDataCredentialsError,
 )
 from us_quant.desktop_settings import (
     DesktopSettingsService,
@@ -192,6 +200,7 @@ from us_quant.desktop_workers import (
     TaskThread,
 )
 from us_quant.desktop_widgets import (
+    MARKET_DATA_MODE_LABELS,
     EquityComparisonChart,
     MetricCard,
     PriceChart,
@@ -434,13 +443,13 @@ class MainWindow(QMainWindow):
             tuple[str, str, str, int, str, str], ...
         ] | None = None
         self._quotes_scroll_active = False
-        self._pending_stream_snapshot: StreamSnapshot | None = None
+        self._pending_stream_snapshot: MarketSnapshot | None = None
         self.portfolio_view: PortfolioView | None = None
         self.stream_worker: StreamWorker | None = None
         self._pending_stream_switch: (
             tuple[str, tuple[str, ...]] | None
         ) = None
-        self.stream_snapshot: StreamSnapshot | None = None
+        self.stream_snapshot: MarketSnapshot | None = None
         self.shadow_engine: ShadowPaperEngine | None = None
         self.shadow_snapshot: ShadowSnapshot | None = None
         self.target_preflight_result: TargetPreflightResult | None = None
@@ -504,7 +513,10 @@ class MainWindow(QMainWindow):
         # belong to the service, not to the UI: the desktop supplies a
         # request and gets a ready stream back (see
         # ``docs/DESKTOP_DECOMPOSITION.md``).
-        self.market_data_service = MarketDataService(self.config.ibkr)
+        # Market Data v2: the window composes the application and then only
+        # ever talks to it.  No provider adapter, and no provider module, is
+        # visible from here.
+        self.market_data = build_market_data_application(self.config.ibkr)
 
         self.setWindowTitle(APP_TITLE)
         self.resize(1440, 900)
@@ -6752,7 +6764,7 @@ class MainWindow(QMainWindow):
         worker = self.stream_worker
         if worker is not None and worker.isRunning():
             self._log(
-                f"正在停止 {worker.provider}，随后切换到 {provider}…"
+                f"正在停止 {worker.source_id}，随后切换到 {provider}…"
             )
             if not self._stop_stream(
                 preserve_pending=True,
@@ -6786,12 +6798,12 @@ class MainWindow(QMainWindow):
         if (
             worker is None
             or not worker.isRunning()
-            or worker.provider != "ibkr_extended"
+            or worker.source_id != SOURCE_IBKR_EXTENDED
             or self._pending_stream_switch is not None
         ):
             return
-        desired_exchange = self.market_data_service.desired_market_exchange(
-            worker.provider
+        desired_exchange = self.market_data.desired_market_exchange(
+            worker.source_id
         )
         if desired_exchange == worker.market_exchange:
             return
@@ -6849,28 +6861,29 @@ class MainWindow(QMainWindow):
             credentials = (
                 self.credential_service.resolve_stream_credentials()
             )
-            # The UI knows *what the operator selected* (provider id,
+            # The UI knows *what the operator selected* (source id,
             # watchlist, credential store values).  Everything else --
             # constructor, timeouts, venue, labels, coverage -- is the
-            # service's business.
-            request = MarketDataRequest(
-                provider=provider,
+            # application's business.
+            request = MarketDataStartRequest(
+                source_id=provider,
                 symbols=symbols,
-                alpaca_api_key=credentials.alpaca_api_key,
-                alpaca_api_secret=credentials.alpaca_api_secret,
-                finnhub_api_key=credentials.finnhub_api_key,
+                credentials=MarketDataCredentials(
+                    alpaca_api_key=credentials.alpaca_api_key,
+                    alpaca_api_secret=credentials.alpaca_api_secret,
+                    finnhub_api_key=credentials.finnhub_api_key,
+                ),
             )
-            worker = StreamWorker(self.market_data_service, request)
+            worker = StreamWorker(self.market_data, request)
             market_exchange = worker.market_exchange
         except (
-            AlpacaCredentialsMissing,
-            FinnhubCredentialsMissing,
-            MarketDataStreamActive,
+            MarketDataCredentialsError,
+            MarketDataActiveError,
             ValueError,
         ) as error:
-            # ``MarketDataStreamActive`` is a ``RuntimeError``, so it has to
-            # be named here: the service refuses to build while it still
-            # holds a live stream, and an uncaught exception escaping a Qt
+            # ``MarketDataActiveError`` is a ``RuntimeError``, so it has to
+            # be named here: the application refuses to prepare while it
+            # still holds a live feed, and an uncaught exception escaping a Qt
             # slot would abort the process instead of telling the operator.
             self._task_failed(str(error))
             return
@@ -7002,11 +7015,11 @@ class MainWindow(QMainWindow):
             )
             snapshot = replace(
                 snapshot,
-                socket_connected=False,
-                handshake_complete=False,
+                connected=False,
+                ready=False,
                 quotes=invalid_quotes,
-                last_message=reason,
-                observed_at=datetime.now(timezone.utc).isoformat(),
+                message=reason,
+                observed_at=datetime.now(timezone.utc),
             )
             self.stream_snapshot = snapshot
             self._populate_stream_snapshot(snapshot)
@@ -7019,35 +7032,35 @@ class MainWindow(QMainWindow):
         """Event-driven ingress: a service push (worker listener) delivered a
         fresh snapshot; record its liveness so the timer poll stays idle and
         latency is bounded by the feed, not the poll interval."""
-        if not isinstance(result, StreamSnapshot):
+        if not isinstance(result, MarketSnapshot):
             return
         self._last_stream_push_monotonic = monotonic()
         self._stream_snapshot_received(result)
 
     def _stream_snapshot_received(self, result: object) -> None:
-        if not isinstance(result, StreamSnapshot):
+        if not isinstance(result, MarketSnapshot):
             return
         self.stream_snapshot = result
         self.workflow_controller.market_account.update(
             account_ready=self.portfolio_view is not None,
             market_ready=result.realtime_ready,
-            message=result.last_message,
+            message=result.message,
         )
         self._record_minute_snapshot(result)
-        if result.last_error_code is not None:
+        if result.error_code is not None:
             # Key by provider+error code only: reconnect generations must not
             # flood the event log with one error entry per retry attempt.
             event_key = (
-                result.provider,
-                result.last_error_code,
+                result.source_id,
+                result.error_code,
             )
             if event_key != self._last_stream_event_key:
                 self._last_stream_event_key = event_key
                 self._record_runtime_event(
                     severity="error",
                     component="market_data",
-                    code=str(result.last_error_code),
-                    message=result.last_message,
+                    code=str(result.error_code),
+                    message=result.message,
                 )
         else:
             # Recovered: allow the next outage of the same kind to be
@@ -7076,7 +7089,7 @@ class MainWindow(QMainWindow):
             self._populate_shadow_snapshot(self.shadow_snapshot)
 
     def _record_minute_snapshot(
-        self, snapshot: StreamSnapshot
+        self, snapshot: MarketSnapshot
     ) -> None:
         symbols_to_record: set[str] = set()
         for quote in snapshot.quotes:
@@ -7090,7 +7103,7 @@ class MainWindow(QMainWindow):
             minute = observed.replace(
                 second=0, microsecond=0
             ).isoformat()
-            key = (quote.provider, quote.symbol, minute)
+            key = (quote.source_id, quote.symbol, minute)
             previous_ready = self._minute_recorded_keys.get(key)
             if previous_ready is None or (
                 quote.realtime_ready and not previous_ready
@@ -7127,10 +7140,10 @@ class MainWindow(QMainWindow):
             # Event-driven pushes are flowing (Finnhub/Alpaca); the timer is
             # only a fallback for services without a push listener (IBKR).
             return
-        self._stream_snapshot_received(worker.service.snapshot())
+        self._stream_snapshot_received(self.market_data.snapshot())
 
     def _populate_stream_snapshot(
-        self, snapshot: StreamSnapshot
+        self, snapshot: MarketSnapshot
     ) -> None:
         if self._quotes_scroll_active:
             self._pending_stream_snapshot = snapshot
@@ -7147,9 +7160,9 @@ class MainWindow(QMainWindow):
         )
         connection_text = (
             "已握手"
-            if snapshot.handshake_complete
+            if snapshot.ready
             else "端口已连"
-            if snapshot.socket_connected
+            if snapshot.connected
             else "已断开"
         )
         self.stream_connection_card.set_value(
@@ -7157,19 +7170,18 @@ class MainWindow(QMainWindow):
             f"连接代次 {snapshot.generation} · "
             f"尝试 {snapshot.reconnect_attempt}",
         )
-        effective_types = {
-            quote.effective_market_data_type
+        modes = {
+            quote.mode
             for quote in snapshot.quotes
-            if quote.effective_market_data_type is not None
         }
-        if snapshot.provider == "Alpaca":
+        if snapshot.source_id == SOURCE_ALPACA_IEX:
             feed_text = "IEX 实时"
-        elif snapshot.provider == "Finnhub":
+        elif snapshot.source_id == SOURCE_FINNHUB_TRADES:
             feed_text = "实时成交"
-        elif effective_types:
+        elif modes:
             feed_text = " / ".join(
-                MARKET_DATA_TYPE_NAMES.get(value, str(value))
-                for value in sorted(effective_types)
+                MARKET_DATA_MODE_LABELS.get(mode, "未知")
+                for mode in sorted(modes, key=lambda item: item.value)
             )
         else:
             feed_text = "等待回调"
@@ -7210,14 +7222,14 @@ class MainWindow(QMainWindow):
         self.quotes_model.update_snapshot(snapshot)
 
         error_line = (
-            f"最近错误：{snapshot.provider} {snapshot.last_error_code}"
-            if snapshot.last_error_code is not None
+            f"最近错误：{snapshot.source_label} {snapshot.error_code}"
+            if snapshot.error_code is not None
             else "最近错误：无"
         )
         gate_explanation = (
             "门控：Finnhub 只把 fresh 实时成交用于信号；"
             "显示的 bid/ask 是 ±5bps 影子执行带，不是市场盘口。"
-            if snapshot.provider == "Finnhub"
+            if snapshot.source_id == SOURCE_FINNHUB_TRADES
             else (
                 "门控：只有 fresh Type 1 且 bid/ask 完整的行情，"
                 "才可被标记为日内可用。Type 2/3/4 不会静默升级。"
@@ -7225,19 +7237,19 @@ class MainWindow(QMainWindow):
         )
         self.stream_health_text.setPlainText(
             f"连接代次：{snapshot.generation}\n"
-            f"来源：{snapshot.provider}\n"
+            f"来源：{snapshot.source_label}\n"
             f"覆盖：{snapshot.coverage}\n"
-            f"Socket：{'连接' if snapshot.socket_connected else '断开'}\n"
-            f"协议握手：{'完成' if snapshot.handshake_complete else '未完成'}\n"
+            f"Socket：{'连接' if snapshot.connected else '断开'}\n"
+            f"协议握手：{'完成' if snapshot.ready else '未完成'}\n"
             f"{error_line}\n"
-            f"最近事件：{snapshot.last_message}\n\n"
+            f"最近事件：{snapshot.message}\n\n"
             f"{gate_explanation}"
         )
-        if snapshot.handshake_complete:
+        if snapshot.ready:
             self.handshake_badge.setText(
                 (
-                    f"{snapshot.provider} · 已认证"
-                    if snapshot.provider in {"Alpaca", "Finnhub"}
+                    f"{snapshot.source_label} · 已认证"
+                    if snapshot.source_id in PUSH_LISTENER_SOURCES
                     else "协议 · 已握手"
                 )
             )
@@ -7247,17 +7259,17 @@ class MainWindow(QMainWindow):
                 (
                     (
                         "行情 · IEX 实时"
-                        if snapshot.provider == "Alpaca"
+                        if snapshot.source_id == SOURCE_ALPACA_IEX
                         else "行情 · Finnhub 成交"
                     )
-                    if snapshot.provider in {"Alpaca", "Finnhub"}
-                    else "行情 · 实时 Type 1"
+                    if snapshot.source_id in PUSH_LISTENER_SOURCES
+                    else "行情 · 实时"
                 )
             )
             self.market_badge.setProperty("state", "ok")
-        elif snapshot.last_error_code is not None:
+        elif snapshot.error_code is not None:
             self.market_badge.setText(
-                f"行情 · 错误 {snapshot.last_error_code}"
+                f"行情 · 错误 {snapshot.error_code}"
             )
             self.market_badge.setProperty("state", "error")
         else:
@@ -7269,22 +7281,22 @@ class MainWindow(QMainWindow):
                 (
                     (
                         "Alpaca IEX 单交易所实时"
-                        if snapshot.provider == "Alpaca"
+                        if snapshot.source_id == SOURCE_ALPACA_IEX
                         else "Finnhub 实时成交+明确模拟执行带"
                     )
-                    if snapshot.provider in {"Alpaca", "Finnhub"}
-                    else "fresh Type 1 + bid/ask"
+                    if snapshot.source_id in PUSH_LISTENER_SOURCES
+                    else "fresh 实时 + bid/ask"
                 )
                 if snapshot.realtime_ready
-                else snapshot.last_message[:42]
+                else snapshot.message[:42]
             ),
         )
         self._repolish_health_badges()
         status_key = (
-            snapshot.provider,
+            snapshot.source_id,
             snapshot.generation,
-            snapshot.handshake_complete,
-            snapshot.last_error_code,
+            snapshot.ready,
+            snapshot.error_code,
         )
         now_monotonic = monotonic()
         if (
@@ -7293,14 +7305,14 @@ class MainWindow(QMainWindow):
         ):
             self._last_stream_status_key = status_key
             self._last_stream_status_log_at = now_monotonic
-            if snapshot.last_error_code is not None:
+            if snapshot.error_code is not None:
                 self._log(
-                    f"{snapshot.provider} 行情错误 "
-                    f"{snapshot.last_error_code}：{snapshot.last_message}"
+                    f"{snapshot.source_label} 行情错误 "
+                    f"{snapshot.error_code}：{snapshot.message}"
                 )
-            elif snapshot.handshake_complete:
+            elif snapshot.ready:
                 self._log(
-                    f"{snapshot.provider} 已连接 · 可下单候选 "
+                    f"{snapshot.source_label} 已连接 · 可下单候选 "
                     f"{readiness.candidate_current_count}/"
                     f"{readiness.candidate_count} · 市场参考 "
                     f"{readiness.reference_current_count}/"
@@ -7310,12 +7322,12 @@ class MainWindow(QMainWindow):
                 )
             else:
                 self._log(
-                    f"{snapshot.provider} 正在连接（第 "
+                    f"{snapshot.source_label} 正在连接（第 "
                     f"{snapshot.reconnect_attempt} 次）…"
                 )
 
     def _update_quote_readiness(
-        self, snapshot: StreamSnapshot
+        self, snapshot: MarketSnapshot
     ) -> tuple[int, int]:
         now_monotonic = monotonic()
         current_symbols = {
@@ -8539,13 +8551,13 @@ class MainWindow(QMainWindow):
                 preferences,
                 current_config=self.config,
                 market_data=getattr(
-                    self, "market_data_service", None
+                    self, "market_data", None
                 ),
             )
         except UserSettingsError as error:
             QMessageBox.warning(self, "设置未保存", str(error))
             return
-        except MarketDataStreamActive as error:
+        except MarketDataActiveError as error:
             QMessageBox.warning(self, "设置未保存", str(error))
             return
         saved = commit.preferences
@@ -8644,7 +8656,7 @@ class MainWindow(QMainWindow):
         if (
             self.stream_worker is not None
             and self.stream_worker.isRunning()
-            and self.stream_worker.provider == provider
+            and self.stream_worker.source_id == provider
         ):
             QMessageBox.warning(
                 self,
@@ -8732,7 +8744,7 @@ class MainWindow(QMainWindow):
             and self.stream_worker.isRunning()
         )
         active_provider = (
-            self.stream_worker.provider
+            self.stream_worker.source_id
             if stream_running and self.stream_worker is not None
             else None
         )

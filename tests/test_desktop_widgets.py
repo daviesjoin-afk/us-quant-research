@@ -22,6 +22,8 @@ import pathlib
 import pytest
 from PySide6.QtWidgets import QApplication
 
+from us_quant.trading.domain.market import MarketDataMode
+
 
 _APP = QApplication.instance() or QApplication([])
 
@@ -45,7 +47,7 @@ FORBIDDEN_IMPORTS = (
     "desktop",
     "desktop_workers",
     "runtime_supervisor",
-    "market_data_service",
+    "trading.application",
     "auto_quant",
     "risk",
     "strategy",
@@ -65,7 +67,7 @@ ALLOWED_IMPORTS = {
     "PySide6.QtCore",
     "PySide6.QtGui",
     "PySide6.QtWidgets",
-    "us_quant.ibkr_stream",
+    "us_quant.trading.domain.market",
     "us_quant.ui_theme",
 }
 
@@ -121,39 +123,53 @@ def _imported_modules(raw: bytes) -> set[str]:
 
 
 def _quote(symbol: str, **overrides):
-    from us_quant.ibkr_stream import StreamQuote
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    from us_quant.trading.domain.market import (
+        MarketDataMode,
+        MarketQuote,
+    )
 
     base = dict(
         symbol=symbol,
-        request_id=1,
-        generation=1,
-        requested_market_data_type=3,
-        effective_market_data_type=3,
-        bid=__import__("decimal").Decimal("1.00"),
-        ask=__import__("decimal").Decimal("1.10"),
-        last=__import__("decimal").Decimal("1.05"),
-        close=__import__("decimal").Decimal("1.00"),
-        updated_at="2026-09-18T10:00:00+00:00",
+        bid=Decimal("1.00"),
+        ask=Decimal("1.10"),
+        last=Decimal("1.05"),
+        close=Decimal("1.00"),
+        bid_size=None,
+        ask_size=None,
+        mode=MarketDataMode.DELAYED,
+        updated_at=datetime(2026, 9, 18, 10, 0, tzinfo=timezone.utc),
         age_seconds=1.5,
         stale=False,
         stale_reason=None,
+        generation=1,
+        source_id="test_feed",
+        source_label="TestFeed",
+        coverage="unit-test",
     )
     base.update(overrides)
-    return StreamQuote(**base)
+    return MarketQuote(**base)
 
 
 def _snapshot(quotes):
-    from us_quant.ibkr_stream import StreamSnapshot
+    from datetime import datetime, timezone
 
-    return StreamSnapshot(
+    from us_quant.trading.domain.market import MarketSnapshot
+
+    return MarketSnapshot(
         generation=1,
-        socket_connected=True,
-        handshake_complete=True,
+        connected=True,
+        ready=True,
         reconnect_attempt=0,
         quotes=tuple(quotes),
-        last_error_code=None,
-        last_message="",
-        observed_at="2026-09-18T10:00:00+00:00",
+        error_code=None,
+        message="",
+        observed_at=datetime(2026, 9, 18, 10, 0, tzinfo=timezone.utc),
+        source_id="test_feed",
+        source_label="TestFeed",
+        coverage="unit-test",
     )
 
 
@@ -483,7 +499,7 @@ def test_quote_table_colours_exactly_the_documented_columns() -> None:
     model = _widgets().QuoteTableModel()
     # a realtime-ready quote: effective type 1, live bid/ask, not stale
     ready = _quote(
-        "AAPL", effective_market_data_type=1, requested_market_data_type=1, stale=False
+        "AAPL", mode=MarketDataMode.REALTIME, stale=False
     )
     model.update_snapshot(_snapshot([ready]))
     assert model.index(0, 12).data() == "READY"
@@ -508,8 +524,7 @@ def test_quote_table_colours_column_thirteen_only_when_stale() -> None:
             [
                 _quote(
                     "AAPL",
-                    effective_market_data_type=1,
-                    requested_market_data_type=1,
+                    mode=MarketDataMode.REALTIME,
                     stale=False,
                 )
             ]
@@ -541,8 +556,7 @@ def test_quote_table_ready_colour_comes_from_the_palette_success_slot() -> None:
             [
                 _quote(
                     "AAPL",
-                    effective_market_data_type=1,
-                    requested_market_data_type=1,
+                    mode=MarketDataMode.REALTIME,
                     stale=False,
                 )
             ]
@@ -597,9 +611,9 @@ def test_quote_table_sorts_non_numeric_text_case_insensitively() -> None:
     model.update_snapshot(
         _snapshot(
             [
-                _quote("A", provider="cherry"),
-                _quote("B", provider="Banana"),
-                _quote("C", provider="apple"),
+                _quote("A", source_label="cherry"),
+                _quote("B", source_label="Banana"),
+                _quote("C", source_label="apple"),
             ]
         )
     )

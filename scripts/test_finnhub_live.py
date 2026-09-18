@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from us_quant.credential_store import WindowsCredentialStore  # noqa: E402
 from us_quant.extended_hours import us_equity_session  # noqa: E402
-from us_quant.finnhub_stream import (  # noqa: E402
+from us_quant.trading.adapters.finnhub.market_data import (  # noqa: E402
     FinnhubTradeStream,
 )
 from us_quant.paths import ApplicationPaths  # noqa: E402

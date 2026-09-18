@@ -1,8 +1,8 @@
 import unittest
 
 from us_quant.ibkr import IBKRConnectionConfig
-from us_quant.ibkr_stream import (
-    IBKRReadOnlyStream,
+from us_quant.trading.adapters.ibkr.market_data import IBKRReadOnlyStream
+from us_quant.trading.adapters.market_data_state import (
     ReadOnlyEClientGuard,
     ReadOnlyViolation,
     StreamStateReducer,
@@ -27,7 +27,7 @@ class IBKRStreamTests(unittest.TestCase):
         )
         snapshot = stream.snapshot()
         self.assertEqual(stream.market_exchange, "OVERNIGHT")
-        self.assertEqual(snapshot.provider, "IBKR 5×24")
+        self.assertEqual(snapshot.source_label, "IBKR 5×24")
         self.assertIn("OVERNIGHT", snapshot.coverage)
 
     def test_live_quote_is_ready_only_with_type1_and_bid_ask(self) -> None:

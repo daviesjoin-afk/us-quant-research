@@ -2,7 +2,7 @@ import json
 from decimal import Decimal
 import unittest
 
-from us_quant.alpaca_stream import (
+from us_quant.trading.adapters.alpaca.market_data import (
     AlpacaCredentialsMissing,
     AlpacaIEXStream,
 )
@@ -60,7 +60,7 @@ class AlpacaStreamTests(unittest.TestCase):
         )
         snapshot = stream.snapshot()
         quote = snapshot.quotes[0]
-        self.assertEqual(snapshot.provider, "Alpaca")
+        self.assertEqual(snapshot.source_label, "Alpaca")
         self.assertIn("非全市场", snapshot.coverage)
         self.assertEqual(str(quote.bid), "200.1")
         self.assertEqual(str(quote.ask), "200.2")

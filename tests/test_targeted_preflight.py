@@ -3,7 +3,10 @@ from dataclasses import replace
 from decimal import Decimal
 import unittest
 
-from us_quant.ibkr_stream import StreamQuote
+from us_quant.trading.domain.market import (
+    MarketDataMode,
+    MarketQuote,
+)
 from us_quant.minute_data import MinuteDataSummary
 from us_quant.portfolio_view import AccountView
 from us_quant.strategy_registry import StrategyRecord
@@ -130,22 +133,23 @@ def _universe(**changes) -> UniverseRecord:
     return UniverseRecord(**values)
 
 
-def _quote(symbol: str = "AAPL") -> StreamQuote:
-    return StreamQuote(
+def _quote(symbol: str = "AAPL") -> MarketQuote:
+    return MarketQuote(
         symbol=symbol,
-        request_id=1,
-        generation=1,
-        requested_market_data_type=1,
-        effective_market_data_type=1,
         bid=Decimal("199.90"),
         ask=Decimal("200"),
         last=Decimal("199.95"),
         close=None,
-        updated_at=NOW.isoformat(),
+        bid_size=None,
+        ask_size=None,
+        mode=MarketDataMode.REALTIME,
+        updated_at=NOW,
         age_seconds=1,
         stale=False,
         stale_reason=None,
-        provider="TestFeed",
+        generation=1,
+        source_id="test_feed",
+        source_label="TestFeed",
         coverage="unit test",
     )
 

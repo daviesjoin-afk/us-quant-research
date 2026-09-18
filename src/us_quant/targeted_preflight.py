@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_FLOOR
 
-from us_quant.ibkr_stream import StreamQuote
+from us_quant.trading.domain.market import MarketQuote
 from us_quant.minute_data import MinuteDataSummary
 from us_quant.portfolio_view import AccountView
 from us_quant.strategy_registry import StrategyRecord
@@ -61,7 +61,7 @@ def evaluate_target_preflight(
     symbol: str,
     *,
     universe_record: UniverseRecord | None,
-    quote: StreamQuote | None,
+    quote: MarketQuote | None,
     account: AccountView | None,
     minute_summary: MinuteDataSummary,
     strategy: StrategyRecord | None,
@@ -255,7 +255,7 @@ def evaluate_target_preflight(
             "目标行情订阅",
             quote_subscribed,
             (
-                quote.provider if quote is not None else "未订阅"
+                quote.source_label if quote is not None else "未订阅"
             ),
             "当前流包含目标代码",
             "行情",
@@ -370,7 +370,7 @@ def evaluate_target_preflight(
         strategy_status=(
             strategy.status if strategy is not None else None
         ),
-        quote_provider=quote.provider if quote is not None else None,
+        quote_provider=quote.source_label if quote is not None else None,
         bid=quote.bid if quote is not None else None,
         ask=quote.ask if quote is not None else None,
         quote_age_seconds=quote_age,

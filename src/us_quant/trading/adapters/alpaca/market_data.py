@@ -1,3 +1,16 @@
+"""Alpaca IEX market data adapter.
+
+Moved from ``us_quant.alpaca_stream``.  The transport behaviour is unchanged:
+the proxy resolution and Clash fallback, the authentication handshake, the
+reconnect backoff and the message parsing are the same code.
+
+The boundary changed in two ways: ``snapshot()`` now returns the domain
+``MarketSnapshot``, and the missing-credentials failure is a
+``MarketDataCredentialsError`` (``AlpacaCredentialsMissing`` is kept as a
+subclass so existing callers and tests keep working) so the UI never has to
+name a provider-specific exception.
+"""
+
 from __future__ import annotations
 
 from dataclasses import replace
@@ -6,16 +19,24 @@ import os
 import random
 from threading import Event
 from time import monotonic, sleep
-from typing import Callable
 
-from us_quant.ibkr_stream import (
-    StreamSnapshot,
-    StreamStateReducer,
-)
 from us_quant.proxy_support import (
     DEFAULT_PROXY,
     proxy_unreachable,
     resolve_proxy,
+)
+from us_quant.trading.adapters.market_data_state import (
+    StreamSnapshot,
+    StreamStateReducer,
+    to_market_snapshot,
+)
+from us_quant.trading.domain.market import (
+    MarketDataHealth,
+    MarketSnapshot,
+)
+from us_quant.trading.ports.market_data import (
+    MarketDataCredentialsError,
+    SnapshotListener,
 )
 
 
@@ -23,9 +44,16 @@ ALPACA_KEY_ENV = "APCA_API_KEY_ID"
 ALPACA_SECRET_ENV = "APCA_API_SECRET_KEY"
 ALPACA_IEX_URL = "wss://stream.data.alpaca.markets/v2/iex"
 
+#: Stable logic key for this feed.
+SOURCE_ALPACA_IEX = "alpaca_iex"
+ALPACA_SOURCE_LABEL = "Alpaca"
 
-class AlpacaCredentialsMissing(RuntimeError):
-    pass
+ALPACA_QUOTE_COVERAGE = "IEX 单交易所实时；非 SIP/NBBO"
+ALPACA_SNAPSHOT_COVERAGE = "IEX 单交易所实时；非全市场 SIP/NBBO"
+
+
+class AlpacaCredentialsMissing(MarketDataCredentialsError):
+    """Kept as a named subclass of the provider-neutral error."""
 
 
 class AlpacaIEXStream:
@@ -39,7 +67,7 @@ class AlpacaIEXStream:
         api_secret: str | None = None,
         stale_after_seconds: float = 8.0,
         open_timeout_seconds: float = 15.0,
-        listener: Callable[[StreamSnapshot], None] | None = None,
+        listener: SnapshotListener | None = None,
     ) -> None:
         normalized = tuple(
             dict.fromkeys(
@@ -272,21 +300,41 @@ class AlpacaIEXStream:
             except Exception:
                 pass
 
-    def snapshot(self) -> StreamSnapshot:
+    def transport_snapshot(self) -> StreamSnapshot:
         base = self.reducer.snapshot()
         quotes = tuple(
             replace(
                 quote,
-                provider="Alpaca",
-                coverage="IEX 单交易所实时；非 SIP/NBBO",
+                provider=ALPACA_SOURCE_LABEL,
+                coverage=ALPACA_QUOTE_COVERAGE,
             )
             for quote in base.quotes
         )
         return replace(
             base,
             quotes=quotes,
-            provider="Alpaca",
-            coverage="IEX 单交易所实时；非全市场 SIP/NBBO",
+            provider=ALPACA_SOURCE_LABEL,
+            coverage=ALPACA_SNAPSHOT_COVERAGE,
+        )
+
+    def snapshot(self) -> MarketSnapshot:
+        return to_market_snapshot(
+            self.transport_snapshot(),
+            source_id=SOURCE_ALPACA_IEX,
+            source_label=ALPACA_SOURCE_LABEL,
+        )
+
+    def health(self) -> MarketDataHealth:
+        snapshot = self.snapshot()
+        return MarketDataHealth(
+            connected=snapshot.connected,
+            source=snapshot.source_id,
+            stale_symbols=tuple(
+                quote.symbol
+                for quote in snapshot.quotes
+                if quote.stale
+            ),
+            message=snapshot.message,
         )
 
     def _authenticate(self, connection) -> None:

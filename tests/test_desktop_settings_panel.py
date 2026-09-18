@@ -122,6 +122,38 @@ LATER_ROUND_UI_METHODS = (
     "_targeted_robustness_finished",
 )
 
+# Market Data v2: the methods this round rewrote because the market
+# data boundary moved from a v1 service to the application service.
+# Declared so the guard below can assert the delta exactly.
+MARKET_DATA_V2_METHODS = (
+    # Market Data v2: the window talks to the application service and the
+    # domain snapshot instead of the v1 service and transport types.
+    "__init__",
+    "_start_stream",
+    "_stream_snapshot_pushed",
+    "_stream_snapshot_received",
+    "_poll_stream_snapshot",
+    "_populate_stream_snapshot",
+    "_invalidate_stream_snapshot",
+    "_record_minute_snapshot",
+    "_update_quote_readiness",
+    "_maybe_rotate_extended_ibkr_session",
+    "_request_stream_switch",
+    "_save_user_preferences",
+    "_clear_selected_api_credentials",
+    "_api_provider_changed",
+)
+
+#: The frozen handlers this round legitimately rewrote, with the reason.
+#: Declared so `test_the_settings_handler_is_unchanged` can assert the
+#: exact delta instead of only the untouched remainder.
+MARKET_DATA_V2_FROZEN_HANDLERS = (
+    # The save path now hands credentials to the application request.
+    "_save_user_preferences",
+    "_clear_selected_api_credentials",
+    "_api_provider_changed",
+)
+
 # Spec 4: the seventeen controls the window keeps exposing.
 SETTINGS_WIDGETS = (
     "settings_theme_combo",
@@ -1286,7 +1318,14 @@ def test_the_panel_does_not_import_the_window() -> None:
 
 @pytest.mark.parametrize("name", FROZEN_HANDLERS)
 def test_the_settings_handler_is_unchanged(name: str) -> None:
-    """Spec 23/41: the handlers must be byte-identical to the base commit."""
+    """Spec 23/41: the handlers must be byte-identical to the base commit.
+
+    Market Data v2 rewrote three of them because the save path now hands
+    credentials to the application request.  Those three are declared in
+    ``MARKET_DATA_V2_FROZEN_HANDLERS`` and are asserted to have changed --
+    so the exemption cannot silently swallow an unrelated edit, and a
+    fourth frozen handler changing still fails here.
+    """
 
     base = _base_source("src/us_quant/desktop.py")
     if base is None:
@@ -1309,6 +1348,12 @@ def test_the_settings_handler_is_unchanged(name: str) -> None:
     current_body = _source_of(
         _main_window_class(current_tree), current_method, current
     ).replace("\r\n", "\n")
+
+    if name in MARKET_DATA_V2_FROZEN_HANDLERS:
+        # Declared as changed: assert it really did change, so the
+        # declaration cannot mask an untouched (or reverted) method.
+        assert current_body != base_body, name
+        return
 
     assert current_body == base_body
 
@@ -1368,9 +1413,15 @@ def test_only_the_settings_tab_was_rewritten() -> None:
         if base_body != current_body:
             changed.append(name)
 
-    assert set(changed) <= DECLARED_REFACTOR_SURFACE | set(
-        LATER_ROUND_UI_METHODS
+    allowed = (
+        set(DECLARED_REFACTOR_SURFACE)
+        | set(LATER_ROUND_UI_METHODS)
+        | set(MARKET_DATA_V2_METHODS)
     )
+    # Exact, not a subset: every changed method must be declared, and
+    # every declared method must actually have changed.
+    assert set(changed) <= allowed
+    assert set(MARKET_DATA_V2_METHODS) <= set(changed)
     assert "_settings_tab" in changed
 
 

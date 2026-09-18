@@ -5,7 +5,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from us_quant.ibkr_stream import StreamQuote, StreamSnapshot
+from us_quant.trading.domain.market import (
+    MarketDataMode,
+    MarketQuote,
+    MarketSnapshot,
+)
 from us_quant.minute_data import MinuteQuoteRecord, MinuteQuoteStore
 from us_quant.targeted_replay import (
     load_targeted_replays,
@@ -45,36 +49,36 @@ def snapshot(
     bid: str,
     ask: str,
     stale: bool = False,
-) -> StreamSnapshot:
-    quote = StreamQuote(
+) -> MarketSnapshot:
+    quote = MarketQuote(
         symbol="AAPL",
-        request_id=1,
-        generation=1,
-        requested_market_data_type=1,
-        effective_market_data_type=1,
         bid=Decimal(bid),
         ask=Decimal(ask),
         last=Decimal(bid),
         close=None,
-        updated_at=minute.isoformat(),
-        age_seconds=0,
         bid_size=Decimal("400"),
         ask_size=Decimal("600"),
+        mode=MarketDataMode.REALTIME,
+        updated_at=minute,
+        age_seconds=0,
         stale=stale,
         stale_reason="test stale" if stale else None,
-        provider="TestFeed",
+        generation=1,
+        source_id="test_feed",
+        source_label="TestFeed",
         coverage="unit-test Level-I",
     )
-    return StreamSnapshot(
+    return MarketSnapshot(
         generation=1,
-        socket_connected=True,
-        handshake_complete=True,
+        connected=True,
+        ready=True,
         reconnect_attempt=0,
         quotes=(quote,),
-        last_error_code=None,
-        last_message="test",
-        observed_at=minute.isoformat(),
-        provider="TestFeed",
+        error_code=None,
+        message="test",
+        observed_at=minute,
+        source_id="test_feed",
+        source_label="TestFeed",
         coverage="unit-test Level-I",
     )
 
@@ -125,7 +129,7 @@ class MinuteReplayTests(unittest.TestCase):
                 bid=price,
                 ask=price + Decimal("0.02"),
                 last=price,
-                market_data_type=1,
+                mode=MarketDataMode.REALTIME,
                 realtime_ready=True,
                 stale=False,
                 stale_reason=None,
@@ -166,7 +170,7 @@ class MinuteReplayTests(unittest.TestCase):
                 bid=Decimal("50"),
                 ask=Decimal("50.02"),
                 last=Decimal("50"),
-                market_data_type=1,
+                mode=MarketDataMode.REALTIME,
                 realtime_ready=True,
                 stale=False,
                 stale_reason=None,
@@ -207,7 +211,7 @@ class MinuteReplayTests(unittest.TestCase):
                 bid=Decimal("50"),
                 ask=Decimal("50.02"),
                 last=Decimal("50"),
-                market_data_type=1,
+                mode=MarketDataMode.REALTIME,
                 realtime_ready=True,
                 stale=False,
                 stale_reason=None,
@@ -265,7 +269,7 @@ class MinuteReplayTests(unittest.TestCase):
                 bid=Decimal("50"),
                 ask=Decimal("50.02"),
                 last=Decimal("50"),
-                market_data_type=1,
+                mode=MarketDataMode.REALTIME,
                 realtime_ready=True,
                 stale=False,
                 stale_reason=None,
@@ -308,7 +312,7 @@ def _multi_session_records(days: int) -> tuple[MinuteQuoteRecord, ...]:
                     bid=price,
                     ask=price + Decimal("0.02"),
                     last=price,
-                    market_data_type=1,
+                    mode=MarketDataMode.REALTIME,
                     realtime_ready=True,
                     stale=False,
                     stale_reason=None,

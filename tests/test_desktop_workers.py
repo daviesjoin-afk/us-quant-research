@@ -187,7 +187,7 @@ class _FakeService:
     stop_calls: int = 0
     failure: Exception | None = None
 
-    def build_stream(self, request, listener=None):
+    def prepare(self, request, *, listener=None):
         self.built.append({"request": request, "listener": listener})
         return self.stream
 
@@ -204,14 +204,14 @@ class _FakeService:
         self.stop_calls += 1
 
 
-def _request(provider: str | None = None):
-    from us_quant.market_data_service import (
-        PROVIDER_IBKR,
-        MarketDataRequest,
+def _request(source: str | None = None):
+    from us_quant.trading.application.market_data import (
+        SOURCE_IBKR,
+        MarketDataStartRequest,
     )
 
-    return MarketDataRequest(
-        provider=provider or PROVIDER_IBKR, symbols=("SPY",)
+    return MarketDataStartRequest(
+        source_id=source or SOURCE_IBKR, symbols=("SPY",)
     )
 
 
@@ -225,9 +225,8 @@ def test_stream_worker_asks_the_service_for_its_stream() -> None:
     assert service.built[0]["request"] is request
     assert len(service.exchanges_asked) == 1
 
-    assert worker.provider == request.provider
+    assert worker.source_id == request.source_id
     assert worker.market_data is service
-    assert worker.service is service.stream
     assert worker.market_exchange == "ARCA"
 
 
@@ -239,16 +238,18 @@ def test_stream_worker_carries_the_requested_provider_verbatim() -> None:
     a different provider, where the two cannot be confused.
     """
 
-    from us_quant.market_data_service import PROVIDER_FINNHUB_TRADES
+    from us_quant.trading.application.market_data import (
+        SOURCE_FINNHUB_TRADES,
+    )
 
     service = _FakeService()
 
     worker = _workers().StreamWorker(
-        service, _request(PROVIDER_FINNHUB_TRADES)
+        service, _request(SOURCE_FINNHUB_TRADES)
     )
 
-    assert worker.provider == PROVIDER_FINNHUB_TRADES
-    assert worker.provider == "finnhub_trades"
+    assert worker.source_id == SOURCE_FINNHUB_TRADES
+    assert worker.source_id == "finnhub_trades"
 
 
 def test_stream_worker_hands_the_adapter_its_own_signal_as_listener() -> None:
@@ -411,7 +412,7 @@ def test_worker_module_allows_only_the_expected_dependencies() -> None:
         "__future__",
         "typing",
         "PySide6.QtCore",
-        "us_quant.market_data_service",
+        "us_quant.trading.application.market_data",
         "us_quant.universe",
     }
 
@@ -433,11 +434,13 @@ def test_worker_module_names_no_ui_class() -> None:
 
 
 def test_stream_worker_contains_no_provider_branching() -> None:
-    """The provider factory belongs to ``MarketDataService``.
+    """The provider factory belongs to ``MarketDataApplication``.
 
     Checked as AST rather than as text: a comparison against
-    ``request.provider`` or a ``match`` on it is the shape a re-grown
-    factory takes.
+    ``request.source_id``/``request.provider`` or a ``match`` on it is the
+    shape a re-grown factory takes.  A branch whose body happens to be inert
+    is still a factory in waiting, so the guard flags the comparison itself
+    rather than any resulting behaviour.
     """
 
     tree = _module_tree()
@@ -447,19 +450,37 @@ def test_stream_worker_contains_no_provider_branching() -> None:
         if isinstance(node, ast.ClassDef) and node.name == "StreamWorker"
     )
 
-    provider_comparisons = []
+    branches = []
     for node in ast.walk(worker_class):
         if isinstance(node, ast.Match):
-            provider_comparisons.append("match")
+            branches.append("match")
         if isinstance(node, ast.Compare):
             for operand in [node.left, *node.comparators]:
                 if (
                     isinstance(operand, ast.Attribute)
-                    and operand.attr == "provider"
+                    and operand.attr in {"provider", "source_id"}
                 ):
-                    provider_comparisons.append(ast.unparse(node)[:80])
+                    branches.append(ast.unparse(node)[:80])
+        if isinstance(node, (ast.If, ast.IfExp)):
+            for operand in ast.walk(node.test):
+                if (
+                    isinstance(operand, ast.Attribute)
+                    and operand.attr in {"provider", "source_id"}
+                ):
+                    branches.append(ast.unparse(node.test)[:80])
+                    break
 
-    assert provider_comparisons == []
+    assert branches == []
+
+
+def test_stream_worker_hardcodes_no_source_id() -> None:
+    """A literal source id in the worker is a factory that lost its shape."""
+
+    from us_quant.trading.application.market_data import SUPPORTED_SOURCES
+
+    source = _SOURCE.read_text(encoding="utf-8")
+    for source_id in SUPPORTED_SOURCES:
+        assert f'"{source_id}"' not in source, source_id
 
 
 def test_worker_module_names_no_provider_adapter() -> None:

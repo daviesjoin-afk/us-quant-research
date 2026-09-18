@@ -4,7 +4,7 @@ import json
 import os
 import unittest
 
-from us_quant.finnhub_stream import (
+from us_quant.trading.adapters.finnhub.market_data import (
     FinnhubCredentialsMissing,
     FinnhubRejectedError,
     FinnhubTradeStream,
@@ -64,7 +64,7 @@ class FinnhubStreamTests(unittest.TestCase):
         )
         snapshot = stream.snapshot()
         row = snapshot.quotes[0]
-        self.assertEqual(snapshot.provider, "Finnhub")
+        self.assertEqual(snapshot.source_label, "Finnhub")
         self.assertIn("非市场盘口", row.coverage)
         self.assertEqual(str(row.last), "50.0")
         self.assertLess(row.bid, row.last)
@@ -87,7 +87,7 @@ class FinnhubStreamTests(unittest.TestCase):
 
         self.assertEqual(stream.reducer.stale_after_seconds, 120)
         self.assertIn("120", extended.coverage)
-        self.assertIn("等待新的成交", extended.last_message)
+        self.assertIn("等待新的成交", extended.message)
         session[0] = USEquitySession.REGULAR
         regular = stream.snapshot()
         self.assertEqual(stream.reducer.stale_after_seconds, 20)

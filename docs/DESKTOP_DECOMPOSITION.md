@@ -1,5 +1,13 @@
 # Desktop 运行时职责分解（第一步：RuntimeSupervisor；第二步：MarketDataService）
 
+> **历史记录。** 本文件描述 0.20.0 之前的十五步桌面分解过程，保留为历史过程
+> 记录，不再往里追加未来总架构。其中第二步建立的
+> `src/us_quant/market_data_service.py` 已在 **Market Data v2** 轮次被删除，
+> 其职责迁至 `trading/application/market_data.py` +
+> `trading/composition/market_data.py` + `trading/adapters/*/market_data.py`。
+> 当前架构见 `docs/TRADING_ARCHITECTURE_V2.md`。下文提到
+> `MarketDataService` / `StreamSnapshot` 之处均指当时的实现，不再对应当前代码。
+
 审计对象：`src/us_quant/desktop.py`（审计前 9,624 行 / 371,474 字节）。
 
 第一步：把**通用 runtime 生命周期**从 `MainWindow` 里抽出来交给

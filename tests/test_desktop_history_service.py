@@ -93,6 +93,28 @@ LATER_ROUND_UI_METHODS = (
 )
 
 # Spec 34/58: these must stay byte-identical to the base commit.
+# Market Data v2: the methods this round rewrote because the market
+# data boundary moved from a v1 service to the application service.
+# Declared so the guard below can assert the delta exactly.
+MARKET_DATA_V2_METHODS = (
+    # Market Data v2: the window talks to the application service and the
+    # domain snapshot instead of the v1 service and transport types.
+    "__init__",
+    "_start_stream",
+    "_stream_snapshot_pushed",
+    "_stream_snapshot_received",
+    "_poll_stream_snapshot",
+    "_populate_stream_snapshot",
+    "_invalidate_stream_snapshot",
+    "_record_minute_snapshot",
+    "_update_quote_readiness",
+    "_maybe_rotate_extended_ibkr_session",
+    "_request_stream_switch",
+    "_save_user_preferences",
+    "_clear_selected_api_credentials",
+    "_api_provider_changed",
+)
+
 FROZEN_METHODS = (
     "_data_tab",
     "_history_finished",
@@ -848,9 +870,18 @@ def test_the_collaborators_are_untouched() -> None:
         assert current == base, path
 
 
+# Market Data v2: sibling modules this round legitimately rewrote.
+# Declared so the guard can assert the delta exactly.
+MARKET_DATA_V2_CHANGED_MODULES = (
+    "src/us_quant/desktop_workers.py",
+    "src/us_quant/desktop_widgets.py",
+)
+
+
 def test_the_frozen_sibling_modules_are_untouched() -> None:
     """Spec 35/36/37: Paper, settings, workers and widgets are frozen."""
 
+    changed = []
     for path in (
         "src/us_quant/paper_trading_service.py",
         "src/us_quant/paper_session.py",
@@ -872,7 +903,12 @@ def test_the_frozen_sibling_modules_are_untouched() -> None:
                 "byte-equivalence guard cannot run"
             )
         current = (_REPO_ROOT / path).read_text(encoding="utf-8")
-        assert current == base, path
+        if current != base:
+            changed.append(path)
+
+    # Exact, not a subset: the delta is the declared Market Data v2 surface
+    # and nothing else.
+    assert set(changed) == set(MARKET_DATA_V2_CHANGED_MODULES)
 
 
 # -- 58: the AutoQuant trio is frozen ---------------------------------
@@ -959,7 +995,9 @@ def test_only_the_declared_methods_changed() -> None:
         | set(LATER_ROUND_METHODS)
         | set(LATER_ROUND_UI_METHODS)
     )
+    declared = set(declared) | set(MARKET_DATA_V2_METHODS)
     assert set(changed) <= declared
+    assert set(MARKET_DATA_V2_METHODS) <= set(changed)
     for name in REFACTORED_METHODS:
         if name != "__init__":
             assert name in changed, name
@@ -1189,7 +1227,7 @@ def test_run_history_reads_the_live_config_not_the_stream_copy(
     try:
         fresh_ibkr = replace(window.config.ibkr)
         window.config = replace(window.config, ibkr=fresh_ibkr)
-        assert window.market_data_service.config is not fresh_ibkr
+        assert window.market_data.config is not fresh_ibkr
 
         def fake_run_ibkr(config, *, maximum_jobs, progress=None):
             seen["config"] = config

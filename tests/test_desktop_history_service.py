@@ -621,6 +621,44 @@ def test_snapshot_maps_counts_onto_explicit_fields(
     assert (snapshot.completed, snapshot.failed) == (8, 2)
 
 
+def test_snapshot_preserves_the_windows_original_read_order(
+    tmp_path,
+) -> None:
+    """Rows are observed before counts, exactly as the old window did.
+
+    The queue can change while a history runner is active.  Reversing these
+    two reads would be a subtle behaviour change in an extraction-only PR,
+    even though both orders look equivalent in a quiescent unit test.
+    """
+
+    calls: list[str] = []
+
+    class OrderedStore(_FakeStore):
+        def list_jobs(self, **_kwargs) -> tuple:
+            calls.append("list_jobs")
+            return ()
+
+        def counts(self) -> dict[str, int]:
+            calls.append("counts")
+            return {
+                "pending": 0,
+                "running": 0,
+                "completed": 0,
+                "failed": 0,
+            }
+
+    import us_quant.desktop_history_service as module
+
+    original = module.HistoryJobStore
+    module.HistoryJobStore = OrderedStore
+    try:
+        _service(tmp_path).snapshot()
+    finally:
+        module.HistoryJobStore = original
+
+    assert calls == ["list_jobs", "counts"]
+
+
 def test_snapshot_does_not_apply_the_table_cap(
     monkeypatch, tmp_path, fake_store
 ) -> None:
@@ -918,6 +956,16 @@ def test_the_module_wide_ban_is_deliberately_not_asserted() -> None:
         "src/us_quant/history_queue.py",
     ):
         assert (_REPO_ROOT / path).exists()
+
+
+def test_desktop_keeps_only_the_autoquant_store_import_not_history_runners(
+) -> None:
+    """The AutoQuant store stays, but the two queue runners belong to service."""
+
+    source = _desktop_source()
+    assert "HistoryJobStore" in source
+    assert "run_history_queue" not in source
+    assert "run_public_history_queue" not in source
 
 
 # -- 49: the window owns the service -----------------------------------

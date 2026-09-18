@@ -1208,7 +1208,10 @@ def test_only_the_declared_methods_changed() -> None:
         if before != after:
             changed.append(name)
 
-    assert set(changed) <= set(REFACTORED_METHODS) | {"_run_scan"}
+    assert set(changed) <= set(REFACTORED_METHODS) | {
+        "_run_scan",
+        "_run_backtest_workspace",
+    }
     assert "_refresh_universe" in changed
 
 

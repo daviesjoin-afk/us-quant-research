@@ -95,6 +95,7 @@ from us_quant.desktop_universe_service import (
     DesktopUniverseService,
 )
 from us_quant.desktop_market_scan_service import DesktopMarketScanService
+from us_quant.desktop_backtest_service import DesktopBacktestService
 from us_quant.ibkr import IBKRConnectionConfig, probe_ibkr_socket
 from us_quant.ibkr_readonly import (
     IBKRReadOnlySnapshot,
@@ -281,8 +282,6 @@ from us_quant.backtest_workspace import (
     STRATEGY_SPECS,
     BacktestRequest,
     BacktestRun,
-    run_backtest,
-    save_backtest_run,
 )
 from us_quant.strategy_schema import strategy_schema_summary
 
@@ -360,6 +359,11 @@ class MainWindow(QMainWindow):
             data_root=self.data_root,
             fallback_data_root=self.bundled_data_root,
             scan_path=self.scan_path,
+        )
+        self.backtest_service = DesktopBacktestService(
+            data_root=self.data_root,
+            fallback_data_root=self.bundled_data_root,
+            output_root=self.paths.research_results_root / "backtests",
         )
         self.strategy_path = (
             self.paths.research_results_root
@@ -3205,25 +3209,13 @@ class MainWindow(QMainWindow):
         ]
 
         def task(progress: Callable[[str], None]) -> tuple[BacktestRun, ...]:
-            runs = []
-            for index, request in enumerate(requests, start=1):
-                progress(
-                    f"回测 {index}/{len(requests)}："
+            return self.backtest_service.run(
+                requests,
+                on_progress=lambda index, total, request: progress(
+                    f"回测 {index}/{total}："
                     f"{request.strategy_id} {request.symbol}"
-                )
-                run = run_backtest(
-                    request,
-                    data_root=self.data_root,
-                    fallback_data_root=self.bundled_data_root,
-                )
-                save_backtest_run(
-                    run,
-                    output_root=(
-                        self.paths.research_results_root / "backtests"
-                    ),
-                )
-                runs.append(run)
-            return tuple(runs)
+                ),
+            )
 
         self.backtest_run_button.setEnabled(False)
         self.backtest_compare_button.setEnabled(False)

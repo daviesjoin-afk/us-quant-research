@@ -1283,3 +1283,190 @@ service 不含任何中文文案。窗口在 task 内部把 domain event 翻成�
 字段、`schedule_universe` 不接 `batch_size`、`snapshot()` 内部仍是**两次** store read
 且顺序必须是 `list_jobs() → counts()`、以及测试数改为 979。第三点不是文字问题——
 它是合并 PR #12 前最后修掉的行为漂移，写错就等于把错误语义固化成文档。
+
+## 15. 第十四步：`desktop_market_scan_service.py`（手动市场扫描边界）
+
+第十四步把 `MainWindow._run_scan()` 里「读本地日 K → `scan_market` →
+`save_market_scan`」这段非 Qt 编排搬进
+`src/us_quant/desktop_market_scan_service.py`。
+
+```text
+MainWindow
+    ↓ Qt task / progress / dialogs
+
+DesktopMarketScanService
+    ↓
+scan_market
+save_market_scan
+```
+
+**只迁移用户手动扫描这条路径。** AutoQuant 的候选准备
+（`_prepare_auto_quant_candidates`）内部还有一份同样的
+`scan_market` + `save_market_scan`，本步**故意保留**：它连着 Paper `PREPARING`、
+候选准备失败清理与 `_auto_market_scan_finished`，属于高风险启动链。
+
+### 15.1 边界形状
+
+```python
+class DesktopMarketScanService:
+    def __init__(
+        self,
+        *,
+        data_root: Path,
+        fallback_data_root: Path | None,
+        scan_path: Path,
+    ) -> None: ...
+
+    def scan(
+        self,
+        universe: UniverseSnapshot,
+        *,
+        capital: Decimal,
+        max_position_risk_pct: Decimal,
+        substitutions: dict[str, SubstitutionRule],
+    ) -> MarketScan: ...
+```
+
+构造函数**只保存三个路径**，零 I/O：不 `mkdir`、不 `exists`、不 `open`、
+不 `read`、不 `scan_market`、不 `save_market_scan`。AST 守卫钉住
+`self.<attr>` 的 Store 集合恰好是
+`{data_root, fallback_data_root, scan_path}`。
+
+三个路径全部取自窗口已有对象，不重新 `ApplicationPaths.discover()`、
+不自行拼 `runtime/` / `research/results/` / `data/`。
+
+### 15.2 scan → save → return
+
+```text
+scan_market(...)  →  save_market_scan(result, scan_path)  →  return result
+```
+
+顺序是契约：不 save-before-scan、不在 save 之前 return、不做后台保存。
+`save_market_scan` 返回的 `Path` **不得**替代 domain result——`service.scan(...)`
+的返回值必须与 `scan_market` 的返回值**同一对象**（identity，不是相等）。
+
+`scan_market` 失败（`ValueError` / `OSError`）时 `save_market_scan` 调用 **0 次**，
+异常原样向上；`save_market_scan` 失败时同样原样抛出，**不返回 scan result
+假装成功**。两者都不 catch、不包装成 `DesktopMarketScanError`。service 里
+没有任何 `except` 子句（AST 守卫）。
+
+### 15.3 scanner 参数逐项保持
+
+```python
+scan_market(
+    universe,
+    data_root=self.data_root,
+    fallback_data_root=self.fallback_data_root,
+    capital=capital,
+    max_position_risk_pct=max_position_risk_pct,
+    substitutions=substitutions,
+)
+```
+
+`allow_quality_second_tier` **不传**：旧代码也没传，因此继续使用 scanner 自己的
+默认值 `True`。extraction 不得偷偷改第二层质量池规则。
+
+### 15.4 求值时机（本步最容易错的地方）
+
+| 值 | 求值时机 |
+|---|---|
+| `research_capital` | **task 启动前**（UI 线程） |
+| `self.universe` | task 执行时读取 |
+| `self.config.risk_limits.max_position_exposure_pct` | task 执行时读取 |
+| `self.config.substitutions` | task 执行时读取 |
+
+`research_capital = self._research_scenario_capital()` 发生在 `_start_task()`
+之前；其余三项在 worker 内部读取。**不能**在 `_run_scan()` 前提前写
+`universe = self.universe` 再让 worker 用那个快照，也**不能**把
+`_research_scenario_capital()` 挪进 task——那会改变 UI 线程与 worker 线程的求值时机。
+
+测试用「捕获 task 但不执行 → 替换 `universe` / `config` → 再执行 task」的方式钉住：
+`capital` 必须是替换前的 `CAPITAL_A`，而 `universe` / `risk_pct` / `substitutions`
+必须是替换后的新对象。
+
+### 15.5 UI 留在窗口
+
+- 缺少标的池的对话框（标题「缺少标的池」、正文「请先刷新官方标的。」）留在
+  `_run_scan()`：这是 UI prerequisite，不是 application 逻辑。
+- 进度文案「正在读取已通过质量门的本地日 K…」留在窗口；service **不需要**
+  progress callback。本步**不**引入 `MarketScanProgress` / `STAGE_*` /
+  callback protocol——只有一条进度，为形式统一而抽象没有价值。
+- `_start_task(task, on_success=self._scan_finished, start_message="市场扫描中…",
+  resource_group="scan")` 逐项不变。
+- `_scan_finished` 完全冻结：`self.scan = result` → `_populate_scan_table()` →
+  `_refresh_cards()` → `_refresh_market_scope_summary()` → `summary()` → `_log(...)`。
+
+### 15.6 允许变化的两个方法
+
+| 方法 | 说明 |
+|---|---|
+| `__init__` | 构造 service（+5 行） |
+| `_run_scan` | 40 行 → 22 行 |
+
+`MainWindow` 方法总数 **191 → 191**。其余方法逐字节未变，包括
+`_scan_finished`、`_prepare_auto_quant_candidates`、
+`_auto_candidate_preparation_failed`、`_auto_market_scan_finished`、
+`_select_auto_quant_candidates`、`_stop_auto_market_data`、
+`_confirm_and_start_auto_quant`、`_start_auto_quant`（8 个 byte-equivalence 用例）。
+
+`scanner.py` 本身冻结——本步只是给它加一层 application orchestration wrapper。
+`desktop.py` 仍 import `scan_market` / `save_market_scan`，因为 AutoQuant 路径
+仍然直接调用它们。
+
+### 15.7 体积与测试
+
+| | before | after |
+|---|---|---|
+| `desktop.py` | 9014 行 / 356,115 字节 | 9016 行 / 356,227 字节 |
+| `desktop_market_scan_service.py` | — | 72 行 / 2,440 字节 |
+| `tests/test_desktop_market_scan_service.py` | — | 1084 行 / 31,495 字节 |
+| 全套测试 | 1032 passed | 1077 passed |
+
+（字节口径为 LF 归一化后的 blob；before 取 `git show d497388:src/us_quant/desktop.py`。
+`MainWindow` 方法总数 **191 → 191**；`__init__` 184 → 189 行、`_run_scan` 32 → 28 行、
+`_scan_finished` 10 → 10 行不变。）
+
+### 15.8 覆盖强度与突变结果
+
+`tests/test_desktop_market_scan_service.py` 共 **39 个测试函数**，参数化展开后
+**46 个用例**：**16 个函数是结构守卫**（参数化后 23 个用例），23 个是行为断言
+（23 个用例）。
+
+结构守卫按 AST 读源码：service 的 import 集合**相等**（只允许 `__future__` /
+`decimal` / `pathlib` / `us_quant.portfolio` / `us_quant.scanner` /
+`us_quant.universe`）、不 import Qt、不 import Paper / workflow / risk / auto_quant、
+无 `except` 子句、无 `cancel`/`stop`/`request_stop`、无中文文案、
+`self.<attr>` 的 Store 集合恰好是三个路径、`__init__` 正文不含任何 I/O 调用；
+`_run_scan` 正文不再出现 `scan_market(` / `save_market_scan(`，而
+`_prepare_auto_quant_candidates` **必须**仍然直接调用它们。
+
+突变结果：**44/44 全杀、0 存活、0 问题、0 挂起、0 SKIP。** 三轮才收敛：
+
+① 首轮一个存活：`data_root.exists()` 加在构造函数里。这是**语义等价**突变——
+纯读取调用无副作用、外部不可观测，行为断言永远杀不掉它。处理方式是加一条
+AST 结构守卫（`__init__` 正文的调用集合不得含 `mkdir`/`exists`/`open`/…），
+让「零 I/O」这条规则有真实杀手。
+
+② 次轮两个存活：`capital-moved-into-the-task`（我的假
+`_research_scenario_capital` 恒返回同一值，在 UI 线程算还是在 worker 里算看起来
+一样 → 改成第二次调用返回不同值）；`on-success-callback-changed`（突变体是**多加了
+一个 keyword**，而断言只查键存在 → 补 `set(kwargs)` 键集合断言）。
+
+③ 一个 harness 缺陷：`scan-exceptions-swallowed` 的替换文本产生了不成对的 `try`，
+`ast.parse` 拦下了它并**中止整个 sweep**。`ast.parse` 前置校验是对的（没有写坏文件），
+但中止应该是**逐体跳过并记录**，不是让整轮失败。
+
+### 15.9 三条守卫的维护方式
+
+本步合法改动了 `_run_scan`，而前几轮的 scope guard 各自相对自己的 base commit 断言
+「只有我声明的方法变了」。按 §49 的要求，处理方式是**把 `_run_scan` 加进它们的
+显式 allowlist**，而不是删除、跳过或放宽守卫：
+
+- `test_desktop_history_service.py`：`LATER_ROUND_METHODS += "_run_scan"`
+- `test_desktop_settings_panel.py`：`DECLARED_REFACTOR_SURFACE += "_run_scan"`
+- `test_desktop_universe_service.py`：从 `FROZEN_METHODS` 移出 `_run_scan`
+  （它在第十三步的 base 里存在，但第十四步合法重写了它），并在本步自己的
+  byte-equivalence 清单里改为冻结 `_scan_finished` 与 AutoQuant 七方法。
+
+**每轮都要为自己那一刀配一个相对自己 base commit 的守卫**——否则「允许面」会
+逐轮膨胀成什么都允许。

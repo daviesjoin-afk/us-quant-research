@@ -84,7 +84,7 @@ from us_quant.artifact_state import (
 )
 from us_quant.paths import ApplicationPaths
 from us_quant.account_ledger import AccountLedger
-from us_quant.history_queue import HistoryJobStore, run_history_queue
+from us_quant.history_queue import HistoryJobStore
 from us_quant.desktop_history_service import DesktopHistoryService
 from us_quant.ibkr import IBKRConnectionConfig, probe_ibkr_socket
 from us_quant.ibkr_readonly import (
@@ -244,7 +244,6 @@ from us_quant.intraday_universe import (
     select_intraday_watchlist,
     select_paper_rotation_rows,
 )
-from us_quant.public_history import run_public_history_queue
 from us_quant.cross_sectional import (
     run_cross_sectional_research,
     save_cross_sectional_research,

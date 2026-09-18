@@ -77,6 +77,7 @@ from us_quant.credential_store import (
     CredentialStoreError,
     WindowsCredentialStore,
 )
+from us_quant.desktop_credentials import DesktopCredentialService
 from us_quant.artifact_state import (
     ArtifactCatalog,
     load_artifact_catalog,
@@ -315,6 +316,9 @@ class MainWindow(QMainWindow):
         self.paths.seed_research_results()
         self.credential_store = WindowsCredentialStore(
             self.paths.state_root / "credentials"
+        )
+        self.credential_service = DesktopCredentialService(
+            self.credential_store
         )
         self.root = self.paths.resource_root
         self.config_path = self.paths.config_path
@@ -7223,14 +7227,8 @@ class MainWindow(QMainWindow):
             return
         provider = str(self.stream_mode.currentData() or "ibkr")
         try:
-            finnhub_key = self._load_stream_credential(
-                "finnhub_api_key", "FINNHUB_API_KEY"
-            )
-            alpaca_key = self._load_stream_credential(
-                "alpaca_api_key", "APCA_API_KEY_ID"
-            )
-            alpaca_secret = self._load_stream_credential(
-                "alpaca_api_secret", "APCA_API_SECRET_KEY"
+            credentials = (
+                self.credential_service.resolve_stream_credentials()
             )
             # The UI knows *what the operator selected* (provider id,
             # watchlist, credential store values).  Everything else --
@@ -7239,9 +7237,9 @@ class MainWindow(QMainWindow):
             request = MarketDataRequest(
                 provider=provider,
                 symbols=symbols,
-                alpaca_api_key=alpaca_key,
-                alpaca_api_secret=alpaca_secret,
-                finnhub_api_key=finnhub_key,
+                alpaca_api_key=credentials.alpaca_api_key,
+                alpaca_api_secret=credentials.alpaca_api_secret,
+                finnhub_api_key=credentials.finnhub_api_key,
             )
             worker = StreamWorker(self.market_data_service, request)
             market_exchange = worker.market_exchange
@@ -8998,9 +8996,16 @@ class MainWindow(QMainWindow):
                 "Alpaca 需要同时填写 API Key 和 API Secret。",
             )
             return
+        if provider == "finnhub_trades":
+            api_key = supplied.get("finnhub_api_key", "")
+            api_secret = ""
+        else:
+            api_key = supplied.get("alpaca_api_key", "")
+            api_secret = supplied.get("alpaca_api_secret", "")
         try:
-            for name, value in supplied.items():
-                self.credential_store.save_secret(name, value)
+            self.credential_service.save_provider(
+                provider, api_key=api_key, api_secret=api_secret
+            )
         except (CredentialStoreError, OSError, ValueError) as error:
             QMessageBox.warning(self, "凭据保存失败", str(error))
             return
@@ -9031,10 +9036,8 @@ class MainWindow(QMainWindow):
             )
             return
         if provider == "finnhub_trades":
-            names = ("finnhub_api_key",)
             label = "Finnhub"
         elif provider == "alpaca_iex":
-            names = ("alpaca_api_key", "alpaca_api_secret")
             label = "Alpaca"
         else:
             QMessageBox.information(
@@ -9044,8 +9047,7 @@ class MainWindow(QMainWindow):
             )
             return
         try:
-            for name in names:
-                self.credential_store.delete_secret(name)
+            self.credential_service.clear_provider(provider)
         except (CredentialStoreError, OSError, ValueError) as error:
             QMessageBox.warning(self, "凭据清除失败", str(error))
             return
@@ -9062,7 +9064,7 @@ class MainWindow(QMainWindow):
 
     def _clear_saved_finnhub_key(self) -> None:
         try:
-            self.credential_store.delete_secret("finnhub_api_key")
+            self.credential_service.clear_provider("finnhub_trades")
         except (CredentialStoreError, OSError, ValueError) as error:
             QMessageBox.warning(self, "Finnhub Key 清除失败", str(error))
             return
@@ -9076,34 +9078,26 @@ class MainWindow(QMainWindow):
             self.settings_api_provider_combo.currentData()
             or "finnhub_trades"
         )
+        status = self.credential_service.status(provider)
         if provider == "finnhub_trades":
-            path = (
-                self.credential_store.root / "finnhub_api_key.dpapi"
-            )
-            status = (
+            text = (
                 "Finnhub：已加密保存"
-                if path.exists()
+                if status.api_key_saved
                 else "Finnhub：未保存"
             )
         elif provider == "alpaca_iex":
-            key_path = (
-                self.credential_store.root / "alpaca_api_key.dpapi"
-            )
-            secret_path = (
-                self.credential_store.root / "alpaca_api_secret.dpapi"
-            )
-            status = (
+            text = (
                 "Alpaca Key："
-                f"{'已加密保存' if key_path.exists() else '未保存'}"
+                f"{'已加密保存' if status.api_key_saved else '未保存'}"
                 " · Alpaca Secret："
-                f"{'已加密保存' if secret_path.exists() else '未保存'}"
+                f"{'已加密保存' if status.api_secret_saved else '未保存'}"
             )
         else:
-            status = (
+            text = (
                 "IBKR Gateway：使用本机 Host / 端口 / Client ID，"
                 "无需 API Key"
             )
-        self.settings_credential_status.setText(status)
+        self.settings_credential_status.setText(text)
 
     def _api_provider_changed(self, *_args: object) -> None:
         provider = str(
@@ -9132,17 +9126,6 @@ class MainWindow(QMainWindow):
             has_api_credentials and provider != active_provider
         )
         self._refresh_credential_status()
-
-    def _load_stream_credential(
-        self, name: str, environment_name: str
-    ) -> str:
-        environment_value = os.environ.get(environment_name, "").strip()
-        if environment_value:
-            return environment_value
-        try:
-            return self.credential_store.load_secret(name) or ""
-        except CredentialStoreError as error:
-            raise ValueError(str(error)) from error
 
     def _set_connection_settings_enabled(self, enabled: bool) -> None:
         for control_name in (

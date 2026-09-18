@@ -29,8 +29,14 @@ from PySide6.QtWidgets import QApplication
 
 from us_quant import market_data_service as module
 from us_quant.desktop import MainWindow, StreamWorker
+from us_quant.desktop_credentials import (
+    CredentialStatus,
+    DesktopCredentialService,
+    StreamCredentials,
+)
 from us_quant.ibkr import IBKRConnectionConfig
 from us_quant.market_data_service import (
+    PROVIDER_ALPACA_IEX,
     PROVIDER_IBKR,
     PROVIDER_IBKR_EXTENDED,
     MarketDataRequest,
@@ -575,9 +581,13 @@ def test_the_desktop_hands_the_adapter_the_queued_signal(
         window.stream_mode.setCurrentIndex(index)
         window.stream_symbols.setText("AAPL")
         monkeypatch.setattr(
-            window,
-            "_load_stream_credential",
-            lambda *args, **kwargs: "placeholder",
+            window.credential_service,
+            "resolve_stream_credentials",
+            lambda **kwargs: StreamCredentials(
+                finnhub_api_key="",
+                alpaca_api_key="placeholder",
+                alpaca_api_secret="placeholder",
+            ),
         )
 
         window._start_stream()
@@ -637,3 +647,370 @@ def test_the_desktop_no_longer_names_a_provider_adapter() -> None:
         "ibkr_market_data_exchange",
     ):
         assert name not in source, f"desktop.py still references {name}"
+
+
+# -- the desktop hands credentials over, it does not store them --------
+
+
+def test_main_window_owns_the_credential_service() -> None:
+    """The window keeps store *ownership*; the service keeps the rules."""
+
+    window = _window()
+    try:
+        assert isinstance(
+            window.credential_service, DesktopCredentialService
+        )
+        # Not a second store: the same object, so a blob written through
+        # one path is visible through the other.
+        assert (
+            window.credential_service.store is window.credential_store
+        )
+    finally:
+        window.deleteLater()
+
+
+def test_the_desktop_performs_no_credential_store_operations() -> None:
+    """``desktop.py`` must not name the store's operations or layout.
+
+    Constructing ``WindowsCredentialStore`` stays -- the window still owns
+    the persistence object -- but every read, write and delete goes
+    through the service, and the ``.dpapi`` filename never appears.
+    """
+
+    source = inspect.getsource(
+        __import__("us_quant.desktop", fromlist=["desktop"])
+    )
+
+    for forbidden in (
+        "credential_store.save_secret(",
+        "credential_store.load_secret(",
+        "credential_store.delete_secret(",
+        "credential_store.has_secret(",
+        "credential_store.root",
+        ".dpapi",
+    ):
+        assert forbidden not in source, f"desktop.py still uses {forbidden}"
+
+
+def test_the_desktop_no_longer_resolves_credentials_itself() -> None:
+    """The per-credential env-then-DPAPI fallback has one home now."""
+
+    source = inspect.getsource(
+        __import__("us_quant.desktop", fromlist=["desktop"])
+    )
+
+    assert "_load_stream_credential" not in source
+    assert "FINNHUB_API_KEY" not in source
+    assert "APCA_API_KEY_ID" not in source
+    assert "APCA_API_SECRET_KEY" not in source
+
+
+def test_the_stream_request_carries_the_services_credentials(
+    monkeypatch,
+) -> None:
+    """Three sentinels in, three sentinels out.
+
+    Asserting on the request the service is asked to build is the point:
+    a window that resolved credentials correctly but then passed them to
+    the wrong field would still look like it worked.
+    """
+
+    requests: list[MarketDataRequest] = []
+
+    def build_stream(request, *, listener=None):
+        requests.append(request)
+        return _Recorder()
+
+    window = _window()
+    try:
+        index = window.stream_mode.findData(PROVIDER_ALPACA_IEX)
+        assert index >= 0
+        window.stream_mode.setCurrentIndex(index)
+        window.stream_symbols.setText("AAPL")
+        monkeypatch.setattr(
+            window.credential_service,
+            "resolve_stream_credentials",
+            lambda **kwargs: StreamCredentials(
+                finnhub_api_key="SENTINEL-FINNHUB",
+                alpaca_api_key="SENTINEL-KEY",
+                alpaca_api_secret="SENTINEL-SECRET",
+            ),
+        )
+        monkeypatch.setattr(
+            window.market_data_service, "build_stream", build_stream
+        )
+
+        window._start_stream()
+
+        assert len(requests) == 1
+        request = requests[0]
+        assert request.alpaca_api_key == "SENTINEL-KEY"
+        assert request.alpaca_api_secret == "SENTINEL-SECRET"
+        assert request.finnhub_api_key == "SENTINEL-FINNHUB"
+    finally:
+        window._stop_stream()
+        window.deleteLater()
+
+
+def _fake_running_worker(provider: str):
+    """A stand-in for a live ``StreamWorker``: running, on ``provider``."""
+
+    class _Worker:
+        def __init__(self) -> None:
+            self.provider = provider
+
+        def isRunning(self) -> bool:  # noqa: N802 - Qt spelling
+            return True
+
+    return _Worker()
+
+
+def _capture_messages(monkeypatch) -> list[tuple]:
+    """Record every ``QMessageBox`` call: warning and information."""
+
+    calls: list[tuple] = []
+
+    def recorder(kind: str):
+        def message(*args, **kwargs):
+            calls.append((kind, args, kwargs))
+            return None
+
+        return staticmethod(message)
+
+    monkeypatch.setattr(
+        "us_quant.desktop.QMessageBox.warning", recorder("warning")
+    )
+    monkeypatch.setattr(
+        "us_quant.desktop.QMessageBox.information",
+        recorder("information"),
+    )
+    return calls
+
+
+def test_clearing_the_active_providers_credentials_is_refused(
+    monkeypatch,
+) -> None:
+    """The guard is UI/runtime coordination, so it stays in the window.
+
+    A live stream is holding those credentials; deleting the blob under it
+    would leave a running stream whose key no longer exists on disk.
+    """
+
+    cleared: list[str] = []
+    window = _window()
+    try:
+        monkeypatch.setattr(
+            window.credential_service,
+            "clear_provider",
+            cleared.append,
+        )
+        window.stream_worker = _fake_running_worker(
+            "finnhub_trades"
+        )
+        index = window.settings_api_provider_combo.findData(
+            "finnhub_trades"
+        )
+        assert index >= 0
+        window.settings_api_provider_combo.setCurrentIndex(index)
+        messages = _capture_messages(monkeypatch)
+
+        window._clear_selected_api_credentials()
+
+        assert cleared == []
+        assert len(messages) == 1
+        kind, args, _ = messages[0]
+        assert kind == "warning"
+        assert "行情运行中" in args[1]
+    finally:
+        window.stream_worker = None
+        window.deleteLater()
+
+
+def test_clearing_an_inactive_providers_credentials_is_allowed(
+    monkeypatch,
+) -> None:
+    """Finnhub running must not block clearing Alpaca.
+
+    The over-broad version of the guard -- "any stream running refuses
+    every clear" -- is the mistake this pins down.
+    """
+
+    cleared: list[str] = []
+    window = _window()
+    try:
+        monkeypatch.setattr(
+            window.credential_service,
+            "clear_provider",
+            cleared.append,
+        )
+        window.stream_worker = _fake_running_worker(
+            "finnhub_trades"
+        )
+        index = window.settings_api_provider_combo.findData(
+            "alpaca_iex"
+        )
+        assert index >= 0
+        window.settings_api_provider_combo.setCurrentIndex(index)
+        messages = _capture_messages(monkeypatch)
+
+        window._clear_selected_api_credentials()
+
+        assert cleared == ["alpaca_iex"]
+        assert messages == []
+    finally:
+        window.stream_worker = None
+        window.deleteLater()
+
+
+def test_clearing_ibkr_credentials_asks_the_service_for_nothing(
+    monkeypatch,
+) -> None:
+    """IBKR stores no API key here, so there is nothing to delete."""
+
+    cleared: list[str] = []
+    window = _window()
+    try:
+        monkeypatch.setattr(
+            window.credential_service,
+            "clear_provider",
+            cleared.append,
+        )
+        index = window.settings_api_provider_combo.findData("ibkr")
+        assert index >= 0
+        window.settings_api_provider_combo.setCurrentIndex(index)
+        messages = _capture_messages(monkeypatch)
+
+        window._clear_selected_api_credentials()
+
+        assert cleared == []
+        assert len(messages) == 1
+        kind, args, _ = messages[0]
+        assert kind == "information"
+        assert "无需清除" in args[1]
+    finally:
+        window.deleteLater()
+
+
+def test_saving_ibkr_credentials_asks_the_service_for_nothing(
+    monkeypatch,
+) -> None:
+    saved: list[tuple] = []
+    window = _window()
+    try:
+        monkeypatch.setattr(
+            window.credential_service,
+            "save_provider",
+            lambda *args, **kwargs: saved.append((args, kwargs)),
+        )
+        index = window.settings_api_provider_combo.findData("ibkr")
+        assert index >= 0
+        window.settings_api_provider_combo.setCurrentIndex(index)
+        messages = _capture_messages(monkeypatch)
+
+        window._save_api_credentials()
+
+        assert saved == []
+        assert len(messages) == 1
+        kind, args, _ = messages[0]
+        assert kind == "information"
+        assert "无需 API Key" in args[1]
+    finally:
+        window.deleteLater()
+
+
+def test_the_credential_status_line_comes_from_the_service(
+    monkeypatch,
+) -> None:
+    """The window renders the copy; the service answers the question."""
+
+    window = _window()
+    try:
+        index = window.settings_api_provider_combo.findData(
+            "finnhub_trades"
+        )
+        assert index >= 0
+        window.settings_api_provider_combo.setCurrentIndex(index)
+
+        monkeypatch.setattr(
+            window.credential_service,
+            "status",
+            lambda provider: CredentialStatus(
+                provider=provider,
+                requires_api_key=True,
+                api_key_saved=True,
+                api_secret_saved=False,
+            ),
+        )
+        window._refresh_credential_status()
+        assert (
+            window.settings_credential_status.text()
+            == "Finnhub：已加密保存"
+        )
+
+        monkeypatch.setattr(
+            window.credential_service,
+            "status",
+            lambda provider: CredentialStatus(
+                provider=provider,
+                requires_api_key=True,
+                api_key_saved=False,
+                api_secret_saved=False,
+            ),
+        )
+        window._refresh_credential_status()
+        assert (
+            window.settings_credential_status.text()
+            == "Finnhub：未保存"
+        )
+    finally:
+        window.deleteLater()
+
+
+def test_the_alpaca_status_line_reports_each_half(
+    monkeypatch,
+) -> None:
+    window = _window()
+    try:
+        index = window.settings_api_provider_combo.findData("alpaca_iex")
+        assert index >= 0
+        window.settings_api_provider_combo.setCurrentIndex(index)
+
+        monkeypatch.setattr(
+            window.credential_service,
+            "status",
+            lambda provider: CredentialStatus(
+                provider=provider,
+                requires_api_key=True,
+                api_key_saved=True,
+                api_secret_saved=False,
+            ),
+        )
+        window._refresh_credential_status()
+
+        text = window.settings_credential_status.text()
+        assert "Alpaca Key：已加密保存" in text
+        assert "Alpaca Secret：未保存" in text
+    finally:
+        window.deleteLater()
+
+
+def test_the_ibkr_status_line_says_no_key_is_needed(
+    monkeypatch,
+) -> None:
+    window = _window()
+    try:
+        index = window.settings_api_provider_combo.findData("ibkr")
+        assert index >= 0
+        window.settings_api_provider_combo.setCurrentIndex(index)
+        messages = _capture_messages(monkeypatch)
+
+        window._refresh_credential_status()
+
+        assert (
+            window.settings_credential_status.text()
+            == "IBKR Gateway：使用本机 Host / 端口 / Client ID，"
+            "无需 API Key"
+        )
+        assert messages == []
+    finally:
+        window.deleteLater()

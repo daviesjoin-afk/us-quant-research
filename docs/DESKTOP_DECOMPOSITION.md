@@ -415,3 +415,131 @@ supervisor 接线 0 行为变化，diff 只来自 import 路径。
 import 会让**整个测试文件 collection 失败**，而 collection error 不报任何测试名，
 守卫恰好在它该起作用的那一刻变成不可归因。harness 因此把 collection error 单列为
 `unattributed`，既不算杀死也不算存活。
+
+---
+
+## 9. 第八步：`desktop_widgets.py`（presentation 边界）
+
+### 9.1 被移出的知识
+
+`desktop.py` 里混着两种完全不同的东西：窗口的**业务编排**（MainWindow 的
+task/stream/paper 处理），和纯粹的**展示层**——把数据变成像素的四个 widget，
+以及两个只做文本格式化的 helper。后者与 MainWindow 的生命周期毫无关系，却因为
+「一开始就写在一起」而必须跟着 9.9k 行的窗口模块一起被导入、一起被测试。
+
+本步把展示层单独成模块，边界是：**`desktop_widgets.py` 不知道任何应用服务，
+只接受数据、产出像素。**
+
+### 9.2 边界形状
+
+```text
+src/us_quant/desktop_widgets.py
+    _sortable_number(...)      # 文本 → 可排序数值，供 QTableWidgetItem 使用
+    _price(...)                # Decimal → 展示文本
+    QuoteTableModel            # 实时报价表（StreamSnapshot → 14 列）
+    MetricCard                 # 指标卡
+    PriceChart                 # 收盘价曲线
+    EquityComparisonChart      # 权益对比曲线
+```
+
+依赖方向单向：`desktop.py` → `desktop_widgets.py`，反向禁止。旧 import 路径
+`from us_quant.desktop import QuoteTableModel` 继续有效，且必须是**同一个对象**
+（`is`），因为 `desktop.py` 内部对这几个类有 `isinstance` 判断，wrapper 或
+subclass 能通过 import 却会破坏它们。
+
+### 9.3 允许依赖
+
+`desktop_widgets.py` 的 import 面被钉死为：
+
+| 来源 | 名字 |
+|---|---|
+| `us_quant.ibkr_stream` | `MARKET_DATA_TYPE_NAMES`, `StreamSnapshot` |
+| `us_quant.ui_theme` | `theme_palette` |
+| stdlib | `datetime.date`, `decimal.Decimal`, `re` |
+| Qt | `QtCore` / `QtGui` / `QtWidgets` 的 16 个名字 |
+
+`ibkr_stream` 是允许的，因为 `QuoteTableModel` 的输入就是 `StreamSnapshot`——
+它是**数据形状**，不是业务服务。其余业务侧依赖（`paper_*`、`workflow_*`、
+`auto_quant`、`risk`、`strategy`、`market_data_service`、`runtime_supervisor`、
+`desktop_workers`）全部禁止，`desktop` 自身更是禁止反向 import。
+
+### 9.4 为什么 `QTableWidgetItem` 和 `_money` 留在 `desktop.py`
+
+`QTableWidgetItem` 是 `_QTableWidgetItem` 的子类，被 MainWindow 的各表格广泛使用；
+它需要 `_sortable_number`，所以 `desktop.py` 从新模块 import 该 helper。这样
+`QTableWidgetItem` 的行为一字未改，也不需要为它设计新的边界。
+
+`_money` 同理留在原地：MainWindow 大量使用它。**本步不做格式化框架**——只搬
+已经在别处被独立使用、且搬走后能自洽的两个 helper。
+
+`configure_chinese_font` 也不动：它牵涉 `QFontDatabase` 与 Windows 字体路径，
+属于应用启动而不是展示逻辑。
+
+### 9.5 逐字保持的语义
+
+搬迁用 AST span 从原始字节切片，脚本先断言锚点再写盘，因此**不可能**顺手重排
+格式或改字。六个块与 `main` 原文逐一比对，**字节完全相同**（LF 归一化后），
+比对由一次性脚本完成（附件 §52 要求的正是这种一次性等价检查）：
+
+| 块 | 字节 |
+|---|---|
+| `_sortable_number` | 418 |
+| `_price` | 143 |
+| `QuoteTableModel` | 5,846 |
+| `MetricCard` | 1,441 |
+| `PriceChart` | 3,815 |
+| `EquityComparisonChart` | 3,480 |
+
+冻结的行为要点：
+
+* `update_snapshot` 的 reset/incremental 二态：symbol 集合变了才 `beginResetModel`
+  全量重建（`reset_count += 1`），集合没变则**保持现有行序**、只对变化的行
+  `dataChanged.emit`（`changed_row_count` 累加实际变化数）。不「优化」为每次 reset。
+* 排序 key 仍是 `(numeric is None, numeric if numeric is not None else value.casefold())`，
+  `Qt.DescendingOrder` 决定 `reverse`——`_sortable_number` 搬走后排序**不得**退化成
+  字符串比较。
+* `ForegroundRole` 的列集合不变：STALE → 列 0/6/10/12/13 用 `theme.error`，
+  READY → 列 0/6/10/12 用 `theme.success`，其余列返回 `None`。
+* `MetricCard.set_value(value)` 的 `note=None` 表示**保留旧 note**，不是清空。
+* `PriceChart.set_series` 只做 `points[-180:]`，不排序、不归一化日期、不转 dataframe。
+* 两个 `paintEvent` 的几何 magic number 与 `QPainter` 原语原样保留，不引入
+  matplotlib / pyqtgraph，也不抽象出 chart engine。
+
+### 9.6 本步不碰的东西
+
+`MainWindow` 的任何方法、`desktop_workers.py`、Paper 全栈、`MarketDataService`、
+`RuntimeSupervisor` 全部未改。`desktop.py` 的 diff 精确等于「删 6 个定义 + 删 8 个
+不再使用的 Qt import + 加 1 条 import」，无其他改动。
+
+### 9.7 体积与测试
+
+| | before | after |
+|---|---|---|
+| `desktop.py` | 9837 行 / 384,684 字节 | 9384 行 / 369,555 字节 |
+| `desktop_widgets.py` | — | 507 行 / 16,392 字节 |
+| `tests/test_desktop_widgets.py` | — | 909 行 / 30,774 字节 |
+| 全套测试 | 623 passed | 685 passed |
+
+（同样是 blob 对 blob；`desktop.py` 的 `main` 基线取 `git rev-parse main:...`。
+`desktop.py` 净减 **453 行**。）
+
+### 9.8 覆盖强度
+
+`tests/test_desktop_widgets.py` 共 **51 个测试函数**（参数化展开后 **62 个用例**），
+其中 **12 条是结构守卫**（AST 读源码，不经 import），39 条是行为断言。结构守卫覆盖：
+迁移符号各只有一份定义、`desktop.py` 零重复定义、六个符号全仓唯一、
+依赖白名单（集合相等）、禁止反向 import `desktop`、禁止线程与业务服务、
+禁止白名单外的 Qt 名字、旧 import identity、以及 `desktop.py` 里不得残留
+因搬迁而死的 Qt import。
+
+逐字搬迁由**一次性比对脚本**证明（附件 §52 的写法），**不常驻测试**：把原文哈希
+冻进测试会让此后任何一次合法改动都被判死，而且它会抢先杀死所有触及已搬迁块的
+突变体，把真正的覆盖缺口全部掩盖掉——第八步第一轮突变就是这样丢了 5 个信号。
+
+### 9.9 本步的代价与下一步
+
+`desktop.py` 从 9837 行降到 9384 行（约 4.6%），绝对值仍很大——`MainWindow` 本身
+才是主体，而本步刻意没有拆它（附件明确要求「不要继续拆 MainWindow methods」）。
+下一步若继续，对象是 `MainWindow` 的方法族（`_build*` / `_apply_theme` /
+stream 与 paper 的 handler），那才是真正需要逐段行为冻结的部分。
+

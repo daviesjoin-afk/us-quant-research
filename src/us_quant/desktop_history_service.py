@@ -142,9 +142,13 @@ class DesktopHistoryService:
 
     def snapshot(self) -> HistoryQueueSnapshot:
         store = self._store()
+        # Preserve the window's original observation order: rows first,
+        # counts second.  A runner may update the queue between these two
+        # reads, so reversing them would subtly change the old UI semantics.
+        jobs = tuple(store.list_jobs())
         counts = store.counts()
         return HistoryQueueSnapshot(
-            jobs=tuple(store.list_jobs()),
+            jobs=jobs,
             pending=counts["pending"],
             running=counts["running"],
             completed=counts["completed"],

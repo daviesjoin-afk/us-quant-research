@@ -68,6 +68,18 @@ class WindowsCredentialStore:
         if target.exists():
             target.unlink()
 
+    def has_secret(self, name: str) -> bool:
+        """Whether an encrypted blob exists.  Never decrypts.
+
+        The desktop used to build ``root / "<name>.dpapi"`` itself, which
+        leaked the on-disk layout into the UI.  Decryption is deliberately
+        avoided: a blob from another Windows user would raise, turning a
+        status line into an error.
+        """
+
+        target = self.root / f"{_clean_name(name)}.dpapi"
+        return target.exists()
+
 
 def _clean_name(name: str) -> str:
     cleaned = name.strip().lower()

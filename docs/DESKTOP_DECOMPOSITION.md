@@ -669,5 +669,164 @@ harness 另有两处必须处理的坑：① 锚点用 `\n` 写而文件是 CRLF
 `QMessageBox`，offscreen 下永久阻塞，导致整个 sweep 被 `TimeoutExpired` 打断 →
 逐突变体超时记 `HUNG` 并继续。
 
+## 11. 第十步：`desktop_credentials.py`（凭据边界）
+
+```text
+MainWindow
+    ↓ 读凭据输入框 / 弹 QMessageBox / 决定控件可见性
+DesktopCredentialService
+    ↓
+WindowsCredentialStore（DPAPI）
+```
+
+流启动时的凭据解析：
+
+```text
+Stream start
+    ↓
+DesktopCredentialService.resolve_stream_credentials()
+    ↓
+environment override
+    ↓ fallback
+DPAPI
+```
+
+### 11.1 被移出的知识
+
+`MainWindow` 原本同时知道三件事：provider → secret 名的映射、`.dpapi` 文件名的拼法、
+以及「环境变量优先于 store」这条规则。前两件是持久化细节，第三件是**哪一份凭据被使用**
+的规则——三者都不是表现层，因此移入本模块。
+
+`STREAM_CREDENTIAL_SOURCES` 是唯一的一份映射表；`ENVIRONMENT_NAMES` 由它反向推导，
+不另写一份，否则两张表会漂移，凭据会从错误的变量里读出来。
+
+### 11.2 为什么 `has_secret()` 必须加在 store 上
+
+`_refresh_credential_status()` 过去直接拼 `root / "finnhub_api_key.dpapi"` 再
+`Path.exists()`——UI 知道了磁盘布局。`has_secret()` 把这件事收回 store，并且**复用
+`_clean_name()`**（不复制文件名净化逻辑，否则非法名会绕过一个入口）。
+
+它**只表示加密文件是否存在，绝不解密**。这是有意的分歧：损坏的 blob、或属于另一个
+Windows 用户的 blob 会让 `load_secret()` 抛错，但「是否已保存」仍然只是「是否存在」——
+若让状态显示依赖解密，一行状态就会变成错误。
+
+### 11.3 为什么 active-stream guard 留在 UI
+
+```python
+if (
+    self.stream_worker is not None
+    and self.stream_worker.isRunning()
+    and self.stream_worker.provider == provider
+):
+    # 拒绝清除
+```
+
+`QThread.isRunning`、active provider、stream ownership 属于 **UI/runtime 协调**，不属于
+凭据存储。时序是「MainWindow 先判断，允许后才调用 `clear_provider()`」。这条规则很容易
+被写成过宽的形式（「只要有 stream 在跑就禁止清除任何凭据」），因此两条回归测试分别钉住
+「拒绝 active」与「放行 inactive」。
+
+### 11.4 环境变量优先，且逐项独立
+
+每个凭据**各自**解析：环境变量有非空值就不再读对应的 DPAPI blob。只含空白的变量视为
+未设置（`FINNHUB_API_KEY="   "` 会回落到 DPAPI），值本身会被 `.strip()`。
+
+`CredentialStoreError` 继续转换成 `ValueError`，并保留 `__cause__`：`_start_stream()`
+捕获的是 `ValueError` 而不是 `CredentialStoreError`，异常类型是外部契约的一部分。
+
+### 11.5 Alpaca 半套必须拒绝
+
+UI 已经检查过「Key 与 Secret 必须同时填写」，但 service **自己也必须防御**，否则非 UI
+调用者可以写出半套凭据——那会看起来「已配置」，却在 stream 启动时失败。半套输入抛
+`ValueError` 且**写入 0 次**，绝不静默只保存一半。
+
+### 11.6 边界形状
+
+依赖面用**集合相等**钉死：
+
+```text
+__future__, collections.abc, dataclasses, os, typing
+us_quant.credential_store
+```
+
+无 Qt、无 `desktop`、无 `market_data_service`、无 provider adapter、无 Paper 栈、无
+`MainWindow`。provider id 以字面量固定在本模块内——它需要三个字符串，不需要整个
+market-data adapter 依赖图。`CredentialStatus` / `StreamCredentials` 均为
+`frozen=True, slots=True`。
+
+`CredentialStatus` 只允许 bool 与 identifier，**不得出现 `api_key` / `api_secret`
+这类字段**。`StreamCredentials` 是内部运行时 DTO，必须携带真实 key 才能建立行情请求；
+它的安全边界是「不写日志、不写 export、不进 `CredentialStatus`」，本阶段不新造 secret
+wrapper 或脱敏框架。
+
+### 11.7 本步不碰的东西
+
+`MarketDataService`（`build_stream` / `run` / `stop` /
+`ensure_config_update_allowed` / `update_config` / `listener_for` /
+`market_exchange_for` 逐字节未变）、`desktop_settings.py`、`desktop_workers.py`、
+`desktop_widgets.py`、`user_settings.py`、`config.py`、`risk.py` 与 Paper 全栈
+（`paper_trading_service.py` / `paper_session.py` / `paper_workflow.py` /
+`ibkr_paper_orders.py` / `ibkr_paper_gateway.py` / `workflow_state.py`）全部逐字节未变。
+`_api_provider_changed` 与 `_set_connection_settings_enabled` 未搬——前者控制
+`QLineEdit` 可见性与按钮使能，后者操纵 `QWidget.setEnabled`，都是表现层。
+
+`_clear_saved_finnhub_key` 按规格保留为私有兼容方法（AST 引用扫描确认全仓零调用，但
+「顺手大扫除」不在本阶段范围），仅把内部调用改走 `clear_provider("finnhub_trades")`。
+
+### 11.8 体积与测试
+
+| | before | after |
+|---|---|---|
+| `desktop.py` | 9338 行 / 366,941 字节 | 9321 行 / 366,375 字节 |
+| `desktop_credentials.py` | — | 212 行 / 7,436 字节 |
+| `tests/test_desktop_credentials.py` | — | 700 行 / 21,063 字节 |
+| 全套测试 | 757 passed | 845 passed |
+
+（同为 LF 归一化后的 blob 口径——与第八、九步同口径；`desktop.py` 的 before 取
+`git show main:src/us_quant/desktop.py`。`desktop.py` 净减 **17 行**。）
+
+### 11.9 覆盖强度
+
+`tests/test_desktop_credentials.py` 共 **36 个测试函数**，参数化展开后 **72 个用例**：
+service 用 fake store 直接测，不启动 `QApplication`、不启动线程、不碰真实 DPAPI；末尾的
+接线测试才构造 `MainWindow`。其中 **14 个函数是结构守卫**（参数化后 42 个用例），
+22 个是行为断言（30 个用例）。
+
+结构守卫按 AST 读源码：依赖面集合相等、禁止 import 与禁止提到的符号各自参数化
+（`MarketDataService` 与三个 provider adapter 名也在禁提名单里，因为本模块只需要
+provider *id*）、`CredentialStatus` 字段集、`save_provider` 的 `api_key` /
+`api_secret` 为 keyword-only、`desktop.py` 全文不得出现
+`credential_store.save_secret(` / `load_secret(` / `delete_secret(` / `has_secret(` /
+`credential_store.root` / `.dpapi`（构造 `WindowsCredentialStore` 本身允许，因为
+`MainWindow` 仍拥有 persistence object）。
+
+`status()` 的「不解密」用两个方向钉住：行为侧让 fake store 的 `load_secret` 直接
+`raise AssertionError`，结构侧把 `has_secret` 的正文按 AST 钉成两条语句
+（净化名 + 存在性判断）。
+
+### 11.10 突变结果
+
+**38/38 全杀、0 存活、0 skip、0 错误归因、0 未归因。** 第一轮暴露三个 harness 缺陷：
+
+① **一个 SKIP**——锚点凭印象写成了 `"alpaca_api_key": "APCA_API_KEY_ID"`（dict 字面量
+形态），而真实正文是元组 `("alpaca_api_key", "APCA_API_KEY_ID")`。锚点 0 命中即零覆盖，
+绝不能当通过。
+
+② **一个错误归因**——`_clean_name` 突变实际死在
+`test_has_secret_normalises_like_the_other_operations`，harness 的失败解析器只认
+`FAILED` / `ERROR` 前缀，漏掉了 unittest subtest 的 `SUBFAILED(name=...)` 行，于是判成
+「死在别的测试上」。修法：解析器同时接受 `SUBFAILED`，并剥掉参数化前缀。
+
+③ **一个存活**——`target.exists()` → `target.is_file()`：本 store 能产生的每一种状态
+下两者等价（`save_secret` 写普通文件、`delete_secret` 只 unlink），任何行为断言都区分
+不了。这是**等价突变体**，不是覆盖不足。但 `has_secret` 的正文是规格写死的，因此补一条
+AST 结构守卫把它钉住（净化名 + 存在性判断、共两条语句），既让改动必须有意为之，也让该
+突变体有了真实的杀手。
+
+harness 本轮另外两处经验：锚点必须**从真实文件取**（凭记忆写的全落空）；度量与审计脚本
+**不得与突变 sweep 并发**——突变期间源文件被临时改写，同时读到的字节数会漂（本轮实测
+同一文件在两次读取间从 7,437 变成 7,395 字节）。
+
+
 
 

@@ -295,3 +295,123 @@ runtime 改掉——否则写盘失败会出现「提示未保存、runtime 却�
 行情停止仍走既有的 `runtime_supervisor`（`market_data_stream`, order=100），
 没有第二套 shutdown 管理。第二步只改变「谁来构造 adapter」，关闭顺序、Paper
 安全顺序、`begin_shutdown`/`cancel_shutdown` 一律未动。
+
+## 8. 第七步：`desktop_workers.py`（Qt worker 边界）
+
+第七步把 `TaskThread` 与 `StreamWorker` 从 `desktop.py` 移到
+`src/us_quant/desktop_workers.py`，**逐字搬迁**（搬迁前后文本逐字节相同，用
+脚本对 `git show HEAD:src/us_quant/desktop.py` 的原始块做过比对），只新增模块
+docstring 与 import 头。两个 class 的真正定义现在只有一份。
+
+### 8.1 为什么这两个类值得单独成模块
+
+它们不是「小工具」，而是**唯一一处后台作业变成 `QThread` 的地方**。把它留在
+`desktop.py` 里的代价是：任何想读线程语义的人必须先 import 一个近万行的 GUI
+模块；而任何测试想验证线程语义，都会连带拉起整个窗口栈。移出后
+`tests/test_desktop_workers.py` 只 import 两个 worker，不再需要 `MainWindow`。
+
+### 8.2 边界形状
+
+```text
+MainWindow module (desktop.py)
+        ↓
+Qt worker adapters (desktop_workers.py)
+        ↓
+application services (MarketDataService, universe, ...)
+```
+
+`desktop.py` 改为 `from us_quant.desktop_workers import (StreamWorker, TaskThread)`，
+因此旧路径 `from us_quant.desktop import TaskThread` 仍然有效，且
+**`is` 同一对象**（不是 wrapper、不是 subclass）。这一条有专门测试
+（`test_old_and_new_import_paths_are_the_same_object`），因为 wrapper 能通过
+import 却会破坏 desktop 里所有 `isinstance` 判断。
+
+### 8.3 允许依赖只有 5 个
+
+`typing.Callable`、`PySide6.QtCore.{QThread, Signal}`、
+`us_quant.market_data_service.{MarketDataService, MarketDataRequest}`、
+`us_quant.universe.UniverseRefreshCancelled`。测试对**允许清单**做了 pin
+（集合相等，不只是「不含禁用项」），所以依赖面既不能悄悄扩大也不能意外缩小。
+
+禁止 import 的层：`PySide6.QtWidgets`/`QtGui`、`us_quant.desktop`、
+`paper_*`、`workflow_*`、`risk`、`auto_quant`、`ibkr_paper_orders`、
+`strategy`。禁止出现的名字：`MainWindow`/`QMainWindow`/`QWidget`/
+`QMessageBox`，以及任何具体 provider adapter 名（`IBKRReadOnlyStream`、
+`AlpacaIEXStream`、`FinnhubStream`）。
+
+### 8.4 逐字保持的语义
+
+* `TaskThread`：4 个 signal（`succeeded`/`failed`/`cancelled`/`progress`）、
+  构造参数 `(task, resource_group="research")`、`self.task`/`self.resource_group`
+  字段、`run()` 顺序 `task(self.progress.emit)` →
+  `UniverseRefreshCancelled` → `Exception` → `else`。**cancellation 不是 failure**：
+  `cancelled` 恰好一次、`succeeded`/`failed` 均为 0。
+* 失败消息继续 `" ".join(str(error).split())`，`RuntimeError("hello\n   world")`
+  必须得到 `hello world`（测试固化）。
+* `StreamWorker.run()` 继续 `try: self.market_data.run() except Exception as error:
+  self.failed.emit(f"{type(error).__name__}: {error}")`，即 `RuntimeError: boom`，
+  不允许退化成 `boom`、`<class ...>` 或 traceback。lifecycle truth 仍属
+  `MarketDataService.run()`；worker 不自管 `finished`、不碰 service 生命周期。
+* `request_stop()` 继续只调 `self.market_data.stop()`：不调 `self.service.stop()`、
+  不调 `self.quit()`/`self.terminate()`，也没有新增 QThread interruption 或
+  asyncio cancellation。
+* listener 继续是 `snapshot_ready.emit`（不是 `window._stream_snapshot_received`）：
+  stream 线程 emit → Qt queued delivery → GUI 线程。直接调用 window 会跨线程操作 UI。
+
+### 8.5 本步不碰的东西
+
+`RuntimeSupervisor` 完全未动，仍独占 task registration / worker lifetime /
+shutdown admission / close drain，两个 worker 没有第二套 lifecycle manager。
+`MarketDataService` 的 `build_stream`/`run`/`stop`/`record_failure`/
+`update_config`/`ensure_config_update_allowed` 全部冻结（尤其没有顺手去修之前
+讨论过的 pre-run stale worker identity race —— 那是独立的生命周期问题）。
+Paper 全路径冻结：`_start_auto_quant`、`_auto_order_service_connected`、
+`_reconnect_auto_order_service`、`_start_paper_finalization_refresh`、
+`_finish_auto_quant_session_if_safe`、`_paper_needs_manual_recovery` 以及
+`PaperTradingService`/`PaperWorkflowController`/`IBKRPaperOrderService`/
+`ExecutionLease` 一律未改。`MainWindow` 的 `_start_task`/`_worker_finished`/
+`_task_failed`/`_start_stream`/`_stop_stream`/snapshot handling/`closeEvent`/
+supervisor 接线 0 行为变化，diff 只来自 import 路径。
+
+### 8.6 体积与测试
+
+| | before | after |
+|---|---|---|
+| `desktop.py` | 9913 行 / 387,438 字节 | 9837 行 / 384,684 字节 |
+| `desktop_workers.py` | — | 97 行 / 3,506 字节 |
+| `tests/test_desktop_workers.py` | — | 518 行 / 15,026 字节 |
+| 全套测试 | 601 passed | 623 passed |
+
+（字节数是 **blob 对 blob**：before 取 `git cat-file -s HEAD:...`，after 把工作树
+按 `core.autocrlf` 归一化后 `git hash-object` 再取大小——直接量工作树会因 CRLF
+多出约 0.8% 的假增量。附件写的 before 是 9914 行，实测三种口径——`wc -l`、
+`splitlines()`、CRLF 计数——都是 9913，按实测记录。）
+
+`desktop.py` 的减少幅度不大（约 0.8%），这不是本步的价值所在：本步建立的是
+上面 §8.2 那条边界。widgets（`MetricCard`/`QuoteTableModel`/`PriceChart`/
+`EquityComparisonChart`）按计划留到下一步单独做，避免 UI 回归时无法定位。
+
+### 8.7 覆盖强度
+
+`tests/test_desktop_workers.py` 共 **22 tests**，其中 7 条是结构守卫（AST 读源码，
+不经 import），15 条是行为断言。
+
+**突变测试 24/24 全杀、0 skip、0 未归因**（harness 在本步结束后删除）。每个突变体
+声明「预期失败的测试名集合」，只有失败集合与声明**相交**才算杀死——「被别的守卫
+杀掉」不算数，因为那证明不了目标断言真的有效。
+
+两个突变体在第一轮**存活**，暴露的是真实测试缺陷，不是覆盖不足：
+
+* `self.provider = "ibkr"` 硬编码：原断言写成 `worker.provider == request.provider`，
+  而 `request.provider` 恰好就是 `"ibkr"`（列表里第一个 provider），硬编码也能过。
+  修法：改用 `PROVIDER_FINNHUB_TRADES` 构造请求，两个值无法混淆。
+* `request_stop()` 里加 `self.terminate()`：原断言 `worker.isRunning() is False` 在
+  从未 `start()` 过的线程上恒真，`terminate()` 是否被调用完全看不出来。修法：
+  monkeypatch `QThread.terminate` 记录调用，断言调用列表为空。
+
+**守卫必须不依赖被测模块可导入**：结构守卫按路径读源码（`ast.parse(path.read_text())`），
+行为测试用惰性 import（函数内 `import us_quant.desktop_workers`）。原因是——本步的
+守卫要防的头号违规就是「`desktop_workers` 反过来 import `desktop`」，一旦发生，顶层
+import 会让**整个测试文件 collection 失败**，而 collection error 不报任何测试名，
+守卫恰好在它该起作用的那一刻变成不可归因。harness 因此把 collection error 单列为
+`unattributed`，既不算杀死也不算存活。

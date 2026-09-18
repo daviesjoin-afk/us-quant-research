@@ -827,6 +827,134 @@ harness 本轮另外两处经验：锚点必须**从真实文件取**（凭记�
 **不得与突变 sweep 并发**——突变期间源文件被临时改写，同时读到的字节数会漂（本轮实测
 同一文件在两次读取间从 7,437 变成 7,395 字节）。
 
+## 12. 第十一步：`desktop_settings_panel.py`（Settings 页表现层边界）
+
+第十一步把 `MainWindow._settings_tab()` 里 364 行的 Qt 控件构造搬进
+`src/us_quant/desktop_settings_panel.py`。这一 PR 是 **extraction，不是 API
+redesign**：不重排布局、不改 copy、不改尺寸、不改 provider 顺序、不改 signal
+wiring、不重命名任何控件。
+
+```text
+MainWindow
+    ↓ callbacks + field_label + configure_combo_width
+DesktopSettingsPanel
+    ↓ Qt widgets only
+```
+
+设置事务仍在 `DesktopSettingsService`；凭据管理仍在 `DesktopCredentialService`；
+`MainWindow` 的 13 个 handler 逐字节未变；Paper 全栈未变。
+
+### 12.1 边界形状
+
+```python
+@dataclass(frozen=True, slots=True)
+class DesktopSettingsCallbacks:
+    preview_theme_changed
+    settings_provider_selected
+    switch_to_settings_provider
+    api_provider_changed
+    save_api_credentials
+    clear_api_credentials
+    paper_order_capability_toggled
+    extended_hours_paper_toggled
+    save_user_preferences
 
 
+class DesktopSettingsPanel(QScrollArea):
+    def __init__(
+        self,
+        *,
+        preferences: UserPreferences,
+        paths: ApplicationPaths,
+        callbacks: DesktopSettingsCallbacks,
+        field_label: Callable[[str], QLabel],
+        configure_combo_width: Callable[..., None],
+        parent: QWidget | None = None,
+    ) -> None:
+```
 
+Panel 就是 `_settings_tab()` 的返回值本身——仍然是
+`setFrameShape(QFrame.NoFrame)` / `setWidgetResizable(True)` /
+`Qt.ScrollBarAlwaysOff` 的 `QScrollArea`，内容页 `minimumHeight` 仍是 820。
+
+### 12.2 十七个 alias 必须是 identity
+
+`MainWindow` 仍有几十处按名字读 `self.settings_*`。本步**不**一次性改光，而是让
+`_settings_tab()` 在构造完 panel 之后，把 17 个控件逐个显式 alias 过去：
+
+```python
+self.settings_theme_combo = panel.settings_theme_combo
+```
+
+显式赋值而非 `for name in ...: setattr(...)`——后者无法审计、也无法被测试逐项钉住。
+alias 必须是 identity：一个 Qt widget 只能有一个真实实例，禁止 wrapper、禁止复制。
+
+### 12.3 初始 refresh 留在窗口，且必须在 alias 之后
+
+`_api_provider_changed()` 与 `_refresh_credential_status()` 都读 `self.settings_*`。
+若放进 panel 构造函数，窗口还没有那些属性。因此顺序固定为：
+
+```text
+construct panel → alias 17 controls → _api_provider_changed() → _refresh_credential_status() → return panel
+```
+
+Panel 构造函数本身**不调用任何 application callback**：两个 combo 都是
+`addItem → setCurrentIndex → connect`，connect 落在定位之后，所以构造页面不会
+顺带触发 theme preview / provider sync / credential refresh。
+
+### 12.4 不搬通用 UI helper
+
+`_field_label` 与 `_configure_combo_width` 仍留在 `MainWindow`，通过注入的
+callable 使用——避免同一套 UI rule 定义两份。panel 不复制它们的实现，调用参数
+逐字保持（provider combo `300 / 22`，api provider combo `180 / 14`）。
+
+### 12.5 体积与测试
+
+| | before | after |
+|---|---|---|
+| `desktop.py` | 9321 行 / 366,375 字节 | 9025 行 / 356,403 字节 |
+| `_settings_tab()` | 364 行 | 64 行 |
+| `desktop_settings_panel.py` | — | 452 行 / 16,492 字节 |
+| `tests/test_desktop_settings_panel.py` | — | 1407 行 / 42,054 字节 |
+| 全套测试 | 850 passed | 924 passed |
+
+（同为 LF 归一化后的 blob 口径；before 取 `git show 847fd2dc:src/us_quant/desktop.py`。
+`desktop.py` 净减 **296 行**。）
+
+### 12.6 覆盖强度
+
+`tests/test_desktop_settings_panel.py` 共 **62 个测试函数**，参数化展开后 **74 个用例**：
+**12 个函数是结构守卫**（参数化后 24 个用例），50 个是行为断言（50 个用例）。
+
+结构守卫按 AST 读源码：`_settings_tab` 不再直接构造
+`QFrame` / `QGridLayout` / `QComboBox` / `QLineEdit` / `QSpinBox` /
+`QCheckBox` / `QTextEdit`；三段 layout copy 只存在于 panel；panel 的依赖面集合
+相等（只允许 `dataclasses` / `typing` / `PySide6` / `paths` /
+`user_settings`）；panel 不得 import 窗口、不得持有任何 service、不得出现
+`WindowsCredentialStore` / `DesktopCredentialService` / `CredentialStatus`。
+
+**§41 的 handler byte-equivalence 是最重要的 scope guard**，它从 base commit
+`847fd2dc` 取 13 个 handler 的源码与 PR head 逐字节比较。CI 的
+`actions/checkout@v4` 默认 `fetch-depth: 1`，base commit 不在本地对象库里——
+因此该 helper 先尝试 `git show`，失败则 `git fetch --depth 1 origin <base>` 后重试，
+且**取不到就 fail，绝不 skip**：一条被跳过的守卫等于零覆盖。
+
+### 12.7 突变结果
+
+**46/46 全杀、0 存活、0 问题。** 第一轮暴露两处 harness 缺陷：
+
+① **一个错误归因**——`findData(...) - 1` 突变我按印象声明期望测试是
+`test_an_unknown_provider_falls_back_to_the_first_item`，但该测试传的正是未知
+provider（`findData` 返回 `-1`），减一后仍被 `max(0, ...)` 夹回 0，行为等价；
+真正被杀的是 `test_initial_values_come_from_the_preferences` 与
+`test_extended_hours_maps_onto_the_ibkr_api_provider`（已知 provider 会错位）。
+
+② **一个存活**——`_settings_tab` 末尾删掉 `self._refresh_credential_status()`。
+原测试用 `_api_provider_changed` 的**真身**做 recorder，而真身内部自己就会刷一次
+status，于是掩盖了「tab 自己有没有刷」。修法：把 `_api_provider_changed` 完全打桩成
+纯记录器，断言 `seen == ["api_provider_changed", "refresh_credential_status"]`。
+
+harness 本轮另外两处经验：**前台超时会把 sweep 杀在中途并留下未恢复的突变体**
+（本轮实测 `appearance-title-changed` 的改写留在盘上）→ sweep 必须后台跑，且恢复后
+用「生成器重建 + 逐字节比对」自证工作树干净；**突变体的期望测试名必须从真实失败输出取**，
+不能凭模块语义推断。

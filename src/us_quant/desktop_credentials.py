@@ -112,20 +112,30 @@ class DesktopCredentialService:
         stream start.  IBKR uses no API key, so it writes nothing.
         """
 
-        if provider == PROVIDER_FINNHUB_TRADES:
+        try:
+            sources = STREAM_CREDENTIAL_SOURCES[provider]
+        except KeyError:
+            raise ValueError(
+                f"unsupported credential provider: {provider!r}"
+            ) from None
+        if not sources:
+            raise ValueError("provider does not use API credentials")
+        if len(sources) == 1:
             if not api_key:
                 raise ValueError("API Key 不能为空")
-            self.store.save_secret("finnhub_api_key", api_key)
+            self.store.save_secret(sources[0][0], api_key)
             return
-        if provider == PROVIDER_ALPACA_IEX:
+        if len(sources) == 2:
             if not api_key or not api_secret:
                 raise ValueError(
                     "Alpaca 需要同时提供 API Key 和 API Secret"
                 )
-            self.store.save_secret("alpaca_api_key", api_key)
-            self.store.save_secret("alpaca_api_secret", api_secret)
+            self.store.save_secret(sources[0][0], api_key)
+            self.store.save_secret(sources[1][0], api_secret)
             return
-        raise ValueError("provider does not use API credentials")
+        raise ValueError(
+            f"unsupported credential shape for provider: {provider!r}"
+        )
 
     def clear_provider(self, provider: str) -> None:
         """Delete the credentials for one provider.
@@ -134,14 +144,16 @@ class DesktopCredentialService:
         here, so there is nothing to delete.
         """
 
-        if provider == PROVIDER_FINNHUB_TRADES:
-            self.store.delete_secret("finnhub_api_key")
-            return
-        if provider == PROVIDER_ALPACA_IEX:
-            self.store.delete_secret("alpaca_api_key")
-            self.store.delete_secret("alpaca_api_secret")
-            return
-        raise ValueError("provider does not use API credentials")
+        try:
+            sources = STREAM_CREDENTIAL_SOURCES[provider]
+        except KeyError:
+            raise ValueError(
+                f"unsupported credential provider: {provider!r}"
+            ) from None
+        if not sources:
+            raise ValueError("provider does not use API credentials")
+        for name, _environment_name in sources:
+            self.store.delete_secret(name)
 
     # -- reading ---------------------------------------------------------
 
@@ -153,27 +165,28 @@ class DesktopCredentialService:
         "saved / not saved" line into an error.
         """
 
-        if provider == PROVIDER_FINNHUB_TRADES:
+        try:
+            sources = STREAM_CREDENTIAL_SOURCES[provider]
+        except KeyError:
+            raise ValueError(
+                f"unsupported credential provider: {provider!r}"
+            ) from None
+        if not sources:
             return CredentialStatus(
                 provider=provider,
-                requires_api_key=True,
-                api_key_saved=self.store.has_secret("finnhub_api_key"),
+                requires_api_key=False,
+                api_key_saved=False,
                 api_secret_saved=False,
-            )
-        if provider == PROVIDER_ALPACA_IEX:
-            return CredentialStatus(
-                provider=provider,
-                requires_api_key=True,
-                api_key_saved=self.store.has_secret("alpaca_api_key"),
-                api_secret_saved=self.store.has_secret(
-                    "alpaca_api_secret"
-                ),
             )
         return CredentialStatus(
             provider=provider,
-            requires_api_key=False,
-            api_key_saved=False,
-            api_secret_saved=False,
+            requires_api_key=True,
+            api_key_saved=self.store.has_secret(sources[0][0]),
+            api_secret_saved=(
+                self.store.has_secret(sources[1][0])
+                if len(sources) > 1
+                else False
+            ),
         )
 
     def resolve_stream_credentials(
@@ -189,11 +202,17 @@ class DesktopCredentialService:
         """
 
         source = os.environ if environment is None else environment
+        finnhub_sources = STREAM_CREDENTIAL_SOURCES[
+            PROVIDER_FINNHUB_TRADES
+        ]
+        alpaca_sources = STREAM_CREDENTIAL_SOURCES[PROVIDER_ALPACA_IEX]
         return StreamCredentials(
-            finnhub_api_key=self._resolve(source, "finnhub_api_key"),
-            alpaca_api_key=self._resolve(source, "alpaca_api_key"),
+            finnhub_api_key=self._resolve(
+                source, finnhub_sources[0][0]
+            ),
+            alpaca_api_key=self._resolve(source, alpaca_sources[0][0]),
             alpaca_api_secret=self._resolve(
-                source, "alpaca_api_secret"
+                source, alpaca_sources[1][0]
             ),
         )
 

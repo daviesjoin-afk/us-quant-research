@@ -34,7 +34,6 @@ import os
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QApplication
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -54,11 +53,9 @@ from us_quant.user_settings import (
 )
 
 
-# The service tests above need no Qt at all -- that is the point of the
-# extraction.  The wiring tests at the bottom do construct a ``MainWindow``,
-# and constructing a widget without a ``QApplication`` aborts the process
-# rather than raising, so the instance is created once here.
-_APP = QApplication.instance() or QApplication([])
+# Keep the service tests genuinely Qt-free.  The QApplication is created
+# lazily only when the wiring tests actually construct a MainWindow.
+_APP = None
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -919,8 +916,12 @@ def test_the_mapping_is_a_plain_function_not_a_method() -> None:
 
 
 def _window_with_tmp_state(monkeypatch, tmp_path):
+    global _APP
+
+    from PySide6.QtWidgets import QApplication
     from us_quant.paths import STATE_ROOT_ENV
 
+    _APP = QApplication.instance() or QApplication([])
     monkeypatch.setenv(STATE_ROOT_ENV, str(tmp_path))
     from us_quant.desktop import MainWindow
 

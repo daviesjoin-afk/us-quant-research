@@ -103,6 +103,25 @@ DECLARED_REFACTOR_SURFACE = frozenset(
     }
 )
 
+# Trading Core v2: this round deleted the legacy/unified shell builders and
+# added the v2 page composer.  The delta is declared here so the guard below
+# can assert it *exactly* instead of merely tolerating it.
+LATER_ROUND_REMOVED_METHODS = (
+    "_build_legacy_workspace",
+    "_build_unified_workflow",
+    "_workflow_tabs",
+    "_workflow_scroll_page",
+    "_workspace_tabs",
+)
+LATER_ROUND_ADDED_METHODS = ("_build_v2_pages",)
+
+# Trading Core v2 also rewrote these two: `_build_ui` now composes the v2
+# shell, and `_targeted_robustness_finished` navigates through it.
+LATER_ROUND_UI_METHODS = (
+    "_build_ui",
+    "_targeted_robustness_finished",
+)
+
 # Spec 4: the seventeen controls the window keeps exposing.
 SETTINGS_WIDGETS = (
     "settings_theme_combo",
@@ -345,6 +364,7 @@ def _base_source(path: str) -> str | None:
             cwd=_REPO_ROOT,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=True,
         )
         return result.stdout
@@ -357,6 +377,7 @@ def _base_source(path: str) -> str | None:
             cwd=_REPO_ROOT,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=True,
             timeout=120,
         )
@@ -365,6 +386,7 @@ def _base_source(path: str) -> str | None:
             cwd=_REPO_ROOT,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=True,
         )
     except (
@@ -1325,10 +1347,20 @@ def test_only_the_settings_tab_was_rewritten() -> None:
         if isinstance(node, ast.FunctionDef)
     }
 
-    assert set(base_methods) == set(current_methods)
+    # Trading Core v2 removed the legacy/unified shells and added the v2
+    # page composer.  Asserting the delta exactly keeps this guard strict:
+    # any other addition or removal still fails here.
+    assert set(base_methods) - set(current_methods) == set(
+        LATER_ROUND_REMOVED_METHODS
+    )
+    assert set(current_methods) - set(base_methods) == set(
+        LATER_ROUND_ADDED_METHODS
+    )
 
     changed = []
     for name, node in base_methods.items():
+        if name not in current_methods:
+            continue
         base_body = _source_of(base_cls, node, base).replace("\r\n", "\n")
         current_body = _source_of(
             current_cls, current_methods[name], current
@@ -1336,7 +1368,9 @@ def test_only_the_settings_tab_was_rewritten() -> None:
         if base_body != current_body:
             changed.append(name)
 
-    assert set(changed) <= DECLARED_REFACTOR_SURFACE
+    assert set(changed) <= DECLARED_REFACTOR_SURFACE | set(
+        LATER_ROUND_UI_METHODS
+    )
     assert "_settings_tab" in changed
 
 

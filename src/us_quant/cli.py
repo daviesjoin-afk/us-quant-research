@@ -8,7 +8,7 @@ from pathlib import Path
 
 from us_quant.backtest import BacktestEngine, CostModel
 from us_quant.config import load_config
-from us_quant.domain import Bar, MarketSlice
+from us_quant.trading.domain.market import Bar, MarketSlice
 from us_quant.ibkr import probe_ibkr_socket
 from us_quant.ibkr_history import collect_daily_history
 from us_quant.ibkr_readonly import (

@@ -27,12 +27,12 @@ from us_quant.desktop import MainWindow  # noqa: E402
 
 
 SIZES = (
+    (1024, 720),
     (1120, 720),
     (1280, 800),
     (1440, 900),
     (1920, 1080),
 )
-UNIFIED_SIZES = ((1024, 720),) + SIZES
 AUDITED_TYPES = (
     QComboBox,
     QPushButton,
@@ -53,79 +53,58 @@ def _widget_text(widget: QWidget) -> str:
 
 
 def _visible_pages(window: MainWindow):
-    workflow = window.unified_workflow_page
-    if workflow is not None:
-        for key, section in workflow._sections.items():
-            workflow.navigate_to(key)
-            QApplication.processEvents()
-            secondary = section.findChild(
-                QTabWidget, "workflowSecondaryTabs"
-            )
-            if secondary is None:
-                yield f"module/{key}", section.content_container
-                continue
-            for page_index in range(secondary.count()):
-                secondary.setCurrentIndex(page_index)
-                QApplication.processEvents()
-                yield (
-                    f"module/{key}/{secondary.tabText(page_index)}",
-                    secondary.currentWidget(),
-                )
-        return
+    """Yield every first-level route and, for grouped routes, its sub-pages.
 
-    assert window.tabs is not None
-    for top_index in range(window.tabs.count()):
-        window.tabs.setCurrentIndex(top_index)
+    Desktop UI v2 has eight first-level routes.  ``research`` and ``system``
+    hold a second-level ``QTabWidget``; the rest are single pages.
+    """
+    shell = window.shell
+    for route in shell.routes:
+        shell.navigate_to(route)
         QApplication.processEvents()
-        workspace = window.tabs.currentWidget()
-        if top_index == window.tabs.count() - 1:
-            yield window.tabs.tabText(top_index), workspace
+        page = shell.page(route)
+        secondary = page.findChild(QTabWidget, "workflowSecondaryTabs")
+        if secondary is None:
+            yield f"route/{route}", page
             continue
-        for page_index in range(workspace.count()):
-            workspace.setCurrentIndex(page_index)
+        for page_index in range(secondary.count()):
+            secondary.setCurrentIndex(page_index)
             QApplication.processEvents()
             yield (
-                f"{window.tabs.tabText(top_index)}/"
-                f"{workspace.tabText(page_index)}",
-                workspace.widget(page_index),
+                f"route/{route}/{secondary.tabText(page_index)}",
+                secondary.currentWidget(),
             )
 
 
-def _audit_mode(*, legacy: bool) -> list[str]:
+def _audit_mode() -> list[str]:
+    """Audit the single Desktop UI v2 shell across the size matrix."""
+
     failures: list[str] = []
     with TemporaryDirectory(prefix="usquant-ui-audit-") as state_root:
         os.environ["US_QUANT_STATE_ROOT"] = state_root
-        if legacy:
-            os.environ["US_QUANT_LEGACY_UI"] = "1"
-        else:
-            os.environ.pop("US_QUANT_LEGACY_UI", None)
         app = QApplication.instance() or QApplication([])
         window = MainWindow()
         window.show()
-        sizes = SIZES if legacy else UNIFIED_SIZES
-        for width, height in sizes:
+        for width, height in SIZES:
             window.resize(width, height)
             app.processEvents()
-            workflow = window.unified_workflow_page
-            if not legacy and workflow is not None:
-                expected_compact = (
-                    width < workflow.COMPACT_RAIL_THRESHOLD
+            shell = window.shell
+            expected_compact = width < shell.COMPACT_RAIL_THRESHOLD
+            if shell.rail_is_compact != expected_compact:
+                failures.append(
+                    f"v2 {width}x{height} compact rail state mismatch"
                 )
-                if workflow.rail_is_compact != expected_compact:
+            expected_width = 52 if expected_compact else 176
+            if shell.anchor_rail.width() != expected_width:
+                failures.append(
+                    f"v2 {width}x{height} rail width="
+                    f"{shell.anchor_rail.width()} expected={expected_width}"
+                )
+            for route, anchor in shell._anchors.items():
+                if not anchor.accessibleName() or not anchor.toolTip():
                     failures.append(
-                        f"unified {width}x{height} compact rail state mismatch"
+                        f"v2 {width}x{height} anchor {route} lacks accessible text"
                     )
-                expected_width = 52 if expected_compact else 176
-                if workflow.anchor_rail.width() != expected_width:
-                    failures.append(
-                        f"unified {width}x{height} rail width="
-                        f"{workflow.anchor_rail.width()} expected={expected_width}"
-                    )
-                for key, anchor in workflow._anchors.items():
-                    if not anchor.accessibleName() or not anchor.toolTip():
-                        failures.append(
-                            f"unified {width}x{height} anchor {key} lacks accessible text"
-                        )
             badges = (
                 window.gateway_badge,
                 window.handshake_badge,
@@ -179,7 +158,7 @@ def _audit_mode(*, legacy: bool) -> list[str]:
                     )
                     if below_minimum or severely_compacted:
                         failures.append(
-                            f"{'legacy' if legacy else 'unified'} "
+                            f"v2 "
                             f"{width}x{height} {page_name} "
                             f"{type(widget).__name__} "
                             f"{_widget_text(widget)!r}: "
@@ -193,7 +172,7 @@ def _audit_mode(*, legacy: bool) -> list[str]:
 
 
 def audit() -> list[str]:
-    return _audit_mode(legacy=False) + _audit_mode(legacy=True)
+    return _audit_mode()
 
 
 def main() -> int:
@@ -204,8 +183,8 @@ def main() -> int:
             print(f"- {failure}")
         return 1
     print(
-        "Unified and legacy desktop layout audit passed: "
-        + ", ".join(f"{width}x{height}" for width, height in UNIFIED_SIZES)
+        "Desktop UI v2 layout audit passed: "
+        + ", ".join(f"{width}x{height}" for width, height in SIZES)
     )
     return 0
 

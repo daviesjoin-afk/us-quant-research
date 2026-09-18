@@ -5,7 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 import tomllib
 
-from us_quant.domain import Environment, decimal
+from us_quant.trading.domain.common import Environment, decimal
 from us_quant.ibkr import IBKRConnectionConfig
 from us_quant.portfolio import SubstitutionRule
 from us_quant.risk import RiskLimits

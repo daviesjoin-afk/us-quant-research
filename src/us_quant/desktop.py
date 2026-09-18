@@ -42,7 +42,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QScrollArea,
     QSplashScreen,
     QSizePolicy,
     QSpinBox,
@@ -272,7 +271,8 @@ from us_quant.ui_theme import (
     build_stylesheet,
     theme_palette,
 )
-from us_quant.unified_workflow_ui import UnifiedWorkflowPage
+from us_quant.desktop_v2.navigation import ROUTES
+from us_quant.desktop_v2.shell import DesktopShellV2
 from us_quant.user_settings import (
     UserPreferences,
     UserPreferencesStore,
@@ -572,14 +572,12 @@ class MainWindow(QMainWindow):
             status_grid.setColumnStretch(column, 1)
         header.addLayout(status_grid)
         root_layout.addLayout(header)
-        self._unified_workflow_enabled = (
-            os.environ.get("US_QUANT_LEGACY_UI", "").strip() != "1"
-        )
-        self.unified_workflow_page: UnifiedWorkflowPage | None = None
-        if self._unified_workflow_enabled:
-            root_layout.addWidget(self._build_unified_workflow())
-        else:
-            root_layout.addWidget(self._build_legacy_workspace())
+        # Desktop UI v2.  MainWindow is the temporary composition root: it
+        # builds the page widgets below and hands them to the shell, which
+        # owns nothing but route registration and page switching.  The shell
+        # never connects a broker, starts a stream or submits an order.
+        self.shell = DesktopShellV2(self._build_v2_pages())
+        root_layout.addWidget(self.shell, 1)
 
         self.status_label = QLabel("就绪")
         self.status_label.setObjectName("footer")
@@ -612,127 +610,58 @@ class MainWindow(QMainWindow):
         self.extended_session_timer.start()
         self._refresh_extended_hours_status()
 
-    def _build_legacy_workspace(self) -> QTabWidget:
-        """Build the pre-refactor tab tree for a safe environment rollback."""
-        self.tabs = QTabWidget()
-        self.tabs.setTabPosition(QTabWidget.North)
-        self.tabs.setDocumentMode(True)
-        self.monitor_tabs = self._workspace_tabs(
-            (
-                ("总览", self._dashboard_tab()),
-                ("自动量化", self._auto_quant_tab()),
-                ("账户与持仓", self._account_tab()),
-                ("行情监控", self._quotes_tab()),
-                ("针对性日内 T", self._simulation_tab()),
-            )
-        )
-        self.strategy_tabs = self._workspace_tabs(
-            (
-                ("策略目录与版本", self._strategy_manager_tab()),
-                ("回测工作区", self._backtest_tab()),
-                ("横截面研究", self._strategy_tab()),
-            )
-        )
-        self.research_tabs = self._workspace_tabs(
-            (
-                ("广域标的池", self._universe_tab()),
-                ("市场扫描", self._scanner_tab()),
-                ("数据任务", self._data_tab()),
-            )
-        )
-        self.operations_tabs = self._workspace_tabs(
-            (
-                ("运行事件", self._runtime_tab()),
-                ("风险与权限", self._safety_tab()),
-            )
-        )
-        self.tabs.addTab(self.monitor_tabs, "监控台")
-        self.tabs.addTab(self.strategy_tabs, "策略与回测")
-        self.tabs.addTab(self.research_tabs, "市场研究")
-        self.tabs.addTab(self.operations_tabs, "运维与安全")
-        self.tabs.addTab(self._settings_tab(), "系统设置")
-        return self.tabs
+    def _build_v2_pages(self) -> dict[str, QWidget]:
+        """Compose the eight Desktop UI v2 routes from existing pages.
 
-    def _build_unified_workflow(self) -> UnifiedWorkflowPage:
-        """Compose existing page widgets once into the single-page shell."""
-        page = UnifiedWorkflowPage()
-        self.unified_workflow_page = page
-        self.tabs = None
+        This is the transitional mapping: each route is backed by a page
+        builder that predates v2.  As a v2 page is rewritten, its old builder
+        is deleted and this table points at the replacement.  The dict is
+        keyed by route and must cover ``ROUTES`` exactly -- the shell fails
+        closed on a missing or unknown route.
 
-        today = self._workflow_tabs(
-            (
-                ("Paper 自动量化", self._auto_quant_tab()),
-                ("账户与持仓", self._account_tab()),
-                ("行情监控", self._quotes_tab()),
-                ("总览", self._dashboard_tab()),
-            )
-        )
-        shadow = self._workflow_scroll_page(self._simulation_tab())
-        research = self._workflow_tabs(
-            (
-                ("广域标的池", self._universe_tab()),
-                ("历史数据", self._data_tab()),
-                ("市场扫描", self._scanner_tab()),
-                ("策略目录与版本", self._strategy_manager_tab()),
-                ("回测工作区", self._backtest_tab()),
-                ("横截面研究", self._strategy_tab()),
-            )
-        )
-        audit = self._workflow_tabs(
-            (
-                ("运行事件", self._runtime_tab()),
-                ("风险与权限", self._safety_tab()),
-                ("系统设置", self._settings_tab()),
-            )
-        )
-        page.add_section("today", "今日运行", today, expanded=True)
-        page.add_section(
-            "shadow",
-            "针对性验证 · 内部影子",
-            shadow,
-            expanded=False,
-            boundary_text="仅内部模拟，不发送 IBKR 或任何券商订单。",
-        )
-        page.add_section("research", "研究工坊", research, expanded=False)
-        page.add_section("audit", "系统与审计", audit, expanded=False)
-        return page
+        ``research`` and ``system`` group several functions behind a
+        second-level ``QTabWidget``.  Research is deliberately not part of
+        the trading runtime navigation, and System collects operations and
+        settings.
+        """
+        research = QTabWidget()
+        research.setObjectName("workflowSecondaryTabs")
+        research.setDocumentMode(True)
+        research.setTabPosition(QTabWidget.North)
+        for title, page in (
+            ("针对性验证", self._simulation_tab()),
+            ("广域标的池", self._universe_tab()),
+            ("历史数据", self._data_tab()),
+            ("市场扫描", self._scanner_tab()),
+            ("回测", self._backtest_tab()),
+            ("横截面研究", self._strategy_tab()),
+        ):
+            research.addTab(page, title)
+        self.v2_research_tabs = research
 
-    @staticmethod
-    def _workflow_tabs(
-        pages: tuple[tuple[str, QWidget], ...],
-    ) -> QTabWidget:
-        """Build fixed second-level navigation with per-page scrolling."""
+        system = QTabWidget()
+        system.setObjectName("workflowSecondaryTabs")
+        system.setDocumentMode(True)
+        system.setTabPosition(QTabWidget.North)
+        for title, page in (
+            ("运行事件", self._runtime_tab()),
+            ("系统设置", self._settings_tab()),
+        ):
+            system.addTab(page, title)
+        self.v2_system_tabs = system
 
-        tabs = QTabWidget()
-        tabs.setObjectName("workflowSecondaryTabs")
-        tabs.setDocumentMode(True)
-        tabs.setTabPosition(QTabWidget.North)
-        for title, page in pages:
-            tabs.addTab(MainWindow._workflow_scroll_page(page), title)
-        return tabs
-
-    @staticmethod
-    def _workflow_scroll_page(page: QWidget) -> QScrollArea:
-        """Keep scrolling local to one selected second-level function page."""
-
-        scroll = QScrollArea()
-        scroll.setObjectName("workflowPageScroll")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll.setWidget(page)
-        return scroll
-
-    @staticmethod
-    def _workspace_tabs(
-        pages: tuple[tuple[str, QWidget], ...],
-    ) -> QTabWidget:
-        tabs = QTabWidget()
-        tabs.setDocumentMode(True)
-        tabs.setTabPosition(QTabWidget.North)
-        for title, page in pages:
-            tabs.addTab(page, title)
-        return tabs
+        pages: dict[str, QWidget] = {
+            "dashboard": self._dashboard_tab(),
+            "market": self._quotes_tab(),
+            "account": self._account_tab(),
+            "strategy": self._strategy_manager_tab(),
+            "risk": self._safety_tab(),
+            "execution": self._auto_quant_tab(),
+            "research": research,
+            "system": system,
+        }
+        assert set(pages) == set(ROUTES)
+        return pages
 
     @staticmethod
     def _field_label(text: str) -> QLabel:
@@ -5604,11 +5533,13 @@ class MainWindow(QMainWindow):
         self._populate_targeted_data_quality_results()
         self._populate_targeted_execution_stress_results()
         self._populate_targeted_review_results()
-        if self.unified_workflow_page is not None:
-            self.unified_workflow_page.scroll_to("shadow")
-        else:
-            self.targeted_workspace_tabs.setCurrentIndex(3)
-            self.targeted_research_tabs.setCurrentIndex(6)
+        # Bring the finished robustness evidence into view: the targeted
+        # workspace lives on the research route, and its own detail tabs are
+        # what actually hold the result.
+        self.shell.navigate_to("research")
+        self.v2_research_tabs.setCurrentIndex(0)
+        self.targeted_workspace_tabs.setCurrentIndex(3)
+        self.targeted_research_tabs.setCurrentIndex(6)
         self._record_runtime_event(
             severity="info",
             component="targeted_robustness",

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Mapping, Protocol, Sequence
 
-from us_quant.domain import MarketSlice
+from us_quant.trading.domain.market import MarketSlice
 
 
 @dataclass(frozen=True, slots=True)

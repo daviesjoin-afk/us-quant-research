@@ -7,7 +7,8 @@ from statistics import fmean, pstdev
 from typing import Mapping, Sequence
 
 from us_quant.backtest import BacktestEngine, BacktestResult, CostModel
-from us_quant.domain import MarketSlice, ZERO
+from us_quant.trading.domain.common import ZERO
+from us_quant.trading.domain.market import MarketSlice
 from us_quant.portfolio import IntegerPositionSizer
 from us_quant.strategy import (
     DelayedActivationStrategy,

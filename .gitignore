@@ -7,13 +7,16 @@ __pycache__/
 .venv/
 .venv313/
 venv/
-dist/
-build/
-releases/
+# Build and release output
+/dist/
+/build/
+/releases/
 
-# Local runtime state and market data
-data/
-runtime/
+# Local runtime state and market data.  These are root-anchored on purpose:
+# an unanchored ``runtime/`` also matched ``src/us_quant/trading/runtime/``
+# and silently excluded a real source package from the repository.
+/data/
+/runtime/
 *.sqlite
 *.sqlite3
 *.db

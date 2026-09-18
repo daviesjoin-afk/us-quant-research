@@ -94,6 +94,7 @@ from us_quant.desktop_universe_service import (
     UniverseRefreshProgress,
     DesktopUniverseService,
 )
+from us_quant.desktop_market_scan_service import DesktopMarketScanService
 from us_quant.ibkr import IBKRConnectionConfig, probe_ibkr_socket
 from us_quant.ibkr_readonly import (
     IBKRReadOnlySnapshot,
@@ -354,6 +355,11 @@ class MainWindow(QMainWindow):
         )
         self.scan_path = (
             self.paths.research_results_root / "market_scan.json"
+        )
+        self.market_scan_service = DesktopMarketScanService(
+            data_root=self.data_root,
+            fallback_data_root=self.bundled_data_root,
+            scan_path=self.scan_path,
         )
         self.strategy_path = (
             self.paths.research_results_root
@@ -3058,18 +3064,14 @@ class MainWindow(QMainWindow):
 
         def task(progress: Callable[[str], None]) -> MarketScan:
             progress("正在读取已通过质量门的本地日 K…")
-            result = scan_market(
+            return self.market_scan_service.scan(
                 self.universe,
-                data_root=self.data_root,
-                fallback_data_root=self.bundled_data_root,
                 capital=research_capital,
                 max_position_risk_pct=(
                     self.config.risk_limits.max_position_exposure_pct
                 ),
                 substitutions=self.config.substitutions,
             )
-            save_market_scan(result, self.scan_path)
-            return result
 
         self._start_task(
             task,

@@ -69,6 +69,7 @@ REFACTORED_METHODS = (
 LATER_ROUND_METHODS = (
     "_settings_tab",  # step 11: the Settings page moved into a panel
     "_refresh_universe",  # step 13: the refresh moved into a service
+    "_run_scan",  # step 14: the manual scan moved into a service
 )
 
 # Spec 34/58: these must stay byte-identical to the base commit.

@@ -543,3 +543,131 @@ subclass 能通过 import 却会破坏它们。
 下一步若继续，对象是 `MainWindow` 的方法族（`_build*` / `_apply_theme` /
 stream 与 paper 的 handler），那才是真正需要逐段行为冻结的部分。
 
+---
+
+## 10. 第九步：`desktop_settings.py`（设置事务边界）
+
+```text
+MainWindow
+    ↓ 从控件收集值（只做这一件事）
+DesktopSettingsService.commit(...)
+    ↓
+UserPreferencesStore          MarketData config port
+（磁盘）                        （runtime）
+```
+
+事务顺序：
+
+```text
+validate  →  preflight  →  persist  →  runtime apply
+```
+
+### 10.1 被移出的知识
+
+`MainWindow._save_user_preferences()` 原本在一个方法里做了四件互不相干的事：读控件、
+校验取值、写偏好文件、把运行中的行情服务搬到新连接参数上。后三件都不是表现层，而且
+**它们的前后顺序是安全属性而不是风格选择**，因此全部移入本模块。
+
+同时被删除的重复实现：`MainWindow._ibkr_config_from_preferences()` 与
+`MainWindow._apply_preferences_to_config()`。前者与 `__init__` 里手写的一份
+`IBKRConnectionConfig(...)` 是同一条映射的两个副本——现在 `__init__` 也改走
+`ibkr_config_from_preferences()`，startup config 与 saved config 不会再漂成两套规则。
+
+### 10.2 为什么 preflight 必须在 persist 之前
+
+stream 存活时 `MarketDataService` 拒绝更换连接参数。若先写文件，磁盘上是新 client ID
+而 runtime 还是旧值——操作者被告知「已保存」，下一次 stream 却仍用旧参数。
+
+`ensure_config_update_allowed()` 只**检查**：不改状态、不做 I/O。这正是两种失败模式
+得以分离的原因——被拒绝的变更什么都没留下。
+
+### 10.3 为什么 persist 必须在 runtime apply 之前
+
+写盘是提交点。若先 apply 再写，写失败时 runtime 已经切换，下一次 stream 会用设置文件
+里并不存在的值连接。
+
+### 10.4 本步不做的事
+
+**不新增任何事务框架**：没有回滚、不备份 `preferences.json`、不加文件锁、不做两阶段
+提交、不引入 transaction manager。现有顺序已经让两种失败模式各自惰性，为「检查与
+应用之间的理论竞态」发明一套机制是另一个 PR 的事。
+
+### 10.5 两个安全层不得互相蕴含
+
+`preferences.paper_order_capability_enabled` 说的是**操作者可以被提供** Paper 下单
+控件；它绝不能让 `IBKRConnectionConfig.paper_order_submission_enabled` 变成 True。
+desktop 的基础 IBKR config 永远保持 `api_read_only=True` /
+`paper_order_submission_enabled=False`，真正的 Paper order service 仍由它自己的
+专用路径从自己的 config 创建。
+
+### 10.6 边界形状
+
+`desktop_settings.py` 依赖面用**集合相等**钉死：
+
+```text
+dataclasses, typing
+us_quant.config, us_quant.ibkr, us_quant.user_settings
+```
+
+不 import `MarketDataService` 本身，而是通过 `MarketDataConfigPort(Protocol)` 描述所需
+的三个成员（`config` / `ensure_config_update_allowed` / `update_config`）——服务可以
+新增方法而不惊动本模块，测试也可以用一个计数器替身替代它。
+
+无 Qt、无 `desktop`、无 credential store、无 Paper 栈、无 provider adapter。
+`DesktopSettingsCommit` 是 `frozen=True, slots=True`。
+
+### 10.7 本步不碰的东西
+
+`MarketDataService`（`ensure_config_update_allowed` / `update_config` /
+`build_stream` / `run` / `stop` 全部未改）、`user_settings.py`（schema、allowed
+providers、host 白名单、端口 4002、原子写全部未改）、credential methods、Settings UI
+布局、provider switch、Paper 全栈、`desktop_workers.py`、`desktop_widgets.py`、
+`RuntimeSupervisor` 全部未改。`MainWindow` 除设置保存接线外未改，尤其
+`_start_stream` / `_stop_stream` / `_stream_finished` / `closeEvent` /
+`_start_auto_quant` / `_paper_execution_health_adapter` /
+`_finish_auto_quant_session_if_safe` 未触碰。
+
+### 10.8 体积与测试
+
+| | before | after |
+|---|---|---|
+| `desktop.py` | 9384 行 / 369,555 字节 | 9338 行 / 366,941 字节 |
+| `desktop_settings.py` | — | 176 行 / 6,924 字节 |
+| `tests/test_desktop_settings.py` | — | 1025 行 / 32,437 字节 |
+| 全套测试 | 685 passed | 757 passed |
+
+（同为 LF 归一化后的 blob 口径——与第八步同口径；`desktop.py` 的 before 取
+`git show main:src/us_quant/desktop.py`。`desktop.py` 净减 **46 行**。）
+
+### 10.9 覆盖强度
+
+`tests/test_desktop_settings.py` 共 **40 个测试函数**，参数化展开后 **72 个用例**：
+服务本身用 fake store + fake market data 直接测，不启动 `QApplication`；末尾的接线
+测试才构造 `MainWindow`。其中 **5 个函数是结构守卫**（参数化后 33 个用例），35 个是
+行为断言（39 个用例）。
+
+断言的是**调用日志**而不是只断言返回值——先保存后检查的服务也会返回一个看起来正确的
+commit。被钉住的顺序为 `["ensure", "save", "update"]`。
+
+结构守卫按 AST 读源码：依赖面集合相等、禁止 import 与禁止提到的符号各自参数化
+（`MarketDataService` 也在禁提名单里，因为本模块只应通过 Protocol 与它对话）、
+`commit` 的 `current_config` / `market_data` 为 keyword-only 且无默认值、
+`_save_user_preferences` 里不得出现三处事务调用、`desktop.py` 全文不得出现
+`preferences_store.save(` / `ensure_config_update_allowed(` /
+`market_data_service.update_config(`。
+
+### 10.10 突变结果
+
+**28/28 全杀、0 存活、0 skip、0 错误归因、0 未归因。** 第一轮有 1 个存活：
+`port=preferences.ibkr_port` → `port=4002`。原因是 `UserPreferences.validated()`
+本身就把端口钉成 4002，测试数据里字面量恰好等价——这是**映射函数的真实测试缺口**，
+不是覆盖不足。补 `test_the_mapping_copies_every_connection_field_verbatim`（用未校验
+的 4003 / client 123456 / timeout 99 直接调映射）后杀死。
+
+harness 另有两处必须处理的坑：① 锚点用 `\n` 写而文件是 CRLF，多行锚点会全部匹配失败
+→ 匹配前按文件自身行尾归一化；② 某个突变体会让 `_save_user_preferences` 弹出模态
+`QMessageBox`，offscreen 下永久阻塞，导致整个 sweep 被 `TimeoutExpired` 打断 →
+逐突变体超时记 `HUNG` 并继续。
+
+
+

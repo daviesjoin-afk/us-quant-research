@@ -101,6 +101,10 @@ from us_quant.market_data_service import (
     MarketDataService,
     MarketDataStreamActive,
 )
+from us_quant.desktop_settings import (
+    DesktopSettingsService,
+    ibkr_config_from_preferences,
+)
 from us_quant.extended_hours import (
     USEquitySession,
     paper_order_routing,
@@ -340,6 +344,9 @@ class MainWindow(QMainWindow):
         self.preferences_store = UserPreferencesStore(
             self.paths.state_root / "settings" / "preferences.json"
         )
+        self.settings_service = DesktopSettingsService(
+            self.preferences_store
+        )
         defaults = UserPreferences(
             ibkr_host=baseline_config.ibkr.host,
             ibkr_port=baseline_config.ibkr.port,
@@ -351,18 +358,11 @@ class MainWindow(QMainWindow):
         self.preferences = self.preferences_store.load(defaults)
         self.current_theme_name = self.preferences.theme
         self.theme = theme_palette(self.current_theme_name)
+        # Start-up builds its IBKR config through the same mapping a later
+        # save uses, so the two cannot drift into separate rules.
         self.config = replace(
             baseline_config,
-            ibkr=IBKRConnectionConfig(
-                host=self.preferences.ibkr_host,
-                port=self.preferences.ibkr_port,
-                client_id=self.preferences.ibkr_client_id,
-                api_read_only=True,
-                paper_order_submission_enabled=False,
-                connection_timeout_seconds=(
-                    self.preferences.connection_timeout_seconds
-                ),
-            ),
+            ibkr=ibkr_config_from_preferences(self.preferences),
         )
         self.artifact_catalog: ArtifactCatalog = load_artifact_catalog(
             self.paths.research_results_root
@@ -8889,6 +8889,14 @@ class MainWindow(QMainWindow):
             self.settings_extended_hours_paper.blockSignals(False)
 
     def _save_user_preferences(self) -> None:
+        """UI adapter around :meth:`DesktopSettingsService.commit`.
+
+        Reads the controls and reports failures; the transaction itself --
+        validate, preflight, persist, apply -- belongs to the service.  The
+        widget work below runs only after the commit succeeded, and in the
+        order it always has.
+        """
+
         try:
             preferences = UserPreferences(
                 theme=str(
@@ -8910,34 +8918,22 @@ class MainWindow(QMainWindow):
                 extended_hours_paper_enabled=(
                     self.settings_extended_hours_paper.isChecked()
                 ),
-            ).validated()
-            ibkr = self._ibkr_config_from_preferences(preferences)
-            # Checked *before* persisting, and deliberately so.  While a
-            # stream is live the service refuses to change its connection
-            # config, and saving first would leave the settings file and
-            # the live service disagreeing about the port and client id --
-            # the operator would be told the change was saved while the
-            # next stream still used the old values.
-            #
-            # ``ensure_config_update_allowed`` only *checks*: it changes no
-            # state and performs no I/O.  That is what keeps the two failure
-            # modes apart -- a refused change leaves nothing behind, and a
-            # failed write below cannot leave the runtime already moved to
-            # values the operator was just told were not saved.
-            service = getattr(self, "market_data_service", None)
-            if service is not None:
-                service.ensure_config_update_allowed(ibkr)
-            saved = self.preferences_store.save(preferences)
+            )
+            commit = self.settings_service.commit(
+                preferences,
+                current_config=self.config,
+                market_data=getattr(
+                    self, "market_data_service", None
+                ),
+            )
         except UserSettingsError as error:
             QMessageBox.warning(self, "设置未保存", str(error))
             return
         except MarketDataStreamActive as error:
             QMessageBox.warning(self, "设置未保存", str(error))
             return
-        # Only once the file is on disk does the runtime move.  Applying
-        # after a successful save is what makes the three views -- the
-        # persisted settings, ``self.config`` and the service -- agree.
-        self._apply_preferences_to_config(saved)
+        saved = commit.preferences
+        self.config = commit.config
         self.preferences = saved
         self._apply_theme(saved.theme)
         index = self.stream_mode.findData(saved.market_provider)
@@ -8956,48 +8952,6 @@ class MainWindow(QMainWindow):
             )
         self._refresh_auto_quant_preflight()
         self._refresh_extended_hours_status()
-
-    def _ibkr_config_from_preferences(
-        self, preferences: UserPreferences
-    ) -> IBKRConnectionConfig:
-        """The IBKR connection config ``preferences`` describe.
-
-        Split out of :meth:`_apply_preferences_to_config` so the settings
-        save path can build the config it is *about to* apply and ask the
-        service whether that change would be accepted -- before it writes
-        the file.  Read-only: it touches no state.
-        """
-
-        return IBKRConnectionConfig(
-            host=preferences.ibkr_host,
-            port=preferences.ibkr_port,
-            client_id=preferences.ibkr_client_id,
-            api_read_only=True,
-            paper_order_submission_enabled=False,
-            connection_timeout_seconds=(
-                preferences.connection_timeout_seconds
-            ),
-        )
-
-    def _apply_preferences_to_config(
-        self, preferences: UserPreferences
-    ) -> None:
-        ibkr = self._ibkr_config_from_preferences(preferences)
-        # The service holds its own copy of the IBKR config and builds
-        # every future stream from it, so saving settings has to reach it
-        # too -- otherwise the next stream silently reconnects with the
-        # values from start-up.
-        #
-        # Order matters: the service is asked first and ``self.config`` is
-        # only updated once it accepted, so the two cannot end up
-        # disagreeing.  While a stream is live the service refuses (the
-        # open connection is the one it was built with) and this raises;
-        # ``getattr`` keeps initialisation order safe, and an unchanged
-        # config is a no-op rather than a spurious refusal.
-        service = getattr(self, "market_data_service", None)
-        if service is not None and service.config != ibkr:
-            service.update_config(ibkr)
-        self.config = replace(self.config, ibkr=ibkr)
 
     def _save_api_credentials(self) -> None:
         provider = str(

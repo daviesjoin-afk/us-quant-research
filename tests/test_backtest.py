@@ -3,7 +3,7 @@ from decimal import Decimal
 import unittest
 
 from us_quant.backtest import BacktestEngine, CostModel
-from us_quant.domain import Bar, MarketSlice
+from us_quant.trading.domain.market import Bar, MarketSlice
 from us_quant.portfolio import IntegerPositionSizer, SubstitutionRule
 from us_quant.strategy import TargetAllocation
 

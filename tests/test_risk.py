@@ -3,7 +3,8 @@ from decimal import Decimal
 from typing import get_type_hints
 import unittest
 
-from us_quant.domain import AccountSnapshot, OrderIntent, Position, Side
+from us_quant.trading.domain.account import AccountSnapshot, Position
+from us_quant.trading.domain.orders import OrderIntent, Side
 from us_quant.risk import (
     PreTradeRiskEngine,
     RiskLimits,

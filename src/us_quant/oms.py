@@ -8,7 +8,11 @@ from pathlib import Path
 import sqlite3
 from typing import Generator, Iterable
 
-from us_quant.domain import OrderEvent, OrderIntent, OrderStatus
+from us_quant.trading.domain.orders import (
+    OrderEvent,
+    OrderIntent,
+    OrderStatus,
+)
 
 
 ALLOWED_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {

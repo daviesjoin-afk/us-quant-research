@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_FLOOR
 from typing import Mapping
 
-from us_quant.domain import ONE, ZERO
+from us_quant.trading.domain.common import ONE, ZERO
 
 
 @dataclass(frozen=True, slots=True)

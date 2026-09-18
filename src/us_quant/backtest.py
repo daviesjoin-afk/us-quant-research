@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_FLOOR
 from typing import Iterable, Mapping
 
-from us_quant.domain import MarketSlice, ONE, ZERO, Side
+from us_quant.trading.domain.common import ONE, ZERO
+from us_quant.trading.domain.market import MarketSlice
+from us_quant.trading.domain.orders import Side
 from us_quant.portfolio import IntegerPositionSizer, ResolvedInstrument
 from us_quant.strategy import Strategy, TargetAllocation
 

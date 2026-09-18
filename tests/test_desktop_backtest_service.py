@@ -30,6 +30,25 @@ SERVICE_PATH = _REPO_ROOT / SERVICE_MODULE
 # Spec 54: the only two MainWindow methods this step may change.
 REFACTORED_METHODS = ("__init__", "_run_backtest_workspace")
 
+# Trading Core v2: this round deleted the legacy/unified shell builders and
+# added the v2 page composer.  The delta is declared here so the guard below
+# can assert it *exactly* instead of merely tolerating it.
+LATER_ROUND_REMOVED_METHODS = (
+    "_build_legacy_workspace",
+    "_build_unified_workflow",
+    "_workflow_tabs",
+    "_workflow_scroll_page",
+    "_workspace_tabs",
+)
+LATER_ROUND_ADDED_METHODS = ("_build_v2_pages",)
+
+# Trading Core v2 also rewrote these two: `_build_ui` now composes the v2
+# shell, and `_targeted_robustness_finished` navigates through it.
+LATER_ROUND_UI_METHODS = (
+    "_build_ui",
+    "_targeted_robustness_finished",
+)
+
 # Spec 53: byte-identical to the base commit.
 FROZEN_METHODS = (
     "_backtest_workspace_finished",
@@ -1376,10 +1395,20 @@ def test_only_the_declared_methods_changed() -> None:
         if isinstance(node, ast.FunctionDef)
     }
 
-    assert set(base_methods) == set(current_methods)
+    # Trading Core v2 removed the legacy/unified shells and added the v2
+    # page composer.  Asserting the delta exactly keeps this guard strict:
+    # any other addition or removal still fails here.
+    assert set(base_methods) - set(current_methods) == set(
+        LATER_ROUND_REMOVED_METHODS
+    )
+    assert set(current_methods) - set(base_methods) == set(
+        LATER_ROUND_ADDED_METHODS
+    )
 
     changed = []
     for name, node in base_methods.items():
+        if name not in current_methods:
+            continue
         before = _source_of(base_window, node, base).replace("\r\n", "\n")
         after = _source_of(
             current_window, current_methods[name], current
@@ -1387,7 +1416,9 @@ def test_only_the_declared_methods_changed() -> None:
         if before != after:
             changed.append(name)
 
-    assert set(changed) <= set(REFACTORED_METHODS)
+    assert set(changed) <= set(REFACTORED_METHODS) | set(
+        LATER_ROUND_UI_METHODS
+    )
     assert "_run_backtest_workspace" in changed
 
 

@@ -11,7 +11,7 @@ import tempfile
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from us_quant.domain import Bar, MarketSlice
+from us_quant.trading.domain.market import Bar, MarketSlice
 
 
 @dataclass(frozen=True, slots=True)

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Protocol
 
-from us_quant.domain import OrderIntent
+from us_quant.trading.domain.orders import OrderIntent
 
 
 @dataclass(frozen=True, slots=True)

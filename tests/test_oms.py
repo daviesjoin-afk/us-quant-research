@@ -3,7 +3,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from us_quant.domain import OrderIntent, OrderStatus, Side
+from us_quant.trading.domain.orders import (
+    OrderIntent,
+    OrderStatus,
+    Side,
+)
 from us_quant.oms import (
     InvalidOrderTransition,
     OrderManager,

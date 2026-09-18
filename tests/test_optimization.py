@@ -3,7 +3,7 @@ from decimal import Decimal
 import unittest
 
 from us_quant.backtest import CostModel
-from us_quant.domain import Bar, MarketSlice
+from us_quant.trading.domain.market import Bar, MarketSlice
 from us_quant.optimization import (
     MovingAverageCandidate,
     walk_forward_moving_average,

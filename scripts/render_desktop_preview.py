@@ -9,7 +9,6 @@ from time import monotonic, sleep
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("US_QUANT_LEGACY_UI", "1")
 
 ROOT = Path(__file__).resolve().parents[1]
 os.environ.setdefault(
@@ -37,9 +36,12 @@ def main() -> int:
     if not window.grab().save(str(output)):
         raise RuntimeError("desktop preview could not be saved")
 
-    def select(top_index: int, child, child_index: int) -> None:
-        window.tabs.setCurrentIndex(top_index)
-        child.setCurrentIndex(child_index)
+    def select(route: str, sub_index: int | None = None) -> None:
+        """Show one Desktop UI v2 route, optionally a second-level page."""
+
+        window.shell.navigate_to(route)
+        if sub_index is not None:
+            window.shell.page(route).setCurrentIndex(sub_index)
         application.processEvents()
 
     preview_candidates = []
@@ -75,7 +77,7 @@ def main() -> int:
         f"已整理 {len(preview_candidates)} 个广域候选；"
         "等待实时订阅与用户逐会话武装 IBKR Paper。"
     )
-    select(0, window.monitor_tabs, 1)
+    select("execution")
     auto_output = (
         ROOT / "research" / "artifacts" / "desktop_auto_quant_preview.png"
     )
@@ -93,20 +95,20 @@ def main() -> int:
         raise RuntimeError("auto orders preview could not be saved")
     window.auto_detail_tabs.setCurrentIndex(0)
 
-    select(0, window.monitor_tabs, 2)
+    select("account")
     application.processEvents()
     account_output = (
         ROOT / "research" / "artifacts" / "desktop_account_preview.png"
     )
     if not window.grab().save(str(account_output)):
         raise RuntimeError("account preview could not be saved")
-    select(0, window.monitor_tabs, 3)
+    select("market")
     quotes_output = (
         ROOT / "research" / "artifacts" / "desktop_quotes_preview.png"
     )
     if not window.grab().save(str(quotes_output)):
         raise RuntimeError("quotes preview could not be saved")
-    select(0, window.monitor_tabs, 4)
+    select("research", 0)
     window.target_symbol_input.setText("AAPL")
     window._apply_target_symbol()
     replay_start = datetime(
@@ -254,7 +256,7 @@ def main() -> int:
     )
     if not window.grab().save(str(preflight_output)):
         raise RuntimeError("target preflight preview could not be saved")
-    select(1, window.strategy_tabs, 0)
+    select("strategy")
     manager_output = (
         ROOT
         / "research"
@@ -263,7 +265,7 @@ def main() -> int:
     )
     if not window.grab().save(str(manager_output)):
         raise RuntimeError("strategy manager preview could not be saved")
-    select(1, window.strategy_tabs, 1)
+    select("research", 4)
     window._run_backtest_workspace(False)
     deadline = monotonic() + 15
     while window.workers and monotonic() < deadline:
@@ -275,25 +277,25 @@ def main() -> int:
     )
     if not window.grab().save(str(backtest_output)):
         raise RuntimeError("backtest preview could not be saved")
-    select(2, window.research_tabs, 1)
+    select("research", 3)
     scanner_output = (
         ROOT / "research" / "artifacts" / "desktop_scanner_preview.png"
     )
     if not window.grab().save(str(scanner_output)):
         raise RuntimeError("scanner preview could not be saved")
-    select(1, window.strategy_tabs, 2)
+    select("research", 5)
     strategy_output = (
         ROOT / "research" / "artifacts" / "desktop_strategy_preview.png"
     )
     if not window.grab().save(str(strategy_output)):
         raise RuntimeError("strategy preview could not be saved")
-    select(3, window.operations_tabs, 0)
+    select("system", 0)
     runtime_output = (
         ROOT / "research" / "artifacts" / "desktop_runtime_preview.png"
     )
     if not window.grab().save(str(runtime_output)):
         raise RuntimeError("runtime preview could not be saved")
-    window.tabs.setCurrentIndex(4)
+    select("system", 1)
     application.processEvents()
     settings_output = (
         ROOT / "research" / "artifacts" / "desktop_settings_dark.png"
@@ -304,13 +306,13 @@ def main() -> int:
     window.settings_theme_combo.setCurrentIndex(
         window.settings_theme_combo.findData("light")
     )
-    select(0, window.monitor_tabs, 0)
+    select("dashboard")
     light_output = (
         ROOT / "research" / "artifacts" / "desktop_preview_light.png"
     )
     if not window.grab().save(str(light_output)):
         raise RuntimeError("light preview could not be saved")
-    select(0, window.monitor_tabs, 1)
+    select("execution")
     light_auto_output = (
         ROOT
         / "research"
@@ -332,7 +334,7 @@ def main() -> int:
             "light auto orders preview could not be saved"
         )
     window.auto_detail_tabs.setCurrentIndex(0)
-    select(0, window.monitor_tabs, 3)
+    select("market")
     light_quotes_output = (
         ROOT
         / "research"
@@ -341,7 +343,7 @@ def main() -> int:
     )
     if not window.grab().save(str(light_quotes_output)):
         raise RuntimeError("light quotes preview could not be saved")
-    select(0, window.monitor_tabs, 4)
+    select("research", 0)
     window.targeted_workspace_tabs.setCurrentIndex(0)
     window.targeted_research_tabs.setCurrentIndex(0)
     light_shadow_output = (
@@ -427,7 +429,7 @@ def main() -> int:
         raise RuntimeError(
             "light target preflight preview could not be saved"
         )
-    window.tabs.setCurrentIndex(4)
+    select("system", 1)
     application.processEvents()
     light_settings_output = (
         ROOT / "research" / "artifacts" / "desktop_settings_light.png"

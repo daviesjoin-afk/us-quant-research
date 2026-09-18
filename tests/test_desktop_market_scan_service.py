@@ -29,6 +29,14 @@ SERVICE_PATH = _REPO_ROOT / SERVICE_MODULE
 # Spec 48: the only two MainWindow methods this step may change.
 REFACTORED_METHODS = ("__init__", "_run_scan")
 
+# Methods a *later* round legitimately rewrote.  Each round appends the
+# methods it declared; the union is what this guard tolerates relative to
+# its own base commit.  Adding a name here that no round declared is exactly
+# the scope violation this guard exists to catch.
+LATER_ROUND_METHODS = (
+    "_run_backtest_workspace",  # step 15: the batch loop moved into a service
+)
+
 # Spec 46/47: byte-identical to the base commit.
 FROZEN_METHODS = (
     "_scan_finished",
@@ -1007,7 +1015,9 @@ def test_only_the_declared_methods_changed() -> None:
         if before != after:
             changed.append(name)
 
-    assert set(changed) <= set(REFACTORED_METHODS)
+    assert set(changed) <= set(REFACTORED_METHODS) | set(
+        LATER_ROUND_METHODS
+    )
     assert "_run_scan" in changed
 
 

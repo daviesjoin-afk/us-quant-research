@@ -1470,3 +1470,177 @@ AST 结构守卫（`__init__` 正文的调用集合不得含 `mkdir`/`exists`/`o
 
 **每轮都要为自己那一刀配一个相对自己 base commit 的守卫**——否则「允许面」会
 逐轮膨胀成什么都允许。
+
+## 16. 第十五步：`desktop_backtest_service.py`（回测批量执行边界）
+
+第十五步把 `MainWindow._run_backtest_workspace()` 里「逐个
+`run_backtest` → `save_backtest_run` → 收集结果」的非 Qt 编排搬进
+`src/us_quant/desktop_backtest_service.py`。
+
+```text
+MainWindow
+    ↓ UI validation
+    ↓ BacktestRequest construction
+    ↓ Qt progress / task lifecycle
+
+DesktopBacktestService
+    ↓
+run_backtest
+save_backtest_run
+```
+
+**只迁移批量执行循环。** Backtest 页面、`BacktestRequest` 的 UI 构造、结果表格渲染、
+Strategy Research、AutoQuant、Paper 全部未迁移。
+
+### 16.1 边界形状
+
+```python
+BacktestProgress = Callable[[int, int, BacktestRequest], None]
+
+
+class DesktopBacktestService:
+    def __init__(
+        self,
+        *,
+        data_root: Path,
+        fallback_data_root: Path | None,
+        output_root: Path,
+    ) -> None: ...
+
+    def run(
+        self,
+        requests: Sequence[BacktestRequest],
+        *,
+        on_progress: BacktestProgress | None = None,
+    ) -> tuple[BacktestRun, ...]: ...
+```
+
+构造函数**只保存三个根**，零 I/O：不 `mkdir`、不 `exists`、不 `open`、
+不 `resolve`、不 `glob`、不 `run_backtest`、不 `save_backtest_run`。
+AST 守卫钉住 `self.<attr>` 的 Store 集合恰好是
+`{data_root, fallback_data_root, output_root}`，并逐条检查 `__init__` 正文的
+调用集合不含任何 I/O 名字（纯读取调用外部不可观测，行为断言杀不掉）。
+
+三个根取自窗口已有对象：`data_root` / `bundled_data_root` 与
+`paths.research_results_root / "backtests"`，不重新 `ApplicationPaths.discover()`。
+
+### 16.2 每个 request 的顺序是契约
+
+```text
+progress(index, total, request)
+↓
+run_backtest(request, data_root=..., fallback_data_root=...)
+↓
+save_backtest_run(run, output_root=...)
+↓
+runs.append(run)
+↓
+next request
+```
+
+最后 `return tuple(runs)`。**progress 在 run 之前发出**——旧 closure 就是这个顺序，
+测试同时从两侧钉住（事件序列，以及「run 计数器在该 progress 之后才增加」）。
+
+严格串行：没有 `ThreadPoolExecutor`、没有 `asyncio`、没有 `multiprocessing`、
+没有 `concurrent.futures`，也没有 `cancel()` / `stop()` / `request_stop()`。
+现有行为是**一个 TaskThread 内串行跑多个版本**，保持如此。
+
+### 16.3 返回值与 save 返回值
+
+`run()` 返回 `tuple[BacktestRun, ...]`，且每个元素就是 `run_backtest` 返回的
+**原对象**（identity，不是相等）。`save_backtest_run()` 返回的 `Path`
+**必须被忽略**——这是和 market scan service 同样的 identity invariant，
+突变体把 `runs.append(run)` 换成 `runs.append(save_backtest_run(...))` 会被杀死。
+
+### 16.4 failure 与部分提交语义
+
+- 第一个 request 的 `run_backtest` 抛错 → 该 request **不 save**、后续 request
+  **不运行**、异常原样向上。
+- 某个 request 的 `save_backtest_run` 抛错 → 该 run **不加入返回元组**、
+  后续 request 不运行、异常原样向上。
+- **中途失败不回滚**：已经保存的 A 留在磁盘上。这不是事务，是**部分提交批处理**；
+  service 不删文件、不做 rollback、不做 batch transaction。
+- service 里**没有任何 `except` 子句**（AST 守卫），也不新增错误体系
+  （没有 `DesktopBacktestError` / `BacktestBatchError` / `PartialBacktestFailure`）。
+- 空请求不发明规则：`run(()) == ()`，且 `run_backtest` / `save_backtest_run` /
+  `on_progress` 均零调用。UI 层的「没有可运行版本」仍由窗口拦。
+
+### 16.5 UI 与 presentation 留在窗口
+
+- 三段前置校验全留窗口：已有 backtest worker → 「任务忙」；`records` 为空 →
+  「没有可运行版本」；`start_date > end_date` → 「日期无效」。
+  service 不知道 `QMessageBox`，也不知道 `_backtest_records(compare_all)`。
+- `BacktestRequest` 的构造继续留窗口，包括 `target_weight / 100` 与
+  各字段的 `Decimal(...)` 转换。本步**不**引入 `BacktestRequestFactory` /
+  `BacktestFormModel` / `BacktestConfig`。
+- 进度文案由窗口生成：`f"回测 {index}/{total}：{request.strategy_id} {request.symbol}"`。
+  service 不含任何中文（「回测」「正在运行」「任务忙」「日期无效」「没有可运行版本」
+  均不得出现）。
+- `_start_task(task, on_success=self._backtest_workspace_finished,
+  start_message=f"正在运行 {len(requests)} 个版本绑定回测…", resource_group="backtest")`
+  逐项不变，且**不增加** `on_failure` / `on_cancel` / `shutdown_essential`。
+  两个按钮在 `_start_task` 之前禁用。
+- `_backtest_workspace_finished` 完全冻结；`_run_backtest_workspace` 里
+  **不加 try/except**，service 异常继续走 `TaskThread.run() → failed.emit()`。
+
+### 16.6 允许变化的两个方法
+
+| 方法 | before | after |
+|---|---|---|
+| `__init__` | 189 行 | 194 行 |
+| `_run_backtest_workspace` | 89 行 | 77 行 |
+
+`MainWindow` 方法总数 **191 → 191**。其余方法逐字节未变，包括
+`_backtest_workspace_finished`（40 行不变）、`_backtest_result_selection_changed`、
+`_show_backtest_run`、`_backtest_records`、`_run_strategy_research`、
+`_strategy_finished`、`_start_task`、`_task_failed`、`closeEvent`（9 个
+byte-equivalence 用例）。
+
+`desktop.py` 不再 import `run_backtest` / `save_backtest_run`——本步之后全文件
+只剩 import 一处引用，按 §47 删除；`BacktestRequest` / `BacktestRun` /
+`STRATEGY_SPECS` 保留（窗口仍构造 requests 并标注 task 返回类型）。
+
+### 16.7 体积与测试
+
+| | before | after |
+|---|---|---|
+| `desktop.py` | 9016 行 / 356,227 字节 | 9008 行 / 356,059 字节 |
+| `desktop_backtest_service.py` | — | 83 行 / 2,766 字节 |
+| `tests/test_desktop_backtest_service.py` | — | 1414 行 / 41,920 字节 |
+| 全套测试 | 1077 passed | 1134 passed |
+
+（字节口径为 LF 归一化后的 blob；before 取 `git show b2fd5ee:src/us_quant/desktop.py`。）
+
+### 16.8 覆盖强度与突变结果
+
+`tests/test_desktop_backtest_service.py` 共 **49 个测试函数**，参数化展开后
+**57 个用例**：**20 个函数是结构守卫**（参数化后 28 个用例），29 个是行为断言
+（29 个用例）。
+
+结构守卫按 AST 读源码：service 的 import 集合**相等**（只允许 `__future__` /
+`collections.abc` / `pathlib` / `us_quant.backtest_workspace`）、不 import Qt、
+不 import 兄弟 service / Paper / AutoQuant / risk、无 `except` 子句、
+无 `cancel`/`stop`/`request_stop`、无中文文案、不知任何 widget 名、
+`self.<attr>` 的 Store 集合恰好是三个根、`__init__` 正文无 I/O 调用、
+`run()` 循环体内 `append` 必须在 `save` 之后；
+`_run_backtest_workspace` 正文不再出现 `run_backtest(` / `save_backtest_run(`
+且不含 `except`。
+
+突变结果：**55/55 全杀、0 存活、0 问题、0 挂起、0 未解析。** 首轮 4 个存活，
+两类原因：
+
+① **两个真实覆盖缺口**。`initial-equity-not-decimal` 存活是因为
+`Decimal(2500) == 2500` 为真——只断言值不断言类型的测试杀不掉「去掉 `Decimal(...)`」
+的突变体（这正是「测试必须断言类型而非只断言值」那条老教训）。已补
+`isinstance(..., Decimal)`。
+
+② **两个是我的 harness 或测试写法问题**。`run-request-not-passed`（把
+`request` 换成 `requests[0]`）在**单请求**的测试里完全等价——测试只传了一个
+request，`requests[0] is request` 恒真；改成三个 request 后即被杀。
+`append-before-save` 与 `failure-rolls-back-the-earlier-runs` 同理：
+返回的元组在两种顺序下完全相同，行为断言**在原理上**分辨不出，必须补
+AST 语句顺序守卫，并把「不回滚」写成**观察真实文件是否仍在**（假 save 写真实
+文件），而不是数调用次数。
+
+harness 本轮另有一处改进：替换文本若 `ast.parse` 失败，记录为
+`UNPARSEABLE` 并**继续**，不再让整轮中止（上一轮踩过这个坑）。

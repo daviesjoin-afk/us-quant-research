@@ -1707,11 +1707,11 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
             engine.risk.exposure_multiplier("AAA"),
         )
 
-    def test_the_engine_uses_the_session_fraction_for_its_own_request(self) -> None:
-        """Spec 61: the strategy keeps its sizing; risk keeps the ceilings."""
+    def test_the_session_fraction_is_visible_as_a_risk_reduction(self) -> None:
+        """The strategy requests its size; risk alone applies the session cap."""
 
         submitted: list[PaperOrderIntent] = []
-        risk = RiskApplication(
+        risk = _RecordingRisk(
             LayeredRiskLimits(
                 account=RiskLimits(
                     max_gross_exposure_pct=Decimal("1"),
@@ -1734,7 +1734,9 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
             observed_at=observed,
         )
         self.assertEqual(len(submitted), 1)
-        # The session override replaces the strategy fraction for the
-        # *request*: (10000 × 0.25 − 0.35) ÷ 10.02 = 249 whole shares, and
-        # the risk ceilings are all above that, so nothing trims it.
+        # Strategy request: (10000 × 0.5 − 0.35) ÷ 10.02 = 498 whole shares.
+        # Session risk cap: 10000 × 25% = 2500, i.e. 249 whole shares.
+        self.assertEqual(risk.requests[-1].proposal.desired_quantity, 498)
         self.assertEqual(submitted[0].quantity, 249)
+        self.assertIn("风险缩量 498 → 249", submitted[0].reason)
+        self.assertIn("position exposure cap", submitted[0].reason)

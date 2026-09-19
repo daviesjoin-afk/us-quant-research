@@ -107,7 +107,15 @@ class StrategyApplication:
         gate_passed: bool = False,
         gate_reason: str = DEFAULT_GATE_REASON,
     ) -> StrategyVersion:
-        """Create one immutable version.
+        """Create one immutable version and return what the store now holds.
+
+        The return value is **read back from the repository**, not the object
+        this method just built.  That matters for one case: a family's
+        definition is established by its first version, so a later version of
+        the same family reads the first version's name and description back.
+        Returning the locally built object would make ``register`` and
+        ``get_version`` disagree about the same version id -- two answers to
+        "what is this strategy called", depending on when you asked.
 
         A caller may not declare its own gate pass; see the module docstring.
         """
@@ -157,7 +165,7 @@ class StrategyApplication:
                 occurred_at=now,
             ),
         )
-        return version
+        return self.get_version(version.version_id)
 
     def clone_version(
         self,

@@ -25,6 +25,9 @@ import pathlib
 
 import pytest
 
+from us_quant.trading.adapters.sqlite.strategy_repository import (
+    SQLiteStrategyRepository,
+)
 from us_quant.trading.application.strategies import (
     StrategyApplication,
     StrategyApplicationError,
@@ -67,11 +70,11 @@ _BASELINE_BY_KEY = {
 class _InMemoryRepository:
     """A ``StrategyRepositoryPort`` with no database behind it.
 
-    It mirrors one observable behaviour of the SQLite adapter: a
-    ``strategy_definition`` row is per *family*, and the first version to
-    register it wins.  Later versions of the same family read that name and
-    description back.  Without this, the catalogue comparison below would
-    compare against something the real store cannot produce.
+    It mirrors one rule of the SQLite adapter, because that rule is part of the
+    application's outward contract: a family's definition is established by its
+    first version, and later versions of the same family read that name and
+    description back.  Without it, ``register`` could not be tested for that
+    contract without a database.
     """
 
     def __init__(self, versions: tuple[StrategyVersion, ...] = ()) -> None:
@@ -257,10 +260,10 @@ def test_the_stale_code_hashes_are_left_alone(seeded) -> None:
 
 
 def test_a_family_reads_back_its_first_registered_definition(seeded) -> None:
-    """The seeded catalogue preserves the definition-collapse quirk.
+    """The stored definition for a family comes from its first version.
 
-    ``sector-momentum`` has two versions whose *description* differs, but the
-    ``strategy_definition`` row is keyed on ``strategy_id`` and written with
+    ``sector-momentum`` has two versions whose *description* differs, but
+    ``strategy_definition`` is keyed on ``strategy_id`` and written with
     ``INSERT OR IGNORE``, so both versions report the first one's text.  That
     is what the retired registry did and what the captured baseline records;
     changing it would rewrite what the operator sees for a version that was
@@ -277,6 +280,55 @@ def test_a_family_reads_back_its_first_registered_definition(seeded) -> None:
     assert newer.description == _BASELINE_BY_KEY[
         ("sector-momentum", "2.0.0-research")
     ]["description"]
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_register_returns_what_the_store_holds(tmp_path, backend) -> None:
+    """``register`` and ``get_version`` agree about the same version id.
+
+    A later version of an existing family cannot carry its caller's name and
+    description: the family's definition was fixed by its first version.  The
+    contract has to hold on the *return value* of the write, not only on a
+    later read -- otherwise the same call reports two different definitions
+    depending on when you look.  Asserted over both a real store and the
+    in-memory port implementation, so the two cannot drift.
+    """
+
+    if backend == "memory":
+        application = StrategyApplication(_InMemoryRepository())
+    else:
+        application = StrategyApplication(
+            SQLiteStrategyRepository(tmp_path / "strategies.sqlite3")
+        )
+
+    first = application.register(
+        strategy_id="same-family",
+        name="First",
+        description="First description",
+        semver="1.0.0-research",
+        parameters={"whole_shares": True},
+        universe_hash="u",
+        code_hash="c",
+        risk_budget_pct=0.10,
+    )
+    second = application.register(
+        strategy_id="same-family",
+        name="Renamed",
+        description="Changed",
+        semver="2.0.0-research",
+        parameters={"whole_shares": True},
+        universe_hash="u",
+        code_hash="c",
+        risk_budget_pct=0.10,
+    )
+
+    assert first.name == "First"
+    assert first.description == "First description"
+    assert second.name == "First"
+    assert second.description == "First description"
+    assert second.version_id != first.version_id
+    assert application.get_version(second.version_id) == second
+    assert application.get_version(first.version_id) == first
 
 
 def test_bootstrap_is_idempotent(application) -> None:

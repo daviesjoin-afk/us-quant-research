@@ -24,13 +24,20 @@ deployment, audit) and a transition is two (deployment, audit).  Each group
 shares one transaction, so a failed audit insert leaves the deployment exactly
 where it was rather than moving a version's status with no record of why.
 
-One inherited quirk is preserved on purpose.  ``strategy_definition`` is keyed
-on ``strategy_id`` and written with ``INSERT OR IGNORE``, so a family's name
-and description come from its *first* registered version and later versions
-read that text back.  The seeded catalogue has one family whose second version
-carries different description text, which is how the recorded baseline shows
-it.  "Fixing" this by upserting the definition would silently rewrite what the
-operator sees for a version nobody edited, so it stays.
+One inherited behaviour is preserved on purpose and is now a **contract**, not
+a storage accident.  ``strategy_definition`` is keyed on ``strategy_id`` and
+written with ``INSERT OR IGNORE``, so a family's name and description come from
+its *first* registered version and later versions read that text back.  The
+seeded catalogue has one family whose second version carries different
+description text, which is how the recorded baseline shows it.  "Fixing" this
+by upserting the definition would silently rewrite what the operator sees for a
+version nobody edited.
+
+Because it is a contract, it holds on every read path: ``StrategyApplication``
+returns what this store holds -- including from ``register`` itself -- so the
+return value of a write and a later ``get_version`` cannot disagree.  The
+in-memory repository used by the application tests mirrors the same rule for
+exactly that reason.
 """
 
 from __future__ import annotations

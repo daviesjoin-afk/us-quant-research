@@ -58,6 +58,16 @@ BROKER_ACCOUNT_V2_METHODS = (
     "_start_shadow",
 )
 
+# Execution v2: the Paper execution stack moved out of the root package into
+# the trading layer, so ``desktop.py`` builds its order store and execution
+# service through the composition root instead of naming ``PaperOrderJournal``
+# and ``IBKRPaperOrderService``.  Declared so the guard can assert the delta.
+EXECUTION_V2_METHODS = (
+    "_start_auto_quant",
+    "_check_auto_order_channel",
+    "_finish_auto_quant_session_if_safe",
+)
+
 # Spec 46/47/48: the base commit of this step.
 BASE_COMMIT = "d497388af958e59b1bdeab1325e2f4708e082c82"
 
@@ -77,6 +87,19 @@ MARKET_DATA_V2_CHANGED_MODULES = (
 BROKER_ACCOUNT_V2_CHANGED_MODULES = (
     "src/us_quant/desktop_settings.py",
     "src/us_quant/ibkr_paper_orders.py",
+)
+
+# Execution v2: the Paper execution stack moved out of the root package into
+# the trading layer.  Declared so the guard can assert the delta exactly.
+EXECUTION_V2_CHANGED_MODULES = (
+    # Execution v2: retyped to the domain order types and the new ports.
+    "src/us_quant/paper_trading_service.py",
+    "src/us_quant/paper_session.py",
+    "src/us_quant/paper_order_models.py",
+    "src/us_quant/ibkr_paper_gateway.py",
+    # Execution v2: the journal file is gone; its store is a trading-layer
+    # SQLite repository now.
+    "src/us_quant/paper_order_journal.py",
 )
 
 SERVICE_MODULE = "src/us_quant/desktop_market_scan_service.py"
@@ -185,7 +208,8 @@ FROZEN_METHODS = (
     "_select_auto_quant_candidates",
     "_stop_auto_market_data",
     "_confirm_and_start_auto_quant",
-    "_start_auto_quant",
+    # ``_start_auto_quant`` is no longer frozen: Execution v2 moved it onto
+    # the composition root, which is why it appears in ``EXECUTION_V2_METHODS``.
 )
 
 # Spec 26/27/28/29/30: modules this step must not touch at all.
@@ -1177,11 +1201,13 @@ def test_only_the_declared_methods_changed() -> None:
         | set(MARKET_DATA_V2_METHODS)
         | set(BROKER_ACCOUNT_V2_METHODS)
         | set(STRATEGY_V2_METHODS)
+        | set(EXECUTION_V2_METHODS)
     )
     assert set(changed) <= allowed
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)
     assert set(BROKER_ACCOUNT_V2_METHODS) <= set(changed)
     assert set(STRATEGY_V2_METHODS) <= set(changed)
+    assert set(EXECUTION_V2_METHODS) <= set(changed)
     assert "_run_scan" in changed
 
 
@@ -1208,6 +1234,7 @@ def test_the_other_frozen_modules_are_untouched() -> None:
     assert set(changed) == (
         set(MARKET_DATA_V2_CHANGED_MODULES)
         | set(BROKER_ACCOUNT_V2_CHANGED_MODULES)
+        | set(EXECUTION_V2_CHANGED_MODULES)
     )
 
 

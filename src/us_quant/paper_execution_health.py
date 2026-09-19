@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from us_quant.auto_quant import AutoQuantSnapshot
-from us_quant.ibkr_paper_orders import (
+from us_quant.paper_order_models import (
     PaperBrokerState,
     PaperOrderConnection,
     PaperOrderReconciliation,

@@ -24,6 +24,7 @@ from __future__ import annotations
 import ast
 import pathlib
 import subprocess
+import sys
 
 import pytest
 
@@ -657,18 +658,26 @@ MARKET_DATA_ADAPTERS = _TRADING / "adapters"
 
 #: Adapter modules under ``trading/adapters`` that do NOT implement
 #: ``MarketDataPort``: the package inits, the shared transport state, the
-#: read-only account chain and the SQLite strategy repository.  Listed by
-#: relative path so a new module in any of those packages cannot slip through
-#: the market-data surface guard by sharing a filename.
+#: read-only account chain, the SQLite strategy repository, and -- since
+#: Execution v2 -- the execution chain (the IBKR order adapter, its gateway
+#: bridge, the SQLite order store and the two shared helpers the execution
+#: adapters use).  Listed by relative path so a new module in any of those
+#: packages cannot slip through the market-data surface guard by sharing a
+#: filename.
 NON_MARKET_DATA_ADAPTER_MODULES = {
     "__init__.py",
     "market_data_state.py",
+    "clock.py",
+    "order_status_mapping.py",
     "ibkr/__init__.py",
     "ibkr/account.py",
+    "ibkr/execution.py",
+    "ibkr/execution_gateway.py",
     "ibkr/support.py",
     "alpaca/__init__.py",
     "finnhub/__init__.py",
     "sqlite/__init__.py",
+    "sqlite/order_repository.py",
     "sqlite/strategy_repository.py",
 }
 
@@ -1181,8 +1190,13 @@ def test_the_account_page_imports_no_business_service() -> None:
     assert not offending, sorted(offending)
 
 
-def test_only_account_composition_wires_the_concrete_account_adapter() -> None:
-    """Exactly one module knows both the account application and its adapter."""
+def test_only_composition_roots_wire_adapters_into_applications() -> None:
+    """Exactly the composition roots know both an application and an adapter.
+
+    Every other module must depend on one side or the other.  A module
+    appearing here that is not a composition root is a caller that reached
+    through the application to a concrete implementation.
+    """
 
     wiring_modules: list[str] = []
     for path in _all_source_files():
@@ -1197,6 +1211,7 @@ def test_only_account_composition_wires_the_concrete_account_adapter() -> None:
             wiring_modules.append(path.relative_to(_SRC).as_posix())
     assert wiring_modules == [
         "trading/composition/accounts.py",
+        "trading/composition/execution.py",
         "trading/composition/market_data.py",
         "trading/composition/strategies.py",
     ], wiring_modules
@@ -1349,12 +1364,12 @@ EXECUTION_COUPLING_NAMES = (
 )
 
 #: Spec 90/91: the exact set of strategy-related modules still allowed to be
-#: execution-coupled, as repository-relative POSIX paths.  Anything else
-#: appearing in this set fails the guard below -- there is no second
-#: exception and adding one is a deliberate, visible edit to this literal.
-TRANSITIONAL_EXECUTION_COUPLED_STRATEGY_FILES = {
-    "src/us_quant/auto_quant.py",
-}
+#: execution-coupled, as repository-relative POSIX paths.  Execution v2 emptied
+#: it: the last strategy that could build an order or hand one to a sink now
+#: produces a ``TradeProposal`` and asks the risk layer.  It must stay empty --
+#: an exception here is a strategy with an execution path again, and the guard
+#: below fails until someone writes the widening down on purpose.
+TRANSITIONAL_EXECUTION_COUPLED_STRATEGY_FILES: set[str] = set()
 
 #: The fields ``TradeProposal`` is allowed to have.  Order identity is
 #: deliberately absent: a proposal that carried one could be submitted.
@@ -1636,8 +1651,9 @@ def test_auto_quant_is_the_only_execution_coupled_strategy_module() -> None:
     """Spec 90/91: the transitional exception is an exact, closed set.
 
     Any second strategy-related module that constructs a ``PaperOrderIntent``
-    or holds an ``order_sink`` fails here.  Widening the exception means
-    editing the literal, which is the point -- it cannot grow by accident.
+    or holds an ``order_sink`` fails here.  Execution v2 emptied the
+    exception, so any coupling at all now fails: there is no strategy with an
+    execution path left, and adding one back means writing it down here first.
     """
 
     coupled: set[str] = set()
@@ -2031,3 +2047,404 @@ def test_the_risk_application_consumes_the_risk_snapshot_not_broker_truth() -> (
     assert "BrokerAccountSnapshot" not in names
     assert "BrokerConnectionState" not in names
     assert "BrokerPositionSnapshot" not in names
+
+
+# -- Execution v2 ---------------------------------------------------------
+
+#: The v1 order modules, retired by this migration.  Deleted outright: no
+#: compatibility re-export, no shim, no "deprecated" import path left behind.
+#: A module that is merely unreferenced can be resurrected, so existence is
+#: checked directly.
+RETIRED_EXECUTION_MODULES = (
+    "us_quant.ibkr_paper_orders",
+    "us_quant.ibkr_paper_gateway",
+    "us_quant.paper_order_journal",
+)
+
+#: The Paper order DTOs this round deleted.  Orders are domain types now, and
+#: a second set of order shapes is how two readings of one order diverge.
+RETIRED_EXECUTION_NAMES = (
+    "PaperOrderIntent",
+    "PaperOrderUpdate",
+    "PaperExecution",
+    "new_paper_order_intent",
+    "IBKRPaperOrderService",
+)
+
+EXECUTION_DOMAIN = _TRADING / "domain" / "orders.py"
+EXECUTION_APPLICATION = _TRADING / "application" / "execution.py"
+EXECUTION_COMPOSITION = _TRADING / "composition" / "execution.py"
+EXECUTION_ADAPTER = _TRADING / "adapters" / "ibkr" / "execution.py"
+EXECUTION_GATEWAY = _TRADING / "adapters" / "ibkr" / "execution_gateway.py"
+EXECUTION_STORE = _TRADING / "adapters" / "sqlite" / "order_repository.py"
+EXECUTION_PORTS = (
+    _TRADING / "ports" / "broker_execution.py",
+    _TRADING / "ports" / "order_repository.py",
+)
+
+#: Every module the execution migration creates or rewrites in the trading
+#: layers.
+EXECUTION_V2_MODULES = (
+    EXECUTION_APPLICATION,
+    EXECUTION_COMPOSITION,
+    EXECUTION_ADAPTER,
+    EXECUTION_GATEWAY,
+    EXECUTION_STORE,
+    _TRADING / "adapters" / "clock.py",
+    _TRADING / "adapters" / "order_status_mapping.py",
+)
+
+#: What the execution *application* may not reach for.  It orchestrates a
+#: verdict, a store and a channel through their ports; naming any of these
+#: means it has taken over a job that belongs to an adapter or a window.
+EXECUTION_APPLICATION_FORBIDDEN_PREFIXES = (
+    "ibapi",
+    "sqlite3",
+    "PySide6",
+    "us_quant.desktop",
+    "us_quant.trading.adapters",
+    "us_quant.paper_order_models",
+    "us_quant.paper_session",
+    "us_quant.paper_workflow",
+)
+
+#: The identifiers that would let a strategy or a risk module reach the
+#: broker channel directly.  ``sqlite3`` is deliberately absent: several
+#: legacy root modules own their own stores, which is a different migration's
+#: problem, and a guard that cannot pass is a guard that gets weakened.
+STRATEGY_EXECUTION_SURFACE_NAMES = (
+    "IBKRExecutionAdapter",
+    "placeOrder",
+    "cancelOrder",
+)
+
+EXECUTION_RISK_APPLICATION = _TRADING / "application" / "risk.py"
+EXECUTION_RISK_DOMAIN = _TRADING / "domain" / "risk.py"
+
+
+def test_the_retired_execution_modules_are_gone() -> None:
+    for module in RETIRED_EXECUTION_MODULES:
+        path = _SRC / f"{module.removeprefix('us_quant.')}.py"
+        assert not path.exists(), (
+            f"{path.relative_to(_SRC).as_posix()} must not exist; the "
+            "execution migration moved its behaviour to trading/"
+        )
+
+
+def test_no_module_imports_a_retired_execution_module() -> None:
+    offenders: list[str] = []
+    for path in _all_source_files():
+        if path == pathlib.Path(__file__):
+            continue
+        used = _matches(_imports(path), RETIRED_EXECUTION_MODULES)
+        if used:
+            offenders.append(
+                f"{path.relative_to(_SRC).as_posix()} -> {sorted(used)}"
+            )
+    assert not offenders, offenders
+
+
+def test_the_paper_order_dtos_are_gone() -> None:
+    """One order vocabulary: the domain's, and nothing beside it."""
+
+    defined: list[str] = []
+    for path in _all_source_files():
+        used = _identifier_names(path) & set(RETIRED_EXECUTION_NAMES)
+        if used:
+            defined.append(
+                f"{path.relative_to(_SRC).as_posix()} -> {sorted(used)}"
+            )
+    assert not defined, defined
+
+
+def test_the_execution_application_is_provider_and_storage_blind() -> None:
+    """It may name the domain and the two ports, and nothing below them."""
+
+    offending = _matches(
+        _imports(EXECUTION_APPLICATION),
+        EXECUTION_APPLICATION_FORBIDDEN_PREFIXES,
+    )
+    assert not offending, sorted(offending)
+
+    names = _identifier_names(EXECUTION_APPLICATION)
+    assert "BrokerExecutionPort" in names
+    assert "OrderRepositoryPort" in names
+    assert "RiskDecision" in names
+    assert "TradeProposal" in names
+
+
+def test_the_execution_ports_depend_on_the_domain_only() -> None:
+    for path in EXECUTION_PORTS:
+        modules = _imports(path)
+        assert not _matches(
+            modules, ("us_quant.trading.adapters",)
+        ), path.name
+        assert not _matches(modules, ("us_quant.trading.application",))
+        assert not _matches(
+            modules, ("ibapi", "sqlite3", "PySide6", "us_quant.desktop")
+        ), path.name
+        assert not _relative_imports(path), path.name
+
+
+def test_only_the_execution_composition_wires_concrete_execution_pieces() -> (
+    None
+):
+    """One assembly point, or the layers above it can pick their own adapter."""
+
+    for path in (
+        EXECUTION_APPLICATION,
+        EXECUTION_DOMAIN,
+        _SRC / "auto_quant.py",
+        _SRC / "paper_session.py",
+    ):
+        modules = _imports(path)
+        assert not _matches(modules, ("us_quant.trading.adapters",)), (
+            f"{path.name} reaches a concrete adapter"
+        )
+
+    names = _identifier_names(EXECUTION_COMPOSITION)
+    assert "ExecutionApplication" in names
+    assert "SQLiteOrderRepository" in names
+    assert "IBKRExecutionAdapter" in names
+
+
+def test_the_desktop_does_not_import_a_concrete_execution_adapter() -> None:
+    """The window composes through the composition root, never by name."""
+
+    desktop = _SRC / "desktop.py"
+    names = _identifier_names(desktop)
+    for retired in (
+        "IBKRExecutionAdapter",
+        "SQLiteOrderRepository",
+        "IBKRPaperOrderService",
+        "PaperOrderJournal",
+        "new_paper_order_intent",
+    ):
+        assert retired not in names, retired
+    assert "build_execution_application" in names, (
+        "the window must build the execution service through composition"
+    )
+
+
+def test_the_strategy_and_risk_layers_cannot_reach_the_broker_channel() -> None:
+    """Strategy proposes, risk decides, execution submits -- and only it."""
+
+    offenders: list[str] = []
+    for path in _python_files(_SRC):
+        relative = path.relative_to(_SRC).as_posix()
+        # The adapters *are* the channel and the composition roots are the one
+        # place allowed to name a concrete one.
+        if relative.startswith("trading/adapters/"):
+            continue
+        if relative.startswith("trading/composition/"):
+            continue
+        if relative == "desktop.py":
+            continue
+        used = _identifier_names(path) & set(STRATEGY_EXECUTION_SURFACE_NAMES)
+        if used:
+            offenders.append(f"{relative} -> {sorted(used)}")
+    assert not offenders, offenders
+
+    for path in (EXECUTION_RISK_APPLICATION, EXECUTION_RISK_DOMAIN):
+        names = _identifier_names(path)
+        assert "ExecutionApplication" not in names, path.name
+        assert "OrderIntent" not in names, path.name
+
+
+def test_only_the_execution_application_creates_order_identity() -> None:
+    """One creator.  A second one is a second place orders appear from."""
+
+    creators: list[str] = []
+    for path in _python_files(_SRC):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "create"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "OrderIntent"
+            ):
+                creators.append(path.relative_to(_SRC).as_posix())
+                break
+    assert creators == ["trading/application/execution.py"], creators
+
+
+def test_the_execution_store_freezes_the_paper_schema() -> None:
+    """Old order databases keep opening: the DDL is the frozen one."""
+
+    source = EXECUTION_STORE.read_text(encoding="utf-8")
+    for table in (
+        "paper_order_intent",
+        "paper_order_update",
+        "paper_execution",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {table}(" in source, table
+    for column in (
+        "intent_id TEXT PRIMARY KEY",
+        "broker_order_id INTEGER NOT NULL UNIQUE",
+        "idempotency_key TEXT",
+        "update_id INTEGER PRIMARY KEY AUTOINCREMENT",
+        "execution_row_id INTEGER PRIMARY KEY AUTOINCREMENT",
+    ):
+        assert column in source, column
+    for forbidden in ("DROP TABLE", "DELETE FROM paper_", "DROP COLUMN"):
+        assert forbidden not in source, forbidden
+    # A legacy database may be grown by an ``ADD COLUMN`` and by nothing else:
+    # no stored value is ever rewritten, so the store's only ALTER statement is
+    # that one.
+    assert source.count("ALTER TABLE") == 1
+    assert 'ALTER TABLE {table} ADD COLUMN {column}' in source
+    assert '("paper_order_intent", "idempotency_key", "TEXT")' in source
+
+
+def test_the_execution_adapter_keeps_its_paper_safety_gates() -> None:
+    """The refusal surface is the contract, not an implementation detail."""
+
+    names = _identifier_names(EXECUTION_ADAPTER)
+    for required in (
+        "validate_paper_order_intent",
+        "ensure_paper_order_config",
+        "ExecutionRefused",
+        "ExecutionSubmissionUncertain",
+    ):
+        assert required in names, required
+
+    source = EXECUTION_ADAPTER.read_text(encoding="utf-8")
+    # No global cancel, no market orders, no short surface came back in.
+    for forbidden in (
+        "reqGlobalCancel",
+        "cancelAllOrders",
+        "orderType = \"MKT\"",
+        "shortSaleSlot",
+    ):
+        assert forbidden not in source, forbidden
+    # And the durable-before-send ordering is inside the two calls, so the
+    # adapter itself must not write the intent: that write is the caller's.
+    assert "record_intent(" not in source, (
+        "the adapter must not write the correlation; the application does "
+        "that between reserve and submit"
+    )
+
+
+def test_the_adapters_record_time_in_one_place() -> None:
+    """A second clock formatter would be a second meaning for the stored text."""
+
+    formatters: set[str] = set()
+    for path in _python_files(_TRADING / "adapters"):
+        source = path.read_text(encoding="utf-8")
+        if "def now_iso" in source:
+            formatters.add(path.relative_to(_SRC).as_posix())
+    assert formatters == {"trading/adapters/clock.py"}, sorted(formatters)
+
+
+# -- scripts/ -------------------------------------------------------------
+#
+# The scripts are the one directory pytest never imports, and that is exactly
+# why a stale import can live there through a whole migration:
+# ``scripts/check_paper_order_channel.py`` kept importing the Paper order
+# journal after the journal was deleted, so ``--help`` raised
+# ``ModuleNotFoundError`` and nothing noticed.  These guards scan that
+# directory directly.
+
+SCRIPTS_DIR = _REPO_ROOT / "scripts"
+
+#: Union of every retired-module tuple above.  A script naming any of them is
+#: broken at import time, because none of these modules exists any more.
+ALL_RETIRED_MODULES = (
+    *RETIRED_MARKET_DATA_MODULES,
+    *RETIRED_ACCOUNT_MODULES,
+    *RETIRED_STRATEGY_MODULES,
+    *RETIRED_EXECUTION_MODULES,
+)
+
+
+def _us_quant_module_exists(module: str) -> bool:
+    """Whether ``us_quant.<...>`` resolves to a file in ``src/us_quant``."""
+
+    head, *rest = module.split(".")
+    if head != "us_quant":
+        return True
+    base = _SRC.joinpath(*rest)
+    return base.with_suffix(".py").is_file() or (base / "__init__.py").is_file()
+
+
+def test_no_script_imports_a_retired_module() -> None:
+    """Deleting a module must not leave an import behind under ``scripts/``."""
+
+    offenders: list[str] = []
+    for path in _python_files(SCRIPTS_DIR):
+        used = _matches(_imports(path), ALL_RETIRED_MODULES)
+        if used:
+            offenders.append(
+                f"{path.relative_to(_REPO_ROOT).as_posix()} -> "
+                f"{sorted(used)}"
+            )
+    assert not offenders, offenders
+
+
+def test_every_module_a_script_imports_exists() -> None:
+    """The general form of the guard above, so the next deletion is caught too.
+
+    A named retired module is caught by the list; this test catches the rest,
+    including a module deleted in a migration whose list nobody extended.
+    """
+
+    missing: list[str] = []
+    for path in _python_files(SCRIPTS_DIR):
+        for module in sorted(_imports(path)):
+            if not _us_quant_module_exists(module):
+                missing.append(
+                    f"{path.relative_to(_REPO_ROOT).as_posix()} imports "
+                    f"{module}, which does not exist"
+                )
+    assert not missing, missing
+
+
+def test_the_paper_order_channel_diagnostic_still_runs() -> None:
+    """The script's own entry point must work: ``--help`` exits 0.
+
+    A diagnostic that cannot print its help text is not a diagnostic, and the
+    failure it had was invisible to a suite that only ever imports ``src``.
+    """
+
+    script = SCRIPTS_DIR / "check_paper_order_channel.py"
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "Read-only diagnostic" in completed.stdout
+
+
+def test_the_paper_order_channel_diagnostic_cannot_submit() -> None:
+    """Diagnostic only: it never arms the session, so it can never send.
+
+    ``arm`` is the gate every send path sits behind -- ``reserve`` refuses for
+    an unarmed session, and ``submit`` re-refuses -- so a script that does not
+    arm cannot place an order even by accident.
+    """
+
+    source = (SCRIPTS_DIR / "check_paper_order_channel.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            assert node.func.attr not in {
+                "arm",
+                "reserve",
+                "submit",
+                "placeOrder",
+                "cancel",
+                "cancelOrder",
+            }, f"the diagnostic must not call {node.func.attr}"
+    assert '"orders_submitted": 0' in source
+    assert "build_execution_candidate" in source
+    assert "build_order_repository" in source
+    # The real order store must not be touched: the run writes to a temporary
+    # directory and opens nothing else.
+    assert "TemporaryDirectory" in source

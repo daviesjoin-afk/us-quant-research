@@ -6,7 +6,7 @@ from us_quant.auto_quant import (
     AutoQuantPosition,
     AutoQuantSnapshot,
 )
-from us_quant.ibkr_paper_orders import (
+from us_quant.paper_order_models import (
     PaperBrokerPosition,
     PaperBrokerState,
     PaperOrderConnection,

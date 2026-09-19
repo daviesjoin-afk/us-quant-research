@@ -7,10 +7,15 @@
 Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只记录它们的
 归宿，不声称已完成。
 
+> **进度更新（Execution v2）**：Execution 链已完成迁移。
+> `PaperOrderIntent` / `new_paper_order_intent` / `order_sink` 与
+> `paper_order_journal.py` / `ibkr_paper_orders.py` 已删除，
+> `TRANSITIONAL_EXECUTION_COUPLED_STRATEGY_FILES` **已归零**。见 §4 Execution
+> 与 §10.2。**Strategy Runtime 仍是 TRANSITIONAL**：`AutoQuantEngine` 仍然
+> 同时承担信号与运行时状态，把它拆成 StrategyRuntime + TradingRuntime 是下一轮。
+>
 > **进度更新（Risk v2）**：Risk Domain、Risk Application、Desktop RiskPage 与
-> AutoQuant 的风险集成已完成迁移。**Strategy Runtime 仍是 TRANSITIONAL**，
-> 因为 `AutoQuantEngine` 依然直接构造 `PaperOrderIntent` 并持有 `order_sink`；
-> 见 §10.2。下一条主线是 **Execution v2**。
+> AutoQuant 的风险集成已完成迁移。
 >
 > **进度更新（Strategy v2）**：Strategy Governance、Strategy Repository、
 > Strategy Selection 与 Desktop StrategyPage 已完成迁移。
@@ -34,13 +39,17 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Risk Application | MIGRATED |
 | Desktop RiskPage | MIGRATED |
 | AutoQuant Risk Integration | MIGRATED |
+| Execution Domain | MIGRATED |
+| Execution Application | MIGRATED |
+| SQLite Order Repository | MIGRATED |
+| IBKR Paper Execution Adapter | MIGRATED |
+| AutoQuant Execution Integration | MIGRATED |
 | Strategy Runtime | **TRANSITIONAL** |
-| Execution | NOT STARTED |
 
-**这不是"策略已完全迁移"。** 策略的治理、存储、选择与界面已经在内，风控也已
-成为唯一权威，但策略的**运行时执行路径**仍然由 `AutoQuantEngine` 直连 Paper
-订单通道——它现在先产出 `TradeProposal`、拿到 `RiskDecision`，然后才构造
-`PaperOrderIntent`。这段桥接是 Execution v2 的活，见 §10.2。
+**这不是"策略已完全迁移"。** 策略的治理、存储、选择与界面已经在内，风控是
+唯一权威，执行也只经 `ExecutionApplication` 一条路——但策略的**运行时形态**
+仍然由 `AutoQuantEngine` 兼任：它同时产出信号、维护会话状态、判断出场时机。
+把它拆成 `StrategyRuntime` 与 `TradingRuntime` 是下一轮，见 §14。
 
 ## 1. 核心依赖方向
 
@@ -277,23 +286,34 @@ Risk 不能：
 构造一个 `RiskApplication`，并以构造参数注入 `AutoQuantEngine`。旧的双入口
 缺陷见 §10.4。
 
-### Execution
+### Execution —— **已迁移（Execution v2）**
 
 ```text
-Approved Proposal
+Approved Proposal + RiskDecision
         ↓
-OrderIntent
+ExecutionApplication.submit_approved()
         ↓
-ExecutionService
+OrderIntent                        （唯一订单身份，只有它能创建）
         ↓
-BrokerExecutionPort
+OrderRepositoryPort + BrokerExecutionPort
         ↓
-IBKR Paper adapter
+SQLiteOrderRepository + IBKRExecutionAdapter
+        ↓
+IBKR Paper
 ```
+
+提交被刻意拆成两段：`reserve()` 只分配券商订单号、**什么都不发**，
+`ExecutionApplication` 随后把 intent ↔ broker id 的对应关系**先写进库**，
+最后才 `submit()`。这个顺序由 `test_trading_execution_application` 用调用序列
+钉死，并且做过反向验证：把 `record_intent` 挪到 `submit` 之后，测试立刻变红。
+
+`OrderIntent` / `OrderEvent` / `ExecutionFill` 是上层唯一认的订单词汇；
+券商原始状态文本仍随事件传递（对账与审计视图要读），但策略读的是映射后的
+`OrderStatus`，且未识别文本一律落 `UNKNOWN`、永不落 `FILLED`。
 
 ## 5. 当前唯一正确的交易路径
 
-Risk v2 之后，真实运行链已经是：
+Execution v2 之后，真实运行链是：
 
 ```text
 AutoQuant signal logic
@@ -304,16 +324,13 @@ RiskApplication.evaluate()
       ↓
 RiskDecision                         （能不能做、做多少）
       ↓
-auto_quant.py 内唯一 transitional bridge
+ExecutionApplication.submit_approved()
       ↓
-PaperOrderIntent
-      ↓
-order_sink
-      ↓
-现有 Paper execution stack
+OrderIntent → OrderRepositoryPort + BrokerExecutionPort
 ```
 
-`PaperOrderIntent` / `order_sink` **本轮仍然存在**，到 Execution v2 才删除。
+`PaperOrderIntent` / `new_paper_order_intent` / `order_sink` 已删除，
+`auto_quant.py` 不再认识任何执行侧类型。
 
 ### 5.1 目标形态
 
@@ -690,6 +707,37 @@ MainWindow._safety_tab()
 拿快照和"当日起始净值"相比，一个没有时区的读数会让"这条读数有多旧"取决于
 本机 locale。
 
+### 9.5 Execution v1（Execution v2 删除）
+
+```text
+src/us_quant/ibkr_paper_orders.py
+        → trading/adapters/ibkr/execution.py 的 IBKRExecutionAdapter（纯搬迁 + 两段提交）
+
+src/us_quant/ibkr_paper_gateway.py
+        → trading/adapters/ibkr/execution_gateway.py（逐字节搬迁）
+
+src/us_quant/paper_order_journal.py
+        → trading/adapters/sqlite/order_repository.py 的 SQLiteOrderRepository
+          （schema 与 SQL 逐字保留，边界换成域类型）
+
+PaperOrderIntent / PaperOrderUpdate / PaperExecution
+        → trading/domain/orders.py 的 OrderIntent / OrderEvent / ExecutionFill
+
+new_paper_order_intent()
+        → ExecutionApplication 构造订单（OrderIntent.create 的唯一调用点）
+
+AutoQuantEngine.order_sink
+        → AutoQuantEngine.execution（注入 ExecutionApplication）
+```
+
+`paper_order_models.py` **保留但缩小**：剩下的只有会话侧 DTO——
+`PaperOrderConnection`、`PaperBrokerState`/`PaperBrokerPosition`、
+`PaperOrderReconciliation`、`ReconciliationSummary`、
+`PaperBrokerOrder`、`PaperReconciliationSnapshot`。它们属于尚未迁移的
+Trading Runtime（连接、券商状态、对账视图），不是 Execution v2 的漏迁。
+`TERMINAL_ORDER_STATUSES` 也留在这里，因为订单库与适配器都要读它，而两者
+不允许互相 import。
+
 ## 10. 现有模块的未来归宿（roadmap）
 
 ```text
@@ -702,12 +750,14 @@ portfolio_view.py         → trading/domain/account.py            ✅ 已删除
 strategy_registry.py      → trading/adapters/sqlite/strategy_repository.py ✅ 已迁移
 strategy_schema.py        → trading/domain/strategy_parameters.py ✅ 已迁移
 risk.py                   → trading/domain/risk.py + trading/application/risk.py ✅ 已迁移
-paper_order_journal.py    → trading/adapters/sqlite/order_repository.py ⏭ 下一条主线
-ibkr_paper_orders.py      → trading/adapters/ibkr/execution.py   ⏭ 下一条主线
-paper_workflow.py         → trading/runtime/session.py           ⏭
+paper_order_journal.py    → trading/adapters/sqlite/order_repository.py ✅ 已迁移
+ibkr_paper_orders.py      → trading/adapters/ibkr/execution.py   ✅ 已迁移
+ibkr_paper_gateway.py     → trading/adapters/ibkr/execution_gateway.py ✅ 已迁移
+paper_workflow.py         → trading/runtime/session.py           ⏭ 下一轮
 ```
 
-**下一条主线：Execution v2。** 目标链路：
+**下一轮：Strategy Runtime / Trading Runtime**（把 `AutoQuantEngine` 拆成
+信号与运行时两半，并给 workflow / lease 找到归宿）。Execution v2 已完成：
 
 ```text
 TradeProposal
@@ -721,12 +771,10 @@ OrderIntent
 OrderRepositoryPort / BrokerExecutionPort
 ```
 
-Execution v2 才删除 `PaperOrderIntent`、`new_paper_order_intent` 与
-`order_sink`。Risk PR 不抢跑：`BrokerExecutionPort` 与 `OrderRepositoryPort`
-本轮仍然**只有定义、没有实现者**，`paper_order_models.py`、
-`ibkr_paper_orders.py`、`ibkr_paper_gateway.py`、`paper_trading_service.py`、
-`paper_order_journal.py`、`paper_session.py`、`paper_workflow.py`、
-`workflow_state.py` 一字节未改。
+`PaperOrderIntent`、`new_paper_order_intent` 与 `order_sink` 已删除；
+`paper_trading_service.py` 的默认工厂改为 composition 的
+`build_execution_candidate`，`paper_session.py` 的事件读取改为
+`fills()` / `events()`，两者都只做类型迁移、排序与语义未动。
 
 ### 10.0 过渡残留：现已清零
 
@@ -742,38 +790,43 @@ Market Data v2 曾留下两点已声明的过渡状态，Broker / Account v2 已
 2. **`MarketQuote` 双重定义 —— 已消失。**
    `ibkr_readonly.py` 已删除，`KNOWN_TRANSITIONAL_OVERLAPS` 现为空字典。
 
-### 10.2 Strategy Runtime 的过渡态（唯一 exception）
+### 10.2 执行例外：**已归零**（Execution v2）
 
-**AutoQuantEngine remains the sole transitional execution-coupled strategy
-implementation.**
+**There is no execution-coupled strategy module left.**
 
-`AutoQuantEngine` 暂时保留，并且是**唯一**仍然允许直接构造
-`PaperOrderIntent`、调用 `new_paper_order_intent` 或持有
-`order_sink` 的策略相关模块。Strategy v2 新建的 domain / ports / adapters /
-application / composition / page 六个层面都不认识执行侧的任何类型，由
-`test_no_strategy_v2_module_imports_paper_execution` 强制。
-
-这个例外是**精确集合**，不是"差不多就行"：
+Risk v2 结束时这里还写着 `AutoQuantEngine` 是唯一例外。Execution v2 把它
+删掉了：`AutoQuantEngine` 不再构造订单、不再持有 sink、不再 import 任何
+IBKR 执行类型。例外集合现在是**空集**，并且必须保持空集：
 
 ```python
-TRANSITIONAL_EXECUTION_COUPLED_STRATEGY_FILES = {"src/us_quant/auto_quant.py"}
+TRANSITIONAL_EXECUTION_COUPLED_STRATEGY_FILES: set[str] = set()
 ```
 
-`test_auto_quant_is_the_only_execution_coupled_strategy_module` 会扫描全部
-策略相关文件，把实际耦合集合与上面这个字面量比对；出现第二个耦合文件
-直接 test fail，扩大例外必须显式改这一行 —— 它不能悄悄长大。Risk v2 没有
-扩大它，也没有缩小它：风控层由 `test_no_risk_v2_module_touches_paper_execution`
-单独禁止出现 `PaperOrderIntent` / `order_sink` / `OrderIntent` 等任何执行面
-名字。Execution v2 完成后，这个集合应当变成空集。
+`test_auto_quant_is_the_only_execution_coupled_strategy_module` 仍会扫描全部
+策略相关文件，把实际耦合集合与这个字面量比对。现在任何耦合都会让它变红，
+而不是"只要还是 auto_quant.py 就行"。
 
-为什么现在不改它：`AutoQuantEngine` 不仅生产提案，还直接提交限价单。
-在 Execution Service 存在之前删除 `order_sink`，等于在没有替代品的情况下
-改写实盘交易路径 —— 与"未迁移的代码保持原样"是同一条原则。Risk v2 只把
-**风控**这一段从它身上摘掉。
+同一轮新增的守卫（`tests/test_trading_architecture.py` 的 Execution v2 段）：
 
-### 10.3 终结 auto_quant 的路线
+- `OrderIntent.create` 的**唯一调用点**是 `trading/application/execution.py`
+  （第二个调用点就是第二个订单来源，包括人工重挂：它走
+  `ExecutionApplication.reissue`）；
+- `ExecutionApplication` 不得 import adapter / sqlite3 / ibapi / Qt / 任何
+  Paper 模块；
+- `BrokerExecutionPort` / `OrderRepositoryPort` 只依赖 domain；
+- 只有 `trading/composition/*` 同时认识 application 与 concrete adapter；
+- `desktop.py` 不得出现 `IBKRExecutionAdapter` / `SQLiteOrderRepository` /
+  `PaperOrderJournal` 等名字，必须走 `build_order_repository` /
+  `build_execution_application`；
+- 被删掉的旧模块（`paper_order_journal` / `ibkr_paper_orders` /
+  `ibkr_paper_gateway`）**不存在**且**没有任何 import 指向它们**；
+- 订单库的 DDL 仍是冻结的那三张表，唯一允许的 DDL 变化是给旧库补一个缺失
+  的 `idempotency_key` 列（`ADD COLUMN`，不改写任何行）。
 
-未来拆成：
+### 10.3 Strategy Runtime 的下一步
+
+Execution v2 只删掉了 **Strategy → Broker 直连**。`AutoQuantEngine` 仍然
+同时承担信号生成与运行时状态（会话、在仓、出场时机），因此下一轮是把它拆成：
 
 ```text
 Strategy Runtime        ← 现在由 AutoQuantEngine 兼任
@@ -781,9 +834,8 @@ Strategy Runtime        ← 现在由 AutoQuantEngine 兼任
 Trading Runtime
 ```
 
-最终删除 `order_sink: Callable[[PaperOrderIntent], int]` 这种
-Strategy → Execution 直连，改为 `TradeProposal` → Risk → `OrderIntent`。
-**本轮不改它。**
+`PaperWorkflowPhase` / `ExecutionLease` / `paper_workflow.py` →
+`trading/runtime/session.py` 也属于那一轮，**本轮刻意未动**。
 
 ### 10.4 已关闭的风险接线缺陷（Risk v2 修复）
 
@@ -853,8 +905,13 @@ AutoQuant 账户级 loss / drawdown 计算   ✅ 已删除（Risk v2）
 AutoQuant symbol 风险策略缓存           ✅ 已删除（Risk v2）
 AutoQuant gross / account position sizing ✅ 已删除（Risk v2）
 AutoQuant layered_risk_limits 构造参数  ✅ 已删除（Risk v2）
+旧 AutoQuant order_sink                ✅ 已删除（Execution v2）
+旧 PaperOrderIntent / new_paper_order_intent ✅ 已删除（Execution v2）
+旧 paper_order_journal.py              ✅ 已删除（Execution v2）
+旧 ibkr_paper_orders.py                ✅ 已删除（Execution v2）
+旧 ibkr_paper_gateway.py               ✅ 已删除（Execution v2）
+旧 PaperOrderUpdate / PaperExecution   ✅ 已删除（Execution v2）
 旧 MainWindow stream lifecycle         ⏭ 后续
-旧 AutoQuant order_sink                ⏭ Execution v2 之后
 旧 Paper-specific orchestration glue   ⏭ 后续
 旧 workflow duplicate state            ⏭ 后续
 旧页面 builder（execution / …）         ⏭ 后续
@@ -908,30 +965,40 @@ HALTED
 
 ## 14. 下一轮
 
-**Execution v2** —— 把最后这段
+**Strategy Runtime / Trading Runtime** —— Execution v2 把最后这段
 
 ```text
 RiskDecision → PaperOrderIntent → order_sink
 ```
 
-替换成
+换成了
 
 ```text
 RiskDecision → OrderIntent → ExecutionApplication → BrokerExecutionPort
 ```
 
-`BrokerExecutionPort` 与 `OrderRepositoryPort` 已经把边界画好了，只是还没有
-实现者。届时 `auto_quant.py` 才能彻底退出 Paper execution，
-`TRANSITIONAL_EXECUTION_COUPLED_STRATEGY_FILES` 随之变为空集。
+`TRANSITIONAL_EXECUTION_COUPLED_STRATEGY_FILES` 已随之变为空集。剩下的过渡态
+不在执行侧，而在**运行时形态**：`AutoQuantEngine` 仍然把信号生成、会话状态与
+出场时机放在同一个类里，`paper_workflow.py` / `PaperWorkflowPhase` /
+`ExecutionLease` 也还没有归宿。下一轮把它们拆成
+`StrategyRuntime` + `TradingRuntime`（`paper_workflow.py` →
+`trading/runtime/session.py`）。
 
-Risk v2 刻意不抢跑：`trading/application/execution.py`、
-`trading/adapters/ibkr/execution.py`、`trading/adapters/sqlite/order_repository.py`
-本轮都不存在。
+Execution v2 刻意没有做的事，留给那一轮或更后面：
 
-本轮刻意不创建 `TradingManager`、`TradingGodService`、`GlobalAppState`、
+- 没有把 `PaperWorkflowPhase` / `ExecutionLease` 改成 trading 层类型；
+- 没有重写 Desktop execution 路由页（`_auto_quant_tab` 仍然按原样渲染，
+  只是数据来自域类型）；
+- 没有合并 Account socket 与 Execution socket；
+- 没有新增任何真实交易能力：仍然 Paper only、整股、限价、无做空、无保证金。
+
+同样刻意不创建 `TradingManager`、`TradingGodService`、`GlobalAppState`、
 `ServiceLocator` 或 `ApplicationContext`：runtime 由 composition root 显式
-组装，不通过全局注册表解析。
+组装，不通过全局注册表解析。Execution v2 新增的
+`trading/composition/execution.py` 就是这条原则的又一例。
 
 同样刻意不引入 `DatabaseMigrationManager` / `MigrationRegistry` /
 `SchemaVersionFramework` / Alembic：当前 schema 迁移仍是每个 store 自己的一次性
-兼容升级。
+兼容升级。订单库这一轮唯一的结构性修正是给旧库补一个缺失的
+`idempotency_key` 列——`CREATE TABLE IF NOT EXISTS` 不会给已存在的表加列，
+而缺这一列的老库连第一张订单都写不进去。

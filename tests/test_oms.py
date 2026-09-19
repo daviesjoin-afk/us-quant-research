@@ -21,11 +21,14 @@ class OrderManagerTests(unittest.TestCase):
             journal = SQLiteOrderJournal(Path(directory) / "orders.sqlite3")
             manager = OrderManager(journal)
             intent = OrderIntent.create(
+                session_id="oms-session",
+                strategy_version_id="oms-version",
                 signal_symbol="MU",
                 execution_symbol="MUU",
                 side=Side.BUY,
                 quantity=2,
-                estimated_price=Decimal("36"),
+                limit_price=Decimal("36"),
+                reason="oms fixture",
                 exposure_multiplier=Decimal("2"),
             )
             self.assertTrue(manager.register_intent(intent))
@@ -68,11 +71,14 @@ class OrderManagerTests(unittest.TestCase):
             journal = SQLiteOrderJournal(Path(directory) / "orders.sqlite3")
             manager = OrderManager(journal)
             intent = OrderIntent.create(
+                session_id="oms-session",
+                strategy_version_id="oms-version",
                 signal_symbol="X",
                 execution_symbol="X",
                 side=Side.BUY,
                 quantity=1,
-                estimated_price=Decimal("10"),
+                limit_price=Decimal("10"),
+                reason="oms fixture",
             )
             manager.register_intent(intent)
             with self.assertRaises(InvalidOrderTransition):

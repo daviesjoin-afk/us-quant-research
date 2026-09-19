@@ -80,12 +80,12 @@ def _install_fake_service(window: MainWindow, *, connected: bool = False):
     fake = _FakeOrderService(connected=connected)
     window.paper_trading = PaperTradingService(
         workflow_getter=lambda: window.paper_workflow,
-        order_service_factory=lambda config, *, journal, extended_hours_enabled: fake,
+        order_service_factory=lambda config, *, repository, extended_hours_enabled: fake,
     )
     window.paper_trading.connect_candidate(
         "wiring-test",
         config=object(),
-        journal=object(),
+        repository=object(),
         extended_hours_enabled=False,
     )
     window.paper_trading.promote_candidate("wiring-test")

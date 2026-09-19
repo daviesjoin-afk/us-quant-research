@@ -4,17 +4,11 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
-from typing import Callable, Iterable
+from typing import Iterable
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from us_quant.ibkr_paper_orders import (
-    IBKRPaperOrderUncertainError,
-    PaperExecution,
-    PaperOrderIntent,
-    PaperOrderUpdate,
-    new_paper_order_intent,
-)
+from us_quant.trading.application.execution import ExecutionApplication
 from us_quant.trading.application.risk import RiskApplication
 from us_quant.trading.domain.account import (
     Position,
@@ -24,6 +18,13 @@ from us_quant.trading.domain.market import (
     MarketQuote,
     MarketSnapshot,
 )
+from us_quant.trading.domain.orders import (
+    ExecutionFill,
+    OrderEvent,
+    OrderIntent,
+    OrderStatus,
+    Side,
+)
 from us_quant.trading.domain.risk import (
     RiskDecision,
     RiskEvaluationRequest,
@@ -32,6 +33,9 @@ from us_quant.trading.domain.strategy import (
     StrategyIdentity,
     TradeAction,
     TradeProposal,
+)
+from us_quant.trading.ports.broker_execution import (
+    ExecutionSubmissionUncertain,
 )
 from us_quant.shadow_paper import ShadowConfig
 
@@ -86,8 +90,8 @@ class AutoQuantSnapshot:
     estimated_unrealized_pnl: Decimal
     positions: tuple[AutoQuantPosition, ...]
     fills: tuple[AutoQuantFill, ...]
-    intents: tuple[PaperOrderIntent, ...]
-    pending_orders: tuple[PaperOrderIntent, ...]
+    intents: tuple[OrderIntent, ...]
+    pending_orders: tuple[OrderIntent, ...]
     trades_today: int
     trading_day: str | None
     status: str
@@ -243,25 +247,22 @@ def evaluate_auto_quant_preflight(
 class AutoQuantEngine:
     """Multi-symbol signal engine that proposes, then submits what risk allows.
 
-    It never calls IBKR directly.  The injected sink is the only execution
-    boundary, which keeps signal generation deterministic and testable, and
-    the injected ``RiskApplication`` is the only risk authority: this class
-    decides *that* a signal fired and what the strategy would like to buy, and
-    the risk layer decides whether that may happen and at what size.
+    It never calls IBKR directly.  The injected ``ExecutionApplication`` is the
+    only execution boundary, which keeps signal generation deterministic and
+    testable, and the injected ``RiskApplication`` is the only risk authority:
+    this class decides *that* a signal fired and what the strategy would like to
+    buy, and the risk layer decides whether that may happen and at what size.
 
     Current research mode holds at most one position while scanning all
     candidates for the strongest eligible intraday momentum.
 
-    TRANSITIONAL (Execution v2 is the next change): the verdict is turned into
-    a ``PaperOrderIntent`` here rather than through an execution service, and
-    this module calls the order sink.  That bridge is the last
-    execution-coupled piece of the strategy path and it stays confined to one
-    file -- see ``TRANSITIONAL_EXECUTION_COUPLED_STRATEGY_FILES``.
-
-    TRANSITIONAL PRICING OWNERSHIP: the proposal's ``reference_price`` is the
-    slippage-adjusted Paper limit this engine already computes.  Execution v2
-    takes ownership of the final limit price; until then, reusing it keeps
-    sizing and cash semantics identical to the pre-migration path.
+    The engine owns its own pending book -- which symbols have an order in
+    flight -- because that is strategy/session state.  It does not own order
+    identity, durability, submission or reconciliation: a risk-approved proposal
+    goes to ``ExecutionApplication``, which creates the order, makes it durable
+    and only then lets the broker see it.  The engine reads back the
+    provider-neutral ``ExecutionFill`` / ``OrderEvent`` facts the session
+    coordinator hands it.
     """
 
     def __init__(
@@ -271,7 +272,7 @@ class AutoQuantEngine:
         config: ShadowConfig,
         strategy: StrategyIdentity,
         risk: RiskApplication,
-        order_sink: Callable[[PaperOrderIntent], int],
+        execution: ExecutionApplication,
         market_reference_symbols: tuple[str, ...] = (),
     ) -> None:
         if not candidates:
@@ -288,6 +289,11 @@ class AutoQuantEngine:
                 "自动量化必须注入唯一风险评估服务，"
                 "不能再由引擎自行解释风险限额"
             )
+        if not isinstance(execution, ExecutionApplication):
+            raise TypeError(
+                "自动量化必须注入唯一执行服务；"
+                "策略不得自行构造或提交订单"
+            )
         self.candidates = tuple(
             AutoQuantCandidate(
                 symbol=row.symbol.strip().upper(),
@@ -302,13 +308,13 @@ class AutoQuantEngine:
         self.config = config
         self.strategy = strategy
         self.risk = risk
-        self.order_sink = order_sink
+        self.execution = execution
         self._peak_equity = Decimal("0")
         self.session_id: str | None = None
         self.active = False
         self.positions: dict[str, AutoQuantPosition] = {}
-        self.pending: dict[str, PaperOrderIntent] = {}
-        self._intents: dict[str, PaperOrderIntent] = {}
+        self.pending: dict[str, OrderIntent] = {}
+        self._intents: dict[str, OrderIntent] = {}
         self.fills: list[AutoQuantFill] = []
         self.trades_today = 0
         self._trading_day = None
@@ -339,7 +345,7 @@ class AutoQuantEngine:
         self._marks: dict[str, Decimal] = {}
         self._seen_executions: set[str] = set()
         self._executed_quantities: dict[str, Decimal] = {}
-        self._terminal_updates: dict[str, PaperOrderUpdate] = {}
+        self._terminal_updates: dict[str, OrderEvent] = {}
         self._last_evaluation_minute: datetime | None = None
         self._stop_requested = False
         self._entries_paused = False
@@ -522,9 +528,9 @@ class AutoQuantEngine:
                 # emitted a brand-new SELL on every market tick, flooding the
                 # broker with identical exit orders until fills or a halt.
                 pending_sell_symbols = {
-                    intent.symbol
+                    intent.execution_symbol
                     for intent in self.pending.values()
-                    if intent.side == "SELL"
+                    if intent.side is Side.SELL
                 }
                 for position in list(self.positions.values()):
                     # A refused exit halts the session; emitting more orders
@@ -589,36 +595,29 @@ class AutoQuantEngine:
             self.status = "等待 fresh 实时 bid/ask"
         return self.snapshot(observed_at=now)
 
-    def on_order_update(
-        self, update: PaperOrderUpdate
+    def on_order_event(
+        self, event: OrderEvent
     ) -> AutoQuantSnapshot:
-        intent = self.pending.get(update.intent_id)
+        intent = self.pending.get(event.order_id)
         if intent is None:
             return self.snapshot()
-        normalized_status = update.status.casefold()
-        terminal = normalized_status in {
-            "cancelled",
-            "apicancelled",
-            "inactive",
-            "error",
-            "filled",
-        }
+        status_text = event.broker_status or event.status.value
+        terminal = event.status.is_terminal
         if terminal:
-            self._terminal_updates[update.intent_id] = update
-            self._finalize_pending_if_reconciled(update.intent_id)
-        if normalized_status in {
-            "cancelled",
-            "apicancelled",
-            "inactive",
-            "error",
+            self._terminal_updates[event.order_id] = event
+            self._finalize_pending_if_reconciled(event.order_id)
+        if event.status in {
+            OrderStatus.CANCELED,
+            OrderStatus.INACTIVE,
+            OrderStatus.BROKER_REJECTED,
         }:
             if (
                 self._stop_requested
-                and normalized_status
-                in {"cancelled", "apicancelled"}
+                and event.status is OrderStatus.CANCELED
             ):
                 self.status = (
-                    f"{intent.symbol} {intent.side} 在途单已撤销；"
+                    f"{intent.execution_symbol} "
+                    f"{intent.side.order_text} 在途单已撤销；"
                     "继续处理已成交持仓并完成停止"
                 )
                 if not self.positions and not self.pending:
@@ -627,24 +626,26 @@ class AutoQuantEngine:
             else:
                 self.active = False
                 self.status = (
-                    f"{intent.symbol} {intent.side} 被 IBKR Paper "
-                    f"{update.status}；会话已停机等待对账："
-                    f"{update.message or '无附加消息'}"
+                    f"{intent.execution_symbol} "
+                    f"{intent.side.order_text} 被 IBKR Paper "
+                    f"{status_text}；会话已停机等待对账："
+                    f"{event.message or '无附加消息'}"
                 )
-        elif terminal and update.intent_id in self.pending:
+        elif terminal and event.order_id in self.pending:
             self.status = (
-                f"{intent.symbol} {intent.side} 状态为 "
-                f"{update.status}，等待逐笔成交回报对账"
+                f"{intent.execution_symbol} "
+                f"{intent.side.order_text} 状态为 "
+                f"{status_text}，等待逐笔成交回报对账"
             )
         return self.snapshot()
 
     def on_execution(
-        self, execution: PaperExecution
+        self, execution: ExecutionFill
     ) -> AutoQuantSnapshot:
         if execution.execution_id in self._seen_executions:
             return self.snapshot()
         self._seen_executions.add(execution.execution_id)
-        intent = self._intents.get(execution.intent_id)
+        intent = self._intents.get(execution.order_id)
         if intent is None:
             return self.snapshot()
         quantity = int(execution.quantity)
@@ -653,15 +654,15 @@ class AutoQuantEngine:
             self.active = False
             return self.snapshot()
         if (
-            execution.symbol != intent.symbol
-            or execution.side != intent.side
+            execution.symbol != intent.execution_symbol
+            or execution.side is not intent.side
         ):
             self.status = "成交方向或代码与订单意图不一致；会话已停机"
             self.active = False
             return self.snapshot()
         executed_total = (
             self._executed_quantities.get(
-                execution.intent_id, Decimal("0")
+                execution.order_id, Decimal("0")
             )
             + execution.quantity
         )
@@ -670,11 +671,11 @@ class AutoQuantEngine:
             self.active = False
             return self.snapshot()
         self._executed_quantities[
-            execution.intent_id
+            execution.order_id
         ] = executed_total
         commission = self.config.commission_per_order
         realized: Decimal | None = None
-        if execution.side == "BUY":
+        if execution.side is Side.BUY:
             existing = self.positions.get(execution.symbol)
             previous_quantity = (
                 existing.quantity if existing is not None else 0
@@ -700,7 +701,7 @@ class AutoQuantEngine:
                 opened_at=(
                     existing.opened_at
                     if existing is not None
-                    else execution.occurred_at
+                    else execution.occurred_at.isoformat()
                 ),
                 high_water=max(
                     execution.price,
@@ -719,7 +720,7 @@ class AutoQuantEngine:
                 f"IBKR Paper 已成交 BUY {execution.symbol} "
                 f"{quantity} 股"
             )
-        elif execution.side == "SELL":
+        elif execution.side is Side.SELL:
             position = self.positions.get(execution.symbol)
             if (
                 position is None
@@ -758,17 +759,17 @@ class AutoQuantEngine:
         self.fills.append(
             AutoQuantFill(
                 execution_id=execution.execution_id,
-                intent_id=execution.intent_id,
-                occurred_at=execution.occurred_at,
+                intent_id=execution.order_id,
+                occurred_at=execution.occurred_at.isoformat(),
                 symbol=execution.symbol,
-                side=execution.side,
+                side=execution.side.order_text,
                 quantity=quantity,
                 price=execution.price,
                 estimated_commission=commission,
                 realized_pnl=realized,
             )
         )
-        self._finalize_pending_if_reconciled(execution.intent_id)
+        self._finalize_pending_if_reconciled(execution.order_id)
         return self.snapshot()
 
     def request_stop(self) -> AutoQuantSnapshot:
@@ -826,25 +827,29 @@ class AutoQuantEngine:
 
     def resubmit_pending_intent(
         self,
-        intent: PaperOrderIntent,
-    ) -> PaperOrderIntent | None:
-        if intent.intent_id not in self.pending:
+        intent: OrderIntent,
+    ) -> OrderIntent | None:
+        """Re-hang an existing pending order under a fresh identity.
+
+        This is the manual-reconciliation path, not a new strategy signal, so
+        the order is re-hung with the quantity, price and side it already had
+        and is deliberately *not* re-evaluated by risk.  It builds the new
+        identity only; the caller owns the submission, exactly as before this
+        migration -- nothing here reaches the broker.
+        """
+
+        if intent.order_id not in self.pending:
             return None
-        new_intent = new_paper_order_intent(
-            session_id=self.session_id or intent.session_id,
-            strategy_version_id=self.strategy.version_id,
-            symbol=intent.symbol,
-            side=intent.side,
-            quantity=intent.quantity,
-            limit_price=intent.limit_price,
+        new_intent = self.execution.reissue(
+            intent,
             reason="对账恢复后人工复核重挂；" + intent.reason,
         )
         # A manual re-hang is a distinct broker order after reconciliation.
         # Keep the original intent in the audit trail, but move the active
         # pending state to the new intent ID and its fresh idempotency key.
-        self.pending.pop(intent.intent_id, None)
-        self.pending[new_intent.intent_id] = new_intent
-        self._intents[new_intent.intent_id] = new_intent
+        self.pending.pop(intent.order_id, None)
+        self.pending[new_intent.order_id] = new_intent
+        self._intents[new_intent.order_id] = new_intent
         return new_intent
 
     def snapshot(
@@ -1102,15 +1107,10 @@ class AutoQuantEngine:
             proposal=proposal, decision=decision
         )
         self._emit(
-            new_paper_order_intent(
-                session_id=self.session_id or "",
-                strategy_version_id=self.strategy.version_id,
-                symbol=symbol,
-                side="BUY",
-                quantity=decision.approved_quantity,
-                limit_price=limit_price,
-                reason=reason,
-            )
+            proposal=proposal,
+            decision=decision,
+            execution_symbol=symbol,
+            reason=reason,
         )
         return None
 
@@ -1299,23 +1299,42 @@ class AutoQuantEngine:
             )
             return
         self._emit(
-            new_paper_order_intent(
-                session_id=self.session_id or "",
-                strategy_version_id=self.strategy.version_id,
-                symbol=symbol,
-                side="SELL",
-                quantity=decision.approved_quantity,
-                limit_price=limit_price,
-                reason=reason,
-            )
+            proposal=proposal,
+            decision=decision,
+            execution_symbol=symbol,
+            reason=reason,
         )
 
-    def _emit(self, intent: PaperOrderIntent) -> None:
+    def _emit(
+        self,
+        *,
+        proposal: TradeProposal,
+        decision: RiskDecision,
+        execution_symbol: str,
+        reason: str,
+    ) -> None:
+        """Hand one risk-approved proposal to the execution service.
+
+        The engine no longer builds order identity, writes anything durably or
+        touches a broker.  What it keeps is the behaviour around the call: an
+        outcome it cannot establish locally halts the session and keeps the
+        order in the pending book, and any other refusal halts too rather than
+        retrying, because a retry loop is how one order becomes several.
+        """
+
         try:
-            order_id = self.order_sink(intent)
-        except IBKRPaperOrderUncertainError as error:
-            self.pending[intent.intent_id] = intent
-            self._intents[intent.intent_id] = intent
+            result = self.execution.submit_approved(
+                proposal=proposal,
+                decision=decision,
+                execution_symbol=execution_symbol,
+                session_id=self.session_id or "",
+                reason=reason,
+            )
+        except ExecutionSubmissionUncertain as error:
+            intent = error.intent
+            if intent is not None:
+                self.pending[intent.order_id] = intent
+                self._intents[intent.order_id] = intent
             self.active = False
             self.status = (
                 "Paper 订单提交结果不确定；已停机并保留在途意图，"
@@ -1329,28 +1348,30 @@ class AutoQuantEngine:
                 "会话已停机，避免自动重试形成重复订单"
             )
             return
-        self.pending[intent.intent_id] = intent
-        self._intents[intent.intent_id] = intent
+        intent = result.intent
+        self.pending[intent.order_id] = intent
+        self._intents[intent.order_id] = intent
         self.status = (
-            f"已提交 IBKR Paper {intent.side} {intent.symbol} "
+            f"已提交 IBKR Paper {intent.side.order_text} "
+            f"{intent.execution_symbol} "
             f"{intent.quantity} 股 @ {intent.limit_price} · "
-            f"Order {order_id}"
+            f"Order {result.broker_order_id}"
         )
 
     def _finalize_pending_if_reconciled(
-        self, intent_id: str
+        self, order_id: str
     ) -> None:
-        update = self._terminal_updates.get(intent_id)
-        intent = self.pending.get(intent_id)
-        if update is None or intent is None:
+        event = self._terminal_updates.get(order_id)
+        intent = self.pending.get(order_id)
+        if event is None or intent is None:
             return
         executed = self._executed_quantities.get(
-            intent_id, Decimal("0")
+            order_id, Decimal("0")
         )
-        if executed != update.filled:
+        if executed != event.filled:
             return
         if (
-            update.status.casefold() == "filled"
+            event.status is OrderStatus.FILLED
             and executed != Decimal(intent.quantity)
         ):
             self.active = False
@@ -1359,7 +1380,7 @@ class AutoQuantEngine:
                 "会话已停机等待人工对账"
             )
             return
-        self.pending.pop(intent_id, None)
+        self.pending.pop(order_id, None)
 
     def _update_minute(
         self, symbol: str, now: datetime, price: Decimal

@@ -1,45 +1,52 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 from time import perf_counter
 import unittest
 
 from us_quant.desktop import QuoteTableModel
-from us_quant.ibkr_stream import StreamQuote, StreamSnapshot
+from us_quant.trading.domain.market import (
+    MarketDataMode,
+    MarketQuote,
+    MarketSnapshot,
+)
 
 
-def _snapshot(age: float = 0.1) -> StreamSnapshot:
+def _snapshot(age: float = 0.1) -> MarketSnapshot:
     quotes = tuple(
-        StreamQuote(
+        MarketQuote(
             symbol=f"T{index:02d}",
-            request_id=index,
-            generation=1,
-            requested_market_data_type=1,
-            effective_market_data_type=1,
             bid=Decimal("99.95") + index,
             ask=Decimal("100.05") + index,
             last=Decimal("100") + index,
             close=Decimal("99") + index,
-            updated_at="2026-07-25T18:00:00+00:00",
+            bid_size=None,
+            ask_size=None,
+            mode=MarketDataMode.REALTIME,
+            updated_at=datetime(2026, 7, 25, 18, 0, tzinfo=timezone.utc),
             age_seconds=age,
             stale=False,
             stale_reason=None,
-            provider="Finnhub",
+            generation=1,
+            source_id="finnhub_trades",
+            source_label="Finnhub",
             coverage="实时成交；影子执行带，非 NBBO",
         )
         for index in range(30)
     )
-    return StreamSnapshot(
+    return MarketSnapshot(
         generation=1,
-        socket_connected=True,
-        handshake_complete=True,
+        connected=True,
+        ready=True,
         reconnect_attempt=0,
         quotes=quotes,
-        last_error_code=None,
-        last_message="ready",
-        observed_at="2026-07-25T18:00:00+00:00",
-        provider="Finnhub",
+        error_code=None,
+        message="ready",
+        observed_at=datetime(2026, 7, 25, 18, 0, tzinfo=timezone.utc),
+        source_id="finnhub_trades",
+        source_label="Finnhub",
         coverage="实时成交",
     )
 

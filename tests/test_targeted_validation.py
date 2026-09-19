@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from us_quant.minute_data import MinuteQuoteRecord, MinuteQuoteStore
+from us_quant.trading.domain.market import MarketDataMode
 from us_quant.targeted_robustness import (
     PerturbationSummary,
     SessionReplayOutcome,
@@ -179,7 +180,7 @@ def _evidence(
                 bid=price,
                 ask=price + Decimal("0.02"),
                 last=price,
-                market_data_type=1,
+                mode=MarketDataMode.REALTIME,
                 realtime_ready=True,
                 stale=False,
                 stale_reason=None,

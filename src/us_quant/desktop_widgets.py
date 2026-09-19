@@ -45,10 +45,21 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from us_quant.ibkr_stream import (
-    MARKET_DATA_TYPE_NAMES,
-    StreamSnapshot,
+from us_quant.trading.domain.market import (
+    MarketDataMode,
+    MarketSnapshot,
 )
+
+# Presentation labels for the market data mode.  These live here, not in the
+# domain enum: the domain carries the semantic mode, and the UI decides how to
+# spell it for the operator.
+MARKET_DATA_MODE_LABELS = {
+    MarketDataMode.REALTIME: "实时",
+    MarketDataMode.FROZEN: "冻结",
+    MarketDataMode.DELAYED: "延迟",
+    MarketDataMode.DELAYED_FROZEN: "延迟冻结",
+    MarketDataMode.UNKNOWN: "未知",
+}
 
 from us_quant.ui_theme import theme_palette
 
@@ -160,7 +171,7 @@ class QuoteTableModel(QAbstractTableModel):
                 [Qt.ForegroundRole],
             )
 
-    def update_snapshot(self, snapshot: StreamSnapshot) -> None:
+    def update_snapshot(self, snapshot: MarketSnapshot) -> None:
         materialized: list[
             tuple[tuple[str, ...], tuple[bool, bool]]
         ] = []
@@ -172,17 +183,19 @@ class QuoteTableModel(QAbstractTableModel):
                 _price(quote.last),
                 _price(quote.close),
                 _price(quote.spread),
-                MARKET_DATA_TYPE_NAMES.get(
-                    quote.effective_market_data_type, "未知"
+                MARKET_DATA_MODE_LABELS.get(quote.mode, "未知"),
+                (
+                    quote.updated_at.isoformat()
+                    if quote.updated_at is not None
+                    else "未收到"
                 ),
-                quote.updated_at or "未收到",
                 (
                     f"{quote.age_seconds:.1f}"
                     if quote.age_seconds is not None
                     else "—"
                 ),
                 str(quote.generation),
-                quote.provider,
+                quote.source_label,
                 quote.coverage,
                 "READY" if quote.realtime_ready else "STALE",
                 quote.stale_reason or "可用于日内观察",

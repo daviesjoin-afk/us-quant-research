@@ -54,6 +54,7 @@ FORBIDDEN_DOMAIN_PREFIXES = (
     "us_quant.desktop",
     "us_quant.desktop_v2",
     "us_quant.market_data_service",
+    "us_quant.ibkr_stream",
     "us_quant.paper",
     "us_quant.ibkr",
     "us_quant.alpaca_stream",
@@ -74,6 +75,7 @@ FORBIDDEN_PORT_PREFIXES = (
     "us_quant.desktop",
     "us_quant.desktop_v2",
     "us_quant.market_data_service",
+    "us_quant.ibkr_stream",
     "us_quant.paper",
     "us_quant.ibkr",
     "us_quant.alpaca_stream",
@@ -568,3 +570,286 @@ def test_main_window_is_still_the_composition_root_for_now() -> None:
     }
     assert "_build_v2_pages" in methods
     assert "DesktopShellV2" in desktop_source
+
+
+# -- Market Data v2 -------------------------------------------------------
+
+# The v1 market data architecture, retired by the market data migration.  None
+# of these may be imported or defined anywhere any more; the guards below
+# check both, because a module that is merely unreferenced can still be
+# resurrected by a later change.
+RETIRED_MARKET_DATA_MODULES = (
+    "us_quant.market_data_service",
+    "us_quant.ibkr_stream",
+    "us_quant.alpaca_stream",
+    "us_quant.finnhub_stream",
+)
+
+RETIRED_MARKET_DATA_NAMES = (
+    "MarketDataService",
+    "MarketDataRequest",
+    "MarketDataServiceSnapshot",
+    "MarketDataStreamActive",
+)
+
+#: The transport DTOs survive, but only inside the adapter layer.  They are
+#: provider-shaped (ISO strings, vendor market-data numbers), so they must
+#: never be defined anywhere a non-adapter module could import them from.
+ADAPTER_INTERNAL_NAMES = {
+    "StreamQuote": "trading/adapters/market_data_state.py",
+    "StreamSnapshot": "trading/adapters/market_data_state.py",
+}
+
+MARKET_DATA_APPLICATION = _TRADING / "application" / "market_data.py"
+MARKET_DATA_COMPOSITION = _TRADING / "composition" / "market_data.py"
+MARKET_DATA_ADAPTERS = _TRADING / "adapters"
+
+
+def _all_source_files() -> list[pathlib.Path]:
+    return sorted(_SRC.rglob("*.py"))
+
+
+def test_the_retired_market_data_modules_are_gone() -> None:
+    """The v1 modules are deleted, not merely unreferenced."""
+
+    for module in RETIRED_MARKET_DATA_MODULES:
+        path = _SRC / f"{module.removeprefix('us_quant.')}.py"
+        assert not path.exists(), (
+            f"{path.relative_to(_SRC).as_posix()} must not exist; the "
+            "market data migration moved its behaviour to trading/"
+        )
+
+
+def test_no_module_imports_a_retired_market_data_module() -> None:
+    offenders: list[str] = []
+    for path in _all_source_files():
+        modules = _imports(path)
+        for retired in RETIRED_MARKET_DATA_MODULES:
+            if retired in modules:
+                offenders.append(
+                    f"{path.relative_to(_SRC)} imports {retired}"
+                )
+    assert not offenders, offenders
+
+
+def test_no_module_redefines_a_retired_market_data_name() -> None:
+    """The transport DTOs and the v1 service must not come back."""
+
+    offenders: list[str] = []
+    for name in RETIRED_MARKET_DATA_NAMES:
+        for path in _definitions(name):
+            offenders.append(
+                f"{path.relative_to(_SRC)} defines {name}"
+            )
+    assert not offenders, offenders
+
+
+def test_the_market_data_application_does_not_import_any_adapter() -> None:
+    """The load-bearing rule: the application is provider-blind.
+
+    If the application could name an adapter, the port would be decorative and
+    the dependency arrow would point outward.
+    """
+
+    modules = _imports(MARKET_DATA_APPLICATION)
+    offending = _matches(
+        modules,
+        (
+            "us_quant.trading.adapters",
+            "us_quant.trading.composition",
+            "us_quant.ibkr_stream",
+            "us_quant.alpaca_stream",
+            "us_quant.finnhub_stream",
+            "ibapi",
+        ),
+    )
+    assert not offending, sorted(offending)
+
+
+def test_only_composition_wires_the_concrete_market_data_adapters() -> None:
+    """Exactly one module knows both the application and the adapters."""
+
+    wiring_modules: list[str] = []
+    for path in _all_source_files():
+        modules = _imports(path)
+        names_adapters = _matches(
+            modules, ("us_quant.trading.adapters",)
+        )
+        names_application = _matches(
+            modules, ("us_quant.trading.application",)
+        )
+        if names_adapters and names_application:
+            wiring_modules.append(
+                path.relative_to(_SRC).as_posix()
+            )
+    assert wiring_modules == ["trading/composition/market_data.py"], (
+        wiring_modules
+    )
+
+
+def test_the_desktop_does_not_import_a_concrete_market_data_adapter() -> None:
+    """The UI composes the application and talks only to it."""
+
+    modules = _imports(_SRC / "desktop.py")
+    offending = _matches(
+        modules,
+        (
+            "us_quant.trading.adapters",
+            "us_quant.ibkr_stream",
+            "us_quant.alpaca_stream",
+            "us_quant.finnhub_stream",
+            "us_quant.market_data_service",
+        ),
+    )
+    assert not offending, sorted(offending)
+
+
+def test_the_strategy_and_risk_layers_do_not_import_a_market_data_adapter() -> None:
+    """Strategy and risk see the domain, never a provider."""
+
+    offenders: list[str] = []
+    for path in _all_source_files():
+        relative = path.relative_to(_SRC).as_posix()
+        if not (
+            relative.startswith("us_quant/strategy")
+            or relative == "us_quant/strategy_registry.py"
+            or relative == "us_quant/risk.py"
+            or relative == "us_quant/auto_quant.py"
+        ):
+            continue
+        offending = _matches(
+            _imports(path),
+            (
+                "us_quant.trading.adapters",
+                "us_quant.ibkr_stream",
+                "us_quant.alpaca_stream",
+                "us_quant.finnhub_stream",
+                "us_quant.market_data_service",
+            ),
+        )
+        if offending:
+            offenders.append(f"{relative} imports {sorted(offending)}")
+    assert not offenders, offenders
+
+
+def test_the_market_data_adapters_expose_the_port_surface() -> None:
+    """Each adapter implements ``run``/``stop``/``snapshot``/``health``."""
+
+    for path in sorted(MARKET_DATA_ADAPTERS.rglob("*.py")):
+        if path.name in {"__init__.py", "market_data_state.py"}:
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        classes = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef)
+            and node.name.endswith("Stream")
+        ]
+        assert classes, f"{path.name} defines no stream adapter"
+        for klass in classes:
+            methods = {
+                node.name
+                for node in klass.body
+                if isinstance(node, ast.FunctionDef)
+            }
+            for required in ("run", "stop", "snapshot", "health"):
+                assert required in methods, (
+                    f"{path.name}:{klass.name} is missing {required}()"
+                )
+
+
+def test_market_data_state_keeps_the_transport_types_adapter_internal() -> None:
+    """``StreamQuote``/``StreamSnapshot`` live in exactly one adapter module.
+
+    They are provider-shaped, so they must not leak upward.  Keeping them in
+    one file is what makes "the domain type is the only upper-layer truth"
+    checkable.
+    """
+
+    definitions = {
+        name: [
+            path.relative_to(_SRC).as_posix()
+            for path in _definitions(name)
+        ]
+        for name in ADAPTER_INTERNAL_NAMES
+    }
+    assert definitions == {
+        name: [module]
+        for name, module in ADAPTER_INTERNAL_NAMES.items()
+    }
+
+
+def test_the_read_only_guard_is_still_present() -> None:
+    """The safety boundary must survive the move.
+
+    ``ReadOnlyEClientGuard`` is what makes the market-data connection
+    structurally unable to place, cancel or exercise anything.  A relocation
+    that dropped it would be a silent safety regression.
+
+    Checked behaviourally *and* structurally: a method that merely exists but
+    returns ``None`` would satisfy a name-only assertion while silently
+    permitting the very call the guard exists to refuse.
+    """
+
+    from us_quant.trading.adapters.market_data_state import (
+        ReadOnlyEClientGuard,
+        ReadOnlyViolation,
+    )
+
+    source = (
+        MARKET_DATA_ADAPTERS / "market_data_state.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    klass = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "ReadOnlyEClientGuard"
+        ),
+        None,
+    )
+    assert klass is not None, "ReadOnlyEClientGuard is missing"
+    methods = {
+        node.name: node
+        for node in klass.body
+        if isinstance(node, ast.FunctionDef)
+    }
+
+    denied_calls = (
+        "placeOrder",
+        "placeOrderProtoBuf",
+        "cancelOrder",
+        "cancelOrderProtoBuf",
+        "reqGlobalCancel",
+        "exerciseOptions",
+        "exerciseOptionsProtoBuf",
+        "replaceFA",
+        "updateDisplayGroup",
+    )
+    for denied in denied_calls:
+        assert denied in methods, f"{denied} is no longer denied"
+        body = ast.unparse(methods[denied])
+        # The body must actually refuse: either raise directly or delegate to
+        # the shared deny helper.
+        assert (
+            "ReadOnlyViolation" in body or "_deny(" in body
+        ), f"{denied} no longer refuses the call"
+
+    # And the refusal is real, not just spelled correctly.
+    guard = ReadOnlyEClientGuard()
+    for denied in denied_calls:
+        with pytest.raises(ReadOnlyViolation):
+            getattr(guard, denied)()
+
+
+def test_the_ibkr_adapter_mixes_in_the_read_only_guard() -> None:
+    """The guard must actually be applied, not just defined."""
+
+    source = (MARKET_DATA_ADAPTERS / "ibkr" / "market_data.py").read_text(
+        encoding="utf-8"
+    )
+    assert "ReadOnlyEClientGuard" in source, (
+        "the IBKR stream no longer applies ReadOnlyEClientGuard"
+    )

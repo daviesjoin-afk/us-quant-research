@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Iterable
 
-from us_quant.ibkr_stream import StreamSnapshot
+from us_quant.trading.domain.market import MarketSnapshot
 from us_quant.portfolio_view import PortfolioView
 from us_quant.runtime_events import RuntimeEvent
 from us_quant.redaction import sanitize_value
@@ -28,7 +28,7 @@ def export_terminal_bundle(
     export_root: Path,
     *,
     portfolio: PortfolioView | None,
-    stream: StreamSnapshot | None,
+    stream: MarketSnapshot | None,
     strategies: tuple[StrategyRecord, ...],
     events: tuple[RuntimeEvent, ...],
     shadow_fills: tuple[ShadowFill, ...] = (),

@@ -57,6 +57,28 @@ LATER_ROUND_UI_METHODS = (
 # Spec 55: everything else must stay byte-identical to the base commit.
 # ``_run_scan`` is NOT here: step 14 legitimately rewrote it, and that step
 # ships its own byte-equivalence guard for the methods it froze.
+# Market Data v2: the methods this round rewrote because the market
+# data boundary moved from a v1 service to the application service.
+# Declared so the guard below can assert the delta exactly.
+MARKET_DATA_V2_METHODS = (
+    # Market Data v2: the window talks to the application service and the
+    # domain snapshot instead of the v1 service and transport types.
+    "__init__",
+    "_start_stream",
+    "_stream_snapshot_pushed",
+    "_stream_snapshot_received",
+    "_poll_stream_snapshot",
+    "_populate_stream_snapshot",
+    "_invalidate_stream_snapshot",
+    "_record_minute_snapshot",
+    "_update_quote_readiness",
+    "_maybe_rotate_extended_ibkr_session",
+    "_request_stream_switch",
+    "_save_user_preferences",
+    "_clear_selected_api_credentials",
+    "_api_provider_changed",
+)
+
 FROZEN_METHODS = (
     "_cancel_universe_refresh",
     "_reset_universe_refresh_controls",
@@ -96,6 +118,18 @@ FROZEN_MODULES = (
     "src/us_quant/universe.py",
     "src/us_quant/paths.py",
     "src/us_quant/desktop_history_service.py",
+)
+
+# Market Data v2: frozen modules this round legitimately rewrote or
+# deleted.  Declared so the guard can assert the delta exactly.
+MARKET_DATA_V2_CHANGED_MODULES = (
+    # Market Data v2: the v1 service is deleted and its policy moved to
+    # `trading/application/market_data.py`.
+    "src/us_quant/market_data_service.py",
+    # Market Data v2: the worker now drives the application, not a service.
+    "src/us_quant/desktop_workers.py",
+    # Market Data v2: the quote grid renders the domain snapshot.
+    "src/us_quant/desktop_widgets.py",
 )
 
 SERVICE_MODULE = "src/us_quant/desktop_universe_service.py"
@@ -1237,23 +1271,40 @@ def test_only_the_declared_methods_changed() -> None:
         if before != after:
             changed.append(name)
 
-    assert set(changed) <= (
+    allowed = (
         set(REFACTORED_METHODS)
         | {"_run_scan", "_run_backtest_workspace"}
         | set(LATER_ROUND_UI_METHODS)
+        | set(MARKET_DATA_V2_METHODS)
     )
+    # Exact, not a subset: the delta is the declared surface and nothing
+    # else, in both directions.
+    assert set(changed) <= allowed
+    assert set(MARKET_DATA_V2_METHODS) <= set(changed)
     assert "_refresh_universe" in changed
 
 
 def test_the_other_frozen_modules_are_untouched() -> None:
     """Spec 58/59/60/62/63/64: the neighbours do not move."""
 
+    changed = []
     for path in FROZEN_MODULES:
         base = _require_base(path)
-        current = (_REPO_ROOT / path).read_text(encoding="utf-8")
-        assert current.replace("\r\n", "\n") == base.replace(
+        current_path = _REPO_ROOT / path
+        if not current_path.exists():
+            # A deleted frozen module only counts as declared if this
+            # round said so; an undeclared deletion must still fail.
+            changed.append(path)
+            continue
+        current = current_path.read_text(encoding="utf-8")
+        if current.replace("\r\n", "\n") != base.replace(
             "\r\n", "\n"
-        ), path
+        ):
+            changed.append(path)
+
+    # Exact, not a subset: the delta is the declared Market Data v2
+    # surface and nothing else.
+    assert set(changed) == set(MARKET_DATA_V2_CHANGED_MODULES)
 
 
 def test_desktop_py_no_longer_calls_the_domain_directly() -> None:

@@ -6,7 +6,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from us_quant.ibkr_stream import StreamQuote, StreamSnapshot
+from us_quant.trading.domain.market import (
+    MarketDataMode,
+    MarketQuote,
+    MarketSnapshot,
+)
 from us_quant.shadow_paper import (
     ShadowConfig,
     ShadowFill,
@@ -22,39 +26,41 @@ def quote(
     ask: str,
     observed_at: datetime,
     ready: bool = True,
-) -> StreamQuote:
-    return StreamQuote(
+) -> MarketQuote:
+    return MarketQuote(
         symbol=symbol,
-        request_id=1,
-        generation=1,
-        requested_market_data_type=1,
-        effective_market_data_type=1 if ready else 3,
         bid=Decimal(bid),
         ask=Decimal(ask),
         last=(Decimal(bid) + Decimal(ask)) / Decimal("2"),
         close=None,
-        updated_at=observed_at.isoformat(),
+        bid_size=None,
+        ask_size=None,
+        mode=MarketDataMode.REALTIME if ready else MarketDataMode.DELAYED,
+        updated_at=observed_at,
         age_seconds=0,
         stale=not ready,
         stale_reason=None if ready else "delayed",
-        provider="Alpaca",
+        generation=1,
+        source_id="alpaca_iex",
+        source_label="Alpaca",
         coverage="IEX single exchange; not SIP/NBBO",
     )
 
 
 def stream(
-    row: StreamQuote, observed_at: datetime
-) -> StreamSnapshot:
-    return StreamSnapshot(
+    row: MarketQuote, observed_at: datetime
+) -> MarketSnapshot:
+    return MarketSnapshot(
         generation=1,
-        socket_connected=True,
-        handshake_complete=True,
+        connected=True,
+        ready=True,
         reconnect_attempt=1,
         quotes=(row,),
-        last_error_code=None,
-        last_message="authenticated",
-        observed_at=observed_at.isoformat(),
-        provider="Alpaca",
+        error_code=None,
+        message="authenticated",
+        observed_at=observed_at,
+        source_id="alpaca_iex",
+        source_label="Alpaca",
         coverage="IEX single exchange; not SIP/NBBO",
     )
 

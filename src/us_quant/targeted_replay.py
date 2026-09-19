@@ -10,7 +10,7 @@ import tempfile
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from us_quant.ibkr_stream import StreamQuote, StreamSnapshot
+from us_quant.trading.domain.market import MarketQuote, MarketSnapshot
 from us_quant.minute_data import MinuteQuoteRecord, MinuteQuoteStore
 from us_quant.shadow_paper import ShadowFill, ShadowPaperEngine, ShadowPaperStore
 from us_quant.targeted_intraday import build_targeted_shadow_config
@@ -106,39 +106,35 @@ def run_targeted_replay(
         engine.start()
         for record in ordered:
             observed = datetime.fromisoformat(record.minute)
-            quote = StreamQuote(
+            quote = MarketQuote(
                 symbol=record.symbol,
-                request_id=1,
-                generation=record.generation,
-                requested_market_data_type=(
-                    record.market_data_type or 1
-                ),
-                effective_market_data_type=(
-                    record.market_data_type or 1
-                ),
                 bid=record.bid,
                 ask=record.ask,
                 last=record.last,
                 close=None,
-                updated_at=record.minute,
+                bid_size=record.bid_size,
+                ask_size=record.ask_size,
+                mode=record.mode,
+                updated_at=observed,
                 age_seconds=0,
                 stale=False,
                 stale_reason=None,
-                provider=record.provider,
-                coverage=record.coverage,
-                bid_size=record.bid_size,
-                ask_size=record.ask_size,
-            )
-            snapshot = StreamSnapshot(
                 generation=record.generation,
-                socket_connected=True,
-                handshake_complete=True,
+                source_id=record.provider,
+                source_label=record.provider,
+                coverage=record.coverage,
+            )
+            snapshot = MarketSnapshot(
+                generation=record.generation,
+                connected=True,
+                ready=True,
                 reconnect_attempt=0,
                 quotes=(quote,),
-                last_error_code=None,
-                last_message="minute replay",
-                observed_at=record.minute,
-                provider=record.provider,
+                error_code=None,
+                message="minute replay",
+                observed_at=observed,
+                source_id=record.provider,
+                source_label=record.provider,
                 coverage=record.coverage,
             )
             state = engine.on_stream(snapshot, observed_at=observed)

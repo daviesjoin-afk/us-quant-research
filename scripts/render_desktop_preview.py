@@ -20,7 +20,11 @@ sys.path.insert(0, str(ROOT / "src"))
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from us_quant.desktop import MainWindow, configure_chinese_font  # noqa: E402
-from us_quant.ibkr_stream import StreamQuote, StreamSnapshot  # noqa: E402
+from us_quant.trading.domain.market import (  # noqa: E402
+    MarketDataMode,
+    MarketQuote,
+    MarketSnapshot,
+)
 from us_quant.auto_quant import AutoQuantCandidate  # noqa: E402
 
 
@@ -132,36 +136,36 @@ def main() -> int:
                 replay_start
                 + timedelta(days=day, minutes=index)
             )
-            quote = StreamQuote(
+            quote = MarketQuote(
                 symbol="AAPL",
-                request_id=1,
-                generation=1,
-                requested_market_data_type=1,
-                effective_market_data_type=1,
                 bid=price,
                 ask=price + Decimal("0.02"),
                 last=price,
                 close=None,
-                updated_at=observed.isoformat(),
+                bid_size=Decimal("1000"),
+                ask_size=Decimal("1000"),
+                mode=MarketDataMode.REALTIME,
+                updated_at=observed,
                 age_seconds=0,
                 stale=False,
                 stale_reason=None,
-                provider="PreviewFeed",
+                generation=1,
+                source_id="preview_feed",
+                source_label="PreviewFeed",
                 coverage="离屏预览 Level-I",
-                bid_size=Decimal("1000"),
-                ask_size=Decimal("1000"),
             )
             window.minute_quote_store.record_snapshot(
-                StreamSnapshot(
+                MarketSnapshot(
                     generation=1,
-                    socket_connected=True,
-                    handshake_complete=True,
+                    connected=True,
+                    ready=True,
                     reconnect_attempt=0,
                     quotes=(quote,),
-                    last_error_code=None,
-                    last_message="preview",
-                    observed_at=observed.isoformat(),
-                    provider="PreviewFeed",
+                    error_code=None,
+                    message="preview",
+                    observed_at=observed,
+                    source_id="preview_feed",
+                    source_label="PreviewFeed",
                     coverage="离屏预览 Level-I",
                 ),
                 evidence_origin="synthetic_preview",

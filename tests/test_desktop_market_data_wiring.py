@@ -27,7 +27,6 @@ import dataclasses
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from us_quant import market_data_service as module
 from us_quant.desktop import MainWindow, StreamWorker
 from us_quant.desktop_credentials import (
     CredentialStatus,
@@ -35,12 +34,17 @@ from us_quant.desktop_credentials import (
     StreamCredentials,
 )
 from us_quant.ibkr import IBKRConnectionConfig
-from us_quant.market_data_service import (
-    PROVIDER_ALPACA_IEX,
-    PROVIDER_IBKR,
-    PROVIDER_IBKR_EXTENDED,
-    MarketDataRequest,
-    MarketDataService,
+from us_quant.trading.application.market_data import (
+    SOURCE_ALPACA_IEX,
+    SOURCE_IBKR,
+    SOURCE_IBKR_EXTENDED,
+    MarketDataApplication,
+    MarketDataCredentials,
+    MarketDataStartRequest,
+)
+from us_quant.trading.composition import market_data as module
+from us_quant.trading.composition.market_data import (
+    build_market_data_application,
 )
 from us_quant.paths import STATE_ROOT_ENV
 from us_quant.user_settings import UserSettingsError
@@ -80,17 +84,17 @@ def _config() -> IBKRConnectionConfig:
 def _install(monkeypatch, name: str) -> list[_Recorder]:
     created: list[_Recorder] = []
 
-    def factory(*args, **kwargs) -> _Recorder:
-        recorder = _Recorder(args=args, kwargs=kwargs)
-        created.append(recorder)
-        return recorder
+    def recorder(*args, **kwargs) -> _Recorder:
+        record = _Recorder(args=args, kwargs=kwargs)
+        created.append(record)
+        return record
 
-    monkeypatch.setattr(module, name, factory)
+    monkeypatch.setattr(module, name, recorder)
     return created
 
 
-def _service() -> MarketDataService:
-    return MarketDataService(_config())
+def _service() -> MarketDataApplication:
+    return build_market_data_application(_config())
 
 
 def _window() -> MainWindow:
@@ -109,11 +113,10 @@ def test_stream_worker_runs_the_stream_the_service_built(
 
     worker = StreamWorker(
         _service(),
-        MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",)),
+        MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("SPY",)),
     )
 
-    assert worker.service is created[0]
-    assert worker.provider == PROVIDER_IBKR
+    assert worker.source_id == SOURCE_IBKR
     assert created[0].kwargs["symbols"] == ("SPY",)
     worker.deleteLater()
 
@@ -148,11 +151,13 @@ def test_stream_worker_listener_is_the_queued_signal(monkeypatch) -> None:
 
     worker = StreamWorker(
         _service(),
-        MarketDataRequest(
-            provider=module.PROVIDER_ALPACA_IEX,
+        MarketDataStartRequest(
+            source_id=SOURCE_ALPACA_IEX,
             symbols=("AAPL",),
-            alpaca_api_key="k",
-            alpaca_api_secret="s",
+            credentials=MarketDataCredentials(
+                alpaca_api_key="k",
+                alpaca_api_secret="s",
+            ),
         ),
     )
 
@@ -175,14 +180,14 @@ def test_stream_worker_forwards_the_stop_request(monkeypatch) -> None:
 
     worker = StreamWorker(
         service,
-        MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",)),
+        MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("SPY",)),
     )
     worker.request_stop()
 
     # The stop goes through the service, not straight to the adapter, so
     # the service's own lifecycle bookkeeping stays truthful.
     assert created[0].stopped is True
-    assert service.snapshot().running is False
+    assert service.lifecycle().running is False
     worker.deleteLater()
 
 
@@ -192,11 +197,11 @@ def test_stream_worker_reports_a_runtime_failure_to_the_service(
     """A stream that raises out of its loop must not leave the service
     claiming it is still healthy."""
 
-    _install(monkeypatch, "IBKRReadOnlyStream")
+    created = _install(monkeypatch, "IBKRReadOnlyStream")
     service = _service()
     worker = StreamWorker(
         service,
-        MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",)),
+        MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("SPY",)),
     )
     captured: list[str] = []
     worker.failed.connect(captured.append)
@@ -204,24 +209,26 @@ def test_stream_worker_reports_a_runtime_failure_to_the_service(
     def explode() -> None:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(worker.service, "run", explode)
+    # The recorder is the object the application built, so the test drives it
+    # without the application exposing its private adapter.
+    monkeypatch.setattr(created[0], "run", explode)
     worker.run()
 
     assert captured and "boom" in captured[0]
-    assert service.snapshot().last_error == captured[0]
+    assert service.lifecycle().last_error == captured[0]
     worker.deleteLater()
 
 
 def test_stream_worker_reports_a_stream_failure(monkeypatch) -> None:
-    def factory(*args, **kwargs) -> _Recorder:
+    def recorder(*args, **kwargs) -> _Recorder:
         raise RuntimeError("socket exploded")
 
-    monkeypatch.setattr(module, "IBKRReadOnlyStream", factory)
+    monkeypatch.setattr(module, "IBKRReadOnlyStream", recorder)
 
     with pytest.raises(RuntimeError):
         StreamWorker(
             _service(),
-            MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",)),
+            MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("SPY",)),
         )
 
 
@@ -230,13 +237,256 @@ def test_stream_worker_venue_comes_from_the_service(monkeypatch) -> None:
 
     worker = StreamWorker(
         _service(),
-        MarketDataRequest(
-            provider=PROVIDER_IBKR_EXTENDED, symbols=("SPY",)
+        MarketDataStartRequest(
+            source_id=SOURCE_IBKR_EXTENDED, symbols=("SPY",)
         ),
     )
 
-    assert worker.market_exchange == module.ibkr_market_data_exchange()
+    assert worker.market_exchange == _service().desired_market_exchange(
+        SOURCE_IBKR_EXTENDED
+    )
     worker.deleteLater()
+
+
+def test_stream_worker_reads_the_prepared_venue_without_re_resolving() -> None:
+    """The worker must not resolve the venue a second time.
+
+    The resolver follows the US equity session, so a second call around a
+    SMART/OVERNIGHT boundary can legitimately return a different venue.  The
+    worker would then report a venue the live adapter was never built for, and
+    ``_maybe_rotate_extended_ibkr_session`` would skip the reconnect it owes.
+
+    The resolver here flips on every call, so a second resolution cannot pass
+    by coincidence.
+    """
+
+    created: list = []
+    values = iter(["SMART", "OVERNIGHT"])
+    calls: list[str] = []
+
+    def resolver() -> str:
+        value = next(values)
+        calls.append(value)
+        return value
+
+    def factory(request, listener, config):
+        record = _Recorder(args=(config,), kwargs={"request": request})
+        created.append(record)
+        return record
+
+    service = MarketDataApplication(
+        _config(),
+        factories={
+            SOURCE_IBKR: factory,
+            SOURCE_IBKR_EXTENDED: factory,
+        },
+        exchange_resolver=resolver,
+    )
+
+    worker = StreamWorker(
+        service,
+        MarketDataStartRequest(
+            source_id=SOURCE_IBKR_EXTENDED, symbols=("SPY",)
+        ),
+    )
+
+    assert calls == ["SMART"], (
+        "the worker re-resolved the venue; it must read the prepared value"
+    )
+    assert created[0].kwargs["request"].market_exchange == "SMART"
+    assert worker.market_exchange == "SMART"
+    assert worker.market_exchange != "OVERNIGHT"
+    # And the worker holds no adapter.
+    assert not hasattr(worker, "service")
+    assert not hasattr(worker, "adapter")
+    worker.deleteLater()
+
+
+def test_stream_worker_carries_an_explicit_venue_verbatim() -> None:
+    """An explicit venue must reach both the adapter and the worker."""
+
+    created: list = []
+    calls: list[int] = []
+
+    def resolver() -> str:
+        calls.append(len(calls))
+        return "OVERNIGHT"
+
+    def factory(request, listener, config):
+        record = _Recorder(args=(config,), kwargs={"request": request})
+        created.append(record)
+        return record
+
+    service = MarketDataApplication(
+        _config(),
+        factories={SOURCE_IBKR_EXTENDED: factory},
+        exchange_resolver=resolver,
+    )
+
+    worker = StreamWorker(
+        service,
+        MarketDataStartRequest(
+            source_id=SOURCE_IBKR_EXTENDED,
+            symbols=("SPY",),
+            market_exchange="SMART",
+        ),
+    )
+
+    assert calls == []
+    assert created[0].kwargs["request"].market_exchange == "SMART"
+    assert worker.market_exchange == "SMART"
+    worker.deleteLater()
+
+
+def test_the_stream_worker_source_never_re_resolves_the_venue() -> None:
+    """Structural guard: the worker may only read prepared truth.
+
+    A behavioural test can miss a redundant call whose result happens to be
+    discarded, so the source is checked directly.  This is an AST check, not a
+    text search: the docstring and comments deliberately *name* the forbidden
+    methods to explain why they are absent, and a substring search would flag
+    its own explanation.
+    """
+
+    import ast
+
+    tree = ast.parse(inspect.getsource(StreamWorker))
+    called = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+    }
+
+    for forbidden in ("market_exchange_for", "desired_market_exchange"):
+        assert forbidden not in called, (
+            f"StreamWorker must not call {forbidden}(); it reads "
+            "prepared_market_exchange instead"
+        )
+
+    read = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+    }
+    assert "prepared_market_exchange" in read
+
+
+def test_session_rotation_fires_when_the_venue_moves_on(monkeypatch) -> None:
+    """End to end: the desktop detects the session change and rotates.
+
+    The worker must report the venue its adapter was built with, so that when
+    the desired venue later differs the rotation guard can see the difference.
+    If the worker had re-resolved, it would report the *new* venue and the
+    rotation would be skipped -- leaving the live feed on the stale venue.
+    """
+
+    created: list = []
+    calls: list[str] = []
+
+    def resolver() -> str:
+        # SMART for the prepare, then the session moves on for good.
+        value = "SMART" if not calls else "OVERNIGHT"
+        calls.append(value)
+        return value
+
+    def factory(request, listener, config):
+        record = _Recorder(args=(config,), kwargs={"request": request})
+        created.append(record)
+        return record
+
+    window = _window()
+    try:
+        # Replace the composed application with one whose resolver flips.
+        window.market_data = MarketDataApplication(
+            window.config.ibkr,
+            factories={SOURCE_IBKR_EXTENDED: factory},
+            exchange_resolver=resolver,
+        )
+        index = window.stream_mode.findData(SOURCE_IBKR_EXTENDED)
+        assert index >= 0
+        window.stream_mode.setCurrentIndex(index)
+        window.stream_symbols.setText("SPY")
+
+        window._start_stream()
+
+        worker = window.stream_worker
+        assert worker is not None
+        # The adapter was built for SMART and the worker reports SMART, even
+        # though the resolver now returns OVERNIGHT.
+        assert created[0].kwargs["request"].market_exchange == "SMART"
+        assert worker.market_exchange == "SMART"
+        assert (
+            window.market_data.desired_market_exchange(
+                SOURCE_IBKR_EXTENDED
+            )
+            == "OVERNIGHT"
+        )
+
+        # The rotation guard must therefore fire.
+        switches: list[tuple] = []
+        monkeypatch.setattr(
+            window,
+            "_request_stream_switch",
+            lambda provider, **kwargs: switches.append(
+                (provider, kwargs)
+            ),
+        )
+        monkeypatch.setattr(
+            window.stream_worker, "isRunning", lambda: True
+        )
+
+        window._maybe_rotate_extended_ibkr_session()
+
+        assert len(switches) == 1, "the session rotation did not fire"
+        provider, kwargs = switches[0]
+        assert provider == SOURCE_IBKR_EXTENDED
+        assert kwargs.get("allow_auto_session_switch") is True
+    finally:
+        window._stop_stream()
+        window.deleteLater()
+
+
+def test_no_rotation_when_the_venue_is_unchanged(monkeypatch) -> None:
+    """Belt and braces: a stable session must not trigger a reconnect."""
+
+    created: list = []
+
+    def factory(request, listener, config):
+        record = _Recorder(args=(config,), kwargs={"request": request})
+        created.append(record)
+        return record
+
+    window = _window()
+    try:
+        window.market_data = MarketDataApplication(
+            window.config.ibkr,
+            factories={SOURCE_IBKR_EXTENDED: factory},
+            exchange_resolver=lambda: "SMART",
+        )
+        index = window.stream_mode.findData(SOURCE_IBKR_EXTENDED)
+        window.stream_mode.setCurrentIndex(index)
+        window.stream_symbols.setText("SPY")
+        window._start_stream()
+
+        switches: list[tuple] = []
+        monkeypatch.setattr(
+            window,
+            "_request_stream_switch",
+            lambda provider, **kwargs: switches.append(
+                (provider, kwargs)
+            ),
+        )
+        monkeypatch.setattr(
+            window.stream_worker, "isRunning", lambda: True
+        )
+
+        window._maybe_rotate_extended_ibkr_session()
+
+        assert switches == []
+    finally:
+        window._stop_stream()
+        window.deleteLater()
 
 
 def test_stream_worker_rejects_an_unknown_provider(monkeypatch) -> None:
@@ -245,7 +495,7 @@ def test_stream_worker_rejects_an_unknown_provider(monkeypatch) -> None:
     with pytest.raises(ValueError):
         StreamWorker(
             _service(),
-            MarketDataRequest(provider="ibkr_extened", symbols=("SPY",)),
+            MarketDataStartRequest(source_id="ibkr_extened", symbols=("SPY",)),
         )
 
     assert created == []
@@ -257,9 +507,9 @@ def test_stream_worker_rejects_an_unknown_provider(monkeypatch) -> None:
 def test_main_window_owns_a_market_data_service() -> None:
     window = _window()
     try:
-        assert isinstance(window.market_data_service, MarketDataService)
+        assert isinstance(window.market_data, MarketDataApplication)
         # It must be built from the live IBKR config, not a copy.
-        assert window.market_data_service.config == window.config.ibkr
+        assert window.market_data.config == window.config.ibkr
     finally:
         window.deleteLater()
 
@@ -329,9 +579,9 @@ def test_saving_settings_reaches_the_service_before_the_next_stream(
 
         # The service -- not just the window -- carries the new config.
         assert window.config.ibkr.client_id == new_client_id
-        assert window.market_data_service.config == window.config.ibkr
+        assert window.market_data.config == window.config.ibkr
 
-        index = window.stream_mode.findData(PROVIDER_IBKR)
+        index = window.stream_mode.findData(SOURCE_IBKR)
         assert index >= 0
         window.stream_mode.setCurrentIndex(index)
         window.stream_symbols.setText("SPY")
@@ -365,10 +615,10 @@ def test_saving_settings_is_refused_while_a_stream_is_live(
     warnings = _capture_warnings(monkeypatch)
     window = _window_with_tmp_state(monkeypatch, tmp_path)
     try:
-        window.market_data_service.build_stream(
-            MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",))
+        window.market_data.prepare(
+            MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("SPY",))
         )
-        before = window.market_data_service.config
+        before = window.market_data.config
 
         window.settings_ibkr_client_id.setValue(_next_client_id(window))
         window._save_user_preferences()
@@ -377,7 +627,7 @@ def test_saving_settings_is_refused_while_a_stream_is_live(
         # Refused means *nothing* moved: the service kept its config, the
         # window kept its config, and the settings file was not rewritten
         # behind the refusal.
-        assert window.market_data_service.config == before
+        assert window.market_data.config == before
         assert window.config.ibkr == before
         assert not (tmp_path / "settings" / "preferences.json").exists()
     finally:
@@ -400,8 +650,8 @@ def test_saving_identical_settings_while_streaming_is_not_a_refusal(
     warnings = _capture_warnings(monkeypatch)
     window = _window_with_tmp_state(monkeypatch, tmp_path)
     try:
-        window.market_data_service.build_stream(
-            MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",))
+        window.market_data.prepare(
+            MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("SPY",))
         )
 
         window._save_user_preferences()  # unchanged values: must not refuse
@@ -438,7 +688,7 @@ def test_a_failed_settings_write_leaves_the_runtime_untouched(
         on_disk = saved_file.read_text(encoding="utf-8")
 
         config_before = window.config.ibkr
-        service_before = window.market_data_service.config
+        service_before = window.market_data.config
         preferences_before = window.preferences
         new_client_id = _next_client_id(window)
         assert new_client_id != config_before.client_id
@@ -457,7 +707,7 @@ def test_a_failed_settings_write_leaves_the_runtime_untouched(
         assert "设置未保存" in warnings[0][0][1]
         # Nothing moved: not the window, not the service, not the file.
         assert window.config.ibkr == config_before
-        assert window.market_data_service.config == service_before
+        assert window.market_data.config == service_before
         assert window.preferences == preferences_before
         assert saved_file.read_text(encoding="utf-8") == on_disk
     finally:
@@ -503,7 +753,7 @@ def test_starting_the_stream_uses_the_service_built_adapter(
     created = _install(monkeypatch, "IBKRReadOnlyStream")
     window = _window()
     try:
-        index = window.stream_mode.findData(PROVIDER_IBKR)
+        index = window.stream_mode.findData(SOURCE_IBKR)
         assert index >= 0
         window.stream_mode.setCurrentIndex(index)
         window.stream_symbols.setText("SPY,QQQ")
@@ -513,10 +763,13 @@ def test_starting_the_stream_uses_the_service_built_adapter(
         assert len(created) == 1
         worker = window.stream_worker
         assert worker is not None
-        # The worker holds the object the service built, not one of its
-        # own: this is the whole boundary under test.
-        assert worker.service is created[0]
-        assert worker.provider == PROVIDER_IBKR
+        # The worker drives the application, which owns the adapter; the
+        # UI never holds the adapter itself.  This is the boundary under test.
+        assert worker.market_data is window.market_data
+        assert worker.source_id == SOURCE_IBKR
+        # The factory sentinel is the object the application built, and the
+        # worker's venue is the one that adapter was actually given.
+        assert created[0].kwargs["market_exchange"] == worker.market_exchange
         assert created[0].kwargs["symbols"] == ("SPY", "QQQ")
         assert created[0].kwargs["provider_label"] == "IBKR"
     finally:
@@ -539,10 +792,10 @@ def test_a_refused_build_is_reported_instead_of_escaping(
     warnings = _capture_warnings(monkeypatch)
     window = _window()
     try:
-        window.market_data_service.build_stream(
-            MarketDataRequest(provider=PROVIDER_IBKR, symbols=("SPY",))
+        window.market_data.prepare(
+            MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("SPY",))
         )
-        index = window.stream_mode.findData(PROVIDER_IBKR)
+        index = window.stream_mode.findData(SOURCE_IBKR)
         assert index >= 0
         window.stream_mode.setCurrentIndex(index)
         window.stream_symbols.setText("SPY")
@@ -553,7 +806,7 @@ def test_a_refused_build_is_reported_instead_of_escaping(
         assert len(warnings) == 1
         # No second stream was built, and nothing was adopted as a worker.
         assert window.stream_worker is None
-        assert window.market_data_service.snapshot().running is True
+        assert window.market_data.lifecycle().running is True
     finally:
         window._stop_stream()
         window.deleteLater()
@@ -575,7 +828,7 @@ def test_the_desktop_hands_the_adapter_the_queued_signal(
     window = _window()
     try:
         index = window.stream_mode.findData(
-            module.PROVIDER_ALPACA_IEX
+            SOURCE_ALPACA_IEX
         )
         assert index >= 0
         window.stream_mode.setCurrentIndex(index)
@@ -715,15 +968,15 @@ def test_the_stream_request_carries_the_services_credentials(
     the wrong field would still look like it worked.
     """
 
-    requests: list[MarketDataRequest] = []
+    requests: list[MarketDataStartRequest] = []
 
-    def build_stream(request, *, listener=None):
+    def prepare(request, *, listener=None):
         requests.append(request)
         return _Recorder()
 
     window = _window()
     try:
-        index = window.stream_mode.findData(PROVIDER_ALPACA_IEX)
+        index = window.stream_mode.findData(SOURCE_ALPACA_IEX)
         assert index >= 0
         window.stream_mode.setCurrentIndex(index)
         window.stream_symbols.setText("AAPL")
@@ -736,17 +989,15 @@ def test_the_stream_request_carries_the_services_credentials(
                 alpaca_api_secret="SENTINEL-SECRET",
             ),
         )
-        monkeypatch.setattr(
-            window.market_data_service, "build_stream", build_stream
-        )
+        monkeypatch.setattr(window.market_data, "prepare", prepare)
 
         window._start_stream()
 
         assert len(requests) == 1
         request = requests[0]
-        assert request.alpaca_api_key == "SENTINEL-KEY"
-        assert request.alpaca_api_secret == "SENTINEL-SECRET"
-        assert request.finnhub_api_key == "SENTINEL-FINNHUB"
+        assert request.credentials.alpaca_api_key == "SENTINEL-KEY"
+        assert request.credentials.alpaca_api_secret == "SENTINEL-SECRET"
+        assert request.credentials.finnhub_api_key == "SENTINEL-FINNHUB"
     finally:
         window._stop_stream()
         window.deleteLater()
@@ -757,7 +1008,7 @@ def _fake_running_worker(provider: str):
 
     class _Worker:
         def __init__(self) -> None:
-            self.provider = provider
+            self.source_id = provider
 
         def isRunning(self) -> bool:  # noqa: N802 - Qt spelling
             return True

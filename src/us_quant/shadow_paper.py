@@ -11,7 +11,10 @@ from typing import Iterable, Mapping
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from us_quant.ibkr_stream import StreamQuote, StreamSnapshot
+from us_quant.trading.domain.market import (
+    MarketQuote,
+    MarketSnapshot,
+)
 from us_quant.risk import (
     LayeredRiskLimits,
     SessionRiskOverrides,
@@ -475,11 +478,11 @@ class ShadowPaperEngine:
 
     def on_stream(
         self,
-        stream: StreamSnapshot,
+        stream: MarketSnapshot,
         *,
         observed_at: datetime | None = None,
     ) -> ShadowSnapshot:
-        now = _utc(observed_at or _parse_iso(stream.observed_at))
+        now = _utc(observed_at or stream.observed_at)
         if not self.active:
             return self.snapshot(observed_at=now)
         self._roll_trading_day(now)
@@ -611,7 +614,7 @@ class ShadowPaperEngine:
     def _evaluate_entry(
         self,
         now: datetime,
-        ready: dict[str, StreamQuote],
+        ready: dict[str, MarketQuote],
     ) -> None:
         session_overrides = self._session_overrides()
         eastern = now.astimezone(NEW_YORK)
@@ -645,7 +648,7 @@ class ShadowPaperEngine:
             return
 
         candidates: list[
-            tuple[Decimal, str, StreamQuote, int, Decimal]
+            tuple[Decimal, str, MarketQuote, int, Decimal]
         ] = []
         for symbol, quote in ready.items():
             symbol_overrides = self._symbol_overrides(symbol)
@@ -740,7 +743,7 @@ class ShadowPaperEngine:
         self,
         *,
         now: datetime,
-        quote: StreamQuote,
+        quote: MarketQuote,
         quantity: int,
         reason: str,
     ) -> None:
@@ -760,7 +763,7 @@ class ShadowPaperEngine:
             entry_price=price,
             opened_at=now.isoformat(),
             high_water=price,
-            provider=quote.provider,
+            provider=quote.source_label,
             coverage=quote.coverage,
         )
         fill = ShadowFill(
@@ -772,7 +775,7 @@ class ShadowPaperEngine:
             price=price,
             commission=self.config.commission_per_order,
             reason=reason,
-            provider=quote.provider,
+            provider=quote.source_label,
             coverage=quote.coverage,
             realized_pnl=None,
         )
@@ -786,7 +789,7 @@ class ShadowPaperEngine:
     def _check_exit(
         self,
         now: datetime,
-        quote: StreamQuote | None,
+        quote: MarketQuote | None,
     ) -> None:
         position = self.position
         if position is None or quote is None or quote.bid is None:
@@ -830,7 +833,7 @@ class ShadowPaperEngine:
         self,
         *,
         now: datetime,
-        quote: StreamQuote | None,
+        quote: MarketQuote | None,
         reason: str,
     ) -> None:
         position = self.position
@@ -866,7 +869,9 @@ class ShadowPaperEngine:
             commission=commission,
             reason=reason,
             provider=(
-                quote.provider if quote is not None else position.provider
+                quote.source_label
+                if quote is not None
+                else position.provider
             ),
             coverage=(
                 quote.coverage if quote is not None else position.coverage

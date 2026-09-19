@@ -15,7 +15,10 @@ from us_quant.ibkr_paper_orders import (
     PaperOrderUpdate,
     new_paper_order_intent,
 )
-from us_quant.ibkr_stream import StreamQuote, StreamSnapshot
+from us_quant.trading.domain.market import (
+    MarketQuote,
+    MarketSnapshot,
+)
 from us_quant.risk import (
     LayeredRiskLimits,
     SessionRiskOverrides,
@@ -120,7 +123,7 @@ class QuoteReadinessBreakdown:
 
 
 def calculate_quote_readiness_breakdown(
-    quotes: StreamSnapshot | Iterable[StreamQuote],
+    quotes: MarketSnapshot | Iterable[MarketQuote],
     *,
     candidate_symbols: Iterable[str],
     reference_symbols: Iterable[str],
@@ -129,7 +132,7 @@ def calculate_quote_readiness_breakdown(
     """Classify quote freshness without allowing references into candidates."""
 
     snapshot_quotes = (
-        quotes.quotes if isinstance(quotes, StreamSnapshot) else quotes
+        quotes.quotes if isinstance(quotes, MarketSnapshot) else quotes
     )
     subscribed_quotes = {
         quote.symbol.strip().upper(): quote for quote in snapshot_quotes
@@ -389,7 +392,7 @@ class AutoQuantEngine:
 
     def on_stream(
         self,
-        snapshot: StreamSnapshot,
+        snapshot: MarketSnapshot,
         *,
         observed_at: datetime | None = None,
     ) -> AutoQuantSnapshot:
@@ -809,8 +812,8 @@ class AutoQuantEngine:
     def _evaluate_entry(
         self,
         now: datetime,
-        ready: dict[str, StreamQuote],
-        reference_ready: dict[str, StreamQuote],
+        ready: dict[str, MarketQuote],
+        reference_ready: dict[str, MarketQuote],
     ) -> None:
         session_overrides = self._session_overrides()
         account_limits = (
@@ -875,7 +878,7 @@ class AutoQuantEngine:
             self.status = f"entry regime gate blocked: {regime_block}"
             return
         ranked: list[
-            tuple[Decimal, Decimal, str, StreamQuote]
+            tuple[Decimal, Decimal, str, MarketQuote]
         ] = []
         required = max(
             self.config.warmup_minutes,
@@ -1045,7 +1048,7 @@ class AutoQuantEngine:
     def _check_exit(
         self,
         now: datetime,
-        quote: StreamQuote | None,
+        quote: MarketQuote | None,
     ) -> None:
         if quote is None or quote.bid is None:
             return
@@ -1106,7 +1109,7 @@ class AutoQuantEngine:
     def _emit_exit(
         self,
         now: datetime,
-        quote: StreamQuote | None,
+        quote: MarketQuote | None,
         symbol: str,
         price: Decimal,
         reason: str,
@@ -1215,7 +1218,7 @@ class AutoQuantEngine:
         history.append((minute, price))
 
     def _entry_regime_block(
-        self, reference_ready: dict[str, StreamQuote]
+        self, reference_ready: dict[str, MarketQuote]
     ) -> str | None:
         """Fail closed for entries; exits are evaluated before this gate."""
         for symbol in self.market_reference_symbols:

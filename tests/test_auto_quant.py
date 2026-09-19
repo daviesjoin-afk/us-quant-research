@@ -19,7 +19,11 @@ from us_quant.ibkr_paper_orders import (
     PaperOrderUpdate,
     new_paper_order_intent,
 )
-from us_quant.ibkr_stream import StreamQuote, StreamSnapshot
+from us_quant.trading.domain.market import (
+    MarketDataMode,
+    MarketQuote,
+    MarketSnapshot,
+)
 from us_quant.risk import LayeredRiskLimits, RiskLimits, SymbolRiskOverrides
 from us_quant.shadow_paper import ShadowConfig
 
@@ -36,7 +40,7 @@ class AutoQuantTests(unittest.TestCase):
         quotes = tuple(
             replace(
                 quote,
-                effective_market_data_type=1,
+                mode=MarketDataMode.REALTIME,
                 stale=False,
                 stale_reason=None,
             )
@@ -65,7 +69,7 @@ class AutoQuantTests(unittest.TestCase):
             quotes=tuple(
                 replace(
                     quote,
-                    effective_market_data_type=1,
+                    mode=MarketDataMode.REALTIME,
                     stale=False,
                     stale_reason=None,
                 )
@@ -719,37 +723,43 @@ def _snapshot(
     prices: dict[str, Decimal],
     *,
     ready: bool = True,
-) -> StreamSnapshot:
+) -> MarketSnapshot:
     quotes = tuple(
-        StreamQuote(
+        MarketQuote(
             symbol=symbol,
-            request_id=index,
-            generation=1,
-            requested_market_data_type=1,
-            effective_market_data_type=1 if ready else 3,
             bid=price,
             ask=price + Decimal("0.02"),
             last=price,
             close=None,
-            updated_at=observed.isoformat(),
+            bid_size=None,
+            ask_size=None,
+            mode=(
+                MarketDataMode.REALTIME
+                if ready
+                else MarketDataMode.DELAYED
+            ),
+            updated_at=observed,
             age_seconds=0,
             stale=not ready,
             stale_reason=None if ready else "delayed",
-            provider="TestFeed",
+            generation=1,
+            source_id="test_feed",
+            source_label="TestFeed",
             coverage="unit test",
         )
         for index, (symbol, price) in enumerate(prices.items(), 1)
     )
-    return StreamSnapshot(
+    return MarketSnapshot(
         generation=1,
-        socket_connected=True,
-        handshake_complete=True,
+        connected=True,
+        ready=True,
         reconnect_attempt=0,
         quotes=quotes,
-        last_error_code=None,
-        last_message="test",
-        observed_at=observed.isoformat(),
-        provider="TestFeed",
+        error_code=None,
+        message="test",
+        observed_at=observed,
+        source_id="test_feed",
+        source_label="TestFeed",
         coverage="unit test",
     )
 
@@ -811,10 +821,10 @@ class MultiSymbolTests(unittest.TestCase):
         }
         observed = datetime(2024, 1, 2, 20, 0, tzinfo=timezone.utc)
         quotes = (
-            StreamQuote(symbol="AAA", request_id=1, generation=1, requested_market_data_type=1, effective_market_data_type=1, bid=Decimal("10"), ask=Decimal("10.02"), last=Decimal("10"), close=None, updated_at=observed.isoformat(), age_seconds=0, stale=False, stale_reason=None, provider="TestFeed", coverage="test"),
-            StreamQuote(symbol="BBB", request_id=2, generation=1, requested_market_data_type=1, effective_market_data_type=1, bid=Decimal("20"), ask=Decimal("20.02"), last=Decimal("20"), close=None, updated_at=observed.isoformat(), age_seconds=0, stale=False, stale_reason=None, provider="TestFeed", coverage="test"),
+            MarketQuote(symbol="AAA", mode=MarketDataMode.REALTIME, bid=Decimal("10"), ask=Decimal("10.02"), last=Decimal("10"), close=None, bid_size=None, ask_size=None, updated_at=observed, age_seconds=0, stale=False, stale_reason=None, generation=1, source_id="test_feed", source_label="TestFeed", coverage="test"),
+            MarketQuote(symbol="BBB", mode=MarketDataMode.REALTIME, bid=Decimal("20"), ask=Decimal("20.02"), last=Decimal("20"), close=None, bid_size=None, ask_size=None, updated_at=observed, age_seconds=0, stale=False, stale_reason=None, generation=1, source_id="test_feed", source_label="TestFeed", coverage="test"),
         )
-        snapshot = engine.on_stream(StreamSnapshot(generation=1, socket_connected=True, handshake_complete=True, reconnect_attempt=0, quotes=quotes, last_error_code=None, last_message="test", observed_at=observed.isoformat(), provider="TestFeed", coverage="test"), observed_at=observed)
+        snapshot = engine.on_stream(MarketSnapshot(generation=1, connected=True, ready=True, reconnect_attempt=0, quotes=quotes, error_code=None, message="test", observed_at=observed, source_id="test_feed", source_label="TestFeed", coverage="test"), observed_at=observed)
         self.assertEqual(len(intents), 1)
         self.assertEqual(intents[0].symbol, "AAA")
         self.assertEqual(intents[0].quantity, 49)
@@ -1119,7 +1129,7 @@ class MultiSymbolTests(unittest.TestCase):
             "BBB": AutoQuantPosition(symbol="BBB", quantity=5, average_price=Decimal("20"), opened_at=datetime(2024, 1, 2, 10, 0, tzinfo=timezone.utc).isoformat(), high_water=Decimal("20.5"), provider="test"),
         }
         observed = datetime(2024, 1, 2, 10, 30, tzinfo=timezone.utc)
-        quote = StreamQuote(symbol="AAA", request_id=1, generation=1, requested_market_data_type=1, effective_market_data_type=1, bid=Decimal("11.1"), ask=Decimal("11.12"), last=Decimal("11.1"), close=None, updated_at=observed.isoformat(), age_seconds=0, stale=False, stale_reason=None, provider="TestFeed", coverage="test")
+        quote = MarketQuote(symbol="AAA", bid=Decimal("11.1"), ask=Decimal("11.12"), last=Decimal("11.1"), close=None, bid_size=None, ask_size=None, mode=MarketDataMode.REALTIME, updated_at=observed, age_seconds=0, stale=False, stale_reason=None, generation=1, source_id="test_feed", source_label="TestFeed", coverage="test")
         engine._check_exit(observed, quote)
         self.assertEqual(len(intents), 1)
         self.assertEqual(intents[0].symbol, "AAA")

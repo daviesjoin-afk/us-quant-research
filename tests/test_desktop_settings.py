@@ -45,7 +45,7 @@ from us_quant.desktop_settings import (
     ibkr_config_from_preferences,
 )
 from us_quant.ibkr import IBKRConnectionConfig
-from us_quant.market_data_service import MarketDataStreamActive
+from us_quant.trading.ports.market_data import MarketDataActiveError
 from us_quant.user_settings import (
     PAPER_GATEWAY_PORT,
     UserPreferences,
@@ -107,7 +107,7 @@ class _FakeMarketData:
         self._log.append("ensure")
         self.checked.append(config)
         if self._refuse:
-            raise MarketDataStreamActive(
+            raise MarketDataActiveError(
                 "cannot change the IBKR connection config while a market "
                 "data stream is active: stop it first"
             )
@@ -419,14 +419,14 @@ def test_a_refused_change_never_writes_the_file() -> None:
     current = _app_config()
     market_data = _FakeMarketData(current.ibkr, refuse=True, log=log)
 
-    with pytest.raises(MarketDataStreamActive) as excinfo:
+    with pytest.raises(MarketDataActiveError) as excinfo:
         service.commit(
             _preferences(ibkr_client_id=88),
             current_config=current,
             market_data=market_data,
         )
 
-    assert excinfo.type is MarketDataStreamActive
+    assert excinfo.type is MarketDataActiveError
     assert log == ["ensure"]
     assert store.returned is None
 
@@ -438,7 +438,7 @@ def test_a_refused_change_leaves_the_runtime_untouched() -> None:
     before = current.ibkr
     market_data = _FakeMarketData(current.ibkr, refuse=True, log=log)
 
-    with pytest.raises(MarketDataStreamActive):
+    with pytest.raises(MarketDataActiveError):
         service.commit(
             _preferences(ibkr_client_id=88),
             current_config=current,
@@ -464,7 +464,7 @@ def test_a_refused_change_is_not_translated_into_a_settings_error() -> None:
     current = _app_config()
     market_data = _FakeMarketData(current.ibkr, refuse=True, log=log)
 
-    with pytest.raises(MarketDataStreamActive) as excinfo:
+    with pytest.raises(MarketDataActiveError) as excinfo:
         service.commit(
             _preferences(ibkr_client_id=88),
             current_config=current,
@@ -802,9 +802,7 @@ def test_the_module_dependency_surface_is_exactly_what_was_agreed() -> None:
         "us_quant.ibkr_paper_gateway",
         "us_quant.workflow_state",
         "us_quant.auto_quant",
-        "us_quant.ibkr_stream",
-        "us_quant.alpaca_stream",
-        "us_quant.finnhub_stream",
+        "us_quant.trading.adapters",
     ],
 )
 def test_the_module_imports_nothing_it_was_told_not_to(module: str) -> None:
@@ -970,7 +968,7 @@ def test_startup_uses_the_same_mapping_as_a_later_save() -> None:
     [
         "preferences_store.save(",
         "ensure_config_update_allowed(",
-        "market_data_service.update_config(",
+        "self.market_data.update_config(",
     ],
 )
 def test_the_save_adapter_does_not_run_the_transaction_itself(
@@ -1005,7 +1003,7 @@ def test_the_save_adapter_does_go_through_the_service() -> None:
     [
         "preferences_store.save(",
         "ensure_config_update_allowed(",
-        "market_data_service.update_config(",
+        "self.market_data.update_config(",
     ],
 )
 def test_the_transaction_calls_are_absent_from_desktop(call: str) -> None:

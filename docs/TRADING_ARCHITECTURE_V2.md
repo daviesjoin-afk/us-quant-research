@@ -7,6 +7,10 @@
 Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只记录它们的
 归宿，不声称已完成。
 
+> **进度更新（Market Data v2）**：Market 链已完成迁移，见 §4 Market 与
+> §10 roadmap。下一条主线是 **Broker / Account v2**。本文档中除 Market 以外
+> 的 pipeline 仍属路线图，未迁移。
+
 ## 1. 核心依赖方向
 
 ```text
@@ -64,19 +68,32 @@ UI             → concrete IBKR callbacks   UI 不认识券商回调
 
 ## 4. 五条 pipeline 的目标形态
 
-### Market
+### Market —— **已迁移（Market Data v2）**
 
 ```text
 IBKR / Alpaca / Finnhub
         ↓
-MarketData adapters
+trading/adapters/{ibkr,alpaca,finnhub}/market_data.py
+        ↓  （transport StreamQuote/StreamSnapshot → 领域 MarketQuote/MarketSnapshot）
+trading/adapters/market_data_state.py
         ↓
-MarketDataPort
+MarketDataPort        （run / stop / snapshot / health）
         ↓
-MarketData application
+trading/application/market_data.py   （provider 策略与生命周期）
         ↓
-MarketSnapshot
+MarketSnapshot       （上层唯一真相）
 ```
+
+装配点唯一：`trading/composition/market_data.py` 是唯一同时认识 application
+与具体 adapter 的模块；application 本身不 import 任何 adapter（由
+`tests/test_trading_architecture.py` 强制）。
+
+厂商行情类型号（IBKR `1/2/3/4`）只在 IBKR adapter 内解释为
+`MarketDataMode`；上层只看到 `REALTIME/FROZEN/DELAYED/DELAYED_FROZEN/UNKNOWN`。
+
+`source_id`（`alpaca_iex` / `finnhub_trades` / `ibkr` / `ibkr_extended`）是
+逻辑键，用于比较与路由；`source_label`（`Alpaca` / `Finnhub` / `IBKR` /
+`IBKR 5×24`）只是展示文本，任何逻辑都不得比较它。
 
 ### Account
 
@@ -159,7 +176,7 @@ compatibility re-export**。同一个类型不允许有两个 import 路径。
 | 模块 | 内容 |
 | --- | --- |
 | `common.py` | `ZERO`、`ONE`、`decimal()`、`Environment` |
-| `market.py` | `Bar`、`MarketSlice`（迁移）；`MarketQuote`、`MarketSnapshot`、`MarketSubscription`、`MarketDataHealth`（新增） |
+| `market.py` | `Bar`、`MarketSlice`（迁移）；`MarketQuote`、`MarketSnapshot`、`MarketSubscription`、`MarketDataHealth`、`MarketDataMode`（Market Data v2 起为完整领域类型） |
 | `account.py` | `Position`、`AccountSnapshot`（迁移）；`BrokerConnectionState`（新增） |
 | `orders.py` | `Side`、`OrderStatus`、`OrderIntent`、`OrderEvent`（迁移）；`ExecutionFill`（新增） |
 | `risk.py` | `RiskDecision`（迁移） |
@@ -200,11 +217,15 @@ Ports 只允许 import 标准库、`typing` / `collections.abc` 和
 
 | Port | 边界 |
 | --- | --- |
-| `MarketDataPort` | `start` / `stop` / `snapshot` / `health` |
+| `MarketDataPort` | `run` / `stop` / `snapshot` / `health`（Market Data v2 起为 `run`，不再是 `start(subscription)`） |
 | `BrokerAccountPort` | `connect` / `disconnect` / `connection_state` / `account_snapshot` / `positions`（**只读**，无 submit） |
 | `BrokerExecutionPort` | `connect` / `disconnect` / `submit` / `cancel` / `fills` |
 | `StrategyRepositoryPort` | `list_strategies` / `get_strategy`，配 `StrategyRecordView` |
 | `OrderRepositoryPort` | `record_intent` / `record_event` / `record_fill` / `status` / `intent` / `fills` |
+
+`MarketDataPort` 另有 `SnapshotListener`（`Callable[[MarketSnapshot], None]`）
+与 provider 中立的 `MarketDataCredentialsError`。IBKR 不给 listener：它由桌面
+的 snapshot 定时器轮询，再挂 listener 会让每条行情发布两次。
 
 `BrokerAccountPort` 与 `BrokerExecutionPort` 刻意分开：只读账户链路绝不能被
 误认为可交易通道。这与现有代码把只读连接和 Paper 订单连接分开是同一条原则。
@@ -282,26 +303,65 @@ _unified_workflow_enabled
 unified_workflow_page
 ```
 
+### 9.1 Market Data v1（Market Data v2 删除）
+
+```text
+src/us_quant/market_data_service.py
+src/us_quant/ibkr_stream.py
+src/us_quant/alpaca_stream.py
+src/us_quant/finnhub_stream.py
+
+MarketDataService / MarketDataRequest / MarketDataServiceSnapshot
+MarketDataStreamActive          → trading.ports.market_data.MarketDataActiveError
+AlpacaCredentialsMissing        → MarketDataCredentialsError 的子类
+FinnhubCredentialsMissing       → MarketDataCredentialsError 的子类
+StreamQuote / StreamSnapshot    → 降级为 adapter 内部类型，仅存于
+                                  trading/adapters/market_data_state.py
+```
+
+`StreamQuote` / `StreamSnapshot` 没有被删除，而是**降级**：它们是
+provider 形状（ISO 字符串、厂商类型号），因此只允许存在于 adapter 层，
+且只在一个模块里定义。上层唯一的行情真相是领域 `MarketQuote` /
+`MarketSnapshot`。
+
 以后**没有新旧 UI 切换**，只有 Desktop UI v2。旧 internal import 全部迁走，
 本轮明确允许 breaking internal imports——这是架构重构，不是 SDK compatibility
 project。
 
 ## 10. 现有模块的未来归宿（roadmap）
 
-只是路线图，**本轮不搬这些实现**：
-
 ```text
-market_data_service.py    → trading/application/market_data.py
-ibkr_stream.py            → trading/adapters/ibkr/market_data.py
-alpaca_stream.py          → trading/adapters/alpaca/market_data.py
-finnhub_stream.py         → trading/adapters/finnhub/market_data.py
-ibkr_readonly.py          → trading/adapters/ibkr/account.py
+market_data_service.py    → trading/application/market_data.py   ✅ 已迁移
+ibkr_stream.py            → trading/adapters/ibkr/market_data.py ✅ 已迁移
+alpaca_stream.py          → trading/adapters/alpaca/market_data.py ✅ 已迁移
+finnhub_stream.py         → trading/adapters/finnhub/market_data.py ✅ 已迁移
+ibkr_readonly.py          → trading/adapters/ibkr/account.py     ⏭ 下一轮
 strategy_registry.py      → trading/adapters/sqlite/strategy_repository.py
 risk.py                   → trading/application/risk.py
 paper_order_journal.py    → trading/adapters/sqlite/order_repository.py
 ibkr_paper_orders.py      → trading/adapters/ibkr/execution.py
 paper_workflow.py         → trading/runtime/session.py
 ```
+
+**下一条主线：Broker / Account v2。** 它负责把 `ibkr_readonly.py` 的只读账户
+与持仓链路搬进 `trading/adapters/ibkr/account.py`，并顺带移除
+`trading/application/market_data.py` 里对 `IBKRConnectionConfig` 的过渡依赖
+（该依赖已用 `TRANSITIONAL DEPENDENCY` 标注）。
+
+### 10.0 Market Data v2 的过渡残留
+
+以下两点是**已知且已声明**的过渡状态，不属于缺陷：
+
+1. **`IBKRConnectionConfig` 过渡依赖。** `trading/application/market_data.py`
+   仍 import 它，因为连接设置事务由尚未迁移的 Broker/Account 链路持有。
+   注意即便如此，该模块也**没有** import 任何 adapter、`ibapi` 或
+   `ibkr_stream`。
+2. **`MarketQuote` 与 `ibkr_readonly.MarketQuote` 并存。** 后者是既有的
+   IBKR 专用类型，带 `request_id` / `market_data_type`；它随 Broker/Account
+   v2 迁入 adapter 后消失。该重叠在
+   `tests/test_trading_architecture.py::KNOWN_TRANSITIONAL_OVERLAPS` 中登记，
+   并由 `test_transitional_overlaps_are_exactly_the_documented_ones` 强制
+   「不多不少」。
 
 ### 10.1 AutoQuant 的未来归宿
 
@@ -321,8 +381,8 @@ Strategy → Execution 直连。**本轮不改它。**
 替代完成后直接删，不长期维护双轨：
 
 ```text
-旧 MarketDataService v1
-旧 MainWindow stream lifecycle
+旧 MarketDataService v1                ✅ 已删除（Market Data v2）
+旧 MainWindow stream lifecycle         ⏭ Broker/Account v2 之后
 旧 readonly account assembly
 旧 strategy selection glue
 旧 AutoQuant order_sink

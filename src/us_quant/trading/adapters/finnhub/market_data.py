@@ -1,3 +1,23 @@
+"""Finnhub market data adapter.
+
+Moved from ``us_quant.finnhub_stream``.  The transport behaviour is unchanged:
+proxy resolution and Clash fallback, the REST bootstrap that seeds quotes so
+premarket is not blank, the 90-second REST refresh, the extended-hours
+freshness window, the error classification and the reconnect backoff are the
+same code.
+
+Two things are preserved deliberately and must not be "simplified" later:
+
+* the **synthetic +/-5bps execution band**.  Finnhub's free feed is trade
+  prints, not NBBO.  This adapter builds a conservative band around each print
+  and labels it as synthetic in ``coverage``; the domain quote carries that
+  label so no upper layer can mistake the band for a venue bid/ask.
+* the **extended-hours freshness window**.  Regular hours require a print
+  within 20 seconds; pre/after/overnight allow 120 seconds because prints are
+  sparse.  This is not unified with the other providers' thresholds on
+  purpose -- the feeds are genuinely different.
+"""
+
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -8,24 +28,39 @@ import os
 import random
 from threading import Event
 from time import monotonic, sleep
-from typing import Callable
 from urllib.parse import quote
 
-from us_quant.ibkr_stream import StreamSnapshot, StreamStateReducer
 from us_quant.extended_hours import USEquitySession, us_equity_session
 from us_quant.proxy_support import (
     DEFAULT_PROXY,
     proxy_unreachable,
     resolve_proxy,
 )
+from us_quant.trading.adapters.market_data_state import (
+    StreamSnapshot,
+    StreamStateReducer,
+    to_market_snapshot,
+)
+from us_quant.trading.domain.market import (
+    MarketDataHealth,
+    MarketSnapshot,
+)
+from us_quant.trading.ports.market_data import (
+    MarketDataCredentialsError,
+    SnapshotListener,
+)
 
 
 FINNHUB_KEY_ENV = "FINNHUB_API_KEY"
 FINNHUB_WEBSOCKET_URL = "wss://ws.finnhub.io"
 
+#: Stable logic key for this feed.
+SOURCE_FINNHUB_TRADES = "finnhub_trades"
+FINNHUB_SOURCE_LABEL = "Finnhub"
 
-class FinnhubCredentialsMissing(RuntimeError):
-    pass
+
+class FinnhubCredentialsMissing(MarketDataCredentialsError):
+    """Kept as a named subclass of the provider-neutral error."""
 
 
 class FinnhubRejectedError(RuntimeError):
@@ -105,8 +140,8 @@ class FinnhubTradeStream:
         extended_stale_after_seconds: float = 120.0,
         synthetic_half_spread_bps: float = 5.0,
         open_timeout_seconds: float = 15.0,
-        listener: Callable[[StreamSnapshot], None] | None = None,
-        session_provider: Callable[[], USEquitySession] | None = None,
+        listener: SnapshotListener | None = None,
+        session_provider=None,
     ) -> None:
         normalized = tuple(
             dict.fromkeys(
@@ -388,7 +423,7 @@ class FinnhubTradeStream:
             except Exception:
                 pass
 
-    def snapshot(self) -> StreamSnapshot:
+    def transport_snapshot(self) -> StreamSnapshot:
         session = self.session_provider()
         extended = session in {
             USEquitySession.OVERNIGHT,
@@ -409,7 +444,7 @@ class FinnhubTradeStream:
         quotes = tuple(
             replace(
                 row,
-                provider="Finnhub",
+                provider=FINNHUB_SOURCE_LABEL,
                 coverage=coverage,
             )
             for row in base.quotes
@@ -427,9 +462,29 @@ class FinnhubTradeStream:
         return replace(
             base,
             quotes=quotes,
-            provider="Finnhub",
+            provider=FINNHUB_SOURCE_LABEL,
             coverage=coverage,
             last_message=last_message,
+        )
+
+    def snapshot(self) -> MarketSnapshot:
+        return to_market_snapshot(
+            self.transport_snapshot(),
+            source_id=SOURCE_FINNHUB_TRADES,
+            source_label=FINNHUB_SOURCE_LABEL,
+        )
+
+    def health(self) -> MarketDataHealth:
+        snapshot = self.snapshot()
+        return MarketDataHealth(
+            connected=snapshot.connected,
+            source=snapshot.source_id,
+            stale_symbols=tuple(
+                quote.symbol
+                for quote in snapshot.quotes
+                if quote.stale
+            ),
+            message=snapshot.message,
         )
 
     def _emit(self) -> None:

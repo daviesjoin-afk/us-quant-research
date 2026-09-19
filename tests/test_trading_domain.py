@@ -29,6 +29,7 @@ from us_quant.trading.domain.common import ONE, ZERO, Environment, decimal
 from us_quant.trading.domain.market import (
     Bar,
     MarketDataHealth,
+    MarketDataMode,
     MarketQuote,
     MarketSlice,
     MarketSnapshot,
@@ -311,20 +312,84 @@ def test_market_quote_is_provider_neutral_and_frozen() -> None:
         ask=Decimal("100.02"),
         last=Decimal("100.01"),
         close=None,
-        observed_at=_AT,
-        source="IBKR",
-        realtime=True,
+        bid_size=None,
+        ask_size=None,
+        mode=MarketDataMode.REALTIME,
+        updated_at=_AT,
+        age_seconds=0.5,
         stale=False,
+        stale_reason=None,
+        generation=1,
+        source_id="ibkr",
+        source_label="IBKR",
+        coverage="由 IBKR 订阅权限决定",
     )
     assert quote.bid is not None
+    # The domain type carries no vendor market-data number: the adapter maps
+    # 1/2/3/4 onto the mode before the quote crosses the boundary.
+    assert not hasattr(quote, "effective_market_data_type")
+    assert not hasattr(quote, "request_id")
     assert not hasattr(quote, "__dict__")  # slots
     with pytest.raises(Exception):
         quote.symbol = "MSFT"  # type: ignore[misc]
 
 
+def test_market_quote_realtime_ready_requires_every_condition() -> None:
+    """The gate is preservation: a wrong upgrade would let stale data trade."""
+
+    def quote(**overrides) -> MarketQuote:
+        base = dict(
+            symbol="AAPL",
+            bid=Decimal("100"),
+            ask=Decimal("100.02"),
+            last=Decimal("100.01"),
+            close=None,
+            bid_size=None,
+            ask_size=None,
+            mode=MarketDataMode.REALTIME,
+            updated_at=_AT,
+            age_seconds=0.5,
+            stale=False,
+            stale_reason=None,
+            generation=1,
+            source_id="ibkr",
+            source_label="IBKR",
+            coverage="coverage",
+        )
+        base.update(overrides)
+        return MarketQuote(**base)
+
+    assert quote().realtime_ready is True
+    # Each condition on its own is enough to disqualify.
+    assert quote(stale=True, stale_reason="old").realtime_ready is False
+    assert quote(mode=MarketDataMode.DELAYED).realtime_ready is False
+    assert quote(bid=None).realtime_ready is False
+    assert quote(ask=None).realtime_ready is False
+    assert quote(bid=Decimal("0")).realtime_ready is False
+    # A crossed book is not usable.
+    assert (
+        quote(bid=Decimal("100.02"), ask=Decimal("100")).realtime_ready
+        is False
+    )
+
+
 def test_market_snapshot_subscription_and_health_shapes() -> None:
-    snapshot = MarketSnapshot(quotes=(), observed_at=_AT)
+    snapshot = MarketSnapshot(
+        generation=0,
+        connected=False,
+        ready=False,
+        reconnect_attempt=0,
+        quotes=(),
+        error_code=None,
+        message="idle",
+        observed_at=_AT,
+        source_id="ibkr",
+        source_label="IBKR",
+        coverage="coverage",
+    )
     assert snapshot.quotes == ()
+    assert snapshot.realtime_ready is False
+    assert snapshot.quote_for("AAPL") is None
     assert MarketSubscription(symbols=("AAPL",)).source is None
     assert MarketSubscription(symbols=("AAPL",), source="IBKR").source == "IBKR"
     health = MarketDataHealth(

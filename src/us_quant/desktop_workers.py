@@ -16,7 +16,10 @@ from typing import Callable
 
 from PySide6.QtCore import QThread, Signal
 
-from us_quant.market_data_service import MarketDataRequest, MarketDataService
+from us_quant.trading.application.market_data import (
+    MarketDataApplication,
+    MarketDataStartRequest,
+)
 from us_quant.universe import UniverseRefreshCancelled
 
 
@@ -47,18 +50,18 @@ class TaskThread(QThread):
 
 
 class StreamWorker(QThread):
-    """Qt thread adapter over a stream built by ``MarketDataService``.
+    """Qt thread adapter over the market data application.
 
-    This class owns *threading only*: it runs the stream, carries its
-    snapshots across the thread boundary and forwards the stop request.
-    Which provider to construct, with which credentials, timeouts, venue
-    and labels is decided by :class:`MarketDataService`; the worker never
-    inspects ``provider`` to build anything.
+    This class owns *threading only*: it runs the feed, carries its snapshots
+    across the thread boundary and forwards the stop request.  Which provider
+    to construct, with which credentials, timeouts, venue and labels is decided
+    by :class:`MarketDataApplication`; the worker never inspects the source id
+    to build anything, and it never holds the adapter.
 
-    The worker asks the service for the stream (rather than being handed
-    one) so that the push listener is ``snapshot_ready.emit``: a signal
-    emitted from this thread is delivered *queued* to the GUI thread, and
-    a listener that called the desktop directly would touch widgets from
+    The worker asks the application to prepare the feed (rather than being
+    handed an adapter) so that the push listener is ``snapshot_ready.emit``: a
+    signal emitted from this thread is delivered *queued* to the GUI thread,
+    and a listener that called the desktop directly would touch widgets from
     the stream thread.
     """
 
@@ -67,27 +70,28 @@ class StreamWorker(QThread):
 
     def __init__(
         self,
-        market_data: MarketDataService,
-        request: MarketDataRequest,
+        market_data: MarketDataApplication,
+        request: MarketDataStartRequest,
     ) -> None:
         super().__init__()
-        self.provider = request.provider
-        # The service that built this stream, so the worker can hand the
-        # stop request and any runtime failure back through it instead of
-        # reaching for the adapter directly.
+        self.source_id = request.source_id
+        # The application that owns the feed, so the worker can hand the stop
+        # request and any runtime failure back through it instead of reaching
+        # for the adapter directly.
         self.market_data = market_data
-        self.service = market_data.build_stream(
-            request, listener=self.snapshot_ready.emit
-        )
-        # Mirrors the venue the stream was built for; the desktop compares
-        # it against the service's current session venue to decide whether
-        # an extended-hours stream has to be rotated.
-        self.market_exchange = market_data.market_exchange_for(request)
+        market_data.prepare(request, listener=self.snapshot_ready.emit)
+        # The venue the application actually built the adapter with, read back
+        # rather than re-derived.  The resolver follows the US equity session,
+        # so asking it again here could return a different venue around a
+        # SMART/OVERNIGHT boundary; the desktop would then compare the live
+        # adapter against a venue it was never built for and skip the session
+        # rotation it owes.
+        self.market_exchange = market_data.prepared_market_exchange
 
     def run(self) -> None:
-        # ``market_data.run()`` owns the lifecycle half -- it marks the
-        # stream finished and records the failure itself, so this only
-        # has to carry the message to the GUI thread.
+        # ``market_data.run()`` owns the lifecycle half -- it marks the feed
+        # finished and records the failure itself, so this only has to carry
+        # the message to the GUI thread.
         try:
             self.market_data.run()
         except Exception as error:

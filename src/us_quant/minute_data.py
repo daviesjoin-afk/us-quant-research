@@ -10,7 +10,10 @@ from pathlib import Path
 import sqlite3
 from typing import Iterable
 
-from us_quant.ibkr_stream import StreamSnapshot
+from us_quant.trading.domain.market import (
+    MarketDataMode,
+    MarketSnapshot,
+)
 from us_quant.sqlite_support import connect_sqlite
 
 
@@ -23,7 +26,7 @@ class MinuteQuoteRecord:
     bid: Decimal | None
     ask: Decimal | None
     last: Decimal | None
-    market_data_type: int | None
+    mode: MarketDataMode
     realtime_ready: bool
     stale: bool
     stale_reason: str | None
@@ -55,7 +58,7 @@ class MinuteQuoteStore:
 
     def record_snapshot(
         self,
-        snapshot: StreamSnapshot,
+        snapshot: MarketSnapshot,
         *,
         symbols: Iterable[str] | None = None,
         evidence_origin: str = "captured_stream",
@@ -75,19 +78,22 @@ class MinuteQuoteStore:
         for quote in snapshot.quotes:
             if allowed is not None and quote.symbol not in allowed:
                 continue
-            observed = _parse_timestamp(
-                quote.updated_at or snapshot.observed_at
-            )
+            # Both fields are timezone-aware ``datetime`` in the domain type,
+            # so this is a normalisation step, not a parse.  A quote with no
+            # usable timestamp falls back to the snapshot's own observation
+            # time, which is what the pre-migration code did with the ISO
+            # string fallback.
+            observed = _as_utc(quote.updated_at or snapshot.observed_at)
             rows.append(
                 MinuteQuoteRecord(
                     symbol=quote.symbol,
                     minute=_minute_iso(observed),
-                    provider=quote.provider or snapshot.provider,
+                    provider=quote.source_label or snapshot.source_label,
                     coverage=quote.coverage or snapshot.coverage,
                     bid=quote.bid,
                     ask=quote.ask,
                     last=quote.last,
-                    market_data_type=quote.effective_market_data_type,
+                    mode=quote.mode,
                     realtime_ready=quote.realtime_ready,
                     stale=quote.stale,
                     stale_reason=quote.stale_reason,
@@ -106,7 +112,7 @@ class MinuteQuoteStore:
                     """
                     INSERT INTO minute_quote (
                         symbol, minute, provider, coverage, bid, ask, last,
-                        market_data_type, realtime_ready, stale,
+                        mode, realtime_ready, stale,
                         stale_reason, generation, recorded_at
                         , evidence_origin, source_age_seconds,
                         bid_size, ask_size
@@ -117,7 +123,7 @@ class MinuteQuoteStore:
                         bid = excluded.bid,
                         ask = excluded.ask,
                         last = excluded.last,
-                        market_data_type = excluded.market_data_type,
+                        mode = excluded.mode,
                         realtime_ready = excluded.realtime_ready,
                         stale = excluded.stale,
                         stale_reason = excluded.stale_reason,
@@ -137,7 +143,7 @@ class MinuteQuoteStore:
                             _decimal_text(row.bid),
                             _decimal_text(row.ask),
                             _decimal_text(row.last),
-                            row.market_data_type,
+                            row.mode.value,
                             int(row.realtime_ready),
                             int(row.stale),
                             row.stale_reason,
@@ -178,7 +184,7 @@ class MinuteQuoteStore:
         query = (
             """
             SELECT symbol, minute, provider, coverage, bid, ask, last,
-                   market_data_type, realtime_ready, stale,
+                   mode, realtime_ready, stale,
                    stale_reason, generation
                    , evidence_origin, source_age_seconds,
                      bid_size, ask_size
@@ -277,7 +283,7 @@ class MinuteQuoteStore:
                         bid TEXT,
                         ask TEXT,
                         last TEXT,
-                        market_data_type INTEGER,
+                        mode TEXT,
                         realtime_ready INTEGER NOT NULL,
                         stale INTEGER NOT NULL,
                         stale_reason TEXT,
@@ -299,12 +305,19 @@ class MinuteQuoteStore:
                     ON minute_quote(symbol, minute)
                     """
                 )
+                # Snapshot of the schema the database *arrived* with, taken
+                # before any ALTER below: it is what tells us whether this is
+                # a Market Data v1 database that still carries the retired
+                # ``market_data_type`` column.
                 columns = {
                     row[1]
                     for row in connection.execute(
                         "PRAGMA table_info(minute_quote)"
                     ).fetchall()
                 }
+                had_legacy_market_data_type = (
+                    "market_data_type" in columns
+                )
                 if "evidence_origin" not in columns:
                     connection.execute(
                         """
@@ -317,15 +330,75 @@ class MinuteQuoteStore:
                     ("source_age_seconds", "REAL"),
                     ("bid_size", "TEXT"),
                     ("ask_size", "TEXT"),
+                    ("mode", "TEXT"),
                 ):
                     if column not in columns:
                         connection.execute(
                             f"ALTER TABLE minute_quote "
                             f"ADD COLUMN {column} {declaration}"
                         )
+                # Same transaction as the ``mode`` ALTER above: either the
+                # column and its backfill both land, or neither does.
+                if had_legacy_market_data_type:
+                    _migrate_legacy_market_data_type(
+                        connection,
+                        columns=columns,
+                    )
 
     def _connect(self) -> sqlite3.Connection:
         return connect_sqlite(self.path)
+
+
+def _migrate_legacy_market_data_type(
+    connection: sqlite3.Connection,
+    *,
+    columns: set[str],
+) -> None:
+    """Backfill ``mode`` from the retired ``market_data_type`` column.
+
+    Market Data v1 persisted the IBKR market-data type as an integer
+    (``1`` realtime, ``2`` frozen, ``3`` delayed, ``4`` delayed/frozen);
+    v2 persists a ``mode`` string.  An upgraded database therefore carries
+    the legacy column with no ``mode`` value, and reading that as
+    ``UNKNOWN`` would silently downgrade historically valid realtime
+    evidence: ``targeted_replay`` rebuilds a domain ``MarketQuote`` from the
+    stored row, and ``MarketQuote.realtime_ready`` requires
+    ``mode is REALTIME``.
+
+    The mapping is taken from ``MarketDataMode`` itself rather than from
+    hard-coded strings.  Anything else -- ``NULL``, ``99``, a negative
+    value -- maps to ``UNKNOWN`` and stays unusable, because guessing
+    "realtime" from an unrecognised legacy type would let stale evidence
+    drive an intraday signal.
+
+    Only rows with no usable ``mode`` are touched, so re-running this on an
+    already-migrated database (or on a row a v2 build has since rewritten)
+    is a no-op and never overwrites a newer value.  The legacy column is
+    left in place as retired evidence; it is no longer read or written.
+    """
+
+    if "market_data_type" not in columns:
+        return
+    connection.execute(
+        """
+        UPDATE minute_quote
+        SET mode = CASE market_data_type
+                WHEN 1 THEN ?
+                WHEN 2 THEN ?
+                WHEN 3 THEN ?
+                WHEN 4 THEN ?
+                ELSE ?
+            END
+        WHERE mode IS NULL OR mode = ''
+        """,
+        (
+            MarketDataMode.REALTIME.value,
+            MarketDataMode.FROZEN.value,
+            MarketDataMode.DELAYED.value,
+            MarketDataMode.DELAYED_FROZEN.value,
+            MarketDataMode.UNKNOWN.value,
+        ),
+    )
 
 
 def _row_to_record(row: tuple[object, ...]) -> MinuteQuoteRecord:
@@ -337,9 +410,7 @@ def _row_to_record(row: tuple[object, ...]) -> MinuteQuoteRecord:
         bid=_to_decimal(row[4]),
         ask=_to_decimal(row[5]),
         last=_to_decimal(row[6]),
-        market_data_type=(
-            int(row[7]) if row[7] is not None else None
-        ),
+        mode=_to_mode(row[7]),
         realtime_ready=bool(row[8]),
         stale=bool(row[9]),
         stale_reason=str(row[10]) if row[10] is not None else None,
@@ -351,6 +422,21 @@ def _row_to_record(row: tuple[object, ...]) -> MinuteQuoteRecord:
         bid_size=_to_decimal(row[14]),
         ask_size=_to_decimal(row[15]),
     )
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalise a domain timestamp to UTC.
+
+    Accepts a ``datetime`` (the domain contract) and tolerates an ISO string
+    for rows replayed from an older store, so a legacy record does not crash
+    the recorder.
+    """
+
+    if isinstance(value, str):
+        return _parse_timestamp(value)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -370,3 +456,19 @@ def _decimal_text(value: Decimal | None) -> str | None:
 
 def _to_decimal(value: object) -> Decimal | None:
     return Decimal(str(value)) if value is not None else None
+
+
+def _to_mode(value: object) -> MarketDataMode:
+    """Read the persisted mode, defaulting to ``UNKNOWN``.
+
+    Rows written before the Market Data v2 migration have no ``mode`` column
+    value; an unreadable or absent mode is ``UNKNOWN`` rather than a guess,
+    because a wrong "realtime" would make stale evidence look usable.
+    """
+
+    if value is None:
+        return MarketDataMode.UNKNOWN
+    try:
+        return MarketDataMode(str(value))
+    except ValueError:
+        return MarketDataMode.UNKNOWN

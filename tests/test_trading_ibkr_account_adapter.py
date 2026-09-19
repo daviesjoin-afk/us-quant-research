@@ -28,8 +28,9 @@ import importlib.abc
 import importlib.machinery
 import pathlib
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from threading import Event, Thread
 from types import ModuleType
 from unittest.mock import patch
 
@@ -55,6 +56,10 @@ ALIAS = "DU***67"
 #: The script the stub ``run()`` replays.  A dict rather than an argument
 #: because the adapter constructs the app itself.
 _SCRIPT: dict = {}
+
+#: Every fake client the current refresh constructed, so a test can reach the
+#: instance the adapter built for itself.
+_CREATED_CLIENTS: list["_FakeEClient"] = []
 
 
 def _config(**overrides) -> IBKRConnectionConfig:
@@ -101,6 +106,11 @@ def _script(**overrides) -> dict:
         "connection_time": b"20260724 20:00:00 CST",
         "hang": False,
         "connect_error": None,
+        # Real IBKR delivers ``pnlSingle`` asynchronously, after the request
+        # call has already returned.  The default fake replies synchronously
+        # for brevity in the mapping tests; setting this makes it behave like
+        # the real socket, which is what the race regression needs.
+        "deferred_position_pnl": False,
     }
     values.update(overrides)
     return values
@@ -116,6 +126,15 @@ class _FakeEClient:
         self.requests: list[tuple[str, tuple]] = []
         self.cancelled: list[tuple[str, int]] = []
         self._script = _SCRIPT
+        #: Signalled from the network thread when a deferred ``reqPnLSingle``
+        #: has been issued, so the test can prove the adapter is still
+        #: waiting rather than having already built the portfolio.
+        self.position_pnl_requested = Event()
+        #: Released by the test to let the deferred reply through.
+        self.release_position_pnl = Event()
+        #: Safety valve so a buggy implementation cannot hang the suite.
+        self.deferred_release_timeout = 10.0
+        _CREATED_CLIENTS.append(self)
 
     # -- connection -----------------------------------------------------
 
@@ -157,7 +176,11 @@ class _FakeEClient:
                 value,
                 currency,
             )
-        self.accountSummaryEnd(9001)
+        if not self._script.get("skip_account_summary_end"):
+            # A mandatory callback that never arrives, when the flag is set:
+            # the read must fail rather than publish a half-populated
+            # account.  Guarded here because ``run`` drives the session.
+            self.accountSummaryEnd(9001)
         for account, contract, position, avg_cost in self._script[
             "positions"
         ]:
@@ -191,8 +214,26 @@ class _FakeEClient:
             ("reqPnLSingle", (reqId, account, model, conId))
         )
         reply = self._script["position_pnl"].get(conId)
-        if reply is not None:
+        if reply is None:
+            return
+        if not self._script["deferred_position_pnl"]:
+            # The simple mode: reply inline, so the mapping tests read as
+            # straight-line code.
             self.pnlSingle(reqId, *reply)
+            return
+
+        # The realistic mode: the reply comes from another thread, *after*
+        # this request method has returned -- exactly what a real socket
+        # does, and what the adapter must wait for.
+        self.position_pnl_requested.set()
+
+        def deliver() -> None:
+            self.release_position_pnl.wait(
+                self.deferred_release_timeout
+            )
+            self.pnlSingle(reqId, *reply)
+
+        Thread(target=deliver, daemon=True).start()
 
     def cancelAccountSummary(self, reqId) -> None:  # noqa: N802
         self.cancelled.append(("cancelAccountSummary", reqId))
@@ -278,6 +319,7 @@ def _refresh(script: dict, *, config=None, timeout=2.0):
 
     _SCRIPT.clear()
     _SCRIPT.update(script)
+    _CREATED_CLIENTS.clear()
     adapter = IBKRAccountAdapter(config or _config())
     with patch.dict(sys.modules, _stub_modules()):
         return adapter.refresh(timeout_seconds=timeout)
@@ -287,6 +329,57 @@ def _refresh_error(script: dict, *, config=None, timeout=2.0) -> Exception:
     with pytest.raises(Exception) as excinfo:
         _refresh(script, config=config, timeout=timeout)
     return excinfo.value
+
+
+class _DeferredRefresh:
+    """One ``refresh`` running on its own thread against a deferred fake.
+
+    The adapter is driven exactly as production drives it; only the fake's
+    reply timing differs.  Holding the refresh on a thread is what lets the
+    test observe *when* the portfolio was built relative to the callback.
+    """
+
+    def __init__(self, script: dict, *, timeout: float = 5.0) -> None:
+        self.script = script
+        self.timeout = timeout
+        self.result: list = []
+        self.error: list[BaseException] = []
+        self.done = Event()
+        self.thread = Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        try:
+            self.result.append(_refresh(self.script, timeout=self.timeout))
+        except BaseException as error:  # noqa: BLE001 - reported to the test
+            self.error.append(error)
+        finally:
+            self.done.set()
+
+    def start(self) -> "_DeferredRefresh":
+        self.thread.start()
+        return self
+
+    @property
+    def client(self) -> "_FakeEClient":
+        assert _CREATED_CLIENTS, "the fake client was not captured"
+        return _CREATED_CLIENTS[-1]
+
+    def wait_for_request(self, timeout: float = 5.0) -> None:
+        """Block until the fake has issued a deferred ``reqPnLSingle``."""
+
+        assert self.client.position_pnl_requested.wait(timeout), (
+            "the adapter never issued reqPnLSingle"
+        )
+
+    @property
+    def finished(self) -> bool:
+        return self.done.is_set()
+
+    def release(self) -> None:
+        self.client.release_position_pnl.set()
+
+    def join(self, timeout: float = 10.0) -> None:
+        self.thread.join(timeout)
 
 
 # -- the read-only Paper gate ------------------------------------------
@@ -881,3 +974,439 @@ def test_the_domain_types_are_frozen_and_slotted() -> None:
     ):
         assert dataclass_type.__dataclass_params__.frozen is True
         assert dataclass_type.__slots__ != ()
+
+# -- the async position P&L race ---------------------------------------
+#
+# Real IBKR delivers ``pnlSingle`` on its network thread, after
+# ``reqPnLSingle`` has already returned.  The fake above replies inline by
+# default, which is convenient for the mapping tests but hides exactly this
+# timing.  These tests use the deferred mode so the adapter has to wait for a
+# callback that genuinely has not happened yet.
+
+
+def _deferred_script(**overrides) -> dict:
+    values = {
+        "deferred_position_pnl": True,
+        "metrics": [("NetLiquidation", "10000", "USD")],
+        "positions": [(RAW_ACCOUNT, _Contract(), "2", 36.0)],
+        "position_pnl": {1: (2, 5.5, 7.25, -1.5, 72.0)},
+        # The account P&L reply arrives promptly -- that is the realistic
+        # race: the account callback is back while the position callback is
+        # still outstanding.  Leaving this ``None`` would let a buggy
+        # implementation hide behind its own wait on the account event, and
+        # the regression below would pass on the broken code.
+        "account_pnl": (12.5, 30.25, -4.0),
+    }
+    values.update(overrides)
+    return _script(**values)
+
+
+def test_a_deferred_position_pnl_reply_is_waited_for() -> None:
+    """The regression: the portfolio must not be built before the callback.
+
+    The assertion that makes this non-vacuous is the *negative* one below.
+    The callback is withheld, so a correct adapter is still blocked on it,
+    while the previous implementation returned as soon as the mandatory
+    callbacks landed.  Checking the result alone would not catch that: the
+    released callback can land between the broken return and the assertion,
+    which is a race that passes by luck.
+
+    On the pre-fix implementation this test fails, deterministically.
+    """
+
+    refresh = _DeferredRefresh(_deferred_script()).start()
+    try:
+        refresh.wait_for_request()
+        # The reply is being withheld.  A correct adapter is still inside
+        # ``refresh``; the broken one has already returned with ``None``
+        # P&L.  The window is generous because the difference is not close:
+        # the broken path needs microseconds, the correct one is blocked for
+        # the whole grace period.
+        completed_without_waiting = refresh.done.wait(0.5)
+        assert completed_without_waiting is False, (
+            "the adapter built the portfolio without waiting for pnlSingle"
+        )
+        refresh.release()
+    finally:
+        refresh.release()
+        refresh.join()
+
+    assert refresh.error == []
+    assert len(refresh.result) == 1
+    portfolio = refresh.result[0]
+    position = portfolio.positions[0]
+
+    # The evidence the callback carried is present, which is only possible
+    # if the adapter actually waited.
+    assert position.market_value == Decimal("72.0")
+    assert position.daily_pnl == Decimal("5.5")
+    assert position.unrealized_pnl == Decimal("7.25")
+    assert position.realized_pnl == Decimal("-1.5")
+    assert position.mark == Decimal("36.0")
+
+
+def test_the_deferred_reply_is_not_required_to_be_fast() -> None:
+    """A reply that arrives well after the request still lands.
+
+    The callback is released only once the test has confirmed the adapter is
+    still waiting, so the data can only be present if the wait happened.
+    """
+
+    refresh = _DeferredRefresh(_deferred_script()).start()
+    try:
+        refresh.wait_for_request()
+        assert refresh.done.wait(0.5) is False
+        # Some unrelated work while the reply is still withheld.
+        for _ in range(1000):
+            pass
+        assert refresh.finished is False
+        refresh.release()
+    finally:
+        refresh.release()
+        refresh.join()
+
+    assert refresh.result[0].positions[0].market_value == Decimal("72.0")
+
+
+def test_a_deferred_reply_that_never_arrives_leaves_none() -> None:
+    """Optional evidence may be absent; the read must still succeed."""
+
+    script = _deferred_script(
+        positions=[
+            (RAW_ACCOUNT, _Contract(symbol="AAPL"), "2", 36.0),
+            (RAW_ACCOUNT, _Contract(conId=9, symbol="MSFT"), "3", 250.0),
+        ],
+        position_pnl={},
+    )
+    refresh = _DeferredRefresh(script, timeout=3.0).start()
+    refresh.join()
+
+    assert refresh.error == [], "an absent P&L must not fail the refresh"
+    portfolio = refresh.result[0]
+    assert portfolio.account.net_liquidation == Decimal("10000")
+    assert len(portfolio.positions) == 2
+    for position in portfolio.positions:
+        assert position.market_value is None
+        assert position.daily_pnl is None
+        assert position.mark is None
+
+
+def test_no_pnl_callback_at_all_still_returns_a_portfolio() -> None:
+    """No ``reqPnL`` and no ``reqPnLSingle`` reply: still a valid read."""
+
+    script = _script(
+        metrics=[("NetLiquidation", "10000", "USD")],
+        positions=[(RAW_ACCOUNT, _Contract(), "2", 36.0)],
+        account_pnl=None,
+        position_pnl={},
+    )
+    portfolio = _refresh(script)
+
+    assert isinstance(portfolio, BrokerAccountPortfolio)
+    assert portfolio.account.net_liquidation == Decimal("10000")
+    assert portfolio.account.daily_pnl is None
+    assert portfolio.account.pnl_source == "unavailable"
+    assert portfolio.positions[0].market_value is None
+
+
+def test_an_optional_pnl_timeout_does_not_raise() -> None:
+    """The optional window expiring is not a refresh failure."""
+
+    script = _script(
+        metrics=[("NetLiquidation", "10000", "USD")],
+        positions=[(RAW_ACCOUNT, _Contract(), "2", 36.0)],
+        position_pnl={},
+    )
+    # No exception: this would raise BrokerAccountUnavailable if the
+    # optional wait had been wired through the mandatory ``_wait_for``.
+    portfolio = _refresh(script, timeout=1.0)
+
+    assert portfolio.positions[0].market_value is None
+
+
+def test_the_optional_wait_never_exceeds_the_global_timeout() -> None:
+    """The grace period is a *ceiling*, not an addition.
+
+    With ``timeout_seconds=0.5`` the optional window must be clamped to the
+    global deadline; otherwise a short timeout would silently become
+    ``0.5 + grace``.
+    """
+
+    from time import monotonic
+
+    from us_quant.trading.adapters.ibkr.account import (
+        OPTIONAL_PNL_GRACE_SECONDS,
+    )
+
+    script = _script(
+        metrics=[("NetLiquidation", "10000", "USD")],
+        positions=[(RAW_ACCOUNT, _Contract(), "2", 36.0)],
+        position_pnl={},
+    )
+    started = monotonic()
+    _refresh(script, timeout=0.5)
+    elapsed = monotonic() - started
+
+    assert elapsed < 0.5 + OPTIONAL_PNL_GRACE_SECONDS, (
+        "the optional grace period was added on top of the global timeout"
+    )
+
+
+def test_many_positions_share_one_grace_period() -> None:
+    """The wait is bounded by the window, not by the position count.
+
+    Ten silent positions must not cost ten grace periods.
+    """
+
+    from time import monotonic
+
+    from us_quant.trading.adapters.ibkr.account import (
+        OPTIONAL_PNL_GRACE_SECONDS,
+    )
+
+    positions = [
+        (RAW_ACCOUNT, _Contract(conId=index, symbol=f"S{index}"), "1", 10.0)
+        for index in range(10)
+    ]
+    script = _script(
+        metrics=[("NetLiquidation", "10000", "USD")],
+        positions=positions,
+        position_pnl={},
+    )
+    started = monotonic()
+    portfolio = _refresh(script, timeout=30.0)
+    elapsed = monotonic() - started
+
+    assert len(portfolio.positions) == 10
+    assert elapsed < OPTIONAL_PNL_GRACE_SECONDS * 2, (
+        f"ten silent positions cost {elapsed:.2f}s; the window is not shared"
+    )
+
+
+def test_mandatory_and_optional_timeouts_are_distinct() -> None:
+    """The two classes of callback fail differently, on purpose.
+
+    A missing *mandatory* callback is an unavailable account.  A missing
+    *optional* one is ``None`` fields on an otherwise valid portfolio.
+    """
+
+    # Mandatory: the account summary never completes.
+    with pytest.raises(BrokerAccountUnavailable):
+        _refresh(
+            _script(
+                metrics=[("NetLiquidation", "10000", "USD")],
+                skip_account_summary_end=True,
+            ),
+            timeout=0.3,
+        )
+
+    # Optional: no P&L at all, still a portfolio.
+    portfolio = _refresh(
+        _script(
+            metrics=[("NetLiquidation", "10000", "USD")],
+            positions=[(RAW_ACCOUNT, _Contract(), "2", 36.0)],
+            position_pnl={},
+        ),
+        timeout=1.0,
+    )
+    assert portfolio.account.daily_pnl is None
+
+
+def test_the_teardown_cancels_and_disconnects_after_a_deferred_reply() -> None:
+    """Whatever the callbacks did, the socket is released."""
+
+    refresh = _DeferredRefresh(_deferred_script()).start()
+    try:
+        refresh.wait_for_request()
+        refresh.release()
+    finally:
+        refresh.release()
+        refresh.join()
+
+    client = refresh.client
+    names = [name for name, _ in client.cancelled]
+    assert "cancelAccountSummary" in names
+    assert "cancelPositions" in names
+    assert "cancelPnL" in names
+    assert "cancelPnLSingle" in names
+    assert client.disconnected is True
+
+
+def test_the_pnl_single_event_is_registered_before_the_request() -> None:
+    """Otherwise an early reply would be dropped and burn the grace period.
+
+    Asserted structurally on the source: the ``position_pnl_events[...]``
+    assignment must appear before the ``app.reqPnLSingle(...)`` call.
+    """
+
+    path = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "src"
+        / "us_quant"
+        / "trading"
+        / "adapters"
+        / "ibkr"
+        / "account.py"
+    )
+    text = path.read_text(encoding="utf-8")
+    registration = text.index("position_pnl_events[request_id] = Event()")
+    request = text.index("app.reqPnLSingle(")
+    assert registration < request, (
+        "the event must be registered before the request is issued"
+    )
+
+
+def test_the_callback_stores_before_it_signals() -> None:
+    """The waiter reads the stored row the moment the event is set."""
+
+    path = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "src"
+        / "us_quant"
+        / "trading"
+        / "adapters"
+        / "ibkr"
+        / "account.py"
+    )
+    text = path.read_text(encoding="utf-8")
+    store = text.index("self.position_pnl[reqId] = _RawPositionPnl(")
+    signal = text.index("event.set()", store)
+    assert store < signal, "the event must be set after the data is stored"
+
+
+def test_the_optional_helper_never_raises() -> None:
+    """It returns on the deadline instead of raising."""
+
+    from threading import Event
+
+    from us_quant.trading.adapters.ibkr.account import (
+        _wait_for_optional_events,
+    )
+
+    never = Event()
+    _wait_for_optional_events((never,), deadline=0.0)  # returns immediately
+    _wait_for_optional_events((), deadline=1.0)
+    _wait_for_optional_events((never,), deadline=-1.0)
+
+
+# -- the timezone contract on the broker domain ------------------------
+
+
+def test_the_broker_account_snapshot_rejects_a_naive_timestamp() -> None:
+    """A naive ``observed_at`` must not be silently promoted to UTC.
+
+    Guessing a timezone is how a stale account would come to look fresh at
+    the preflight's 300-second gate.
+    """
+
+    naive = datetime(2026, 9, 19, 10, 0)
+    with pytest.raises(ValueError) as excinfo:
+        BrokerAccountSnapshot(
+            environment=Environment.PAPER,
+            account_alias=ALIAS,
+            net_liquidation=Decimal("1"),
+            cash=None,
+            available_funds=None,
+            buying_power=None,
+            gross_position_value=None,
+            excess_liquidity=None,
+            maintenance_margin=None,
+            cushion=None,
+            daily_pnl=None,
+            unrealized_pnl=None,
+            realized_pnl=None,
+            observed_at=naive,
+            pnl_source="test",
+        )
+    assert "timezone-aware" in str(excinfo.value)
+
+
+def test_the_broker_position_snapshot_rejects_a_naive_timestamp() -> None:
+    with pytest.raises(ValueError) as excinfo:
+        _position(observed_at=datetime(2026, 9, 19, 10, 0))
+    assert "timezone-aware" in str(excinfo.value)
+
+
+def test_an_aware_utc_timestamp_is_accepted() -> None:
+    account = BrokerAccountSnapshot(
+        environment=Environment.PAPER,
+        account_alias=ALIAS,
+        net_liquidation=Decimal("1"),
+        cash=None,
+        available_funds=None,
+        buying_power=None,
+        gross_position_value=None,
+        excess_liquidity=None,
+        maintenance_margin=None,
+        cushion=None,
+        daily_pnl=None,
+        unrealized_pnl=None,
+        realized_pnl=None,
+        observed_at=datetime(2026, 9, 19, 10, 0, tzinfo=timezone.utc),
+        pnl_source="test",
+    )
+    assert account.observed_at.tzinfo is timezone.utc
+
+
+def test_an_aware_non_utc_timestamp_is_accepted() -> None:
+    """The contract is *aware*, not *UTC-only*.
+
+    A broker may report in a local offset; the domain keeps it as given and
+    the consumer converts.
+    """
+
+    offset = timezone(timedelta(hours=8))
+    account = BrokerAccountSnapshot(
+        environment=Environment.PAPER,
+        account_alias=ALIAS,
+        net_liquidation=Decimal("1"),
+        cash=None,
+        available_funds=None,
+        buying_power=None,
+        gross_position_value=None,
+        excess_liquidity=None,
+        maintenance_margin=None,
+        cushion=None,
+        daily_pnl=None,
+        unrealized_pnl=None,
+        realized_pnl=None,
+        observed_at=datetime(2026, 9, 19, 10, 0, tzinfo=offset),
+        pnl_source="test",
+    )
+    assert account.observed_at.utcoffset() == timedelta(hours=8)
+
+    position = _position(observed_at=datetime(2026, 9, 19, 10, 0, tzinfo=offset))
+    assert position.observed_at.utcoffset() == timedelta(hours=8)
+
+
+def test_the_adapter_produces_an_aware_timestamp() -> None:
+    """The production path is unaffected by the new strictness."""
+
+    portfolio = _refresh(
+        _script(metrics=[("NetLiquidation", "10000", "USD")])
+    )
+    assert portfolio.account.observed_at.tzinfo is not None
+    assert portfolio.account.observed_at.utcoffset() is not None
+
+
+def test_the_preflight_fails_closed_on_a_naive_timestamp() -> None:
+    """``_age_seconds`` must not guess UTC."""
+
+    from us_quant.targeted_preflight import _age_seconds
+
+    now = datetime(2026, 9, 19, 10, 0, tzinfo=timezone.utc)
+    assert _age_seconds(datetime(2026, 9, 19, 10, 0), now) is None
+    assert _age_seconds(None, now) is None
+    assert _age_seconds("2026-09-19T10:00:00+00:00", now) is None
+    # An aware value still ages normally, including a non-UTC one.
+    assert _age_seconds(
+        datetime(2026, 9, 19, 9, 59, 55, tzinfo=timezone.utc), now
+    ) == Decimal("5.0")
+
+
+def test_the_preflight_still_enforces_the_300_second_rule() -> None:
+    """The rule is unchanged: 0 <= age <= 300 passes, beyond fails."""
+
+    from us_quant.targeted_preflight import MAXIMUM_ACCOUNT_AGE_SECONDS
+
+    assert MAXIMUM_ACCOUNT_AGE_SECONDS == Decimal("300")

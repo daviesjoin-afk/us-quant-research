@@ -226,11 +226,33 @@ def test_a_missing_account_fails_closed() -> None:
     assert _gates(result)["paper_account_truth"] is False
 
 
-def test_a_naive_observation_time_is_read_as_utc() -> None:
-    """A naive ``datetime`` must not be treated as "now"."""
+def test_a_naive_observation_time_is_refused_at_construction() -> None:
+    """A naive ``datetime`` is rejected, not quietly read as UTC.
 
-    naive = _account(
-        observed_at=(NOW - timedelta(minutes=30)).replace(tzinfo=None)
+    Broker Account v2 tightened this: the domain refuses a timestamp with no
+    timezone instead of assuming one.  Guessing UTC is how an unageable
+    observation would come to look fresh at the 300-second gate, so the
+    failure belongs at construction -- next to the code that built it --
+    rather than as a silently wrong age at the point of use.
+    """
+
+    with pytest.raises(ValueError) as excinfo:
+        _account(
+            observed_at=(NOW - timedelta(minutes=30)).replace(tzinfo=None)
+        )
+    assert "timezone-aware" in str(excinfo.value)
+
+
+def test_a_naive_observation_time_fails_the_preflight_closed() -> None:
+    """And if one ever reaches the preflight, it is un-ageable.
+
+    Constructed by bypassing the domain guard, because the point is what the
+    *consumer* does with a value the contract forbids.
+    """
+
+    naive = _account()
+    object.__setattr__(
+        naive, "observed_at", (NOW - timedelta(minutes=30)).replace(tzinfo=None)
     )
     result = evaluate_target_preflight(
         "AAPL",
@@ -243,6 +265,7 @@ def test_a_naive_observation_time_is_read_as_utc() -> None:
     )
 
     assert _gates(result)["paper_account_truth"] is False
+    assert result.account_age_seconds is None
 
 
 def test_the_domain_timestamp_is_not_re_parsed_as_a_string() -> None:

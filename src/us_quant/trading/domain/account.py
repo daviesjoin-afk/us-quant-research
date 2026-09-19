@@ -41,6 +41,21 @@ from decimal import Decimal
 from us_quant.trading.domain.common import ONE, ZERO, Environment
 
 
+def _require_aware(value: datetime, label: str) -> None:
+    """Raise unless ``value`` carries a real UTC offset.
+
+    ``tzinfo is not None`` alone is not enough: a ``tzinfo`` whose
+    ``utcoffset()`` returns ``None`` is still effectively naive, and
+    subtracting it from an aware value raises deep inside the caller.  Both
+    checks are needed for the contract to mean what it says.
+    """
+
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(
+            f"{label} observed_at must be timezone-aware"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class Position:
     symbol: str
@@ -128,6 +143,19 @@ class BrokerAccountSnapshot:
     observed_at: datetime
     pnl_source: str
 
+    def __post_init__(self) -> None:
+        """Refuse a timestamp with no timezone.
+
+        An aware ``datetime`` is the contract, and a naive one is not
+        quietly promoted to UTC: guessing a timezone is how a stale account
+        would come to look fresh, and the preflight's 300-second freshness
+        gate reads this field.  Failing here means the mistake surfaces at
+        construction, next to the code that made it, rather than as a
+        silently wrong age at the point of use.
+        """
+
+        _require_aware(self.observed_at, "broker account")
+
 
 @dataclass(frozen=True, slots=True)
 class BrokerPositionSnapshot:
@@ -163,6 +191,11 @@ class BrokerPositionSnapshot:
     realized_pnl: Decimal | None
 
     observed_at: datetime
+
+    def __post_init__(self) -> None:
+        """Refuse a timestamp with no timezone.  See the account type."""
+
+        _require_aware(self.observed_at, "broker position")
 
     @property
     def cost_basis(self) -> Decimal:

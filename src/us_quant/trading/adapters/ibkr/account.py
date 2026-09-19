@@ -36,6 +36,7 @@ IBKR exception name.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -68,6 +69,15 @@ from us_quant.trading.ports.broker_account import (
     BrokerAccountUnavailable,
     BrokerAccountValidationError,
 )
+
+
+#: Shared grace window for the *optional* P&L replies (``reqPnL`` and every
+#: ``reqPnLSingle``).  It is one window for all of them, not one per request:
+#: a per-request wait would make a many-position account slower in proportion
+#: to its holdings.  Whatever has not arrived by then is reported as ``None``
+#: -- an absent P&L never fails an account read, because the balances and
+#: positions are already valid broker truth.
+OPTIONAL_PNL_GRACE_SECONDS = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +291,13 @@ class IBKRAccountAdapter:
                     realized_pnl=optional_decimal(realizedPnL),
                     market_value=optional_decimal(value),
                 )
+                # Store first, signal second.  The waiting thread reads
+                # ``self.position_pnl`` the moment the event is set, so
+                # setting it before the data is visible would let the read
+                # race the write and observe a missing row.
+                event = position_pnl_events.get(reqId)
+                if event is not None:
+                    event.set()
 
             def error(
                 self,
@@ -306,6 +323,10 @@ class IBKRAccountAdapter:
         account_request_id = 9001
         account_pnl_request_id = 9300
         position_pnl_requests: dict[int, tuple[str, int]] = {}
+        #: One event per outstanding ``reqPnLSingle``, set by the matching
+        #: ``pnlSingle`` callback.  Populated before each request is issued
+        #: so an early reply cannot be missed.
+        position_pnl_events: dict[int, Event] = {}
         try:
             try:
                 connect_ibkr_client(app, self.config)
@@ -352,6 +373,12 @@ class IBKRAccountAdapter:
                     position.account,
                     position.con_id,
                 )
+                # Register the event *before* issuing the request.  The
+                # reply is asynchronous, so a callback that arrives before
+                # this line would find no event to set and the wait below
+                # would then burn the whole grace period on a row that is
+                # already present.
+                position_pnl_events[request_id] = Event()
                 app.reqPnLSingle(
                     request_id,
                     position.account,
@@ -359,13 +386,23 @@ class IBKRAccountAdapter:
                     position.con_id,
                 )
 
-            # The account P&L reply is a courtesy of the same connection and
-            # is not waited on to the deadline: an account read must not fail
-            # because the optional P&L callback was slow.  Whatever arrived is
-            # used; what did not stays ``None`` rather than becoming a guess.
-            remaining = deadline - monotonic()
-            if remaining > 0:
-                account_pnl_event.wait(min(2.0, remaining))
+            # Account P&L and position P&L are *optional evidence*: the
+            # balances and positions above are already valid broker truth.
+            # They share one bounded grace window, so a slow reply costs a
+            # fixed wait rather than one grace period per position.  A
+            # missing reply leaves ``None`` -- never a failure, and never a
+            # guessed number.
+            optional_deadline = min(
+                deadline,
+                monotonic() + OPTIONAL_PNL_GRACE_SECONDS,
+            )
+            _wait_for_optional_events(
+                (
+                    account_pnl_event,
+                    *position_pnl_events.values(),
+                ),
+                deadline=optional_deadline,
+            )
 
             return _to_portfolio(
                 raw_account=raw_account,
@@ -596,6 +633,32 @@ def _wait_for(event: Event, deadline: float, label: str) -> None:
         raise BrokerAccountUnavailable(
             f"timed out waiting for {label}"
         )
+
+
+def _wait_for_optional_events(
+    events: Iterable[Event],
+    *,
+    deadline: float,
+) -> None:
+    """Wait for optional callbacks until they all arrive or ``deadline`` passes.
+
+    Never raises.  These are the P&L replies: the account balances and
+    positions are already valid broker truth without them, so a slow or
+    absent reply degrades to ``None`` fields rather than failing the read.
+
+    The whole sequence shares one absolute ``deadline``, which is what keeps
+    the cost bounded.  Waiting per event with a fresh timeout would make the
+    total grow linearly with the number of positions -- ten holdings would
+    cost ten grace periods.  Because the callbacks arrive on the network
+    thread, waiting on the first one also gives every other event time to
+    complete, so a single pass is enough.
+    """
+
+    for event in events:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return
+        event.wait(remaining)
 
 
 __all__ = ["IBKRAccountAdapter"]

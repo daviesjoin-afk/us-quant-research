@@ -399,16 +399,20 @@ def _age_seconds(
 ) -> Decimal | None:
     """How old an observation is, from a domain ``datetime``.
 
-    The domain already carries a timezone-aware ``datetime``, so there is no
-    string parsing here any more.  A naive value is read as UTC rather than
-    rejected, and anything that is not a ``datetime`` yields ``None`` so a
-    malformed observation fails closed instead of looking fresh.
+    Returns ``None`` for anything that is not an aware ``datetime``: a
+    missing value, a string, or a naive timestamp.  A naive timestamp is
+    deliberately *not* read as UTC.  This age feeds the account-freshness
+    gate, so guessing a timezone could make an unageable observation look
+    fresh and let it through; failing closed instead turns it into
+    ``account_age is None`` and therefore ``account_truth = False``.
     """
 
-    if not isinstance(timestamp, datetime):
+    if (
+        not isinstance(timestamp, datetime)
+        or timestamp.tzinfo is None
+        or timestamp.utcoffset() is None
+    ):
         return None
-    if timestamp.tzinfo is None:
-        timestamp = timestamp.replace(tzinfo=timezone.utc)
     return Decimal(
         str(
             round(

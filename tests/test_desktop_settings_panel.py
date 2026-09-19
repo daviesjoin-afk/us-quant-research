@@ -107,13 +107,21 @@ DECLARED_REFACTOR_SURFACE = frozenset(
 # added the v2 page composer.  The delta is declared here so the guard below
 # can assert it *exactly* instead of merely tolerating it.
 LATER_ROUND_REMOVED_METHODS = (
+    # Broker Account v2 deleted the legacy account page builder;
+    # the account route is a native v2 page now.
+    "_account_tab",
+    "_populate_account_view",
+
     "_build_legacy_workspace",
     "_build_unified_workflow",
     "_workflow_tabs",
     "_workflow_scroll_page",
     "_workspace_tabs",
 )
-LATER_ROUND_ADDED_METHODS = ("_build_v2_pages",)
+LATER_ROUND_ADDED_METHODS = (
+    "_populate_dashboard_account_cards",
+    "_refresh_account_surfaces",
+"_build_v2_pages",)
 
 # Trading Core v2 also rewrote these two: `_build_ui` now composes the v2
 # shell, and `_targeted_robustness_finished` navigates through it.
@@ -144,9 +152,42 @@ MARKET_DATA_V2_METHODS = (
     "_api_provider_changed",
 )
 
+# Broker Account v2: the methods this round rewrote because the
+# account truth moved from ``IBKRReadOnlySnapshot``/``PortfolioView``
+# to the domain ``BrokerAccountPortfolio``, and because the account
+# page became a native Desktop UI v2 page.
+BROKER_ACCOUNT_V2_METHODS = (
+    "_account_snapshot_finished",
+    "_export_terminal_state",
+    "_paper_simulation_capital",
+    "_populate_auto_quant_snapshot",
+    "_refresh_account_snapshot",
+    "_refresh_cards",
+    "_refresh_queue_table",
+    "_refresh_target_preflight",
+    "_refresh_universe",
+    "_research_capital_changed",
+    "_retry_failed",
+    "_run_backtest_workspace",
+    "_run_history",
+    "_run_public_history",
+    "_run_scan",
+    "_schedule_history",
+    "_settings_tab",
+    "_start_shadow",
+    "_strategy_registry_selection_changed",
+)
+
 #: The frozen handlers this round legitimately rewrote, with the reason.
 #: Declared so `test_the_settings_handler_is_unchanged` can assert the
 #: exact delta instead of only the untouched remainder.
+
+# Broker Account v2: modules whose bytes moved with this round.
+BROKER_ACCOUNT_V2_CHANGED_MODULES = (
+    "src/us_quant/desktop_settings.py",
+    "src/us_quant/ibkr_paper_orders.py",
+)
+
 MARKET_DATA_V2_FROZEN_HANDLERS = (
     # The save path now hands credentials to the application request.
     "_save_user_preferences",
@@ -1417,16 +1458,26 @@ def test_only_the_settings_tab_was_rewritten() -> None:
         set(DECLARED_REFACTOR_SURFACE)
         | set(LATER_ROUND_UI_METHODS)
         | set(MARKET_DATA_V2_METHODS)
+        | set(BROKER_ACCOUNT_V2_METHODS)
     )
     # Exact, not a subset: every changed method must be declared, and
     # every declared method must actually have changed.
     assert set(changed) <= allowed
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)
+    assert set(BROKER_ACCOUNT_V2_METHODS) <= set(changed)
     assert "_settings_tab" in changed
 
 
 def test_the_frozen_settings_modules_are_untouched() -> None:
-    """Spec 24: the two application services must not change here."""
+    """Spec 24: the two application services must not change here.
+
+    ``desktop_settings.py`` moved this round: Broker Account v2 made the
+    account application the connection-config owner, so the transaction now
+    asks it for the config and only consults the runtime guards when the
+    config actually changed.  That file is declared below and asserted to
+    have changed, so the exemption cannot silently swallow an unrelated
+    edit -- and the other two modules must still be byte-identical.
+    """
 
     for path in (
         "src/us_quant/desktop_settings.py",
@@ -1436,11 +1487,16 @@ def test_the_frozen_settings_modules_are_untouched() -> None:
         base = _base_source(path)
         if base is None:
             pytest.fail(
-            "base commit "
-            f"{BASE_COMMIT} is unreachable; the byte-equivalence "
-            "guard cannot run"
-        )
+                "base commit "
+                f"{BASE_COMMIT} is unreachable; the byte-equivalence "
+                "guard cannot run"
+            )
         current = (_REPO_ROOT / path).read_text(encoding="utf-8")
+        if path in BROKER_ACCOUNT_V2_CHANGED_MODULES:
+            # Declared as changed: assert it really did change, so the
+            # declaration cannot mask an untouched (or reverted) file.
+            assert current != base, path
+            continue
         assert current == base, path
 
 

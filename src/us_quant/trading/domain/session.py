@@ -24,9 +24,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from us_quant.trading.domain.account import (
-    AccountSnapshot,
     BrokerConnectionState,
     Position,
+    RiskAccountSnapshot,
 )
 from us_quant.trading.domain.market import MarketDataHealth
 from us_quant.trading.domain.risk import RiskDecision
@@ -54,7 +54,7 @@ class TradingSnapshot:
     market_health: MarketDataHealth
     broker: BrokerConnectionState
 
-    account: AccountSnapshot | None
+    account: RiskAccountSnapshot | None
     positions: tuple[Position, ...]
 
     risk: RiskDecision | None

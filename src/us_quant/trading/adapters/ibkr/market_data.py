@@ -28,7 +28,7 @@ from us_quant.ibkr import (
     IBKRConnectionConfig,
     connect_ibkr_client,
 )
-from us_quant.ibkr_readonly import (
+from us_quant.trading.adapters.ibkr.support import (
     IBKRAPIUnavailable,
     INFORMATIONAL_ERROR_CODES,
     ensure_readonly_paper_config,

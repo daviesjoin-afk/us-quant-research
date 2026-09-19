@@ -91,7 +91,11 @@ FORBIDDEN_PORT_PREFIXES = (
 # The canonical types, and the module each must be defined in *within the
 # domain package*.
 CANONICAL_TYPES = {
-    "AccountSnapshot": "account.py",
+    "RiskAccountSnapshot": "account.py",
+    "BrokerAccountSnapshot": "account.py",
+    "BrokerPositionSnapshot": "account.py",
+    "BrokerAccountPortfolio": "account.py",
+    "BrokerDiagnostic": "account.py",
     "Position": "account.py",
     "BrokerConnectionState": "account.py",
     "Bar": "market.py",
@@ -120,26 +124,25 @@ CANONICAL_TYPES = {
 # They are the ones whose duplication would create two competing truths about
 # live account, position, order or risk state.
 GLOBALLY_UNIQUE_TYPES = (
-    "AccountSnapshot",
+    "RiskAccountSnapshot",
+    "BrokerAccountSnapshot",
+    "BrokerPositionSnapshot",
+    "BrokerAccountPortfolio",
     "OrderIntent",
     "RiskDecision",
     "Position",
 )
 
-# Transitional overlap, recorded rather than hidden.
+# Transitional overlaps: none, since Broker/Account v2.
 #
-# ``MarketQuote`` is defined twice on purpose for now: once as the new
-# provider-neutral domain type, and once as the pre-existing IBKR-specific
-# ``ibkr_readonly.MarketQuote`` (which carries ``request_id`` and
-# ``market_data_type`` -- vendor fields the domain type must not have).
-# ``ibkr_readonly.py`` is not migrated by this change; it is scheduled to
-# become ``trading/adapters/ibkr/account.py``, at which point its quote type
-# retires into the adapter and the overlap disappears.  This is the same
-# deliberate coexistence as ``TradingSessionPhase`` and
-# ``PaperWorkflowPhase``.
-KNOWN_TRANSITIONAL_OVERLAPS = {
-    "MarketQuote": ("market.py", "ibkr_readonly.py"),
-}
+# ``MarketQuote`` used to be defined twice: once as the provider-neutral
+# domain type and once as the pre-existing IBKR-specific
+# ``ibkr_readonly.MarketQuote`` (which carried ``request_id`` and
+# ``market_data_type``).  ``ibkr_readonly.py`` is deleted by the Broker/Account
+# v2 change, so the overlap is gone rather than merely recorded -- and this
+# dict must stay empty: any new duplicate core type fails the guard below
+# until it is deliberately written down.
+KNOWN_TRANSITIONAL_OVERLAPS: dict[str, tuple[str, str]] = {}
 
 
 def _python_files(directory: pathlib.Path) -> list[pathlib.Path]:
@@ -540,11 +543,23 @@ def test_shell_does_not_import_application_runtime_or_adapters() -> None:
 
 
 def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
+    """The v2 package holds the shell, the route table and native pages.
+
+    ``pages/account.py`` is the first genuinely native v2 page: the account
+    route no longer reuses a legacy builder from ``MainWindow``.
+    """
+
     desktop_v2 = _SRC / "desktop_v2"
-    assert {path.name for path in _python_files(desktop_v2)} == {
+    relative = {
+        path.relative_to(desktop_v2).as_posix()
+        for path in _python_files(desktop_v2)
+    }
+    assert relative == {
         "__init__.py",
         "navigation.py",
         "shell.py",
+        "pages/__init__.py",
+        "pages/account.py",
     }
 
 
@@ -667,7 +682,13 @@ def test_the_market_data_application_does_not_import_any_adapter() -> None:
 
 
 def test_only_composition_wires_the_concrete_market_data_adapters() -> None:
-    """Exactly one module knows both the application and the adapters."""
+    """Exactly one module knows both the market data application and adapters.
+
+    Since Broker/Account v2 there are two composition roots, one per chain.
+    This guard is scoped to the *market data* application so the account
+    composition root does not register as an extra wiring module -- and so a
+    new module wiring the market data chain still fails here.
+    """
 
     wiring_modules: list[str] = []
     for path in _all_source_files():
@@ -676,7 +697,7 @@ def test_only_composition_wires_the_concrete_market_data_adapters() -> None:
             modules, ("us_quant.trading.adapters",)
         )
         names_application = _matches(
-            modules, ("us_quant.trading.application",)
+            modules, ("us_quant.trading.application.market_data",)
         )
         if names_adapters and names_application:
             wiring_modules.append(
@@ -733,10 +754,21 @@ def test_the_strategy_and_risk_layers_do_not_import_a_market_data_adapter() -> N
 
 
 def test_the_market_data_adapters_expose_the_port_surface() -> None:
-    """Each adapter implements ``run``/``stop``/``snapshot``/``health``."""
+    """Each market data adapter implements ``run``/``stop``/``snapshot``/``health``.
+
+    Scoped to the modules that actually implement ``MarketDataPort``.  The
+    package also holds the account adapter (``ibkr/account.py``) and the
+    shared IBKR support module (``ibkr/support.py``), which are a different
+    chain with a different port and must not be judged by this surface.
+    """
 
     for path in sorted(MARKET_DATA_ADAPTERS.rglob("*.py")):
-        if path.name in {"__init__.py", "market_data_state.py"}:
+        if path.name in {
+            "__init__.py",
+            "market_data_state.py",
+            "account.py",
+            "support.py",
+        }:
             continue
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source)
@@ -757,6 +789,35 @@ def test_the_market_data_adapters_expose_the_port_surface() -> None:
                 assert required in methods, (
                     f"{path.name}:{klass.name} is missing {required}()"
                 )
+
+
+def test_every_market_data_adapter_module_is_covered_by_the_guard() -> None:
+    """The scoped guard above must not be silencing a real adapter.
+
+    If a new market data adapter is added under a name the guard skips, the
+    skip list would hide it.  This asserts the skip list is exactly the
+    known non-market-data modules.
+    """
+
+    present = {
+        path.relative_to(MARKET_DATA_ADAPTERS).as_posix()
+        for path in MARKET_DATA_ADAPTERS.rglob("*.py")
+    }
+    skipped = {
+        "__init__.py",
+        "market_data_state.py",
+        "ibkr/__init__.py",
+        "ibkr/account.py",
+        "ibkr/support.py",
+        "alpaca/__init__.py",
+        "finnhub/__init__.py",
+    }
+    covered = present - skipped
+    assert covered == {
+        "ibkr/market_data.py",
+        "alpaca/market_data.py",
+        "finnhub/market_data.py",
+    }, sorted(present)
 
 
 def test_market_data_state_keeps_the_transport_types_adapter_internal() -> None:
@@ -853,3 +914,325 @@ def test_the_ibkr_adapter_mixes_in_the_read_only_guard() -> None:
     assert "ReadOnlyEClientGuard" in source, (
         "the IBKR stream no longer applies ReadOnlyEClientGuard"
     )
+
+
+# -- Broker / Account v2 --------------------------------------------------
+
+# The v1 account architecture, retired by the broker account migration.  Both
+# modules are deleted outright: no compatibility re-export, no shim, no
+# "deprecated" import path left behind.  A module that is merely unreferenced
+# can still be resurrected, so existence is checked directly.
+RETIRED_ACCOUNT_MODULES = (
+    "us_quant.ibkr_readonly",
+    "us_quant.portfolio_view",
+)
+
+# The presentation DTOs and the account/market-data coupling that went with
+# them.  ``intraday_market_data_reasons`` is in the list because the account
+# chain used to answer a market-readiness question -- Market Data v2 owns that
+# answer now.
+RETIRED_ACCOUNT_NAMES = (
+    "IBKRReadOnlySnapshot",
+    "AccountView",
+    "PositionView",
+    "PortfolioView",
+    "intraday_market_data_reasons",
+    "build_portfolio_view",
+    "snapshot_to_redacted_dict",
+    "collect_readonly_snapshot",
+    # The generic name that invited a risk calculation to be read as broker
+    # truth.  It must not come back under this name.
+    "AccountSnapshot",
+)
+
+ACCOUNT_APPLICATION = _TRADING / "application" / "accounts.py"
+ACCOUNT_COMPOSITION = _TRADING / "composition" / "accounts.py"
+ACCOUNT_ADAPTER = _TRADING / "adapters" / "ibkr" / "account.py"
+ACCOUNT_PAGE = _SRC / "desktop_v2" / "pages" / "account.py"
+BROKER_ACCOUNT_PORT = _TRADING / "ports" / "broker_account.py"
+
+
+def _identifier_names(path: pathlib.Path) -> set[str]:
+    """Every *code* name and attribute the module mentions.
+
+    Read from the AST rather than the text so a docstring that names a
+    forbidden symbol -- explaining what was removed, for instance -- does not
+    trip a guard.  A guard that failed on documentation would push authors to
+    stop documenting removals, which is the opposite of what is wanted.
+    """
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.add(node.name)
+    return names
+
+
+def _attribute_calls(path: pathlib.Path) -> set[str]:
+    """Attribute names used in a *call*, e.g. ``app.reqMktData(...)``."""
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    calls: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(
+            node.func, ast.Attribute
+        ):
+            calls.add(node.func.attr)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            calls.add(node.func.id)
+    return calls
+
+
+def test_the_retired_account_modules_are_gone() -> None:
+    """``ibkr_readonly`` and ``portfolio_view`` are deleted, not orphaned."""
+
+    for module in RETIRED_ACCOUNT_MODULES:
+        path = _SRC / f"{module.removeprefix('us_quant.')}.py"
+        assert not path.exists(), (
+            f"{path.relative_to(_SRC).as_posix()} must not exist; the "
+            "broker account migration moved its behaviour to trading/"
+        )
+
+
+def test_no_module_imports_a_retired_account_module() -> None:
+    offenders: list[str] = []
+    for path in _all_source_files():
+        modules = _imports(path)
+        for retired in RETIRED_ACCOUNT_MODULES:
+            if retired in modules:
+                offenders.append(
+                    f"{path.relative_to(_SRC)} imports {retired}"
+                )
+    assert not offenders, offenders
+
+
+def test_no_module_redefines_a_retired_account_name() -> None:
+    """The v1 DTOs and the account/market-data coupling must not return."""
+
+    offenders: list[str] = []
+    for name in RETIRED_ACCOUNT_NAMES:
+        for path in _definitions(name):
+            offenders.append(f"{path.relative_to(_SRC)} defines {name}")
+    assert not offenders, offenders
+
+
+def test_the_account_adapter_never_requests_market_data() -> None:
+    """The account chain asks the broker about the account, nothing else.
+
+    This is the load-bearing separation: the v1 collector requested market
+    data and ran a SPY/QQQ readiness check from the account read, which is
+    how an account refresh came to overwrite the market badge.  Market
+    readiness belongs to Market Data v2 exclusively.
+    """
+
+    source = ACCOUNT_ADAPTER.read_text(encoding="utf-8")
+    for forbidden in (
+        "reqMarketDataType",
+        "reqMktData",
+        "cancelMktData",
+        "marketDataType",
+        "tickPrice",
+        "TickTypeEnum",
+        "reqContractDetails",
+    ):
+        assert forbidden not in _identifier_names(ACCOUNT_ADAPTER), (
+            f"the account adapter must not use {forbidden}"
+        )
+        assert forbidden not in _attribute_calls(ACCOUNT_ADAPTER), (
+            f"the account adapter must not call {forbidden}"
+        )
+    # And the module really does document the removal, so the guard above is
+    # not passing because the explanation was deleted.
+    assert "no market data" in source
+
+
+def test_the_account_adapter_keeps_vendor_types_private() -> None:
+    """Raw IBKR DTOs stay inside the adapter and are not exported."""
+
+    source = ACCOUNT_ADAPTER.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    exported = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "__all__"
+                for target in node.targets
+            )
+        ),
+        None,
+    )
+    assert exported is not None, "the adapter declares no __all__"
+    names = {
+        element.value
+        for element in exported.value.elts  # type: ignore[attr-defined]
+    }
+    assert names == {"IBKRAccountAdapter"}, names
+
+
+def test_the_account_application_does_not_import_an_adapter_or_qt() -> None:
+    """The application is provider-blind and UI-free."""
+
+    offending = _matches(
+        _imports(ACCOUNT_APPLICATION),
+        (
+            "PySide6",
+            "ibapi",
+            "us_quant.trading.adapters",
+            "us_quant.desktop",
+            "us_quant.desktop_v2",
+            "us_quant.paper",
+            "us_quant.ibkr_paper_orders",
+            "us_quant.ibkr_paper_gateway",
+            "us_quant.trading.application.market_data",
+        ),
+    )
+    assert not offending, sorted(offending)
+
+
+def test_the_account_application_does_not_import_the_ibkr_config_module() -> None:
+    """It owns the config *value*; it does not need the vendor module.
+
+    ``IBKRConnectionConfig`` is imported, which is the one deliberate
+    exception -- the config type is the connection contract.  What must not
+    appear is an adapter, a stream or ``ibapi``.
+    """
+
+    modules = _imports(ACCOUNT_APPLICATION)
+    assert "us_quant.ibkr" in modules
+    assert "us_quant.trading.adapters" not in modules
+    assert "ibapi" not in modules
+
+
+def test_the_account_page_imports_no_business_service() -> None:
+    """The page renders; it does not reach for a runtime or a transport."""
+
+    offending = _matches(
+        _imports(ACCOUNT_PAGE),
+        (
+            "PySide6.QtNetwork",
+            "ibapi",
+            "us_quant.trading.adapters",
+            "us_quant.trading.application",
+            "us_quant.trading.composition",
+            "us_quant.ibkr",
+            "us_quant.paper_trading_service",
+            "us_quant.paper_session",
+            "us_quant.paper_workflow",
+            "us_quant.ibkr_paper_orders",
+            "us_quant.ibkr_paper_gateway",
+            "us_quant.auto_quant",
+            "us_quant.risk",
+            "us_quant.strategy_registry",
+        ),
+    )
+    assert not offending, sorted(offending)
+
+
+def test_only_account_composition_wires_the_concrete_account_adapter() -> None:
+    """Exactly one module knows both the account application and its adapter."""
+
+    wiring_modules: list[str] = []
+    for path in _all_source_files():
+        modules = _imports(path)
+        names_adapters = _matches(
+            modules, ("us_quant.trading.adapters",)
+        )
+        names_application = _matches(
+            modules, ("us_quant.trading.application",)
+        )
+        if names_adapters and names_application:
+            wiring_modules.append(path.relative_to(_SRC).as_posix())
+    assert wiring_modules == [
+        "trading/composition/accounts.py",
+        "trading/composition/market_data.py",
+    ], wiring_modules
+
+
+def test_the_desktop_does_not_import_a_concrete_account_adapter() -> None:
+    """The UI composes the application and talks only to it."""
+
+    offending = _matches(
+        _imports(_SRC / "desktop.py"),
+        ("us_quant.trading.adapters",),
+    )
+    assert not offending, sorted(offending)
+
+
+def test_the_market_data_application_has_no_ibkr_config_dependency() -> None:
+    """The transitional dependency from Market Data v2 is fully removed.
+
+    ``MarketDataApplication`` used to import ``IBKRConnectionConfig`` and
+    hold ``self.config`` / ``update_config`` while Broker/Account v2 did not
+    exist.  It must now know nothing about the IBKR endpoint at all.
+    """
+
+    source = MARKET_DATA_APPLICATION.read_text(encoding="utf-8")
+    names = _identifier_names(MARKET_DATA_APPLICATION)
+    assert "IBKRConnectionConfig" not in names
+    assert "config" not in {
+        node.attr
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Attribute) and node.attr == "config"
+    }
+    assert "update_config" not in names
+    assert "ensure_config_update_allowed" not in names
+    assert "ensure_reconfiguration_allowed" in names
+
+    offending = _matches(
+        _imports(MARKET_DATA_APPLICATION),
+        ("us_quant.ibkr", "ibapi"),
+    )
+    assert not offending, sorted(offending)
+
+
+def test_the_broker_account_port_is_read_only() -> None:
+    """No submit, cancel or arm may appear on the account port."""
+
+    source = BROKER_ACCOUNT_PORT.read_text(encoding="utf-8")
+    names = _identifier_names(BROKER_ACCOUNT_PORT)
+    for forbidden in (
+        "placeOrder",
+        "cancelOrder",
+        "reqGlobalCancel",
+        "exerciseOptions",
+        "replaceFA",
+    ):
+        assert forbidden not in names, (
+            f"BrokerAccountPort must stay read-only, found {forbidden}"
+        )
+    # The port surface is ``refresh`` and nothing else.
+    port = next(
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, ast.ClassDef) and node.name == "BrokerAccountPort"
+    )
+    assert {
+        node.name
+        for node in port.body
+        if isinstance(node, ast.FunctionDef)
+    } == {"refresh"}
+    assert "BrokerExecutionPort" in source, (
+        "the port must document that execution is a separate, unmigrated port"
+    )
+
+
+def test_the_shared_ibkr_support_module_is_importable_by_both_channels() -> None:
+    """``mask_account_id`` has exactly one definition.
+
+    The Paper order service and the account adapter both need it, and two
+    copies could drift -- the one that drifted being the one that leaked an
+    account number.
+    """
+
+    definitions = _definitions("mask_account_id")
+    assert len(definitions) == 1, [
+        str(path.relative_to(_SRC)) for path in definitions
+    ]
+    assert definitions[0] == _TRADING / "adapters" / "ibkr" / "support.py"

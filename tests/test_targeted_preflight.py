@@ -8,7 +8,8 @@ from us_quant.trading.domain.market import (
     MarketQuote,
 )
 from us_quant.minute_data import MinuteDataSummary
-from us_quant.portfolio_view import AccountView
+from us_quant.trading.domain.account import BrokerAccountSnapshot
+from us_quant.trading.domain.common import Environment
 from us_quant.strategy_registry import StrategyRecord
 from us_quant.targeted_preflight import evaluate_target_preflight
 from us_quant.universe import UniverseRecord
@@ -43,9 +44,7 @@ class TargetedPreflightTests(unittest.TestCase):
             stale_reason="test",
         )
         stale_account = _account(
-            observed_at=(
-                NOW - timedelta(minutes=6)
-            ).isoformat()
+            observed_at=NOW - timedelta(minutes=6)
         )
         result = evaluate_target_preflight(
             "AAPL",
@@ -154,9 +153,15 @@ def _quote(symbol: str = "AAPL") -> MarketQuote:
     )
 
 
-def _account(observed_at: str | None = None) -> AccountView:
-    return AccountView(
-        environment="paper",
+def _account(observed_at: datetime | None = None) -> BrokerAccountSnapshot:
+    """Domain account truth: an ``Environment`` and a ``datetime``.
+
+    ``observed_at`` is a timezone-aware ``datetime`` rather than an ISO
+    string, which is what the preflight's ``_age_seconds`` now consumes.
+    """
+
+    return BrokerAccountSnapshot(
+        environment=Environment.PAPER,
         account_alias="DU***123",
         net_liquidation=Decimal("10000"),
         cash=Decimal("10000"),
@@ -169,7 +174,7 @@ def _account(observed_at: str | None = None) -> AccountView:
         daily_pnl=Decimal("0"),
         unrealized_pnl=Decimal("0"),
         realized_pnl=Decimal("0"),
-        observed_at=observed_at or NOW.isoformat(),
+        observed_at=observed_at or NOW,
         pnl_source="IBKR reqPnL",
     )
 

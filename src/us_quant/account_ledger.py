@@ -6,7 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 import sqlite3
 
-from us_quant.portfolio_view import AccountView
+from us_quant.trading.domain.account import BrokerAccountSnapshot
 from us_quant.sqlite_support import connect_sqlite
 
 
@@ -30,7 +30,14 @@ class AccountLedger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def append(self, account: AccountView) -> None:
+    def append(self, account: BrokerAccountSnapshot) -> None:
+        """Record one observation.
+
+        The domain timestamp is a timezone-aware ``datetime``; the column
+        stays ISO text so the historical table schema does not change.  Only
+        the masked alias is written -- the domain holds nothing else.
+        """
+
         with closing(self._connect()) as connection:
             with connection:
                 connection.execute(
@@ -42,8 +49,8 @@ class AccountLedger:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        account.observed_at,
-                        account.environment,
+                        account.observed_at.isoformat(),
+                        account.environment.value,
                         account.account_alias,
                         _text(account.net_liquidation),
                         _text(account.cash),

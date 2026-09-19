@@ -4,9 +4,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_FLOOR
 
+from us_quant.trading.domain.account import BrokerAccountSnapshot
+from us_quant.trading.domain.common import Environment
 from us_quant.trading.domain.market import MarketQuote
 from us_quant.minute_data import MinuteDataSummary
-from us_quant.portfolio_view import AccountView
 from us_quant.strategy_registry import StrategyRecord
 from us_quant.universe import UniverseRecord
 
@@ -62,7 +63,7 @@ def evaluate_target_preflight(
     *,
     universe_record: UniverseRecord | None,
     quote: MarketQuote | None,
-    account: AccountView | None,
+    account: BrokerAccountSnapshot | None,
     minute_summary: MinuteDataSummary,
     strategy: StrategyRecord | None,
     exposure_multiplier: Decimal = Decimal("1"),
@@ -108,7 +109,7 @@ def evaluate_target_preflight(
     )
     account_truth = (
         account is not None
-        and account.environment == "paper"
+        and account.environment is Environment.PAPER
         and account.net_liquidation is not None
         and account.net_liquidation > 0
         and account_age is not None
@@ -393,22 +394,30 @@ def evaluate_target_preflight(
 
 
 def _age_seconds(
-    timestamp: str | None,
+    timestamp: datetime | None,
     now: datetime,
 ) -> Decimal | None:
-    if not timestamp:
+    """How old an observation is, from a domain ``datetime``.
+
+    Returns ``None`` for anything that is not an aware ``datetime``: a
+    missing value, a string, or a naive timestamp.  A naive timestamp is
+    deliberately *not* read as UTC.  This age feeds the account-freshness
+    gate, so guessing a timezone could make an unageable observation look
+    fresh and let it through; failing closed instead turns it into
+    ``account_age is None`` and therefore ``account_truth = False``.
+    """
+
+    if (
+        not isinstance(timestamp, datetime)
+        or timestamp.tzinfo is None
+        or timestamp.utcoffset() is None
+    ):
         return None
-    try:
-        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
     return Decimal(
         str(
             round(
                 (
-                    now - parsed.astimezone(timezone.utc)
+                    now - timestamp.astimezone(timezone.utc)
                 ).total_seconds(),
                 3,
             )

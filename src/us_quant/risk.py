@@ -5,7 +5,10 @@ from datetime import time
 from decimal import Decimal
 from typing import Mapping
 
-from us_quant.trading.domain.account import AccountSnapshot, Position
+from us_quant.trading.domain.account import (
+    Position,
+    RiskAccountSnapshot,
+)
 from us_quant.trading.domain.common import ONE, ZERO
 from us_quant.trading.domain.orders import OrderIntent, Side
 from us_quant.trading.domain.risk import RiskDecision
@@ -105,7 +108,7 @@ class PreTradeRiskEngine:
         self,
         *,
         intent: OrderIntent,
-        account: AccountSnapshot,
+        account: RiskAccountSnapshot,
         positions: Mapping[str, Position],
         market_prices: Mapping[str, Decimal],
         estimated_commission: Decimal = ZERO,

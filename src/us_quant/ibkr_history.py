@@ -8,7 +8,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from us_quant.ibkr import IBKRConnectionConfig
-from us_quant.ibkr_readonly import (
+from us_quant.trading.adapters.ibkr.support import (
     IBKRAPIUnavailable,
     IBKRReadOnlyError,
     INFORMATIONAL_ERROR_CODES,

@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import get_type_hints
 import unittest
 
-from us_quant.trading.domain.account import AccountSnapshot, Position
+from us_quant.trading.domain.account import RiskAccountSnapshot, Position
 from us_quant.trading.domain.orders import OrderIntent, Side
 from us_quant.risk import (
     PreTradeRiskEngine,
@@ -28,7 +28,7 @@ class PreTradeRiskEngineTests(unittest.TestCase):
             ),
             allowed_symbols={"MUU"},
         )
-        self.account = AccountSnapshot(
+        self.account = RiskAccountSnapshot(
             net_liquidation=Decimal("1500"),
             cash=Decimal("1500"),
             day_start_equity=Decimal("1500"),
@@ -70,7 +70,7 @@ class PreTradeRiskEngineTests(unittest.TestCase):
         )
 
     def test_daily_account_loss_halts_new_buys(self) -> None:
-        losing_account = AccountSnapshot(
+        losing_account = RiskAccountSnapshot(
             net_liquidation=Decimal("1469"),
             cash=Decimal("1469"),
             day_start_equity=Decimal("1500"),
@@ -86,7 +86,7 @@ class PreTradeRiskEngineTests(unittest.TestCase):
         self.assertIn("daily account loss halt is active", decision.reasons)
 
     def test_daily_loss_halt_still_allows_risk_reducing_sell(self) -> None:
-        losing_account = AccountSnapshot(
+        losing_account = RiskAccountSnapshot(
             net_liquidation=Decimal("1469"),
             cash=Decimal("1397"),
             day_start_equity=Decimal("1500"),

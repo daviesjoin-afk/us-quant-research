@@ -7,25 +7,26 @@ session-aware venue, the source labels, the coverage copy, and which providers
 get a push listener.  It owns provider *lifecycle*: prepared / running /
 stop-requested / finished.
 
-It deliberately does **not** know any concrete adapter.  Construction is
-injected as a mapping of factory callables, so this module imports only the
-domain and the ports.  The wiring that names IBKR/Alpaca/Finnhub lives in
+It deliberately does **not** know any concrete adapter, and it no longer
+knows any connection config either.  Construction is injected as a mapping of
+factory callables, so this module imports only the domain and the ports.  The
+wiring that names IBKR/Alpaca/Finnhub lives in
 ``trading.composition.market_data``.
 
-TRANSITIONAL DEPENDENCY
-    ``IBKRConnectionConfig`` is imported here because Broker/Account v2 has
-    not migrated yet: the connection settings transaction still hands the
-    application an IBKR config, and ``ensure_config_update_allowed`` /
-    ``update_config`` must keep working for it.  The Broker/Account v2 change
-    removes this import.  Note what is *not* imported even so: no IBKR stream,
-    no ``ibapi``, no adapter module.
+The IBKR connection settings belong to
+:class:`~us_quant.trading.application.accounts.BrokerAccountApplication`,
+which is their single runtime owner.  The market-data composition reads them
+from there through a getter at prepare time, so this application holds no
+config, applies no config and cannot go stale.  Note what is *not* imported:
+no IBKR config, no ``us_quant.ibkr``, no IBKR stream, no ``ibapi``, no
+adapter module.
 
 Lifecycle semantics (preserved from the service this replaces):
 
 * ``stop requested`` is **not** ``run finished``.  ``stop()`` only asks the
   adapter to wind down; ``run()`` can stay inside the adapter for an unbounded
   time afterwards.  Until it returns, no second stream may be prepared and no
-  new connection config may be applied.
+  reconfiguration may be accepted.
 * a second ``prepare()`` while a stream is live raises
   ``MarketDataActiveError`` instead of silently replacing the old one.
 * construction fails closed: an unknown source id raises ``ValueError`` (never
@@ -38,7 +39,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 
-from us_quant.ibkr import IBKRConnectionConfig
 from us_quant.trading.domain.market import MarketSnapshot
 from us_quant.trading.ports.market_data import (
     MarketDataActiveError,
@@ -133,16 +133,14 @@ class MarketDataLifecycle:
 #: Builds one adapter for a request.  ``listener`` is ``None`` for sources
 #: that are polled rather than pushed.
 #:
-#: ``config`` is the application's *current* IBKR connection config, passed on
-#: every call rather than captured by the factory.  A factory that closed over
-#: the start-up config would silently ignore a later ``update_config`` and
-#: rebuild with stale settings -- a bug the settings transaction cannot see,
-#: because it only checks that the application accepted the new config.
-#:
-#: TRANSITIONAL DEPENDENCY: this parameter is IBKR-shaped and disappears when
-#: Broker/Account v2 gives the connection its own port.
+#: The factory takes only what is genuinely provider-neutral: the request and
+#: the listener.  It carries no connection config, because a config parameter
+#: here was IBKR-shaped and forced this module to import ``us_quant.ibkr``.
+#: The IBKR factory in ``trading.composition.market_data`` obtains the current
+#: endpoint from the account application's config getter at prepare time
+#: instead, which is also what keeps it from going stale.
 ProviderFactory = Callable[
-    [MarketDataStartRequest, SnapshotListener | None, IBKRConnectionConfig],
+    [MarketDataStartRequest, SnapshotListener | None],
     MarketDataPort,
 ]
 
@@ -152,12 +150,10 @@ class MarketDataApplication:
 
     def __init__(
         self,
-        config: IBKRConnectionConfig,
         *,
         factories: Mapping[str, ProviderFactory],
         exchange_resolver: Callable[[], str] | None = None,
     ) -> None:
-        self.config = config
         self._factories = dict(factories)
         self._exchange_resolver = exchange_resolver
         self._adapter: MarketDataPort | None = None
@@ -241,7 +237,6 @@ class MarketDataApplication:
             adapter = factory(
                 resolved,
                 self.listener_for(request.source_id, listener),
-                self.config,
             )
         except Exception as error:
             # Fail closed: record why, then let the caller see the real
@@ -385,38 +380,26 @@ class MarketDataApplication:
         finally:
             self._finished = True
 
-    def ensure_config_update_allowed(
-        self, config: IBKRConnectionConfig
-    ) -> None:
-        """Raise if ``config`` could not be applied right now.
+    def ensure_reconfiguration_allowed(self) -> None:
+        """Raise if the connection could not be reconfigured right now.
 
-        Split out of :meth:`update_config` so a caller can *check* before it
-        commits to anything irreversible.  Saving settings has to know the
-        change will be accepted before it writes the file.
+        A pure *lifecycle* guard: it answers "may anything about the
+        connection change while this stream is live?" and deliberately does
+        not know what the new settings are.  The connection config itself
+        belongs to :class:`BrokerAccountApplication`, which owns the
+        config comparison; this application only knows whether a stream is
+        running.
 
-        Checks only -- no state change, no I/O.  An identical config is always
-        allowed, because re-saving unchanged settings must not be blocked by
-        an unrelated live stream.
+        Checks only -- no state change, no I/O.  The caller decides whether
+        the settings actually changed; a re-save of unchanged settings must
+        not be blocked by an unrelated live stream.
         """
 
-        if config == self.config:
-            return
         if self._adapter is not None and not self._lifecycle_ended:
             raise MarketDataActiveError(
-                "cannot change the IBKR connection config while a market "
+                "cannot reconfigure the IBKR connection while a market "
                 "data stream is active: stop it first"
             )
-
-    def update_config(self, config: IBKRConnectionConfig) -> None:
-        """Replace the IBKR connection config used by future preparations.
-
-        Fails closed while a stream is live: the running adapter is connected
-        with the config it was built from.  Deliberately inert otherwise -- no
-        network call, no reconnect, no stream creation.
-        """
-
-        self.ensure_config_update_allowed(config)
-        self.config = config
 
     def stop(self) -> None:
         """Ask the prepared adapter to wind down.  Safe to call repeatedly."""

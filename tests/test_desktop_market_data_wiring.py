@@ -94,7 +94,7 @@ def _install(monkeypatch, name: str) -> list[_Recorder]:
 
 
 def _service() -> MarketDataApplication:
-    return build_market_data_application(_config())
+    return build_market_data_application(_config)
 
 
 def _window() -> MainWindow:
@@ -269,13 +269,12 @@ def test_stream_worker_reads_the_prepared_venue_without_re_resolving() -> None:
         calls.append(value)
         return value
 
-    def factory(request, listener, config):
-        record = _Recorder(args=(config,), kwargs={"request": request})
+    def factory(request, listener):
+        record = _Recorder(args=(), kwargs={"request": request})
         created.append(record)
         return record
 
     service = MarketDataApplication(
-        _config(),
         factories={
             SOURCE_IBKR: factory,
             SOURCE_IBKR_EXTENDED: factory,
@@ -312,13 +311,12 @@ def test_stream_worker_carries_an_explicit_venue_verbatim() -> None:
         calls.append(len(calls))
         return "OVERNIGHT"
 
-    def factory(request, listener, config):
-        record = _Recorder(args=(config,), kwargs={"request": request})
+    def factory(request, listener):
+        record = _Recorder(args=(), kwargs={"request": request})
         created.append(record)
         return record
 
     service = MarketDataApplication(
-        _config(),
         factories={SOURCE_IBKR_EXTENDED: factory},
         exchange_resolver=resolver,
     )
@@ -390,8 +388,8 @@ def test_session_rotation_fires_when_the_venue_moves_on(monkeypatch) -> None:
         calls.append(value)
         return value
 
-    def factory(request, listener, config):
-        record = _Recorder(args=(config,), kwargs={"request": request})
+    def factory(request, listener):
+        record = _Recorder(args=(), kwargs={"request": request})
         created.append(record)
         return record
 
@@ -399,7 +397,6 @@ def test_session_rotation_fires_when_the_venue_moves_on(monkeypatch) -> None:
     try:
         # Replace the composed application with one whose resolver flips.
         window.market_data = MarketDataApplication(
-            window.config.ibkr,
             factories={SOURCE_IBKR_EXTENDED: factory},
             exchange_resolver=resolver,
         )
@@ -452,15 +449,14 @@ def test_no_rotation_when_the_venue_is_unchanged(monkeypatch) -> None:
 
     created: list = []
 
-    def factory(request, listener, config):
-        record = _Recorder(args=(config,), kwargs={"request": request})
+    def factory(request, listener):
+        record = _Recorder(args=(), kwargs={"request": request})
         created.append(record)
         return record
 
     window = _window()
     try:
         window.market_data = MarketDataApplication(
-            window.config.ibkr,
             factories={SOURCE_IBKR_EXTENDED: factory},
             exchange_resolver=lambda: "SMART",
         )
@@ -508,8 +504,60 @@ def test_main_window_owns_a_market_data_service() -> None:
     window = _window()
     try:
         assert isinstance(window.market_data, MarketDataApplication)
-        # It must be built from the live IBKR config, not a copy.
-        assert window.market_data.config == window.config.ibkr
+        # It holds no connection config any more: the account application
+        # owns that, and the market data composition reads it through a
+        # getter at prepare time.
+        assert not hasattr(window.market_data, "config")
+    finally:
+        window.deleteLater()
+
+
+def test_main_window_owns_a_broker_account_application() -> None:
+    """The account application is the single config owner."""
+
+    from us_quant.trading.application.accounts import (
+        BrokerAccountApplication,
+    )
+
+    window = _window()
+    try:
+        assert isinstance(
+            window.broker_account, BrokerAccountApplication
+        )
+        # It is built from the live IBKR config, not a copy.
+        assert window.broker_account.config == window.config.ibkr
+        # And it starts with no account truth at all -- an unread account
+        # must never look like an empty one.
+        assert window.broker_account.portfolio is None
+        assert window.broker_account.last_error is None
+    finally:
+        window.deleteLater()
+
+
+def test_the_market_data_application_reads_the_account_config_getter(
+) -> None:
+    """The getter is the account application, not a captured config.
+
+    This is the structural half of the stale-config regression: if the
+    composition closed over a config value instead of calling the getter,
+    the next IBKR stream would still use the start-up endpoint.
+    """
+
+    window = _window()
+    try:
+        # Change the owner's config and confirm the composition observes it
+        # rather than a snapshot taken at construction time.
+        import dataclasses
+
+        before = window.broker_account.config
+        updated = dataclasses.replace(before, client_id=before.client_id + 1)
+        window.broker_account.update_config(updated)
+        try:
+            assert window.broker_account.config.client_id == (
+                before.client_id + 1
+            )
+        finally:
+            window.broker_account.update_config(before)
     finally:
         window.deleteLater()
 
@@ -577,9 +625,10 @@ def test_saving_settings_reaches_the_service_before_the_next_stream(
         window.settings_ibkr_client_id.setValue(new_client_id)
         window._save_user_preferences()
 
-        # The service -- not just the window -- carries the new config.
+        # The account application -- not just the window -- carries the
+        # new config.  It is the single runtime owner.
         assert window.config.ibkr.client_id == new_client_id
-        assert window.market_data.config == window.config.ibkr
+        assert window.broker_account.config == window.config.ibkr
 
         index = window.stream_mode.findData(SOURCE_IBKR)
         assert index >= 0
@@ -618,16 +667,16 @@ def test_saving_settings_is_refused_while_a_stream_is_live(
         window.market_data.prepare(
             MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("SPY",))
         )
-        before = window.market_data.config
+        before = window.broker_account.config
 
         window.settings_ibkr_client_id.setValue(_next_client_id(window))
         window._save_user_preferences()
 
         assert len(warnings) == 1, "the refusal must be reported"
-        # Refused means *nothing* moved: the service kept its config, the
-        # window kept its config, and the settings file was not rewritten
-        # behind the refusal.
-        assert window.market_data.config == before
+        # Refused means *nothing* moved: the account application kept its
+        # config, the window kept its config, and the settings file was not
+        # rewritten behind the refusal.
+        assert window.broker_account.config == before
         assert window.config.ibkr == before
         assert not (tmp_path / "settings" / "preferences.json").exists()
     finally:
@@ -688,7 +737,7 @@ def test_a_failed_settings_write_leaves_the_runtime_untouched(
         on_disk = saved_file.read_text(encoding="utf-8")
 
         config_before = window.config.ibkr
-        service_before = window.market_data.config
+        service_before = window.broker_account.config
         preferences_before = window.preferences
         new_client_id = _next_client_id(window)
         assert new_client_id != config_before.client_id
@@ -707,7 +756,7 @@ def test_a_failed_settings_write_leaves_the_runtime_untouched(
         assert "设置未保存" in warnings[0][0][1]
         # Nothing moved: not the window, not the service, not the file.
         assert window.config.ibkr == config_before
-        assert window.market_data.config == service_before
+        assert window.broker_account.config == service_before
         assert window.preferences == preferences_before
         assert saved_file.read_text(encoding="utf-8") == on_disk
     finally:

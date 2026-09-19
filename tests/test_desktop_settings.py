@@ -39,12 +39,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from us_quant.config import load_config
 from us_quant.desktop_settings import (
+    BrokerConfigOwnerPort,
     DesktopSettingsCommit,
     DesktopSettingsService,
-    MarketDataConfigPort,
+    RuntimeReconfigurationGuard,
     ibkr_config_from_preferences,
 )
 from us_quant.ibkr import IBKRConnectionConfig
+from us_quant.trading.ports.broker_account import BrokerAccountActiveError
 from us_quant.trading.ports.market_data import MarketDataActiveError
 from us_quant.user_settings import (
     PAPER_GATEWAY_PORT,
@@ -90,10 +92,11 @@ def _app_config():
     return load_config(_REPO_ROOT / "configs" / "paper.toml")
 
 
-class _FakeMarketData:
-    """Records what the service asked of it, in order.
+class _FakeBrokerConfig:
+    """The account application's config-owner surface, recording in order.
 
-    ``refuse=True`` makes the preflight raise the way a live stream does.
+    ``refuse=True`` makes the preflight raise the way a running account
+    refresh does.
     """
 
     def __init__(self, config, *, refuse: bool = False, log: list) -> None:
@@ -107,15 +110,37 @@ class _FakeMarketData:
         self._log.append("ensure")
         self.checked.append(config)
         if self._refuse:
-            raise MarketDataActiveError(
-                "cannot change the IBKR connection config while a market "
-                "data stream is active: stop it first"
+            raise BrokerAccountActiveError(
+                "cannot change the IBKR connection config while an "
+                "account refresh is running: wait for it to finish"
             )
 
     def update_config(self, config) -> None:
         self._log.append("update")
         self.updated.append(config)
         self.config = config
+
+
+class _FakeGuard:
+    """A runtime that must be idle before the connection may change.
+
+    ``refuse=True`` makes the lifecycle preflight raise the way a live
+    market data stream does.
+    """
+
+    def __init__(self, *, refuse: bool = False, log: list) -> None:
+        self._refuse = refuse
+        self._log = log
+        self.checked = 0
+
+    def ensure_reconfiguration_allowed(self) -> None:
+        self._log.append("guard")
+        self.checked += 1
+        if self._refuse:
+            raise MarketDataActiveError(
+                "cannot reconfigure the IBKR connection while a market "
+                "data stream is active: stop it first"
+            )
 
 
 class _FakeStore:
@@ -276,16 +301,18 @@ def test_a_successful_commit_runs_preflight_then_save_then_apply() -> None:
     store = _FakeStore(log=log)
     service = DesktopSettingsService(store)
     current = _app_config()
-    market_data = _FakeMarketData(current.ibkr, log=log)
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    guard = _FakeGuard(log=log)
     preferences = _preferences(ibkr_client_id=88)
 
     commit = service.commit(
         preferences,
         current_config=current,
-        market_data=market_data,
+        broker_config=broker_config,
+        runtime_guards=(guard,),
     )
 
-    assert log == ["ensure", "save", "update"]
+    assert log == ["ensure", "guard", "save", "update"]
 
 
 def test_a_successful_commit_reports_the_stores_own_copy() -> None:
@@ -299,13 +326,15 @@ def test_a_successful_commit_reports_the_stores_own_copy() -> None:
     store = _FakeStore(log=log)
     service = DesktopSettingsService(store)
     current = _app_config()
-    market_data = _FakeMarketData(current.ibkr, log=log)
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    guard = _FakeGuard(log=log)
     preferences = _preferences(ibkr_client_id=88)
 
     commit = service.commit(
         preferences,
         current_config=current,
-        market_data=market_data,
+        broker_config=broker_config,
+        runtime_guards=(guard,),
     )
 
     assert store.returned is not None
@@ -321,18 +350,20 @@ def test_a_successful_commit_returns_the_applied_config() -> None:
     store = _FakeStore(log=log)
     service = DesktopSettingsService(store)
     current = _app_config()
-    market_data = _FakeMarketData(current.ibkr, log=log)
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    guard = _FakeGuard(log=log)
     preferences = _preferences(ibkr_client_id=88)
 
     commit = service.commit(
         preferences,
         current_config=current,
-        market_data=market_data,
+        broker_config=broker_config,
+        runtime_guards=(guard,),
     )
 
     assert commit.config.ibkr == ibkr_config_from_preferences(preferences)
-    assert commit.config.ibkr == market_data.config
-    assert market_data.updated == [commit.config.ibkr]
+    assert commit.config.ibkr == broker_config.config
+    assert broker_config.updated == [commit.config.ibkr]
 
 
 def test_a_successful_commit_leaves_the_other_config_fields_alone() -> None:
@@ -342,12 +373,14 @@ def test_a_successful_commit_leaves_the_other_config_fields_alone() -> None:
     store = _FakeStore(log=log)
     service = DesktopSettingsService(store)
     current = _app_config()
-    market_data = _FakeMarketData(current.ibkr, log=log)
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    guard = _FakeGuard(log=log)
 
     commit = service.commit(
         _preferences(ibkr_client_id=88),
         current_config=current,
-        market_data=market_data,
+        broker_config=broker_config,
+        runtime_guards=(guard,),
     )
 
     assert commit.config is not current
@@ -367,12 +400,14 @@ def test_the_passed_in_config_is_not_mutated() -> None:
     service = DesktopSettingsService(store)
     current = _app_config()
     before = current.ibkr
-    market_data = _FakeMarketData(current.ibkr, log=log)
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    guard = _FakeGuard(log=log)
 
     commit = service.commit(
         _preferences(ibkr_client_id=88),
         current_config=current,
-        market_data=market_data,
+        broker_config=broker_config,
+        runtime_guards=(guard,),
     )
 
     assert current.ibkr is before
@@ -391,16 +426,18 @@ def test_the_config_passed_to_the_preflight_is_the_one_applied() -> None:
     store = _FakeStore(log=log)
     service = DesktopSettingsService(store)
     current = _app_config()
-    market_data = _FakeMarketData(current.ibkr, log=log)
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    guard = _FakeGuard(log=log)
 
     commit = service.commit(
         _preferences(ibkr_client_id=88),
         current_config=current,
-        market_data=market_data,
+        broker_config=broker_config,
+        runtime_guards=(guard,),
     )
 
-    assert market_data.checked == market_data.updated
-    assert market_data.checked == [commit.config.ibkr]
+    assert broker_config.checked == broker_config.updated
+    assert broker_config.checked == [commit.config.ibkr]
 
 
 # -- a live stream refuses the connection change -----------------------
@@ -417,17 +454,19 @@ def test_a_refused_change_never_writes_the_file() -> None:
     log: list = []
     service, store = _service()
     current = _app_config()
-    market_data = _FakeMarketData(current.ibkr, refuse=True, log=log)
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    guard = _FakeGuard(refuse=True, log=log)
 
     with pytest.raises(MarketDataActiveError) as excinfo:
         service.commit(
             _preferences(ibkr_client_id=88),
             current_config=current,
-            market_data=market_data,
+            broker_config=broker_config,
+            runtime_guards=(guard,),
         )
 
     assert excinfo.type is MarketDataActiveError
-    assert log == ["ensure"]
+    assert log == ["ensure", "guard"]
     assert store.returned is None
 
 
@@ -436,17 +475,19 @@ def test_a_refused_change_leaves_the_runtime_untouched() -> None:
     service, _ = _service()
     current = _app_config()
     before = current.ibkr
-    market_data = _FakeMarketData(current.ibkr, refuse=True, log=log)
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    guard = _FakeGuard(refuse=True, log=log)
 
     with pytest.raises(MarketDataActiveError):
         service.commit(
             _preferences(ibkr_client_id=88),
             current_config=current,
-            market_data=market_data,
+            broker_config=broker_config,
+            runtime_guards=(guard,),
         )
 
-    assert market_data.updated == []
-    assert market_data.config is before
+    assert broker_config.updated == []
+    assert broker_config.config is before
     assert current.ibkr is before
 
 
@@ -462,13 +503,15 @@ def test_a_refused_change_is_not_translated_into_a_settings_error() -> None:
     log: list = []
     service, _ = _service()
     current = _app_config()
-    market_data = _FakeMarketData(current.ibkr, refuse=True, log=log)
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    guard = _FakeGuard(refuse=True, log=log)
 
     with pytest.raises(MarketDataActiveError) as excinfo:
         service.commit(
             _preferences(ibkr_client_id=88),
             current_config=current,
-            market_data=market_data,
+            broker_config=broker_config,
+        runtime_guards=(guard,),
         )
 
     assert not isinstance(excinfo.value, UserSettingsError)
@@ -487,23 +530,58 @@ def test_an_unchanged_config_is_not_refused_while_streaming() -> None:
     store = _FakeStore(log=log)
     service = DesktopSettingsService(store)
     current = _app_config()
-    market_data = _FakeMarketData(
+    broker_config = _FakeBrokerConfig(
         ibkr_config_from_preferences(preferences), log=log
     )
+    guard = _FakeGuard(log=log)
 
     commit = service.commit(
         preferences,
         current_config=current,
-        market_data=market_data,
+        broker_config=broker_config,
+        runtime_guards=(guard,),
     )
 
-    # The check and the write still happen; only the apply is skipped.
+    # The owner's check and the write still happen; only the apply is
+    # skipped.  The runtime guard is deliberately *not* consulted: it can
+    # only answer "may anything change right now?", and nothing is changing.
+    # Asking it anyway would let a live market stream block a theme save.
     assert log == ["ensure", "save"]
-    assert market_data.updated == []
-    assert market_data.checked == [
+    assert guard.checked == 0
+    assert broker_config.updated == []
+    assert broker_config.checked == [
         ibkr_config_from_preferences(preferences)
     ]
-    assert commit.config.ibkr == market_data.config
+    assert commit.config.ibkr == broker_config.config
+
+
+def test_an_unchanged_config_never_consults_a_refusing_guard() -> None:
+    """The strongest form of the rule above.
+
+    A guard that would refuse if asked proves the guard was never asked --
+    the theme save succeeds while a stream is live.
+    """
+
+    preferences = _preferences()
+    log: list = []
+    store = _FakeStore(log=log)
+    service = DesktopSettingsService(store)
+    current = _app_config()
+    broker_config = _FakeBrokerConfig(
+        ibkr_config_from_preferences(preferences), log=log
+    )
+    guard = _FakeGuard(refuse=True, log=log)
+
+    commit = service.commit(
+        _preferences(theme="light"),
+        current_config=current,
+        broker_config=broker_config,
+        runtime_guards=(guard,),
+    )
+
+    assert guard.checked == 0
+    assert commit.preferences.theme == "light"
+    assert log == ["ensure", "save"]
 
 
 def test_an_unchanged_config_still_reports_the_stores_copy() -> None:
@@ -511,14 +589,16 @@ def test_an_unchanged_config_still_reports_the_stores_copy() -> None:
     store = _FakeStore(log=log)
     service = DesktopSettingsService(store)
     current = _app_config()
-    market_data = _FakeMarketData(
+    broker_config = _FakeBrokerConfig(
         ibkr_config_from_preferences(_preferences()), log=log
     )
+    guard = _FakeGuard(log=log)
 
     commit = service.commit(
         _preferences(theme="light"),
         current_config=current,
-        market_data=market_data,
+        broker_config=broker_config,
+        runtime_guards=(guard,),
     )
 
     assert commit.preferences is store.returned
@@ -540,19 +620,21 @@ def test_a_failed_write_never_moves_the_runtime() -> None:
     service, _ = _service(log=log, fail=True)
     current = _app_config()
     before = current.ibkr
-    market_data = _FakeMarketData(current.ibkr, log=log)
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    guard = _FakeGuard(log=log)
 
     with pytest.raises(UserSettingsError) as excinfo:
         service.commit(
             _preferences(ibkr_client_id=88),
             current_config=current,
-            market_data=market_data,
+            broker_config=broker_config,
+        runtime_guards=(guard,),
         )
 
     assert excinfo.type is UserSettingsError
-    assert log == ["ensure", "save"]
-    assert market_data.updated == []
-    assert market_data.config is before
+    assert log == ["ensure", "guard", "save"]
+    assert broker_config.updated == []
+    assert broker_config.config is before
     assert current.ibkr is before
 
 
@@ -562,13 +644,15 @@ def test_a_failed_write_is_reported_not_swallowed() -> None:
     log: list = []
     service, _ = _service(log=log, fail=True)
     current = _app_config()
-    market_data = _FakeMarketData(current.ibkr, log=log)
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    guard = _FakeGuard(log=log)
 
     with pytest.raises(UserSettingsError) as excinfo:
         service.commit(
             _preferences(ibkr_client_id=88),
             current_config=current,
-            market_data=market_data,
+            broker_config=broker_config,
+        runtime_guards=(guard,),
         )
 
     assert "disk full" in str(excinfo.value)
@@ -585,24 +669,26 @@ def test_a_failed_write_is_the_write_and_not_the_preflight() -> None:
     log: list = []
     service, _ = _service(log=log, fail=True)
     current = _app_config()
-    market_data = _FakeMarketData(current.ibkr, log=log)
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    guard = _FakeGuard(log=log)
 
     with pytest.raises(UserSettingsError):
         service.commit(
             _preferences(ibkr_client_id=88),
             current_config=current,
-            market_data=market_data,
+            broker_config=broker_config,
+        runtime_guards=(guard,),
         )
 
-    assert market_data.checked != []
+    assert broker_config.checked != []
     assert log.index("ensure") < log.index("save")
 
 
 # -- no market data service (start-up and pure service use) ------------
 
 
-def test_committing_without_a_market_data_service_still_works() -> None:
-    """``market_data=None`` is the start-up case, not an error.
+def test_committing_without_a_runtime_still_works() -> None:
+    """``broker_config=None`` is the start-up case, not an error.
 
     The settings transaction must not require a service to exist: the
     window builds one only later, and the pure-service path has none.
@@ -617,7 +703,7 @@ def test_committing_without_a_market_data_service_still_works() -> None:
     commit = service.commit(
         preferences,
         current_config=current,
-        market_data=None,
+        broker_config=None,
     )
 
     assert log == ["save"]
@@ -638,7 +724,7 @@ def test_committing_without_a_service_still_validates() -> None:
         service.commit(
             _preferences(ibkr_port=4001),
             current_config=current,
-            market_data=None,
+            broker_config=None,
         )
 
     assert log == []
@@ -653,7 +739,7 @@ def test_committing_without_a_service_still_reports_write_failures() -> None:
         service.commit(
             _preferences(),
             current_config=current,
-            market_data=None,
+            broker_config=None,
         )
 
     assert log == ["save"]
@@ -683,18 +769,20 @@ def test_invalid_preferences_are_rejected_before_anything_happens(
     log: list = []
     service, store = _service()
     current = _app_config()
-    market_data = _FakeMarketData(current.ibkr, log=log)
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    guard = _FakeGuard(log=log)
 
     with pytest.raises(UserSettingsError):
         service.commit(
             _preferences(**overrides),
             current_config=current,
-            market_data=market_data,
+            broker_config=broker_config,
+        runtime_guards=(guard,),
         )
 
     assert log == []
     assert store.returned is None
-    assert market_data.updated == []
+    assert broker_config.updated == []
 
 
 def test_invalid_preferences_are_not_a_value_error() -> None:
@@ -706,13 +794,15 @@ def test_invalid_preferences_are_not_a_value_error() -> None:
     log: list = []
     service, _ = _service()
     current = _app_config()
-    market_data = _FakeMarketData(current.ibkr, log=log)
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    guard = _FakeGuard(log=log)
 
     with pytest.raises(UserSettingsError) as excinfo:
         service.commit(
             _preferences(ibkr_host="10.0.0.7"),
             current_config=current,
-            market_data=market_data,
+            broker_config=broker_config,
+        runtime_guards=(guard,),
         )
 
     assert not isinstance(excinfo.value, ValueError)
@@ -726,16 +816,18 @@ def test_a_valid_but_unnormalised_host_is_normalised_before_use() -> None:
     log: list = []
     service, _ = _service()
     current = _app_config()
-    market_data = _FakeMarketData(current.ibkr, log=log)
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    guard = _FakeGuard(log=log)
 
     commit = service.commit(
         _preferences(ibkr_host="  LocalHost  "),
         current_config=current,
-        market_data=market_data,
+        broker_config=broker_config,
+        runtime_guards=(guard,),
     )
 
     assert commit.config.ibkr.host == "localhost"
-    assert market_data.checked == [commit.config.ibkr]
+    assert broker_config.checked == [commit.config.ibkr]
 
 
 # -- the module's own boundary ----------------------------------------
@@ -778,6 +870,7 @@ def test_the_module_dependency_surface_is_exactly_what_was_agreed() -> None:
 
     assert _imported_modules(_MODULE_PATH) == {
         "__future__",
+        "collections.abc",
         "dataclasses",
         "typing",
         "us_quant.config",
@@ -834,7 +927,7 @@ def test_the_module_mentions_no_ui_or_paper_symbol(name: str) -> None:
     """It is an application service, not a UI controller.
 
     ``MarketDataService`` is in the list deliberately: the module talks to
-    the service through :class:`MarketDataConfigPort` instead, so it never
+    the runtimes through :class:`BrokerConfigOwnerPort` instead, so it never
     has to import the concrete class.
     """
 
@@ -861,18 +954,39 @@ def test_the_commit_is_a_frozen_slots_dataclass() -> None:
         commit.config = _app_config()
 
 
-def test_the_market_data_port_is_a_protocol_with_three_members() -> None:
-    """The service's surface is the point: config, check, apply.
+def test_the_config_owner_port_is_a_protocol_with_three_members() -> None:
+    """The owner's surface is the point: config, check, apply.
 
     ``ensure_config_update_allowed`` and ``update_config`` were moved out
     of ``update_config``'s body precisely so a caller can check without
-    applying; the port records that.
+    applying; the protocol records that.
     """
 
-    assert getattr(MarketDataConfigPort, "_is_protocol", False) is True
-    assert set(MarketDataConfigPort.__annotations__) == {"config"}
-    assert callable(MarketDataConfigPort.ensure_config_update_allowed)
-    assert callable(MarketDataConfigPort.update_config)
+    assert getattr(BrokerConfigOwnerPort, "_is_protocol", False) is True
+    assert set(BrokerConfigOwnerPort.__annotations__) == {"config"}
+    assert callable(BrokerConfigOwnerPort.ensure_config_update_allowed)
+    assert callable(BrokerConfigOwnerPort.update_config)
+
+
+def test_the_runtime_guard_port_asks_only_about_lifecycle() -> None:
+    """A guard must not need to know *what* the new config is.
+
+    That is the whole reason it is narrower than the owner: the market data
+    application owns no connection config any more, so a guard that took one
+    would re-couple the two runtimes this migration separates.
+    """
+
+    assert getattr(
+        RuntimeReconfigurationGuard, "_is_protocol", False
+    ) is True
+    assert set(RuntimeReconfigurationGuard.__annotations__) == set()
+    assert callable(
+        RuntimeReconfigurationGuard.ensure_reconfiguration_allowed
+    )
+    assert not hasattr(
+        RuntimeReconfigurationGuard, "ensure_config_update_allowed"
+    )
+    assert not hasattr(RuntimeReconfigurationGuard, "config")
 
 
 def test_the_service_holds_only_the_store() -> None:
@@ -894,11 +1008,16 @@ def test_commit_takes_its_context_by_keyword() -> None:
     assert parameters["current_config"].kind is (
         inspect.Parameter.KEYWORD_ONLY
     )
-    assert parameters["market_data"].kind is (
+    assert parameters["broker_config"].kind is (
         inspect.Parameter.KEYWORD_ONLY
     )
-    assert parameters["market_data"].default is inspect.Parameter.empty
+    assert parameters["runtime_guards"].kind is (
+        inspect.Parameter.KEYWORD_ONLY
+    )
     assert parameters["current_config"].default is inspect.Parameter.empty
+    assert parameters["broker_config"].default is inspect.Parameter.empty
+    # ``runtime_guards`` defaults to empty: the start-up case has no runtime.
+    assert parameters["runtime_guards"].default == ()
 
 
 def test_the_mapping_is_a_plain_function_not_a_method() -> None:
@@ -968,7 +1087,7 @@ def test_startup_uses_the_same_mapping_as_a_later_save() -> None:
     [
         "preferences_store.save(",
         "ensure_config_update_allowed(",
-        "self.market_data.update_config(",
+        "self.broker_config.update_config(",
     ],
 )
 def test_the_save_adapter_does_not_run_the_transaction_itself(
@@ -1003,15 +1122,16 @@ def test_the_save_adapter_does_go_through_the_service() -> None:
     [
         "preferences_store.save(",
         "ensure_config_update_allowed(",
-        "self.market_data.update_config(",
+        "self.broker_config.update_config(",
     ],
 )
 def test_the_transaction_calls_are_absent_from_desktop(call: str) -> None:
     """The module boundary, asserted on the file that was refactored.
 
-    ``market_data_service.py`` still *defines* the check and the apply --
-    that is the other side of the boundary -- but ``desktop.py`` must no
-    longer call them directly.
+    ``BrokerAccountApplication`` still *defines* the check and the apply
+    -- that is the other side of the boundary -- but ``desktop.py`` must no
+    longer call them directly.  The window passes the application in as the
+    owner instead.
     """
 
     assert call not in _DESKTOP_PATH.read_text(encoding="utf-8")
@@ -1022,3 +1142,180 @@ def test_the_transaction_lives_in_the_settings_module() -> None:
     assert "ensure_config_update_allowed(" in source
     assert "update_config(" in source
     assert "self.store.save(" in source
+
+
+# -- Broker Account v2: both runtimes are protected --------------------
+
+
+def test_a_running_account_refresh_refuses_before_the_disk_write() -> None:
+    """§112: the account owner refuses, and the file is untouched.
+
+    The account application owns the connection config, so its refusal is
+    the one that matters most: a change it refused can never be applied, and
+    writing the file first would leave the operator told "saved" while the
+    next refresh still used the old endpoint.
+    """
+
+    log: list = []
+    store = _FakeStore(log=log)
+    service = DesktopSettingsService(store)
+    current = _app_config()
+    broker_config = _FakeBrokerConfig(
+        current.ibkr, refuse=True, log=log
+    )
+    guard = _FakeGuard(log=log)
+
+    with pytest.raises(BrokerAccountActiveError):
+        service.commit(
+            _preferences(ibkr_client_id=88),
+            current_config=current,
+            broker_config=broker_config,
+            runtime_guards=(guard,),
+        )
+
+    # Refused before the write, and the stream guard was never consulted
+    # because the owner had already refused.
+    assert log == ["ensure"]
+    assert store.returned is None
+    assert guard.checked == 0
+    assert broker_config.updated == []
+
+
+def test_a_live_market_stream_refuses_before_the_disk_write() -> None:
+    """§111: the market guard refuses, and the file is untouched."""
+
+    log: list = []
+    store = _FakeStore(log=log)
+    service = DesktopSettingsService(store)
+    current = _app_config()
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    guard = _FakeGuard(refuse=True, log=log)
+
+    with pytest.raises(MarketDataActiveError):
+        service.commit(
+            _preferences(ibkr_client_id=88),
+            current_config=current,
+            broker_config=broker_config,
+            runtime_guards=(guard,),
+        )
+
+    # The owner accepted it (it is idle), the stream guard refused, and
+    # nothing was written or applied.
+    assert log == ["ensure", "guard"]
+    assert store.returned is None
+    assert broker_config.updated == []
+
+
+def test_both_idle_applies_the_change_after_the_write() -> None:
+    """§113: save, then apply, and the next read sees the new config."""
+
+    log: list = []
+    store = _FakeStore(log=log)
+    service = DesktopSettingsService(store)
+    current = _app_config()
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    guard = _FakeGuard(log=log)
+
+    commit = service.commit(
+        _preferences(ibkr_client_id=88),
+        current_config=current,
+        broker_config=broker_config,
+        runtime_guards=(guard,),
+    )
+
+    # Order is the contract: both checks, then the write, then the apply.
+    assert log == ["ensure", "guard", "save", "update"]
+    assert broker_config.config == commit.config.ibkr
+    assert commit.config.ibkr.client_id == 88
+
+
+def test_several_guards_are_all_consulted() -> None:
+    """A second runtime must not be skipped because the first passed."""
+
+    log: list = []
+    store = _FakeStore(log=log)
+    service = DesktopSettingsService(store)
+    current = _app_config()
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    first = _FakeGuard(log=log)
+    second = _FakeGuard(log=log)
+
+    service.commit(
+        _preferences(ibkr_client_id=88),
+        current_config=current,
+        broker_config=broker_config,
+        runtime_guards=(first, second),
+    )
+
+    assert log == ["ensure", "guard", "guard", "save", "update"]
+    assert first.checked == 1
+    assert second.checked == 1
+
+
+def test_any_refusing_guard_stops_the_transaction() -> None:
+    """The second guard refusing is as decisive as the first."""
+
+    log: list = []
+    store = _FakeStore(log=log)
+    service = DesktopSettingsService(store)
+    current = _app_config()
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    first = _FakeGuard(log=log)
+    second = _FakeGuard(refuse=True, log=log)
+
+    with pytest.raises(MarketDataActiveError):
+        service.commit(
+            _preferences(ibkr_client_id=88),
+            current_config=current,
+            broker_config=broker_config,
+            runtime_guards=(first, second),
+        )
+
+    assert store.returned is None
+    assert broker_config.updated == []
+
+
+def test_no_guards_still_checks_the_config_owner() -> None:
+    """``runtime_guards`` defaults to empty; the owner is not optional."""
+
+    log: list = []
+    store = _FakeStore(log=log)
+    service = DesktopSettingsService(store)
+    current = _app_config()
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+
+    commit = service.commit(
+        _preferences(ibkr_client_id=88),
+        current_config=current,
+        broker_config=broker_config,
+    )
+
+    assert log == ["ensure", "save", "update"]
+    assert commit.config.ibkr.client_id == 88
+
+
+def test_the_guards_are_consulted_in_the_order_given() -> None:
+    """Order is deterministic so a refusal is reproducible."""
+
+    log: list = []
+    store = _FakeStore(log=log)
+    service = DesktopSettingsService(store)
+    current = _app_config()
+    broker_config = _FakeBrokerConfig(current.ibkr, log=log)
+    order: list[str] = []
+
+    class _Named:
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        def ensure_reconfiguration_allowed(self) -> None:
+            order.append(self._name)
+
+    service.commit(
+        _preferences(ibkr_client_id=88),
+        current_config=current,
+        broker_config=broker_config,
+        runtime_guards=(_Named("a"), _Named("b"), _Named("c")),
+    )
+
+    assert order == ["a", "b", "c"]

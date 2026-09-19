@@ -21,7 +21,7 @@ from decimal import Decimal
 import pytest
 
 from us_quant.trading.domain.account import (
-    AccountSnapshot,
+    RiskAccountSnapshot,
     BrokerConnectionState,
     Position,
 )
@@ -144,7 +144,7 @@ def test_market_slice_rejects_naive_timestamp_empty_and_mismatched_bars() -> Non
         MarketSlice(timestamp=other, bars={"AAPL": _bar()})
 
 
-# -- Position / AccountSnapshot -------------------------------------------
+# -- Position / RiskAccountSnapshot -------------------------------------------
 
 
 def test_position_rejects_short_and_negative_and_zero_multiplier() -> None:
@@ -182,11 +182,11 @@ def test_account_snapshot_rejects_any_negative_field() -> None:
         }
         values[field] = Decimal("-1")
         with pytest.raises(ValueError, match="account values cannot be negative"):
-            AccountSnapshot(**values)
+            RiskAccountSnapshot(**values)
 
 
 def test_account_snapshot_defaults_its_timestamp_to_now_utc() -> None:
-    snapshot = AccountSnapshot(
+    snapshot = RiskAccountSnapshot(
         net_liquidation=Decimal("100"),
         cash=Decimal("50"),
         day_start_equity=Decimal("90"),

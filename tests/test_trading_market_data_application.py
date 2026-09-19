@@ -132,7 +132,6 @@ def _application(
     resolver=None,
 ) -> MarketDataApplication:
     return MarketDataApplication(
-        _config(),
         factories=factories or {},
         exchange_resolver=resolver,
     )
@@ -148,7 +147,7 @@ def _app_with_recorder(
 
     created: list[_Recorder] = []
 
-    def factory(request, listener, config):
+    def factory(request, listener):
         recorder = _Recorder(
             kwargs={
                 "symbols": request.symbols,
@@ -159,7 +158,6 @@ def _app_with_recorder(
             symbols=request.symbols,
         )
         recorder.request = request
-        recorder.config = config
         created.append(recorder)
         return recorder
 
@@ -180,7 +178,7 @@ def replace_config(**changes) -> IBKRConnectionConfig:
 
 def test_ibkr_request_builds_the_ibkr_read_only_stream(monkeypatch) -> None:
     created = _install(monkeypatch, "IBKRReadOnlyStream")
-    app = build_market_data_application(_config())
+    app = build_market_data_application(_config)
 
     app.prepare(
         MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("SPY", "QQQ"))
@@ -195,7 +193,8 @@ def test_ibkr_request_builds_the_ibkr_read_only_stream(monkeypatch) -> None:
     assert stream.kwargs["coverage"] == IBKR_COVERAGE
     assert stream.kwargs["market_exchange"] == DEFAULT_MARKET_EXCHANGE
     assert stream.kwargs["source_id"] == SOURCE_IBKR
-    # The IBKR config is positional in the adapter's signature.
+    # The IBKR config is positional in the adapter's signature, and it comes
+    # from the getter -- resolved at prepare time, not captured at build time.
     assert stream.args == (_config(),)
 
 
@@ -203,7 +202,7 @@ def test_extended_ibkr_keeps_label_coverage_and_venue_routing(
     monkeypatch,
 ) -> None:
     created = _install(monkeypatch, "IBKRReadOnlyStream")
-    app = build_market_data_application(_config())
+    app = build_market_data_application(_config)
     monkeypatch.setattr(
         ibkr_module,
         "ibkr_market_data_exchange",
@@ -229,7 +228,7 @@ def test_explicit_market_exchange_overrides_session_routing() -> None:
 
     created: list[_Recorder] = []
 
-    def factory(request, listener, config):
+    def factory(request, listener):
         recorder = _Recorder(
             kwargs={"market_exchange": request.market_exchange}
         )
@@ -280,7 +279,7 @@ def test_prepare_resolves_the_venue_once_and_commits_it() -> None:
         calls.append(len(calls))
         return "SMART"
 
-    def factory(request, listener, config):
+    def factory(request, listener):
         created.append(_Recorder(kwargs={"request": request}))
         return created[-1]
 
@@ -316,7 +315,7 @@ def test_a_changing_resolver_cannot_desynchronise_the_prepared_venue() -> None:
         calls.append(value)
         return value
 
-    def factory(request, listener, config):
+    def factory(request, listener):
         created.append(_Recorder(kwargs={"request": request}))
         return created[-1]
 
@@ -344,7 +343,7 @@ def test_an_explicit_venue_bypasses_the_resolver_entirely() -> None:
         calls.append(len(calls))
         return "OVERNIGHT"
 
-    def factory(request, listener, config):
+    def factory(request, listener):
         created.append(_Recorder(kwargs={"request": request}))
         return created[-1]
 
@@ -385,7 +384,7 @@ def test_a_failed_factory_does_not_half_update_the_prepared_venue() -> None:
     def resolver() -> str:
         return next(values)
 
-    def good_factory(request, listener, config):
+    def good_factory(request, listener):
         created.append(_Recorder(kwargs={"request": request}))
         return created[-1]
 
@@ -403,7 +402,7 @@ def test_a_failed_factory_does_not_half_update_the_prepared_venue() -> None:
     # already produced a different venue.
     app.stop()
 
-    def exploding_factory(request, listener, config):
+    def exploding_factory(request, listener):
         raise RuntimeError("socket exploded")
 
     app._factories[SOURCE_IBKR_EXTENDED] = exploding_factory
@@ -431,7 +430,7 @@ def test_the_prepared_venue_tracks_a_successful_reprepare() -> None:
     def resolver() -> str:
         return next(values)
 
-    def factory(request, listener, config):
+    def factory(request, listener):
         created.append(_Recorder(kwargs={"request": request}))
         return created[-1]
 
@@ -471,7 +470,7 @@ def test_rotation_is_visible_when_the_session_moves_on() -> None:
     def resolver() -> str:
         return next(values)
 
-    def factory(request, listener, config):
+    def factory(request, listener):
         created.append(_Recorder(kwargs={"request": request}))
         return created[-1]
 
@@ -507,7 +506,7 @@ def test_credentials_are_passed_through_for_alpaca_and_finnhub(
 ) -> None:
     alpaca = _install(monkeypatch, "AlpacaIEXStream")
     finnhub = _install(monkeypatch, "FinnhubTradeStream")
-    app = build_market_data_application(_config())
+    app = build_market_data_application(_config)
 
     app.prepare(
         MarketDataStartRequest(
@@ -542,7 +541,7 @@ def test_unknown_source_is_rejected_without_building_anything(
     """A typo must fail closed, never fall back to a broker connection."""
 
     created = _install(monkeypatch, "IBKRReadOnlyStream")
-    app = build_market_data_application(_config())
+    app = build_market_data_application(_config)
 
     with pytest.raises(ValueError) as error:
         app.prepare(
@@ -562,7 +561,7 @@ def test_unknown_source_is_rejected_without_building_anything(
 
 def test_empty_source_is_rejected(monkeypatch) -> None:
     created = _install(monkeypatch, "IBKRReadOnlyStream")
-    app = build_market_data_application(_config())
+    app = build_market_data_application(_config)
 
     with pytest.raises(ValueError):
         app.prepare(MarketDataStartRequest(source_id="", symbols=("SPY",)))
@@ -576,7 +575,7 @@ def test_every_supported_source_builds(monkeypatch) -> None:
     _install(monkeypatch, "IBKRReadOnlyStream")
     _install(monkeypatch, "AlpacaIEXStream")
     _install(monkeypatch, "FinnhubTradeStream")
-    app = build_market_data_application(_config())
+    app = build_market_data_application(_config)
 
     for source in SUPPORTED_SOURCES:
         app.prepare(
@@ -612,7 +611,7 @@ def test_listener_reaches_the_push_sources(monkeypatch) -> None:
     alpaca = _install(monkeypatch, "AlpacaIEXStream")
     finnhub = _install(monkeypatch, "FinnhubTradeStream")
     listener = object()
-    app = build_market_data_application(_config())
+    app = build_market_data_application(_config)
 
     app.prepare(
         MarketDataStartRequest(source_id=SOURCE_ALPACA_IEX, symbols=("A",)),
@@ -640,7 +639,7 @@ def test_ibkr_is_not_given_a_push_listener(monkeypatch) -> None:
 
     for source in (SOURCE_IBKR, SOURCE_IBKR_EXTENDED):
         created = _install(monkeypatch, "IBKRReadOnlyStream")
-        app = build_market_data_application(_config())
+        app = build_market_data_application(_config)
 
         app.prepare(
             MarketDataStartRequest(source_id=source, symbols=("SPY",)),
@@ -680,7 +679,7 @@ def test_lifecycle_reports_state_and_normalises_symbols(
 ) -> None:
     created: list[_Recorder] = []
 
-    def factory(request, listener, config):
+    def factory(request, listener):
         recorder = _Recorder(symbols=("AAPL", "MSFT"))
         created.append(recorder)
         return recorder
@@ -707,7 +706,7 @@ def test_lifecycle_reports_state_and_normalises_symbols(
 
 def test_stop_is_forwarded_and_safe_before_any_prepare(monkeypatch) -> None:
     created = _install(monkeypatch, "AlpacaIEXStream")
-    app = build_market_data_application(_config())
+    app = build_market_data_application(_config)
 
     app.stop()  # nothing prepared yet: must not raise
     app.prepare(
@@ -753,7 +752,7 @@ def test_a_runtime_failure_is_recorded_without_tearing_down(
 def test_failed_construction_never_reports_running(monkeypatch) -> None:
     """Credentials missing is the realistic fail-closed case."""
 
-    def factory(request, listener, config):
+    def factory(request, listener):
         raise AlpacaCredentialsMissing("missing")
 
     app = _application(factories={SOURCE_ALPACA_IEX: factory})
@@ -960,11 +959,7 @@ def test_a_stop_request_does_not_release_the_live_feed(
                 MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("B",))
             )
         with pytest.raises(MarketDataActiveError):
-            app.update_config(replace_config(client_id=99))
-        with pytest.raises(MarketDataActiveError):
-            app.ensure_config_update_allowed(
-                replace_config(client_id=99)
-            )
+            app.ensure_reconfiguration_allowed()
 
         assert len(created) == 1
         assert app.lifecycle().running is True
@@ -976,17 +971,14 @@ def test_a_stop_request_does_not_release_the_live_feed(
     assert outcome == [None]
 
     # Only now that run() has returned is the slot free.
-    app.update_config(replace_config(client_id=99))
+    app.ensure_reconfiguration_allowed()
     app.prepare(
         MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("B",))
     )
 
     assert len(created) == 2
     assert app.lifecycle().symbols == ("B",)
-    assert app.config.client_id == 99
-    # The replacement saw the *updated* config, not the start-up one.
-    assert created[1].config.client_id == 99
-    # And the resolved venue, not None.
+    # The replacement resolved a venue rather than inheriting None.
     assert created[1].request.market_exchange is not None
 
 
@@ -1008,13 +1000,13 @@ def test_a_stop_request_before_run_does_release_the_feed(
 
     # The adapter really was asked to wind down before being dropped.
     assert created[0].stopped is True
-    app.update_config(replace_config(client_id=99))
+    app.ensure_reconfiguration_allowed()
     app.prepare(
         MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("B",))
     )
 
     assert len(created) == 2
-    assert app.config.client_id == 99
+    assert app.lifecycle().symbols == ("B",)
 
 
 def test_a_failed_run_still_releases_the_feed(monkeypatch) -> None:
@@ -1042,52 +1034,49 @@ def test_a_failed_run_still_releases_the_feed(monkeypatch) -> None:
     assert len(created) == 2
 
 
-def test_ensure_config_update_allowed_changes_nothing(monkeypatch) -> None:
+def test_ensure_reconfiguration_allowed_changes_nothing(
+    monkeypatch,
+) -> None:
     """It is a check, not an application: state must be untouched.
 
     The settings save path calls it *before* writing the file, so an accepted
-    check that had already mutated the config would defeat the ordering it
+    check that had already mutated runtime state would defeat the ordering it
     exists to establish.
     """
 
     app, _created = _app_with_recorder(monkeypatch)
-    before = app.config
+    before = app.lifecycle()
 
-    app.ensure_config_update_allowed(replace_config(client_id=99))
+    app.ensure_reconfiguration_allowed()
 
-    assert app.config == before
+    assert app.lifecycle() == before
 
 
-def test_ensure_config_update_allowed_allows_an_unchanged_config(
+def test_ensure_reconfiguration_allowed_allows_an_idle_application(
     monkeypatch,
 ) -> None:
-    """Re-saving identical settings must not be blocked by a live feed."""
+    """An application with no feed may always be reconfigured."""
 
     app, _created = _app_with_recorder(monkeypatch)
-    app.prepare(
-        MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("SPY",))
-    )
 
-    app.ensure_config_update_allowed(_config())  # must not raise
+    app.ensure_reconfiguration_allowed()  # must not raise
 
 
-def test_update_config_is_refused_while_a_feed_is_live(monkeypatch) -> None:
+def test_ensure_reconfiguration_allowed_is_refused_while_a_feed_is_live(
+    monkeypatch,
+) -> None:
     """The open connection is the one the feed was built with."""
 
     app, _created = _app_with_recorder(monkeypatch)
     app.prepare(
         MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("SPY",))
     )
-    before = app.config
 
     with pytest.raises(MarketDataActiveError):
-        app.update_config(replace_config(client_id=99))
-
-    # Refused means unchanged, not half-applied.
-    assert app.config == before
+        app.ensure_reconfiguration_allowed()
 
 
-def test_update_config_is_allowed_when_the_feed_was_stopped_before_it_ran(
+def test_ensure_reconfiguration_allowed_after_a_stop_request_before_run(
     monkeypatch,
 ) -> None:
     """The one releasable case: prepared, stopped, never run."""
@@ -1098,50 +1087,58 @@ def test_update_config_is_allowed_when_the_feed_was_stopped_before_it_ran(
     )
     app.stop()
 
-    updated = replace_config(client_id=99)
-
-    app.update_config(updated)
-
-    assert app.config == updated
+    app.ensure_reconfiguration_allowed()  # must not raise
 
 
-def test_update_config_is_allowed_after_the_feed_finished(
+def test_ensure_reconfiguration_allowed_after_the_feed_finished(
     monkeypatch,
 ) -> None:
+    """A feed that ran and returned no longer holds the connection."""
+
     app, _created = _app_with_recorder(monkeypatch)
     app.prepare(
         MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("SPY",))
     )
     app.run()
 
-    updated = replace_config(client_id=99)
-
-    app.update_config(updated)
-
-    assert app.config == updated
+    app.ensure_reconfiguration_allowed()  # must not raise
 
 
-def test_update_config_only_affects_future_preparations(monkeypatch) -> None:
-    """No network work, no reconnect, no feed: the *next* prepare sees it."""
+def test_the_application_no_longer_owns_a_connection_config(
+    monkeypatch,
+) -> None:
+    """The transitional config dependency is gone, not merely unused.
+
+    Broker/Account v2 moved connection ownership to
+    ``BrokerAccountApplication``.  If a ``config`` attribute or an
+    ``update_config`` method came back here, the two runtimes would again
+    disagree about which endpoint is in force -- the stale-config bug.
+    """
+
+    app, _created = _app_with_recorder(monkeypatch)
+
+    assert not hasattr(app, "config")
+    assert not hasattr(app, "update_config")
+    assert not hasattr(app, "ensure_config_update_allowed")
+
+
+def test_the_factory_is_never_handed_a_connection_config(
+    monkeypatch,
+) -> None:
+    """The factory receives the request and the listener, nothing else.
+
+    A config parameter was what forced the application to import
+    ``us_quant.ibkr``.  The IBKR composition reads the endpoint from the
+    account application's getter at prepare time instead.
+    """
 
     app, created = _app_with_recorder(monkeypatch)
     app.prepare(
         MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("SPY",))
     )
+
     assert len(created) == 1
-    app.stop()
-
-    updated = replace_config(client_id=99)
-    app.update_config(updated)
-
-    # Updating prepared nothing and ran nothing.
-    assert len(created) == 1
-
-    app.prepare(
-        MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("SPY",))
-    )
-
-    assert len(created) == 2
+    assert not hasattr(created[0], "config")
 
 
 # -- immutability ------------------------------------------------------

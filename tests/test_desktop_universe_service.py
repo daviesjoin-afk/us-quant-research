@@ -39,13 +39,21 @@ REFACTORED_METHODS = ("__init__", "_refresh_universe")
 # added the v2 page composer.  The delta is declared here so the guard below
 # can assert it *exactly* instead of merely tolerating it.
 LATER_ROUND_REMOVED_METHODS = (
+    # Broker Account v2 deleted the legacy account page builder;
+    # the account route is a native v2 page now.
+    "_account_tab",
+    "_populate_account_view",
+
     "_build_legacy_workspace",
     "_build_unified_workflow",
     "_workflow_tabs",
     "_workflow_scroll_page",
     "_workspace_tabs",
 )
-LATER_ROUND_ADDED_METHODS = ("_build_v2_pages",)
+LATER_ROUND_ADDED_METHODS = (
+    "_populate_dashboard_account_cards",
+    "_refresh_account_surfaces",
+"_build_v2_pages",)
 
 # Trading Core v2 also rewrote these two: `_build_ui` now composes the v2
 # shell, and `_targeted_robustness_finished` navigates through it.
@@ -77,6 +85,25 @@ MARKET_DATA_V2_METHODS = (
     "_save_user_preferences",
     "_clear_selected_api_credentials",
     "_api_provider_changed",
+)
+
+# Broker Account v2: the methods this round rewrote because the
+# account truth moved from ``IBKRReadOnlySnapshot``/``PortfolioView``
+# to the domain ``BrokerAccountPortfolio``, and because the account
+# page became a native Desktop UI v2 page.
+BROKER_ACCOUNT_V2_METHODS = (
+    "_account_snapshot_finished",
+    "_export_terminal_state",
+    "_paper_simulation_capital",
+    "_populate_auto_quant_snapshot",
+    "_refresh_account_snapshot",
+    "_refresh_cards",
+    "_refresh_target_preflight",
+    "_research_capital_changed",
+    "_run_backtest_workspace",
+    "_run_scan",
+    "_start_shadow",
+    "_strategy_registry_selection_changed",
 )
 
 FROZEN_METHODS = (
@@ -130,6 +157,12 @@ MARKET_DATA_V2_CHANGED_MODULES = (
     "src/us_quant/desktop_workers.py",
     # Market Data v2: the quote grid renders the domain snapshot.
     "src/us_quant/desktop_widgets.py",
+)
+
+# Broker Account v2: modules whose bytes moved with this round.
+BROKER_ACCOUNT_V2_CHANGED_MODULES = (
+    "src/us_quant/desktop_settings.py",
+    "src/us_quant/ibkr_paper_orders.py",
 )
 
 SERVICE_MODULE = "src/us_quant/desktop_universe_service.py"
@@ -1276,11 +1309,13 @@ def test_only_the_declared_methods_changed() -> None:
         | {"_run_scan", "_run_backtest_workspace"}
         | set(LATER_ROUND_UI_METHODS)
         | set(MARKET_DATA_V2_METHODS)
+        | set(BROKER_ACCOUNT_V2_METHODS)
     )
     # Exact, not a subset: the delta is the declared surface and nothing
     # else, in both directions.
     assert set(changed) <= allowed
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)
+    assert set(BROKER_ACCOUNT_V2_METHODS) <= set(changed)
     assert "_refresh_universe" in changed
 
 
@@ -1304,7 +1339,10 @@ def test_the_other_frozen_modules_are_untouched() -> None:
 
     # Exact, not a subset: the delta is the declared Market Data v2
     # surface and nothing else.
-    assert set(changed) == set(MARKET_DATA_V2_CHANGED_MODULES)
+    assert set(changed) == (
+        set(MARKET_DATA_V2_CHANGED_MODULES)
+        | set(BROKER_ACCOUNT_V2_CHANGED_MODULES)
+    )
 
 
 def test_desktop_py_no_longer_calls_the_domain_directly() -> None:

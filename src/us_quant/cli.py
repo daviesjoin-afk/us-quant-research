@@ -11,11 +11,17 @@ from us_quant.config import load_config
 from us_quant.trading.domain.market import Bar, MarketSlice
 from us_quant.ibkr import probe_ibkr_socket
 from us_quant.ibkr_history import collect_daily_history
-from us_quant.ibkr_readonly import (
+from us_quant.trading.adapters.ibkr.support import (
     IBKRAPIUnavailable,
     IBKRReadOnlyError,
-    collect_readonly_snapshot,
-    snapshot_to_redacted_dict,
+)
+from us_quant.trading.composition.accounts import (
+    build_broker_account_application,
+)
+from us_quant.trading.domain.account import BrokerAccountPortfolio
+from us_quant.trading.ports.broker_account import (
+    BrokerAccountError,
+    BrokerAccountUnavailable,
 )
 from us_quant.portfolio import IntegerPositionSizer
 from us_quant.optimization import (
@@ -138,13 +144,25 @@ def ibkr_probe(config_path: Path) -> int:
 
 
 def ibkr_readonly(config_path: Path) -> int:
+    """Read-only account / positions / P&L, as redacted domain JSON.
+
+    This command reports *account* truth only.  Market readiness is not part
+    of it: whether quotes are real-time is owned by Market Data v2, so there
+    is no ``quotes`` or ``intraday_market_data_*`` key here any more.
+
+    No second masking pass happens in the CLI.  The domain snapshot already
+    holds only ``account_alias``, so the redaction is structural rather than
+    something this function has to remember to do.
+    """
+
     config = load_config(config_path)
     if config.environment.value != "paper" or config.live_trading_enabled:
         print("ERROR: read-only integration requires the paper environment")
         return 2
+    application = build_broker_account_application(config.ibkr)
     try:
-        snapshot = collect_readonly_snapshot(config.ibkr)
-    except IBKRAPIUnavailable as error:
+        portfolio = application.refresh(timeout_seconds=20)
+    except BrokerAccountUnavailable as error:
         print(
             json.dumps(
                 {
@@ -160,7 +178,7 @@ def ibkr_readonly(config_path: Path) -> int:
             )
         )
         return 4
-    except IBKRReadOnlyError as error:
+    except BrokerAccountError as error:
         print(
             json.dumps(
                 {"connected": False, "error": str(error)},
@@ -172,12 +190,79 @@ def ibkr_readonly(config_path: Path) -> int:
 
     print(
         json.dumps(
-            snapshot_to_redacted_dict(snapshot),
+            portfolio_to_redacted_dict(portfolio),
             ensure_ascii=False,
             indent=2,
         )
     )
     return 0
+
+
+def portfolio_to_redacted_dict(
+    portfolio: BrokerAccountPortfolio,
+) -> dict:
+    """Render a domain portfolio as JSON-safe, already-redacted data.
+
+    Every value here comes from the domain, which holds no raw account id,
+    so this is a serialisation concern and not a redaction one.
+    """
+
+    account = portfolio.account
+    return {
+        "connected": True,
+        "refreshed": True,
+        "account": {
+            "environment": account.environment.value,
+            "account_alias": account.account_alias,
+            "net_liquidation": _decimal_text(account.net_liquidation),
+            "cash": _decimal_text(account.cash),
+            "available_funds": _decimal_text(account.available_funds),
+            "buying_power": _decimal_text(account.buying_power),
+            "gross_position_value": _decimal_text(
+                account.gross_position_value
+            ),
+            "excess_liquidity": _decimal_text(account.excess_liquidity),
+            "maintenance_margin": _decimal_text(
+                account.maintenance_margin
+            ),
+            "cushion": _decimal_text(account.cushion),
+            "daily_pnl": _decimal_text(account.daily_pnl),
+            "unrealized_pnl": _decimal_text(account.unrealized_pnl),
+            "realized_pnl": _decimal_text(account.realized_pnl),
+            "observed_at": account.observed_at.isoformat(),
+            "pnl_source": account.pnl_source,
+        },
+        "positions": [
+            {
+                "account_alias": position.account_alias,
+                "con_id": position.con_id,
+                "symbol": position.symbol,
+                "local_symbol": position.local_symbol,
+                "security_type": position.security_type,
+                "exchange": position.exchange,
+                "currency": position.currency,
+                "quantity": str(position.quantity),
+                "average_cost": str(position.average_cost),
+                "market_value": _decimal_text(position.market_value),
+                "daily_pnl": _decimal_text(position.daily_pnl),
+                "unrealized_pnl": _decimal_text(position.unrealized_pnl),
+                "realized_pnl": _decimal_text(position.realized_pnl),
+            }
+            for position in portfolio.positions
+        ],
+        "diagnostics": [
+            {
+                "code": diagnostic.code,
+                "message": diagnostic.message,
+                "informational": diagnostic.informational,
+            }
+            for diagnostic in portfolio.diagnostics
+        ],
+    }
+
+
+def _decimal_text(value: Decimal | None) -> str | None:
+    return str(value) if value is not None else None
 
 
 def ibkr_history(
@@ -747,7 +832,13 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("doctor")
     subparsers.add_parser("ibkr-probe")
-    subparsers.add_parser("ibkr-readonly")
+    subparsers.add_parser(
+        "ibkr-readonly",
+        help=(
+            "read-only IBKR Paper account / positions / P&L "
+            "(not market data)"
+        ),
+    )
     history_parser = subparsers.add_parser("ibkr-history")
     history_parser.add_argument("--duration", default="5 Y")
     history_parser.add_argument(

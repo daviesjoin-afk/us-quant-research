@@ -96,11 +96,6 @@ from us_quant.desktop_universe_service import (
 from us_quant.desktop_market_scan_service import DesktopMarketScanService
 from us_quant.desktop_backtest_service import DesktopBacktestService
 from us_quant.ibkr import IBKRConnectionConfig, probe_ibkr_socket
-from us_quant.ibkr_readonly import (
-    IBKRReadOnlySnapshot,
-    collect_readonly_snapshot,
-    intraday_market_data_reasons,
-)
 from us_quant.trading.application.market_data import (
     PUSH_LISTENER_SOURCES,
     SOURCE_ALPACA_IEX,
@@ -109,12 +104,24 @@ from us_quant.trading.application.market_data import (
     MarketDataCredentials,
     MarketDataStartRequest,
 )
+from us_quant.trading.composition.accounts import (
+    build_broker_account_application,
+)
 from us_quant.trading.composition.market_data import (
     build_market_data_application,
 )
+from us_quant.trading.domain.account import (
+    BrokerAccountPortfolio,
+    BrokerAccountSnapshot,
+    BrokerPositionSnapshot,
+)
+from us_quant.trading.domain.common import Environment
 from us_quant.trading.domain.market import (
     MarketDataMode,
     MarketSnapshot,
+)
+from us_quant.trading.ports.broker_account import (
+    BrokerAccountError,
 )
 from us_quant.trading.ports.market_data import (
     MarketDataActiveError,
@@ -133,11 +140,7 @@ from us_quant.extended_hours import (
     paper_order_routing,
     us_equity_session,
 )
-from us_quant.portfolio_view import (
-    AccountView,
-    PortfolioView,
-    build_portfolio_view,
-)
+from us_quant.desktop_v2.pages.account import AccountPage
 from us_quant.scanner import (
     MarketScan,
     load_close_series,
@@ -444,7 +447,7 @@ class MainWindow(QMainWindow):
         ] | None = None
         self._quotes_scroll_active = False
         self._pending_stream_snapshot: MarketSnapshot | None = None
-        self.portfolio_view: PortfolioView | None = None
+        self.account_portfolio: BrokerAccountPortfolio | None = None
         self.stream_worker: StreamWorker | None = None
         self._pending_stream_switch: (
             tuple[str, tuple[str, ...]] | None
@@ -509,14 +512,18 @@ class MainWindow(QMainWindow):
         # task that is still being admitted.
         self._closing = False
         self.runtime_supervisor = RuntimeSupervisor()
-        # Provider selection, credentials, timeouts and the IBKR venue all
-        # belong to the service, not to the UI: the desktop supplies a
-        # request and gets a ready stream back (see
-        # ``docs/DESKTOP_DECOMPOSITION.md``).
-        # Market Data v2: the window composes the application and then only
-        # ever talks to it.  No provider adapter, and no provider module, is
-        # visible from here.
-        self.market_data = build_market_data_application(self.config.ibkr)
+        # Broker/Account v2: the account application is built first because it
+        # is the runtime owner of the IBKR connection settings.  Market data
+        # reads the current endpoint from it through a getter, so a settings
+        # change is picked up by the next stream instead of being captured
+        # here at start-up.  Neither application names a concrete adapter --
+        # composition did that.
+        self.broker_account = build_broker_account_application(
+            self.config.ibkr
+        )
+        self.market_data = build_market_data_application(
+            config_getter=lambda: self.broker_account.config
+        )
 
         self.setWindowTitle(APP_TITLE)
         self.resize(1440, 900)
@@ -623,13 +630,15 @@ class MainWindow(QMainWindow):
         self._refresh_extended_hours_status()
 
     def _build_v2_pages(self) -> dict[str, QWidget]:
-        """Compose the eight Desktop UI v2 routes from existing pages.
+        """Compose the eight Desktop UI v2 routes.
 
-        This is the transitional mapping: each route is backed by a page
-        builder that predates v2.  As a v2 page is rewritten, its old builder
-        is deleted and this table points at the replacement.  The dict is
-        keyed by route and must cover ``ROUTES`` exactly -- the shell fails
-        closed on a missing or unknown route.
+        Most routes are still backed by a page builder that predates v2; as a
+        v2 page is rewritten, its old builder is deleted and this table points
+        at the replacement.  ``account`` is the first route to complete that
+        move: it is served by :class:`AccountPage`, a native v2 page, and
+        ``MainWindow._account_tab`` no longer exists.  The dict is keyed by
+        route and must cover ``ROUTES`` exactly -- the shell fails closed on a
+        missing or unknown route.
 
         ``research`` and ``system`` group several functions behind a
         second-level ``QTabWidget``.  Research is deliberately not part of
@@ -662,10 +671,22 @@ class MainWindow(QMainWindow):
             system.addTab(page, title)
         self.v2_system_tabs = system
 
+        self.account_page = AccountPage()
+        self.account_page.refresh_requested.connect(
+            self._refresh_account_snapshot
+        )
+        # The research-capital input lives on the research page and updates a
+        # card on the account page.  The page owns the card; the window owns
+        # the wiring, so the card is never reached for by attribute name from
+        # a handler that does not know which page it is on.
+        self.research_capital_input.valueChanged.connect(
+            self._research_capital_changed
+        )
+
         pages: dict[str, QWidget] = {
             "dashboard": self._dashboard_tab(),
             "market": self._quotes_tab(),
-            "account": self._account_tab(),
+            "account": self.account_page,
             "strategy": self._strategy_manager_tab(),
             "risk": self._safety_tab(),
             "execution": self._auto_quant_tab(),
@@ -1121,127 +1142,6 @@ class MainWindow(QMainWindow):
         orders_layout.addWidget(self.auto_order_table)
         self.auto_detail_tabs.addTab(orders_page, "Paper订单")
         layout.addWidget(self.auto_detail_tabs)
-        return page
-
-    def _account_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        cards = QHBoxLayout()
-        self.account_nlv_card = MetricCard(
-            "IBKR 模拟账户净值", "—", "尚未读取"
-        )
-        self.research_budget_card = MetricCard(
-            "历史研究资金情景", "$1,500", "可调整；不是账户真值"
-        )
-        self.account_day_pnl_card = MetricCard(
-            "当日盈亏", "不可用", "IBKR reqPnL"
-        )
-        self.account_unrealized_card = MetricCard(
-            "未实现盈亏", "不可用", "IBKR reqPnL"
-        )
-        self.account_cash_card = MetricCard(
-            "现金", "—", "券商账户摘要"
-        )
-        for card in (
-            self.account_nlv_card,
-            self.research_budget_card,
-            self.account_day_pnl_card,
-            self.account_unrealized_card,
-            self.account_cash_card,
-        ):
-            cards.addWidget(card)
-        layout.addLayout(cards)
-
-        self.shadow_gate_label = QLabel(
-            "策略证据门：硬阻断。必须先在“策略·版本”中绑定"
-            "独立验证且状态为 Paper Shadow 的版本。"
-        )
-        self.shadow_gate_label.setObjectName("emptyState")
-        self.shadow_gate_label.setWordWrap(True)
-        layout.addWidget(self.shadow_gate_label)
-
-        controls = QGridLayout()
-        controls.setHorizontalSpacing(10)
-        controls.setVerticalSpacing(6)
-        refresh_button = QPushButton("只读刷新账户 / 持仓 / P&L")
-        refresh_button.clicked.connect(self._refresh_account_snapshot)
-        self.account_status_label = QLabel(
-            "尚未读取 IBKR；账户号只显示脱敏别名"
-        )
-        self.account_status_label.setObjectName("subtitle")
-        controls.addWidget(refresh_button, 0, 0)
-        controls.addWidget(self.account_status_label, 0, 1)
-        controls.setColumnStretch(1, 1)
-        layout.addLayout(controls)
-
-        split = QSplitter(Qt.Vertical)
-        position_panel = QFrame()
-        position_panel.setObjectName("panel")
-        position_layout = QVBoxLayout(position_panel)
-        position_header = QVBoxLayout()
-        position_header.setSpacing(2)
-        position_title = QLabel("券商持仓")
-        position_title.setObjectName("sectionTitle")
-        self.positions_empty_label = QLabel(
-            "尚未读取持仓；读取后若为空，会明确显示“当前账户无持仓”"
-        )
-        self.positions_empty_label.setObjectName("subtitle")
-        position_header.addWidget(position_title)
-        position_header.addWidget(self.positions_empty_label)
-        position_layout.addLayout(position_header)
-        self.positions_table = QTableWidget(0, 13)
-        self.positions_table.setHorizontalHeaderLabels(
-            [
-                "代码",
-                "数量",
-                "均价",
-                "最新价",
-                "市值",
-                "风险敞口",
-                "当日P&L",
-                "未实现P&L",
-                "已实现P&L",
-                "行情类型",
-                "Mark来源",
-                "状态",
-                "账户",
-            ]
-        )
-        self._configure_table(self.positions_table)
-        position_layout.addWidget(self.positions_table)
-        split.addWidget(position_panel)
-
-        ledger_panel = QFrame()
-        ledger_panel.setObjectName("panel")
-        ledger_layout = QVBoxLayout(ledger_panel)
-        ledger_header = QVBoxLayout()
-        ledger_header.setSpacing(2)
-        ledger_title = QLabel("账户权益账本（Paper 与 Live 永久隔离）")
-        ledger_title.setObjectName("sectionTitle")
-        self.account_detail_label = QLabel(
-            "净值、现金和三类 P&L 均保留来源与采集时间"
-        )
-        self.account_detail_label.setObjectName("subtitle")
-        ledger_header.addWidget(ledger_title)
-        ledger_header.addWidget(self.account_detail_label)
-        ledger_layout.addLayout(ledger_header)
-        self.account_ledger_table = QTableWidget(0, 7)
-        self.account_ledger_table.setHorizontalHeaderLabels(
-            [
-                "时间",
-                "环境",
-                "账户",
-                "净值",
-                "现金",
-                "当日P&L",
-                "未实现P&L",
-            ]
-        )
-        self._configure_table(self.account_ledger_table)
-        ledger_layout.addWidget(self.account_ledger_table)
-        split.addWidget(ledger_panel)
-        split.setSizes([420, 220])
-        layout.addWidget(split)
         return page
 
     def _quotes_tab(self) -> QWidget:
@@ -4757,8 +4657,8 @@ class MainWindow(QMainWindow):
         self, snapshot: AutoQuantSnapshot
     ) -> None:
         account = (
-            self.portfolio_view.account
-            if self.portfolio_view is not None
+            self.account_portfolio.account
+            if self.account_portfolio is not None
             else None
         )
         broker_state = self.paper_trading.broker_state()
@@ -5133,9 +5033,9 @@ class MainWindow(QMainWindow):
             ),
             None,
         ) if self.stream_snapshot is not None else None
-        account: AccountView | None = (
-            self.portfolio_view.account
-            if self.portfolio_view is not None
+        account: BrokerAccountSnapshot | None = (
+            self.account_portfolio.account
+            if self.account_portfolio is not None
             else None
         )
         summary = self.minute_quote_store.summary(symbol)
@@ -6081,27 +5981,36 @@ class MainWindow(QMainWindow):
         return Decimal(control.value())
 
     def _research_capital_changed(self, value: int) -> None:
-        self.research_budget_card.set_value(
+        if not hasattr(self, "account_page"):
+            return
+        self.account_page.research_capital_card.set_value(
             f"${value:,.0f}",
             "历史研究情景；不是 Paper/Live 账户余额",
         )
 
     def _paper_simulation_capital(self) -> Decimal | None:
-        if self.portfolio_view is None:
+        """Fresh Paper net liquidation, or ``None`` if it is not usable.
+
+        The 300-second freshness rule and the positive-NLV rule are the same
+        ones the preflight applies, so internal simulation can never be sized
+        from an account the preflight would reject.  ``observed_at`` is
+        already a timezone-aware ``datetime`` from the domain, so there is no
+        string parsing here.
+        """
+
+        portfolio = self.account_portfolio
+        if portfolio is None:
             return None
-        account = self.portfolio_view.account
-        if account.environment != "paper":
+        account = portfolio.account
+        if account.environment is not Environment.PAPER:
             return None
-        try:
-            observed = datetime.fromisoformat(account.observed_at)
-            if observed.tzinfo is None:
-                observed = observed.replace(tzinfo=timezone.utc)
-            age_seconds = (
-                datetime.now(timezone.utc)
-                - observed.astimezone(timezone.utc)
-            ).total_seconds()
-        except (TypeError, ValueError):
-            return None
+        observed = account.observed_at
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=timezone.utc)
+        age_seconds = (
+            datetime.now(timezone.utc)
+            - observed.astimezone(timezone.utc)
+        ).total_seconds()
         if age_seconds < 0 or age_seconds > 300:
             return None
         value = account.net_liquidation
@@ -6121,17 +6030,21 @@ class MainWindow(QMainWindow):
         self.gateway_badge.style().polish(self.gateway_badge)
 
     def _refresh_account_snapshot(self) -> None:
+        """Read broker account truth through the account application.
+
+        The account path requests no market data.  The v1 collector took a
+        symbol list and ran a SPY/QQQ readiness check on the same socket;
+        both are gone, because whether quotes are real-time is Market Data
+        v2's answer to give, not the account chain's.
+        """
+
         def task(
             progress: Callable[[str], None],
-        ) -> IBKRReadOnlySnapshot:
+        ) -> BrokerAccountPortfolio:
             progress(
                 "正在进行 IBKR 只读握手并读取账户、持仓和 P&L…"
             )
-            return collect_readonly_snapshot(
-                self.config.ibkr,
-                symbols=("SPY", "QQQ", "XLF", "AAPL"),
-                timeout_seconds=20,
-            )
+            return self.broker_account.refresh(timeout_seconds=20)
 
         self._start_task(
             task,
@@ -6351,12 +6264,12 @@ class MainWindow(QMainWindow):
         self.strategy_stop_button.setEnabled(
             record.status in {"research", "paper_shadow", "paused"}
         )
-        if hasattr(self, "shadow_gate_label"):
+        if hasattr(self, "account_page"):
             if (
                 record.strategy_id == "intraday-targeted-t"
                 and record.status == "research"
             ):
-                self.shadow_gate_label.setText(
+                self.account_page.set_notice(
                     f"探索性影子模式：已绑定 {record.strategy_id} "
                     f"{record.semver}。可收集实时模拟证据；"
                     "不代表晋级，不会发送券商订单。"
@@ -6365,12 +6278,12 @@ class MainWindow(QMainWindow):
                 record.gate_passed
                 and record.status == "paper_shadow"
             ):
-                self.shadow_gate_label.setText(
+                self.account_page.set_notice(
                     f"策略证据门：通过；已绑定 {record.strategy_id} "
                     f"{record.semver}。仍需新鲜 Paper 账户与实时行情。"
                 )
             else:
-                self.shadow_gate_label.setText(
+                self.account_page.set_notice(
                     "策略证据门：硬阻断。"
                     f"{record.strategy_id} {record.semver}："
                     f"{record.gate_reason}"
@@ -6451,188 +6364,113 @@ class MainWindow(QMainWindow):
         )
 
     def _account_snapshot_finished(self, result: object) -> None:
-        snapshot = result
-        if not isinstance(snapshot, IBKRReadOnlySnapshot):
-            raise TypeError("unexpected IBKR account snapshot")
-        try:
-            view = build_portfolio_view(
-                snapshot,
-                environment="paper",
-                exposure_multipliers=(
-                    self._configured_exposure_multipliers()
-                ),
-            )
-        except ValueError as error:
-            self.handshake_badge.setText("协议 · 已握手")
-            self.handshake_badge.setProperty("state", "ok")
-            self.account_badge.setText("账户 · 校验失败")
-            self.account_badge.setProperty("state", "error")
-            self._repolish_health_badges()
-            self._task_failed(str(error))
-            return
-        self.portfolio_view = view
-        self.account_ledger.append(view.account)
+        """Store account truth and repaint the account surfaces.
+
+        This handler touches *only* account state.  It deliberately does not
+        set ``market_badge``: the v1 version derived a market-readiness
+        verdict from the account snapshot's quotes, which meant an account
+        refresh could relabel the market as "实时 Type 1".  Market state now
+        comes exclusively from ``MarketSnapshot`` via the stream path, so an
+        account read can neither claim nor deny that quotes are real-time.
+        """
+
+        if not isinstance(result, BrokerAccountPortfolio):
+            raise TypeError("unexpected broker account portfolio")
+        self.account_portfolio = result
+        account = result.account
+        self.account_ledger.append(account)
         self._record_runtime_event(
             severity="info",
             component="account",
             code="SNAPSHOT_OK",
             message=(
-                f"{view.account.account_alias} 只读快照完成；"
-                f"{len(view.positions)} 个持仓"
+                f"{account.account_alias} 只读快照完成；"
+                f"{len(result.positions)} 个持仓"
             ),
         )
-        self._populate_account_view()
+        self._refresh_account_surfaces()
         self._refresh_auto_quant_preflight()
+        # "已握手" describes the most recent account refresh, not a socket
+        # that is still open: the read is a one-shot connect/read/disconnect.
         self.handshake_badge.setText("协议 · 已握手")
+        self.handshake_badge.setToolTip("最近一次账户刷新握手成功")
         self.handshake_badge.setProperty("state", "ok")
         self.account_badge.setText(
-            f"Paper · {view.account.account_alias}"
+            f"Paper · {account.account_alias}"
         )
         self.account_badge.setProperty("state", "ok")
-        reasons = intraday_market_data_reasons(
-            snapshot,
-            required_symbols=("SPY", "QQQ"),
-        )
-        market_errors = [
-            message
-            for message in snapshot.messages
-            if message.code
-            in {10089, 10090, 10091, 10167, 10186, 10197}
-        ]
-        if not reasons:
-            self.market_badge.setText("行情 · 实时 Type 1")
-            self.market_badge.setProperty("state", "ok")
-        elif market_errors:
-            code = market_errors[-1].code
-            self.market_badge.setText(f"行情 · 错误 {code}")
-            self.market_badge.setToolTip(market_errors[-1].message)
-            self.market_badge.setProperty("state", "error")
-        else:
-            self.market_badge.setText("行情 · 非实时/不完整")
-            self.market_badge.setToolTip("；".join(reasons))
-            self.market_badge.setProperty("state", "warn")
         self._repolish_health_badges()
         self._log(
-            f"已读取 {view.account.account_alias}："
-            f"{len(view.positions)} 个持仓；"
-            f"行情 {'可用于日内' if not reasons else '不可用于日内'}"
+            f"已读取 {account.account_alias}："
+            f"{len(result.positions)} 个持仓"
         )
 
-    def _populate_account_view(self) -> None:
-        if self.portfolio_view is None:
+    def _refresh_account_surfaces(self) -> None:
+        """Repaint every account surface from the stored portfolio.
+
+        The page owns the widgets; the window owns the data.  Ledger points
+        and the presentation-only exposure multipliers are passed in rather
+        than looked up by the page, which keeps the page free of the ledger
+        store and of any application service.
+        """
+
+        if not hasattr(self, "account_page"):
             return
-        account = self.portfolio_view.account
-        self.account_nlv_card.set_value(
-            _money(account.net_liquidation),
-            f"IBKR Paper · {account.account_alias}",
+        portfolio = self.account_portfolio
+        points: tuple = ()
+        if portfolio is not None:
+            points = self.account_ledger.list_points(
+                environment=portfolio.account.environment.value,
+                account_alias=portfolio.account.account_alias,
+                limit=100,
+            )
+        self.account_page.render(
+            portfolio,
+            ledger_points=points,
+            exposure_multipliers=self._configured_exposure_multipliers(),
         )
-        self.account_cash_card.set_value(
-            _money(account.cash),
-            f"可用资金 {_money(account.available_funds)}",
-        )
-        self.account_day_pnl_card.set_value(
-            _money(account.daily_pnl, signed=True),
-            f"{account.pnl_source} · 不与回测收益混合",
-        )
-        self.account_unrealized_card.set_value(
-            _money(account.unrealized_pnl, signed=True),
-            (
-                f"已实现 {_money(account.realized_pnl, signed=True)}"
-            ),
-        )
-        self.account_status_label.setText(
-            f"{account.environment.upper()} · {account.account_alias} · "
-            f"采集 {account.observed_at}"
-        )
-        self.account_detail_label.setText(
-            f"购买力 {_money(account.buying_power)} · "
-            f"总持仓 {_money(account.gross_position_value)} · "
-            f"维持保证金 {_money(account.maintenance_margin)}"
-        )
+        self._populate_dashboard_account_cards(portfolio)
+        if self.auto_quant_snapshot is not None:
+            self._populate_auto_quant_snapshot(
+                self.auto_quant_snapshot
+            )
+        self._refresh_target_preflight()
+
+    def _populate_dashboard_account_cards(
+        self,
+        portfolio: BrokerAccountPortfolio | None,
+    ) -> None:
+        """Mirror account truth onto the dashboard's account cards.
+
+        These three cards predate the account page and are the dashboard's
+        summary of the same broker truth -- not a second source of it.
+        """
+
+        if portfolio is None:
+            self.universe_card.set_value(
+                "未读取", "到账户与持仓页执行只读刷新"
+            )
+            self.verified_card.set_value(
+                "不可用", "不会以研究收益代替"
+            )
+            self.history_card.set_value(
+                "未读取", "券商空仓与未读取严格区分"
+            )
+            return
+        account = portfolio.account
         self.universe_card.set_value(
             _money(account.net_liquidation),
-            f"IBKR Paper · {account.account_alias}",
+            f"IBKR {account.environment.value.title()} · "
+            f"{account.account_alias}",
         )
         self.verified_card.set_value(
             _money(account.daily_pnl, signed=True),
             "券商 reqPnL；不含回测",
         )
         self.history_card.set_value(
-            str(len(self.portfolio_view.positions)),
-            "当前券商整股持仓",
+            str(len(portfolio.positions)),
+            "当前券商持仓",
         )
-
-        positions = self.portfolio_view.positions
-        self.positions_empty_label.setText(
-            "当前账户无持仓"
-            if not positions
-            else f"共 {len(positions)} 个持仓；过期/非实时 mark 明确标红"
-        )
-        self.positions_table.setSortingEnabled(False)
-        self.positions_table.setRowCount(len(positions))
-        data_type_names = {
-            1: "实时",
-            2: "冻结",
-            3: "延迟",
-            4: "延迟冻结",
-        }
-        for index, position in enumerate(positions):
-            values = (
-                position.symbol,
-                str(position.quantity),
-                _money(position.average_cost),
-                _money(position.mark),
-                _money(position.market_value),
-                _money(position.risk_exposure),
-                _money(position.broker_daily_pnl, signed=True),
-                _money(
-                    position.broker_unrealized_pnl,
-                    signed=True,
-                ),
-                _money(position.broker_realized_pnl, signed=True),
-                data_type_names.get(
-                    position.market_data_type, "未知"
-                ),
-                position.mark_source,
-                "STALE" if position.stale else "FRESH",
-                position.account_alias,
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                if position.stale and column in {0, 3, 9, 11}:
-                    item.setForeground(QColor(self.theme.error))
-                self.positions_table.setItem(index, column, item)
-        self.positions_table.setSortingEnabled(True)
-
-        points = self.account_ledger.list_points(
-            environment=account.environment,
-            account_alias=account.account_alias,
-            limit=100,
-        )
-        self.account_ledger_table.setSortingEnabled(False)
-        self.account_ledger_table.setRowCount(len(points))
-        for index, point in enumerate(points):
-            values = (
-                point.observed_at,
-                point.environment,
-                point.account_alias,
-                _money(point.net_liquidation),
-                _money(point.cash),
-                _money(point.daily_pnl, signed=True),
-                _money(point.unrealized_pnl, signed=True),
-            )
-            for column, value in enumerate(values):
-                self.account_ledger_table.setItem(
-                    index,
-                    column,
-                    QTableWidgetItem(value),
-                )
-        self.account_ledger_table.setSortingEnabled(True)
-        if self.auto_quant_snapshot is not None:
-            self._populate_auto_quant_snapshot(
-                self.auto_quant_snapshot
-            )
-        self._refresh_target_preflight()
 
     def _repolish_health_badges(self) -> None:
         for badge in (
@@ -7042,7 +6880,7 @@ class MainWindow(QMainWindow):
             return
         self.stream_snapshot = result
         self.workflow_controller.market_account.update(
-            account_ready=self.portfolio_view is not None,
+            account_ready=self.account_portfolio is not None,
             market_ready=result.realtime_ready,
             message=result.message,
         )
@@ -7488,7 +7326,7 @@ class MainWindow(QMainWindow):
                 initial_cash=paper_capital,
                 capital_source=(
                     "IBKR Paper "
-                    f"{self.portfolio_view.account.account_alias} "
+                    f"{self.account_portfolio.account.account_alias} "
                     "NetLiquidation"
                 ),
                 daily_loss_limit=paper_capital * Decimal("0.01"),
@@ -8215,7 +8053,7 @@ class MainWindow(QMainWindow):
             )
 
     def _refresh_cards(self) -> None:
-        if self.portfolio_view is None:
+        if self.account_portfolio is None:
             self.universe_card.set_value(
                 "未读取", "到账户与持仓页执行只读刷新"
             )
@@ -8416,7 +8254,7 @@ class MainWindow(QMainWindow):
         try:
             target = export_terminal_bundle(
                 self.paths.exports_root,
-                portfolio=self.portfolio_view,
+                portfolio=self.account_portfolio,
                 stream=self.stream_snapshot,
                 strategies=self.strategy_registry.list_records(),
                 events=self.runtime_events.list_recent(500),
@@ -8550,14 +8388,26 @@ class MainWindow(QMainWindow):
             commit = self.settings_service.commit(
                 preferences,
                 current_config=self.config,
-                market_data=getattr(
-                    self, "market_data", None
+                broker_config=getattr(
+                    self, "broker_account", None
+                ),
+                # Both runtimes that must be quiescent before the IBKR
+                # endpoint changes.  The account application owns the config
+                # and is asked directly; the market data application only
+                # reports whether a stream is live.
+                runtime_guards=(
+                    (getattr(self, "market_data", None),)
+                    if getattr(self, "market_data", None) is not None
+                    else ()
                 ),
             )
         except UserSettingsError as error:
             QMessageBox.warning(self, "设置未保存", str(error))
             return
         except MarketDataActiveError as error:
+            QMessageBox.warning(self, "设置未保存", str(error))
+            return
+        except BrokerAccountError as error:
             QMessageBox.warning(self, "设置未保存", str(error))
             return
         saved = commit.preferences

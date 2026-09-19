@@ -21,7 +21,7 @@ from us_quant.ibkr_paper_gateway import (
     PaperGatewayHandshake,
     create_paper_gateway_app,
 )
-from us_quant.ibkr_readonly import (
+from us_quant.trading.adapters.ibkr.support import (
     INFORMATIONAL_ERROR_CODES,
     mask_account_id,
 )

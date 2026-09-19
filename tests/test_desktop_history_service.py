@@ -77,13 +77,21 @@ LATER_ROUND_METHODS = (
 # added the v2 page composer.  The delta is declared here so the guard below
 # can assert it *exactly* instead of merely tolerating it.
 LATER_ROUND_REMOVED_METHODS = (
+    # Broker Account v2 deleted the legacy account page builder;
+    # the account route is a native v2 page now.
+    "_account_tab",
+    "_populate_account_view",
+
     "_build_legacy_workspace",
     "_build_unified_workflow",
     "_workflow_tabs",
     "_workflow_scroll_page",
     "_workspace_tabs",
 )
-LATER_ROUND_ADDED_METHODS = ("_build_v2_pages",)
+LATER_ROUND_ADDED_METHODS = (
+    "_populate_dashboard_account_cards",
+    "_refresh_account_surfaces",
+"_build_v2_pages",)
 
 # Trading Core v2 also rewrote these two: `_build_ui` now composes the v2
 # shell, and `_targeted_robustness_finished` navigates through it.
@@ -113,6 +121,23 @@ MARKET_DATA_V2_METHODS = (
     "_save_user_preferences",
     "_clear_selected_api_credentials",
     "_api_provider_changed",
+)
+
+# Broker Account v2: the methods this round rewrote because the
+# account truth moved from ``IBKRReadOnlySnapshot``/``PortfolioView``
+# to the domain ``BrokerAccountPortfolio``, and because the account
+# page became a native Desktop UI v2 page.
+BROKER_ACCOUNT_V2_METHODS = (
+    "_account_snapshot_finished",
+    "_export_terminal_state",
+    "_paper_simulation_capital",
+    "_populate_auto_quant_snapshot",
+    "_refresh_account_snapshot",
+    "_refresh_cards",
+    "_refresh_target_preflight",
+    "_research_capital_changed",
+    "_start_shadow",
+    "_strategy_registry_selection_changed",
 )
 
 FROZEN_METHODS = (
@@ -877,6 +902,12 @@ MARKET_DATA_V2_CHANGED_MODULES = (
     "src/us_quant/desktop_widgets.py",
 )
 
+# Broker Account v2: modules whose bytes moved with this round.
+BROKER_ACCOUNT_V2_CHANGED_MODULES = (
+    "src/us_quant/desktop_settings.py",
+    "src/us_quant/ibkr_paper_orders.py",
+)
+
 
 def test_the_frozen_sibling_modules_are_untouched() -> None:
     """Spec 35/36/37: Paper, settings, workers and widgets are frozen."""
@@ -908,7 +939,10 @@ def test_the_frozen_sibling_modules_are_untouched() -> None:
 
     # Exact, not a subset: the delta is the declared Market Data v2 surface
     # and nothing else.
-    assert set(changed) == set(MARKET_DATA_V2_CHANGED_MODULES)
+    assert set(changed) == (
+        set(MARKET_DATA_V2_CHANGED_MODULES)
+        | set(BROKER_ACCOUNT_V2_CHANGED_MODULES)
+    )
 
 
 # -- 58: the AutoQuant trio is frozen ---------------------------------
@@ -996,8 +1030,10 @@ def test_only_the_declared_methods_changed() -> None:
         | set(LATER_ROUND_UI_METHODS)
     )
     declared = set(declared) | set(MARKET_DATA_V2_METHODS)
+    declared = set(declared) | set(BROKER_ACCOUNT_V2_METHODS)
     assert set(changed) <= declared
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)
+    assert set(BROKER_ACCOUNT_V2_METHODS) <= set(changed)
     for name in REFACTORED_METHODS:
         if name != "__init__":
             assert name in changed, name
@@ -1215,10 +1251,11 @@ def test_run_history_reads_the_live_config_not_the_stream_copy(
 ) -> None:
     """Spec 7: ``self.config.ibkr`` is re-read per call.
 
-    ``market_data_service.config`` happens to be the *same object* right after
-    construction, so ``is window.config.ibkr`` cannot tell the two apart.  A
-    settings commit replaces ``self.config``, which is exactly when the stale
-    copy would diverge.
+    ``BrokerAccountApplication.config`` happens to be the *same object*
+    right after construction, so ``is window.config.ibkr`` cannot tell the
+    two apart.  A settings commit replaces ``self.config``, which is exactly
+    when a stale copy would diverge -- and since Broker Account v2 the
+    account application is the owner that must observe the replacement.
     """
 
     window = _window(monkeypatch, tmp_path)
@@ -1227,7 +1264,9 @@ def test_run_history_reads_the_live_config_not_the_stream_copy(
     try:
         fresh_ibkr = replace(window.config.ibkr)
         window.config = replace(window.config, ibkr=fresh_ibkr)
-        assert window.market_data.config is not fresh_ibkr
+        # The account application still holds the pre-replacement config:
+        # the window's own attribute is not where the runtime reads from.
+        assert window.broker_account.config is not fresh_ibkr
 
         def fake_run_ibkr(config, *, maximum_jobs, progress=None):
             seen["config"] = config

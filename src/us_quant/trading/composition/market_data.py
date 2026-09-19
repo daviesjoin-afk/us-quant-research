@@ -10,14 +10,18 @@ policy values (stale thresholds, requested market-data type, venue, label,
 coverage) are decided in the application, and only the *constructor call* is
 assembled here.
 
-Each factory takes the application's current ``IBKRConnectionConfig`` as an
-argument rather than closing over the one passed to this function.  A closure
-would keep rebuilding with the start-up config after ``update_config`` had
-been accepted -- the settings transaction would report success while the next
-feed still used the old endpoint.
+The IBKR endpoint comes from a **getter**, not from a captured config.  The
+connection settings are owned at runtime by
+:class:`~us_quant.trading.application.accounts.BrokerAccountApplication`, and
+the IBKR factory calls the getter on every prepare, so a settings change is
+picked up by the next stream.  Closing over a start-up config here would
+rebuild with the old endpoint after the settings transaction had reported
+success -- the stale-config bug this arrangement exists to prevent.
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 from us_quant.extended_hours import ibkr_market_data_exchange
 from us_quant.ibkr import IBKRConnectionConfig
@@ -53,16 +57,19 @@ from us_quant.trading.ports.market_data import SnapshotListener
 
 
 def build_market_data_application(
-    config: IBKRConnectionConfig,
+    config_getter: Callable[[], IBKRConnectionConfig],
 ) -> MarketDataApplication:
-    """Assemble the market data application with every provider wired."""
+    """Assemble the market data application with every provider wired.
+
+    ``config_getter`` returns the *current* IBKR connection config.  It is
+    called at prepare time, never at build time, so the endpoint the IBKR
+    adapter is built with is the one in force when the stream starts.
+    """
 
     def alpaca_factory(
         request: MarketDataStartRequest,
         listener: SnapshotListener | None,
-        config: IBKRConnectionConfig,
     ) -> AlpacaIEXStream:
-        del config  # Alpaca does not use the IBKR endpoint
         return AlpacaIEXStream(
             symbols=request.symbols,
             api_key=request.credentials.alpaca_api_key,
@@ -74,9 +81,7 @@ def build_market_data_application(
     def finnhub_factory(
         request: MarketDataStartRequest,
         listener: SnapshotListener | None,
-        config: IBKRConnectionConfig,
     ) -> FinnhubTradeStream:
-        del config  # Finnhub does not use the IBKR endpoint
         return FinnhubTradeStream(
             symbols=request.symbols,
             api_key=request.credentials.finnhub_api_key,
@@ -87,9 +92,11 @@ def build_market_data_application(
     def ibkr_factory(
         request: MarketDataStartRequest,
         listener: SnapshotListener | None,
-        config: IBKRConnectionConfig,
     ) -> IBKRReadOnlyStream:
         extended = request.source_id == SOURCE_IBKR_EXTENDED
+        # Resolved here, at prepare time, from the account application's
+        # current config -- never captured when this composition ran.
+        config = config_getter()
         # The application already resolved the venue onto the request, so the
         # adapter and the lifecycle report the same value.  IBKR is built
         # without a push listener: the desktop polls it through its snapshot
@@ -124,7 +131,6 @@ def build_market_data_application(
         SOURCE_IBKR_EXTENDED: ibkr_factory,
     }
     return MarketDataApplication(
-        config,
         factories=factories,
         exchange_resolver=ibkr_market_data_exchange,
     )

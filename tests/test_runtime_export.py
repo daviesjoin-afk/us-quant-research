@@ -5,7 +5,9 @@ import unittest
 
 from us_quant.export_service import export_terminal_bundle
 from us_quant.runtime_events import RuntimeEventStore
-from us_quant.strategy_registry import StrategyRegistry
+from us_quant.trading.composition.strategies import (
+    build_strategy_application,
+)
 
 
 class RuntimeExportTests(unittest.TestCase):
@@ -40,13 +42,14 @@ class RuntimeExportTests(unittest.TestCase):
                     "api_key=ALSOSECRET"
                 ),
             )
-            registry = StrategyRegistry(root / "strategies.sqlite3")
-            registry.seed_defaults()
+            strategies = build_strategy_application(
+                root / "strategies.sqlite3"
+            )
             output = export_terminal_bundle(
                 root / "exports",
                 portfolio=None,
                 stream=None,
-                strategies=registry.list_records(),
+                strategies=strategies.list_versions(),
                 events=events.list_recent(),
             )
             manifest = (output / "manifest.json").read_text(
@@ -95,6 +98,35 @@ class RuntimeExportTests(unittest.TestCase):
         self.assertEqual(event.code, "10197")
         self.assertIn("masked", manifest)
         self.assertIn("sector-momentum", strategies_csv)
+        # The CSV stays flat.  ``StrategyVersion`` nests ``definition`` and
+        # ``identity``; serialising those as sub-objects would have changed the
+        # artifact's columns, so the flatten is asserted by name.
+        header = strategies_csv.splitlines()[0].split(",")
+        self.assertEqual(
+            header,
+            sorted(
+                [
+                    "code_hash",
+                    "created_at",
+                    "description",
+                    "gate_passed",
+                    "gate_reason",
+                    "mode",
+                    "name",
+                    "parameter_hash",
+                    "parameters",
+                    "risk_budget_pct",
+                    "semver",
+                    "status",
+                    "strategy_id",
+                    "universe_hash",
+                    "updated_at",
+                    "version_id",
+                ]
+            ),
+        )
+        self.assertNotIn("definition", header)
+        self.assertNotIn("identity", header)
         self.assertEqual(replay_csv, "")
         self.assertEqual(robustness_csv, "")
         self.assertEqual(walk_forward_csv, "")

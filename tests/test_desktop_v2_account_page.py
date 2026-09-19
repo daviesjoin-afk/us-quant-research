@@ -469,7 +469,7 @@ def test_the_page_imports_no_application_adapter_or_transport() -> None:
         "us_quant.ibkr_paper_gateway",
         "us_quant.auto_quant",
         "us_quant.risk",
-        "us_quant.strategy_registry",
+        "us_quant.sqlite_support",
         "us_quant.portfolio_view",
         "us_quant.ibkr_readonly",
     ):

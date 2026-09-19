@@ -10,7 +10,13 @@ from us_quant.trading.domain.market import (
 from us_quant.minute_data import MinuteDataSummary
 from us_quant.trading.domain.account import BrokerAccountSnapshot
 from us_quant.trading.domain.common import Environment
-from us_quant.strategy_registry import StrategyRecord
+from us_quant.trading.domain.strategy import (
+    StrategyDefinition,
+    StrategyIdentity,
+    StrategyMode,
+    StrategyStatus,
+    StrategyVersion,
+)
 from us_quant.targeted_preflight import evaluate_target_preflight
 from us_quant.universe import UniverseRecord
 
@@ -179,29 +185,34 @@ def _account(observed_at: datetime | None = None) -> BrokerAccountSnapshot:
     )
 
 
-def _strategy() -> StrategyRecord:
-    return StrategyRecord(
-        strategy_id="intraday-targeted-t",
-        name="指定标的日内 T",
-        description="test",
-        version_id="version-1",
+def _strategy() -> StrategyVersion:
+    return StrategyVersion(
+        definition=StrategyDefinition(
+            strategy_id="intraday-targeted-t",
+            name="指定标的日内 T",
+            description="test",
+        ),
+        identity=StrategyIdentity(
+            strategy_id="intraday-targeted-t",
+            version_id="version-1",
+            parameter_hash="p",
+        ),
         semver="1.0.0-research",
-        status="research",
-        mode="research",
+        status=StrategyStatus.RESEARCH,
+        mode=StrategyMode.RESEARCH,
         parameters={
             "max_position_fraction": "0.10",
             "commission_per_order": "0.35",
             "slippage_bps": "2",
             "warmup_minutes": 10,
         },
-        parameter_hash="p",
         universe_hash="u",
         code_hash="c",
-        risk_budget_pct=0.10,
+        risk_budget_pct=Decimal("0.10"),
         gate_passed=False,
         gate_reason="research",
-        created_at=NOW.isoformat(),
-        updated_at=NOW.isoformat(),
+        created_at=NOW,
+        updated_at=NOW,
     )
 
 

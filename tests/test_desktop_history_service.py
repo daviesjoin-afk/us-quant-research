@@ -100,6 +100,52 @@ LATER_ROUND_UI_METHODS = (
     "_targeted_robustness_finished",
 )
 
+# Strategy v2: this round moved strategy governance, storage, selection and the
+# strategy page out of ``MainWindow``.  The retired registry, the six page
+# handlers and the two accessors that read a widget for their answer are gone;
+# the page itself is a native v2 route that reports intent through signals.
+STRATEGY_V2_REMOVED_METHODS = frozenset(
+    {
+        "_strategy_manager_tab",
+        "_populate_strategy_registry",
+        "_selected_strategy_record",
+        "_strategy_registry_selection_changed",
+        "_clone_strategy_version",
+        "_transition_selected_strategy",
+    }
+)
+STRATEGY_V2_ADDED_METHODS = frozenset(
+    {
+        "_auto_strategy_selection_changed",
+        "_populate_strategy_selection_combos",
+        "_record_runtime_strategy_selection",
+        "_refresh_strategy_page",
+        "_set_strategy_account_notice",
+        "_shadow_strategy_selection_changed",
+        "_strategy_clone_requested",
+        "_strategy_transition_requested",
+        "_strategy_version_or_none",
+        "_strategy_version_selected",
+        "_sync_strategy_combo",
+    }
+)
+# Rewritten rather than added or removed: they now talk to the strategy
+# application service and the selection service instead of a registry and a
+# combo box.
+STRATEGY_V2_METHODS = frozenset(
+    {
+        "_apply_theme",
+        "_auto_order_service_connected",
+        "_auto_quant_preflight",
+        "_auto_quant_tab",
+        "_backtest_records",
+        "_refresh_backtest_strategy_combo",
+        "_selected_auto_strategy_record",
+        "_selected_shadow_strategy_record",
+        "_simulation_tab",
+    }
+)
+
 # Spec 34/58: these must stay byte-identical to the base commit.
 # Market Data v2: the methods this round rewrote because the market
 # data boundary moved from a v1 service to the application service.
@@ -137,7 +183,6 @@ BROKER_ACCOUNT_V2_METHODS = (
     "_refresh_target_preflight",
     "_research_capital_changed",
     "_start_shadow",
-    "_strategy_registry_selection_changed",
 )
 
 FROZEN_METHODS = (
@@ -1006,11 +1051,11 @@ def test_only_the_declared_methods_changed() -> None:
     # Trading Core v2 removed the legacy/unified shells and added the v2
     # page composer.  Asserting the delta exactly keeps this guard strict:
     # any other addition or removal still fails here.
-    assert set(base_methods) - set(current_methods) == set(
-        LATER_ROUND_REMOVED_METHODS
+    assert set(base_methods) - set(current_methods) == (
+        set(LATER_ROUND_REMOVED_METHODS) | set(STRATEGY_V2_REMOVED_METHODS)
     )
-    assert set(current_methods) - set(base_methods) == set(
-        LATER_ROUND_ADDED_METHODS
+    assert set(current_methods) - set(base_methods) == (
+        set(LATER_ROUND_ADDED_METHODS) | set(STRATEGY_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1030,10 +1075,15 @@ def test_only_the_declared_methods_changed() -> None:
         | set(LATER_ROUND_UI_METHODS)
     )
     declared = set(declared) | set(MARKET_DATA_V2_METHODS)
-    declared = set(declared) | set(BROKER_ACCOUNT_V2_METHODS)
+    declared = (
+        set(declared)
+        | set(BROKER_ACCOUNT_V2_METHODS)
+        | set(STRATEGY_V2_METHODS)
+    )
     assert set(changed) <= declared
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)
     assert set(BROKER_ACCOUNT_V2_METHODS) <= set(changed)
+    assert set(STRATEGY_V2_METHODS) <= set(changed)
     for name in REFACTORED_METHODS:
         if name != "__init__":
             assert name in changed, name

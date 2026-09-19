@@ -141,16 +141,31 @@ from us_quant.extended_hours import (
     us_equity_session,
 )
 from us_quant.desktop_v2.pages.account import AccountPage
+from us_quant.desktop_v2.pages.strategy import (
+    StrategyPage,
+    strategy_option_label,
+)
 from us_quant.scanner import (
     MarketScan,
     load_close_series,
     save_market_scan,
     scan_market,
 )
-from us_quant.strategy_registry import (
-    StrategyRecord,
-    StrategyRegistry,
-    StrategyRegistryError,
+from us_quant.trading.application.strategies import (
+    StrategyApplicationError,
+    StrategyNotFoundError,
+)
+from us_quant.trading.application.strategy_selection import (
+    StrategySelectionError,
+    StrategySelectionPurpose,
+    StrategySelectionService,
+)
+from us_quant.trading.composition.strategies import (
+    build_strategy_application,
+)
+from us_quant.trading.domain.strategy import (
+    StrategyStatus,
+    StrategyVersion,
 )
 from us_quant.runtime_events import RuntimeEventStore
 from us_quant.export_service import export_terminal_bundle
@@ -295,7 +310,6 @@ from us_quant.backtest_workspace import (
     BacktestRequest,
     BacktestRun,
 )
-from us_quant.strategy_schema import strategy_schema_summary
 
 
 APP_TITLE = "美股量化研究台"
@@ -411,10 +425,18 @@ class MainWindow(QMainWindow):
         self.account_ledger = AccountLedger(
             self.paths.runtime_root / "account_equity.sqlite3"
         )
-        self.strategy_registry = StrategyRegistry(
+        # Strategy governance is composed here and nowhere else: the window
+        # asks the application service, and the application service has never
+        # heard of SQLite.  ``bootstrap`` is idempotent, so an existing store
+        # is brought up to date in place rather than rebuilt.
+        self.strategies = build_strategy_application(
             self.paths.runtime_root / "strategies.sqlite3"
         )
-        self.strategy_registry.seed_defaults()
+        # Runtime selection is service state, not combo state.  The combos on
+        # the research and execution pages are views onto this, so asking
+        # "which version does auto rotation run?" has one answer that does not
+        # depend on which widget happens to be visible.
+        self.strategy_selection = StrategySelectionService(self.strategies)
         self.runtime_events = RuntimeEventStore(
             self.paths.runtime_root / "runtime_events.sqlite3"
         )
@@ -683,17 +705,38 @@ class MainWindow(QMainWindow):
             self._research_capital_changed
         )
 
+        # The strategy page renders and reports intent; every decision it
+        # reports is executed here by the application service.  The page holds
+        # no catalogue and cannot mutate one.
+        self.strategy_page = StrategyPage(palette=self.theme)
+        self.strategy_page.version_selected.connect(
+            self._strategy_version_selected
+        )
+        self.strategy_page.clone_requested.connect(
+            self._strategy_clone_requested
+        )
+        self.strategy_page.transition_requested.connect(
+            self._strategy_transition_requested
+        )
+
         pages: dict[str, QWidget] = {
             "dashboard": self._dashboard_tab(),
             "market": self._quotes_tab(),
             "account": self.account_page,
-            "strategy": self._strategy_manager_tab(),
+            "strategy": self.strategy_page,
             "risk": self._safety_tab(),
             "execution": self._auto_quant_tab(),
             "research": research,
             "system": system,
         }
         assert set(pages) == set(ROUTES)
+        # Paint strategy last, once every page exists.  Both runtime-selection
+        # combos live on pages built just above, and the selection service is
+        # what fills them, so this is the first moment a complete paint is
+        # possible.  The retired page handler ran in the middle of this
+        # construction, which is why the auto-rotation combo used to start up
+        # empty: it had not been created yet.
+        self._refresh_strategy_page()
         return pages
 
     @staticmethod
@@ -820,6 +863,12 @@ class MainWindow(QMainWindow):
             self.auto_strategy_combo,
             minimum_width=485,
             minimum_contents=30,
+        )
+        # Record the choice into the selection service *before* the preflight
+        # reads it: the combo is a view, and the preflight must judge the
+        # version the runtime would actually use.
+        self.auto_strategy_combo.currentIndexChanged.connect(
+            self._auto_strategy_selection_changed
         )
         self.auto_strategy_combo.currentIndexChanged.connect(
             self._refresh_auto_quant_preflight
@@ -1390,6 +1439,9 @@ class MainWindow(QMainWindow):
             "选择驱动本次实时影子会话的不可变策略版本"
         )
         self.shadow_strategy_combo.currentIndexChanged.connect(
+            self._shadow_strategy_selection_changed
+        )
+        self.shadow_strategy_combo.currentIndexChanged.connect(
             self._refresh_target_preflight
         )
         self.target_symbol_input = QLineEdit()
@@ -1858,119 +1910,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.targeted_workspace_tabs)
         return page
 
-    def _strategy_manager_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        cards = QHBoxLayout()
-        self.strategy_total_card = MetricCard(
-            "策略版本", "0", "不可变版本"
-        )
-        self.strategy_research_card = MetricCard(
-            "研究中", "0", "尚未通过晋级门"
-        )
-        self.strategy_shadow_card = MetricCard(
-            "Paper Shadow", "0", "仅观察，不下单"
-        )
-        self.strategy_blocked_card = MetricCard(
-            "已失效", "0", "保留审计，不可恢复"
-        )
-        for card in (
-            self.strategy_total_card,
-            self.strategy_research_card,
-            self.strategy_shadow_card,
-            self.strategy_blocked_card,
-        ):
-            cards.addWidget(card)
-        layout.addLayout(cards)
-
-        self.strategy_registry_table = QTableWidget(0, 11)
-        self.strategy_registry_table.setHorizontalHeaderLabels(
-            [
-                "策略 ID",
-                "名称",
-                "版本",
-                "状态",
-                "模式",
-                "风险预算",
-                "参数Hash",
-                "股票池Hash",
-                "研究门",
-                "更新时间",
-                "说明",
-            ]
-        )
-        self._configure_table(self.strategy_registry_table)
-        self.strategy_registry_table.itemSelectionChanged.connect(
-            self._strategy_registry_selection_changed
-        )
-        layout.addWidget(self.strategy_registry_table, 2)
-
-        lower = QSplitter(Qt.Horizontal)
-        editor_panel = QFrame()
-        editor_panel.setObjectName("panel")
-        editor_layout = QVBoxLayout(editor_panel)
-        editor_title = QLabel("参数版本编辑器")
-        editor_title.setObjectName("sectionTitle")
-        version_row = QHBoxLayout()
-        version_label = QLabel("新版本号")
-        self.strategy_new_semver = QLineEdit()
-        self.strategy_new_semver.setPlaceholderText(
-            "例如 2.0.1-research"
-        )
-        version_row.addWidget(version_label)
-        version_row.addWidget(self.strategy_new_semver)
-        self.strategy_parameter_editor = QTextEdit()
-        self.strategy_parameter_editor.setPlaceholderText(
-            "选择策略后显示 JSON 参数；保存会创建新版本，不会覆盖旧版"
-        )
-        self.strategy_clone_button = QPushButton("从当前参数创建新版本")
-        self.strategy_clone_button.clicked.connect(
-            self._clone_strategy_version
-        )
-        editor_layout.addWidget(editor_title)
-        editor_layout.addLayout(version_row)
-        editor_layout.addWidget(self.strategy_parameter_editor)
-        editor_layout.addWidget(self.strategy_clone_button)
-        lower.addWidget(editor_panel)
-
-        governance_panel = QFrame()
-        governance_panel.setObjectName("panel")
-        governance_layout = QVBoxLayout(governance_panel)
-        governance_title = QLabel("生命周期与晋级门")
-        governance_title.setObjectName("sectionTitle")
-        self.strategy_governance_text = QTextEdit()
-        self.strategy_governance_text.setReadOnly(True)
-        self.strategy_governance_text.setPlainText(
-            "选择策略查看研究门、版本哈希与安全状态。"
-        )
-        buttons = QHBoxLayout()
-        self.strategy_shadow_button = QPushButton(
-            "申请进入 Paper Shadow"
-        )
-        self.strategy_shadow_button.clicked.connect(
-            lambda: self._transition_selected_strategy(
-                "paper_shadow"
-            )
-        )
-        self.strategy_pause_button = QPushButton("暂停")
-        self.strategy_pause_button.clicked.connect(
-            lambda: self._transition_selected_strategy("paused")
-        )
-        self.strategy_stop_button = QPushButton("停止")
-        self.strategy_stop_button.clicked.connect(
-            lambda: self._transition_selected_strategy("stopped")
-        )
-        buttons.addWidget(self.strategy_shadow_button)
-        buttons.addWidget(self.strategy_pause_button)
-        buttons.addWidget(self.strategy_stop_button)
-        governance_layout.addWidget(governance_title)
-        governance_layout.addWidget(self.strategy_governance_text)
-        governance_layout.addLayout(buttons)
-        lower.addWidget(governance_panel)
-        lower.setSizes([690, 690])
-        layout.addWidget(lower, 2)
-        self._populate_strategy_registry()
-        return page
 
     def _runtime_tab(self) -> QWidget:
         page = QWidget()
@@ -2937,46 +2876,63 @@ class MainWindow(QMainWindow):
         )
 
     def _refresh_backtest_strategy_combo(self) -> None:
+        """Repopulate the backtest combo from the BACKTEST selection policy.
+
+        Which versions are eligible is the selection service's answer, not the
+        window's.  The window still chooses *display* order, because that is a
+        presentation choice -- the executable order the factory declares.
+
+        The current choice is preserved across a refill so a governance action
+        (a clone, a stop) does not silently move the operator onto another
+        strategy; if the chosen version just stopped being eligible, the first
+        remaining option is selected instead of leaving a stale entry.
+        """
+
         if not hasattr(self, "backtest_strategy_combo"):
             return
-        supported = {
-            spec.strategy_id: spec for spec in STRATEGY_SPECS
-        }
-        records = [
-            record
-            for record in self.strategy_registry.list_records()
-            if record.strategy_id in supported
-            and record.status == "research"
-        ]
+        previous = self.backtest_strategy_combo.currentData()
+        versions = self.strategy_selection.options(
+            StrategySelectionPurpose.BACKTEST
+        )
         order = {
             spec.strategy_id: index
             for index, spec in enumerate(STRATEGY_SPECS)
         }
-        records.sort(
-            key=lambda record: (
-                order.get(record.strategy_id, 999),
-                record.semver,
-            )
-        )
-        self.backtest_strategy_combo.clear()
-        for record in records:
-            self.backtest_strategy_combo.addItem(
-                f"{record.name} · {record.semver}",
-                record.version_id,
-            )
+        self.backtest_strategy_combo.blockSignals(True)
+        try:
+            self.backtest_strategy_combo.clear()
+            for version in sorted(
+                versions,
+                key=lambda item: (
+                    order.get(item.strategy_id, 999),
+                    item.semver,
+                ),
+            ):
+                self.backtest_strategy_combo.addItem(
+                    f"{version.name} · {version.semver}",
+                    version.version_id,
+                )
+            index = self.backtest_strategy_combo.findData(previous)
+            self.backtest_strategy_combo.setCurrentIndex(max(0, index))
+        finally:
+            self.backtest_strategy_combo.blockSignals(False)
 
-    def _backtest_records(self, compare_all: bool) -> list[StrategyRecord]:
-        supported = {spec.strategy_id for spec in STRATEGY_SPECS}
-        records = [
-            record
-            for record in self.strategy_registry.list_records()
-            if record.strategy_id in supported
-            and record.status == "research"
-        ]
+    def _backtest_records(self, compare_all: bool) -> list[StrategyVersion]:
+        """The research versions this run should execute.
+
+        ``options`` returns newest-first, so "latest per strategy" is the
+        first one seen rather than whichever row the store happened to return
+        first -- the historical behaviour depended on query order, which is
+        not something a selection should be built on.
+        """
+
+        versions = self.strategy_selection.options(
+            StrategySelectionPurpose.BACKTEST
+        )
         if compare_all:
-            latest: dict[str, StrategyRecord] = {}
-            for record in records:
-                latest.setdefault(record.strategy_id, record)
+            latest: dict[str, StrategyVersion] = {}
+            for version in versions:
+                latest.setdefault(version.strategy_id, version)
             return [
                 latest[spec.strategy_id]
                 for spec in STRATEGY_SPECS
@@ -2986,9 +2942,9 @@ class MainWindow(QMainWindow):
             self.backtest_strategy_combo.currentData() or ""
         )
         return [
-            record
-            for record in records
-            if record.version_id == version_id
+            version
+            for version in versions
+            if version.version_id == version_id
         ]
 
     def _run_backtest_workspace(self, compare_all: bool) -> None:
@@ -3416,12 +3372,16 @@ class MainWindow(QMainWindow):
 
     def _auto_quant_preflight(self) -> AutoQuantPreflight:
         strategy = self._selected_auto_strategy_record()
+        # Statuses are compared as enum members, not as raw strings: the
+        # vocabulary is owned by the domain now, and a comparison against
+        # "research" would keep passing if the domain renamed it.
         strategy_eligible = (
             strategy is not None
             and strategy.strategy_id == "intraday-auto-rotation"
-            and strategy.status in {"research", "paper_shadow"}
+            and strategy.status
+            in {StrategyStatus.RESEARCH, StrategyStatus.PAPER_SHADOW}
             and (
-                strategy.status == "research"
+                strategy.status is StrategyStatus.RESEARCH
                 or strategy.gate_passed
             )
         )
@@ -4144,7 +4104,7 @@ class MainWindow(QMainWindow):
                 cash=broker_state.cash,
                 requested_limit=plan.requested_capital_limit,
             )
-            strategy = self.strategy_registry.get_version(
+            strategy = self.strategies.get_version(
                 plan.strategy_version_id
             )
             config = build_auto_rotation_config(
@@ -6053,295 +6013,154 @@ class MainWindow(QMainWindow):
             resource_group="broker",
         )
 
-    def _populate_strategy_registry(self) -> None:
-        all_records = self.strategy_registry.list_records()
-        records = [
-            record
-            for record in all_records
-            if record.status != "legacy_invalidated"
-        ]
-        counts = Counter(row.status for row in all_records)
-        self.strategy_total_card.set_value(
-            str(len(records)), "每次参数变化生成新版本"
-        )
-        self.strategy_research_card.set_value(
-            str(counts["research"]), "仅离线评估"
-        )
-        self.strategy_shadow_card.set_value(
-            str(counts["paper_shadow"]), "无订单提交能力"
-        )
-        self.strategy_blocked_card.set_value(
-            str(counts["legacy_invalidated"]), "永久只读审计"
-        )
-        translations = {
-            "research": "研究",
-            "paper_shadow": "Paper影子",
-            "paused": "暂停",
-            "stopped": "停止",
-            "legacy_invalidated": "旧结果已失效",
-        }
-        self.strategy_registry_table.setSortingEnabled(False)
-        self.strategy_registry_table.setRowCount(len(records))
-        for index, record in enumerate(records):
-            values = (
-                record.strategy_id,
-                record.name,
-                record.semver,
-                translations.get(record.status, record.status),
-                record.mode,
-                f"{record.risk_budget_pct:.1%}",
-                record.parameter_hash[:12],
-                record.universe_hash[:18],
-                "通过" if record.gate_passed else "阻断",
-                record.updated_at,
-                record.description,
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setToolTip(value)
-                if column == 0:
-                    item.setData(Qt.UserRole, record.version_id)
-                if not record.gate_passed and column in {0, 3, 8}:
-                    item.setForeground(QColor(self.theme.warning))
-                if (
-                    record.status == "legacy_invalidated"
-                    and column in {0, 1, 3}
-                ):
-                    item.setForeground(QColor(self.theme.error))
-                self.strategy_registry_table.setItem(
-                    index, column, item
-                )
-        self.strategy_registry_table.setSortingEnabled(True)
+
+
+    # -- strategy governance wiring -------------------------------------
+    #
+    # This is the whole of the window's strategy role: read a signal from the
+    # page, call the application service, repaint.  The retired
+    # ``_strategy_manager_tab`` / ``_populate_strategy_registry`` /
+    # ``_clone_strategy_version`` / ``_transition_selected_strategy`` did the
+    # same work while also owning the widgets and the registry, which is what
+    # made the catalogue a UI concern.
+
+    def _strategy_version_selected(self, version_id: str) -> None:
+        """React to the page showing a different version.
+
+        This is a *governance view* selection, not a runtime selection.
+        Opening a version in the strategy page must never repoint the
+        auto-rotation or targeted-shadow runtime at it; only the combos on
+        those pages do that, and they go through ``StrategySelectionService``.
+        """
+
+        if not version_id:
+            return
+        version = self._strategy_version_or_none(version_id)
+        if version is None:
+            return
+        self._set_strategy_account_notice(version)
+
+    def _refresh_strategy_page(self) -> None:
+        """Repaint the strategy page and resync the runtime selection views."""
+
+        if not hasattr(self, "strategy_page"):
+            return
+        try:
+            versions = self.strategies.list_versions()
+        except StrategyApplicationError as error:
+            self._log(f"策略目录读取失败：{error}")
+            return
+        self.strategy_page.render(versions)
+        self._populate_strategy_selection_combos()
+
+    def _populate_strategy_selection_combos(self) -> None:
+        """Point every runtime-selection combo at the selection service."""
+
+        if hasattr(self, "backtest_strategy_combo"):
+            self._refresh_backtest_strategy_combo()
         if hasattr(self, "shadow_strategy_combo"):
-            selected_version = self.shadow_strategy_combo.currentData()
-            self.shadow_strategy_combo.blockSignals(True)
-            self.shadow_strategy_combo.clear()
-            targeted_records = sorted(
-                (
-                    record
-                    for record in records
-                    if (
-                        record.strategy_id == "intraday-targeted-t"
-                        and record.status in {"research", "paper_shadow"}
-                    )
-                ),
-                key=lambda record: record.created_at,
-                reverse=True,
+            self._sync_strategy_combo(
+                StrategySelectionPurpose.TARGETED_SHADOW,
+                self.shadow_strategy_combo,
             )
-            for record in targeted_records:
-                    label = (
-                        f"{record.name} · {record.semver} · "
-                        f"{translations.get(record.status, record.status)}"
-                    )
-                    self.shadow_strategy_combo.addItem(
-                        label, record.version_id
-                    )
-            restore_index = self.shadow_strategy_combo.findData(
-                selected_version
-            )
-            self.shadow_strategy_combo.setCurrentIndex(
-                max(0, restore_index)
-            )
-            self.shadow_strategy_combo.blockSignals(False)
         if hasattr(self, "auto_strategy_combo"):
-            selected_auto = self.auto_strategy_combo.currentData()
-            self.auto_strategy_combo.blockSignals(True)
-            self.auto_strategy_combo.clear()
-            auto_records = sorted(
-                (
-                    record
-                    for record in records
-                    if (
-                        record.strategy_id
-                        == "intraday-auto-rotation"
-                        and record.status
-                        in {"research", "paper_shadow"}
-                    )
-                ),
-                key=lambda record: record.created_at,
-                reverse=True,
+            self._sync_strategy_combo(
+                StrategySelectionPurpose.AUTO_ROTATION,
+                self.auto_strategy_combo,
             )
-            for record in auto_records:
-                label = (
-                    f"{record.name} · {record.semver} · "
-                    f"{translations.get(record.status, record.status)}"
-                )
-                self.auto_strategy_combo.addItem(
-                    label, record.version_id
-                )
-            restore_auto = self.auto_strategy_combo.findData(
-                selected_auto
-            )
-            self.auto_strategy_combo.setCurrentIndex(
-                max(0, restore_auto)
-            )
-            self.auto_strategy_combo.blockSignals(False)
             self._refresh_auto_quant_preflight()
-        if records:
-            self.strategy_registry_table.selectRow(0)
 
-    def _selected_strategy_record(
+    def _sync_strategy_combo(
         self,
-    ) -> StrategyRecord | None:
-        selected = self.strategy_registry_table.selectedItems()
-        if not selected:
-            return None
-        row = selected[0].row()
-        item = self.strategy_registry_table.item(row, 0)
-        if item is None:
-            return None
-        version_id = item.data(Qt.UserRole)
-        if not version_id:
-            return None
-        try:
-            return self.strategy_registry.get_version(str(version_id))
-        except KeyError:
-            return None
+        purpose: StrategySelectionPurpose,
+        combo: QComboBox,
+    ) -> None:
+        """Make ``combo`` a view of the service's selection for ``purpose``.
 
-    def _selected_shadow_strategy_record(
+        The combo carries no truth of its own: it is cleared, refilled from
+        the policy's options, then pointed at whatever the service currently
+        considers selected.  If the previously chosen version has since been
+        stopped or invalidated, ``restore_or_default`` has already moved to
+        the newest eligible replacement, so the widget cannot keep displaying
+        a version the runtime will not use.
+        """
+
+        selected = self.strategy_selection.restore_or_default(purpose)
+        options = self.strategy_selection.options(purpose)
+        combo.blockSignals(True)
+        combo.clear()
+        for version in options:
+            combo.addItem(strategy_option_label(version), version.version_id)
+        index = combo.findData(selected.version_id) if selected else -1
+        combo.setCurrentIndex(max(0, index))
+        combo.blockSignals(False)
+
+    def _record_runtime_strategy_selection(
         self,
-    ) -> StrategyRecord | None:
-        version_id = self.shadow_strategy_combo.currentData()
+        purpose: StrategySelectionPurpose,
+        version_id: object,
+    ) -> None:
+        """Adopt a combo's choice as the runtime selection.
+
+        A refused selection is logged rather than silently kept: it means the
+        widget is showing something the policy no longer permits, and the
+        operator needs to know the runtime did not move.
+        """
+
         if not version_id:
-            return None
-        try:
-            return self.strategy_registry.get_version(str(version_id))
-        except KeyError:
-            return None
-
-    def _selected_auto_strategy_record(
-        self,
-    ) -> StrategyRecord | None:
-        version_id = self.auto_strategy_combo.currentData()
-        if not version_id:
-            return None
-        try:
-            return self.strategy_registry.get_version(
-                str(version_id)
-            )
-        except KeyError:
-            return None
-
-    def _strategy_registry_selection_changed(self) -> None:
-        record = self._selected_strategy_record()
-        if record is None:
-            return
-        self.strategy_parameter_editor.setPlainText(
-            json.dumps(
-                record.parameters,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            )
-        )
-        self.strategy_new_semver.setText(
-            f"{record.semver}.next"
-        )
-        self.strategy_governance_text.setPlainText(
-            f"策略：{record.name}\n"
-            f"Strategy ID：{record.strategy_id}\n"
-            f"Version ID：{record.version_id}\n"
-            f"状态 / 模式：{record.status} / {record.mode}\n"
-            f"参数 Hash：{record.parameter_hash}\n"
-            f"股票池 Hash：{record.universe_hash}\n"
-            f"代码 Hash：{record.code_hash}\n"
-            f"风险预算：{record.risk_budget_pct:.1%}\n"
-            f"参数约束：{strategy_schema_summary(record.strategy_id)}\n\n"
-            f"晋级门：{'通过' if record.gate_passed else '阻断'}\n"
-            f"原因：{record.gate_reason}\n\n"
-            "自动下单：关闭；本管理器没有订单提交接口。"
-        )
-        self.strategy_clone_button.setEnabled(
-            record.status != "legacy_invalidated"
-        )
-        self.strategy_shadow_button.setEnabled(
-            record.gate_passed
-            and record.status in {"research", "paused"}
-        )
-        self.strategy_pause_button.setEnabled(
-            record.status == "paper_shadow"
-        )
-        self.strategy_stop_button.setEnabled(
-            record.status in {"research", "paper_shadow", "paused"}
-        )
-        if hasattr(self, "account_page"):
-            if (
-                record.strategy_id == "intraday-targeted-t"
-                and record.status == "research"
-            ):
-                self.account_page.set_notice(
-                    f"探索性影子模式：已绑定 {record.strategy_id} "
-                    f"{record.semver}。可收集实时模拟证据；"
-                    "不代表晋级，不会发送券商订单。"
-                )
-            elif (
-                record.gate_passed
-                and record.status == "paper_shadow"
-            ):
-                self.account_page.set_notice(
-                    f"策略证据门：通过；已绑定 {record.strategy_id} "
-                    f"{record.semver}。仍需新鲜 Paper 账户与实时行情。"
-                )
-            else:
-                self.account_page.set_notice(
-                    "策略证据门：硬阻断。"
-                    f"{record.strategy_id} {record.semver}："
-                    f"{record.gate_reason}"
-                )
-
-    def _clone_strategy_version(self) -> None:
-        record = self._selected_strategy_record()
-        if record is None:
-            QMessageBox.warning(
-                self, "无法创建", "请先选择一个策略版本"
-            )
-            return
-        semver = self.strategy_new_semver.text().strip()
-        if not semver:
-            QMessageBox.warning(
-                self, "无法创建", "请输入新版本号"
-            )
             return
         try:
-            parameters = json.loads(
-                self.strategy_parameter_editor.toPlainText()
+            self.strategy_selection.select(purpose, str(version_id))
+        except StrategySelectionError as error:
+            self._log(
+                f"{purpose} 运行选择未生效：{error}；运行时保持原版本"
             )
+
+    def _strategy_clone_requested(
+        self,
+        version_id: str,
+        semver: str,
+        parameters_json: str,
+    ) -> None:
+        """Execute a clone the page asked for."""
+
+        try:
+            parameters = json.loads(parameters_json)
             if not isinstance(parameters, dict):
                 raise ValueError("参数必须是 JSON 对象")
-            created = self.strategy_registry.clone_version(
-                record.version_id,
+            created = self.strategies.clone_version(
+                version_id,
                 semver=semver,
                 parameters=parameters,
             )
-        except (
-            json.JSONDecodeError,
-            ValueError,
-            StrategyRegistryError,
-        ) as error:
+        except json.JSONDecodeError as error:
+            QMessageBox.warning(
+                self, "创建失败", f"参数不是合法 JSON：{error}"
+            )
+            return
+        except (ValueError, StrategyApplicationError) as error:
             QMessageBox.warning(self, "创建失败", str(error))
             return
-        self._populate_strategy_registry()
+        self._refresh_strategy_page()
         self._log(
             f"已创建 {created.strategy_id} {created.semver}；"
             "状态回到研究，需重新验证"
         )
 
-    def _transition_selected_strategy(
-        self, target_status: str
+    def _strategy_transition_requested(
+        self,
+        version_id: str,
+        target_status: str,
     ) -> None:
-        record = self._selected_strategy_record()
-        if record is None:
-            QMessageBox.warning(
-                self, "无法变更", "请先选择一个策略版本"
-            )
-            return
+        """Execute a lifecycle change the page asked for."""
+
         try:
-            changed = self.strategy_registry.transition(
-                record.version_id,
+            changed = self.strategies.transition(
+                version_id,
                 target_status,
                 reason="desktop governance action",
             )
-        except StrategyRegistryError as error:
+        except StrategyApplicationError as error:
             QMessageBox.warning(
                 self,
                 "晋级门阻断",
@@ -6349,10 +6168,8 @@ class MainWindow(QMainWindow):
             )
             self._log(f"策略状态变更被阻断：{error}")
             return
-        self._populate_strategy_registry()
-        self._log(
-            f"{changed.strategy_id} 已变更为 {changed.status}"
-        )
+        self._refresh_strategy_page()
+        self._log(f"{changed.strategy_id} 已变更为 {changed.status}")
         self._record_runtime_event(
             severity="info",
             component="strategy",
@@ -6361,6 +6178,90 @@ class MainWindow(QMainWindow):
                 f"{changed.strategy_id} {changed.semver} -> "
                 f"{changed.status}"
             ),
+        )
+
+    def _strategy_version_or_none(
+        self, version_id: str
+    ) -> StrategyVersion | None:
+        try:
+            return self.strategies.get_version(version_id)
+        except StrategyNotFoundError:
+            return None
+
+    def _set_strategy_account_notice(
+        self, version: StrategyVersion
+    ) -> None:
+        """Bind the account page's notice strip to the shown version.
+
+        Kept semantically identical to the retired page handler: this is
+        strategy-evidence copy displayed on the account page, and the account
+        page itself still knows nothing about strategy.
+        """
+
+        if not hasattr(self, "account_page"):
+            return
+        if (
+            version.strategy_id == "intraday-targeted-t"
+            and version.status is StrategyStatus.RESEARCH
+        ):
+            self.account_page.set_notice(
+                f"探索性影子模式：已绑定 {version.strategy_id} "
+                f"{version.semver}。可收集实时模拟证据；"
+                "不代表晋级，不会发送券商订单。"
+            )
+        elif (
+            version.gate_passed
+            and version.status is StrategyStatus.PAPER_SHADOW
+        ):
+            self.account_page.set_notice(
+                f"策略证据门：通过；已绑定 {version.strategy_id} "
+                f"{version.semver}。仍需新鲜 Paper 账户与实时行情。"
+            )
+        else:
+            self.account_page.set_notice(
+                "策略证据门：硬阻断。"
+                f"{version.strategy_id} {version.semver}："
+                f"{version.gate_reason}"
+            )
+
+    def _auto_strategy_selection_changed(self, *_args: object) -> None:
+        """Adopt the auto-rotation combo's choice as the runtime selection."""
+
+        self._record_runtime_strategy_selection(
+            StrategySelectionPurpose.AUTO_ROTATION,
+            self.auto_strategy_combo.currentData(),
+        )
+
+    def _shadow_strategy_selection_changed(self, *_args: object) -> None:
+        """Adopt the targeted-shadow combo's choice as the runtime selection."""
+
+        self._record_runtime_strategy_selection(
+            StrategySelectionPurpose.TARGETED_SHADOW,
+            self.shadow_strategy_combo.currentData(),
+        )
+
+    def _selected_shadow_strategy_record(
+        self,
+    ) -> StrategyVersion | None:
+        """The targeted-shadow runtime version, from the selection service.
+
+        Retained under its old name because nine call sites read it; what
+        changed is the source.  It is no longer ``QComboBox.currentData()``
+        with a registry lookup, so the answer does not depend on which tab is
+        on screen.
+        """
+
+        return self.strategy_selection.selected(
+            StrategySelectionPurpose.TARGETED_SHADOW
+        )
+
+    def _selected_auto_strategy_record(
+        self,
+    ) -> StrategyVersion | None:
+        """The auto-rotation runtime version, from the selection service."""
+
+        return self.strategy_selection.selected(
+            StrategySelectionPurpose.AUTO_ROTATION
         )
 
     def _account_snapshot_finished(self, result: object) -> None:
@@ -7223,9 +7124,10 @@ class MainWindow(QMainWindow):
             )
             return
         if (
-            strategy.status not in {"research", "paper_shadow"}
+            strategy.status
+            not in {StrategyStatus.RESEARCH, StrategyStatus.PAPER_SHADOW}
             or (
-                strategy.status == "paper_shadow"
+                strategy.status is StrategyStatus.PAPER_SHADOW
                 and not strategy.gate_passed
             )
         ):
@@ -8256,7 +8158,7 @@ class MainWindow(QMainWindow):
                 self.paths.exports_root,
                 portfolio=self.account_portfolio,
                 stream=self.stream_snapshot,
-                strategies=self.strategy_registry.list_records(),
+                strategies=self.strategies.list_versions(),
                 events=self.runtime_events.list_recent(500),
                 shadow_fills=self.shadow_store.recent_fills(500),
                 targeted_replays=tuple(
@@ -8648,6 +8550,10 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(build_stylesheet(self.theme))
         if hasattr(self, "quotes_model"):
             self.quotes_model.set_theme(self.current_theme_name)
+        # The strategy page colours gate-blocked rows from the palette, so it
+        # has to be told when the palette changes.  It re-renders its own rows.
+        if hasattr(self, "strategy_page"):
+            self.strategy_page.set_palette(self.theme)
         for chart_name in ("dashboard_chart", "strategy_chart"):
             chart = getattr(self, chart_name, None)
             if chart is not None:

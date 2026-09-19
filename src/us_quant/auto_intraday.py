@@ -5,7 +5,9 @@ from typing import Any, Mapping
 
 from us_quant.risk import LayeredRiskLimits
 from us_quant.shadow_paper import ShadowConfig
-from us_quant.strategy_schema import validate_strategy_parameters
+from us_quant.trading.domain.strategy_parameters import (
+    validate_strategy_parameters,
+)
 
 
 def resolve_paper_session_capital(

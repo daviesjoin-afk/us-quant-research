@@ -8,7 +8,10 @@ from us_quant.trading.domain.account import BrokerAccountSnapshot
 from us_quant.trading.domain.common import Environment
 from us_quant.trading.domain.market import MarketQuote
 from us_quant.minute_data import MinuteDataSummary
-from us_quant.strategy_registry import StrategyRecord
+from us_quant.trading.domain.strategy import (
+    StrategyStatus,
+    StrategyVersion,
+)
 from us_quant.universe import UniverseRecord
 
 
@@ -65,7 +68,7 @@ def evaluate_target_preflight(
     quote: MarketQuote | None,
     account: BrokerAccountSnapshot | None,
     minute_summary: MinuteDataSummary,
-    strategy: StrategyRecord | None,
+    strategy: StrategyVersion | None,
     exposure_multiplier: Decimal = Decimal("1"),
     broker_orders_available: bool = False,
     now: datetime | None = None,
@@ -120,9 +123,9 @@ def evaluate_target_preflight(
     strategy_eligible = (
         strategy is not None
         and (
-            strategy.status == "research"
+            strategy.status is StrategyStatus.RESEARCH
             or (
-                strategy.status == "paper_shadow"
+                strategy.status is StrategyStatus.PAPER_SHADOW
                 and strategy.gate_passed
             )
         )
@@ -245,7 +248,7 @@ def evaluate_target_preflight(
             "策略运行状态",
             strategy_eligible,
             (
-                strategy.status if strategy is not None else "未选择"
+                strategy.status.value if strategy is not None else "未选择"
             ),
             "research 探索或已过门 paper_shadow",
             "策略",
@@ -332,7 +335,7 @@ def evaluate_target_preflight(
     if shadow_ready and strategy is not None:
         decision = (
             "EXPLORATORY_SHADOW_READY"
-            if strategy.status == "research"
+            if strategy.status is StrategyStatus.RESEARCH
             else "PAPER_SHADOW_READY"
         )
     else:
@@ -369,7 +372,7 @@ def evaluate_target_preflight(
             strategy.semver if strategy is not None else None
         ),
         strategy_status=(
-            strategy.status if strategy is not None else None
+            strategy.status.value if strategy is not None else None
         ),
         quote_provider=quote.source_label if quote is not None else None,
         bid=quote.bid if quote is not None else None,

@@ -4,7 +4,9 @@ from decimal import Decimal
 from typing import Mapping, Any
 
 from us_quant.shadow_paper import ShadowConfig
-from us_quant.strategy_schema import validate_strategy_parameters
+from us_quant.trading.domain.strategy_parameters import (
+    validate_strategy_parameters,
+)
 
 
 def build_targeted_shadow_config(

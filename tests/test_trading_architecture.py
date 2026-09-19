@@ -43,6 +43,7 @@ SKELETON_PACKAGES = (
     "trading/application",
     "trading/runtime",
     "trading/adapters",
+    "trading/adapters/sqlite",
     "trading/composition",
 )
 
@@ -53,6 +54,7 @@ FORBIDDEN_DOMAIN_PREFIXES = (
     "sqlite3",
     "us_quant.desktop",
     "us_quant.desktop_v2",
+    "us_quant.sqlite_support",
     "us_quant.market_data_service",
     "us_quant.ibkr_stream",
     "us_quant.paper",
@@ -61,6 +63,7 @@ FORBIDDEN_DOMAIN_PREFIXES = (
     "us_quant.finnhub_stream",
     "us_quant.auto_quant",
     "us_quant.strategy_registry",
+    "us_quant.strategy_schema",
     "us_quant.trading.application",
     "us_quant.trading.runtime",
     "us_quant.trading.adapters",
@@ -74,6 +77,7 @@ FORBIDDEN_PORT_PREFIXES = (
     "sqlite3",
     "us_quant.desktop",
     "us_quant.desktop_v2",
+    "us_quant.sqlite_support",
     "us_quant.market_data_service",
     "us_quant.ibkr_stream",
     "us_quant.paper",
@@ -82,6 +86,7 @@ FORBIDDEN_PORT_PREFIXES = (
     "us_quant.finnhub_stream",
     "us_quant.auto_quant",
     "us_quant.strategy_registry",
+    "us_quant.strategy_schema",
     "us_quant.trading.application",
     "us_quant.trading.runtime",
     "us_quant.trading.adapters",
@@ -113,6 +118,15 @@ CANONICAL_TYPES = {
     "TradeAction": "strategy.py",
     "StrategyIdentity": "strategy.py",
     "TradeProposal": "strategy.py",
+    "StrategyStatus": "strategy.py",
+    "StrategyMode": "strategy.py",
+    "StrategyDefinition": "strategy.py",
+    "StrategyVersion": "strategy.py",
+    "canonical_parameters_json": "strategy.py",
+    "parameter_hash_for": "strategy.py",
+    "StrategyParameterError": "strategy_parameters.py",
+    "validate_strategy_parameters": "strategy_parameters.py",
+    "strategy_schema_summary": "strategy_parameters.py",
     "TradingSessionPhase": "session.py",
     "TradingSnapshot": "session.py",
     "ZERO": "common.py",
@@ -131,7 +145,16 @@ GLOBALLY_UNIQUE_TYPES = (
     "OrderIntent",
     "RiskDecision",
     "Position",
+    # Strategy governance is the same kind of thing: two ``StrategyVersion``
+    # definitions would mean two readings of one version's status.
+    "StrategyVersion",
+    "StrategyStatus",
 )
+
+# ``ALLOWED_TRANSITIONS`` is deliberately NOT in either table above: the order
+# lifecycle in ``oms.py`` legitimately has its own table under the same name.
+# The strategy machine is guarded by
+# ``test_the_strategy_state_machine_is_domain_owned`` instead.
 
 # Transitional overlaps: none, since Broker/Account v2.
 #
@@ -269,6 +292,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "risk.py",
         "session.py",
         "strategy.py",
+        "strategy_parameters.py",
     }
     assert {path.name for path in _python_files(PORTS_DIR)} == {
         "__init__.py",
@@ -545,8 +569,9 @@ def test_shell_does_not_import_application_runtime_or_adapters() -> None:
 def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
     """The v2 package holds the shell, the route table and native pages.
 
-    ``pages/account.py`` is the first genuinely native v2 page: the account
-    route no longer reuses a legacy builder from ``MainWindow``.
+    ``pages/account.py`` was the first genuinely native v2 page;
+    ``pages/strategy.py`` is the second, and the strategy route no longer
+    reuses a legacy builder from ``MainWindow`` either.
     """
 
     desktop_v2 = _SRC / "desktop_v2"
@@ -560,6 +585,7 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "shell.py",
         "pages/__init__.py",
         "pages/account.py",
+        "pages/strategy.py",
     }
 
 
@@ -618,6 +644,23 @@ ADAPTER_INTERNAL_NAMES = {
 MARKET_DATA_APPLICATION = _TRADING / "application" / "market_data.py"
 MARKET_DATA_COMPOSITION = _TRADING / "composition" / "market_data.py"
 MARKET_DATA_ADAPTERS = _TRADING / "adapters"
+
+#: Adapter modules under ``trading/adapters`` that do NOT implement
+#: ``MarketDataPort``: the package inits, the shared transport state, the
+#: read-only account chain and the SQLite strategy repository.  Listed by
+#: relative path so a new module in any of those packages cannot slip through
+#: the market-data surface guard by sharing a filename.
+NON_MARKET_DATA_ADAPTER_MODULES = {
+    "__init__.py",
+    "market_data_state.py",
+    "ibkr/__init__.py",
+    "ibkr/account.py",
+    "ibkr/support.py",
+    "alpaca/__init__.py",
+    "finnhub/__init__.py",
+    "sqlite/__init__.py",
+    "sqlite/strategy_repository.py",
+}
 
 
 def _all_source_files() -> list[pathlib.Path]:
@@ -736,6 +779,12 @@ def test_the_strategy_and_risk_layers_do_not_import_a_market_data_adapter() -> N
             or relative == "us_quant/strategy_registry.py"
             or relative == "us_quant/risk.py"
             or relative == "us_quant/auto_quant.py"
+            or relative.startswith("trading/domain/strategy")
+            or relative.startswith("trading/application/strateg")
+            or relative == "trading/ports/strategy_repository.py"
+            or relative
+            == "trading/adapters/sqlite/strategy_repository.py"
+            or relative == "desktop_v2/pages/strategy.py"
         ):
             continue
         offending = _matches(
@@ -757,18 +806,15 @@ def test_the_market_data_adapters_expose_the_port_surface() -> None:
     """Each market data adapter implements ``run``/``stop``/``snapshot``/``health``.
 
     Scoped to the modules that actually implement ``MarketDataPort``.  The
-    package also holds the account adapter (``ibkr/account.py``) and the
-    shared IBKR support module (``ibkr/support.py``), which are a different
-    chain with a different port and must not be judged by this surface.
+    package also holds the account adapter (``ibkr/account.py``), the shared
+    IBKR support module (``ibkr/support.py``) and the SQLite strategy
+    repository (``sqlite/strategy_repository.py``), which are different chains
+    with different ports and must not be judged by this surface.
     """
 
     for path in sorted(MARKET_DATA_ADAPTERS.rglob("*.py")):
-        if path.name in {
-            "__init__.py",
-            "market_data_state.py",
-            "account.py",
-            "support.py",
-        }:
+        relative = path.relative_to(MARKET_DATA_ADAPTERS).as_posix()
+        if relative in NON_MARKET_DATA_ADAPTER_MODULES:
             continue
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source)
@@ -778,7 +824,7 @@ def test_the_market_data_adapters_expose_the_port_surface() -> None:
             if isinstance(node, ast.ClassDef)
             and node.name.endswith("Stream")
         ]
-        assert classes, f"{path.name} defines no stream adapter"
+        assert classes, f"{relative} defines no stream adapter"
         for klass in classes:
             methods = {
                 node.name
@@ -787,7 +833,7 @@ def test_the_market_data_adapters_expose_the_port_surface() -> None:
             }
             for required in ("run", "stop", "snapshot", "health"):
                 assert required in methods, (
-                    f"{path.name}:{klass.name} is missing {required}()"
+                    f"{relative}:{klass.name} is missing {required}()"
                 )
 
 
@@ -803,16 +849,7 @@ def test_every_market_data_adapter_module_is_covered_by_the_guard() -> None:
         path.relative_to(MARKET_DATA_ADAPTERS).as_posix()
         for path in MARKET_DATA_ADAPTERS.rglob("*.py")
     }
-    skipped = {
-        "__init__.py",
-        "market_data_state.py",
-        "ibkr/__init__.py",
-        "ibkr/account.py",
-        "ibkr/support.py",
-        "alpaca/__init__.py",
-        "finnhub/__init__.py",
-    }
-    covered = present - skipped
+    covered = present - NON_MARKET_DATA_ADAPTER_MODULES
     assert covered == {
         "ibkr/market_data.py",
         "alpaca/market_data.py",
@@ -1152,6 +1189,7 @@ def test_only_account_composition_wires_the_concrete_account_adapter() -> None:
     assert wiring_modules == [
         "trading/composition/accounts.py",
         "trading/composition/market_data.py",
+        "trading/composition/strategies.py",
     ], wiring_modules
 
 
@@ -1236,3 +1274,489 @@ def test_the_shared_ibkr_support_module_is_importable_by_both_channels() -> None
         str(path.relative_to(_SRC)) for path in definitions
     ]
     assert definitions[0] == _TRADING / "adapters" / "ibkr" / "support.py"
+
+
+# -- Strategy v2 ----------------------------------------------------------
+
+# The v1 strategy governance modules, retired by the strategy migration.
+# Nothing may import them and nothing may define them again: a module that is
+# merely unreferenced can still be resurrected by a later change.
+RETIRED_STRATEGY_MODULES = (
+    "us_quant.strategy_registry",
+    "us_quant.strategy_schema",
+)
+
+# The retired MainWindow strategy page and its controller handlers.  The two
+# combo accessors (``_selected_shadow_strategy_record`` /
+# ``_selected_auto_strategy_record``) are NOT listed: nine call sites still read
+# them, so they were re-pointed at ``StrategySelectionService`` rather than
+# deleted, and ``test_the_combo_accessors_read_the_selection_service`` below
+# pins that they no longer reach for a widget.
+RETIRED_STRATEGY_METHODS = (
+    "_strategy_manager_tab",
+    "_populate_strategy_registry",
+    "_selected_strategy_record",
+    "_strategy_registry_selection_changed",
+    "_clone_strategy_version",
+    "_transition_selected_strategy",
+)
+
+STRATEGY_DOMAIN = _TRADING / "domain" / "strategy.py"
+STRATEGY_PARAMETERS = _TRADING / "domain" / "strategy_parameters.py"
+STRATEGY_PORT = _TRADING / "ports" / "strategy_repository.py"
+STRATEGY_SQLITE_REPOSITORY = (
+    _TRADING / "adapters" / "sqlite" / "strategy_repository.py"
+)
+STRATEGY_APPLICATION = _TRADING / "application" / "strategies.py"
+STRATEGY_DEFAULTS = _TRADING / "application" / "strategy_defaults.py"
+STRATEGY_SELECTION = _TRADING / "application" / "strategy_selection.py"
+STRATEGY_COMPOSITION = _TRADING / "composition" / "strategies.py"
+STRATEGY_PAGE = _SRC / "desktop_v2" / "pages" / "strategy.py"
+
+#: Every module the strategy migration creates or rewrites.
+STRATEGY_V2_MODULES = (
+    STRATEGY_DOMAIN,
+    STRATEGY_PARAMETERS,
+    STRATEGY_PORT,
+    STRATEGY_SQLITE_REPOSITORY,
+    STRATEGY_APPLICATION,
+    STRATEGY_DEFAULTS,
+    STRATEGY_SELECTION,
+    STRATEGY_COMPOSITION,
+    STRATEGY_PAGE,
+)
+
+#: Symbols that would couple strategy governance to order execution.  A
+#: strategy that can build a ``PaperOrderIntent`` or hand one to an
+#: ``order_sink`` has an execution path again, which is the coupling this
+#: migration exists to confine.
+EXECUTION_COUPLING_NAMES = (
+    "BrokerExecutionPort",
+    "IBKRPaperOrderService",
+    "PaperOrderIntent",
+    "PaperTradingService",
+    "new_paper_order_intent",
+    "order_sink",
+)
+
+#: Spec 90/91: the exact set of strategy-related modules still allowed to be
+#: execution-coupled, as repository-relative POSIX paths.  Anything else
+#: appearing in this set fails the guard below -- there is no second
+#: exception and adding one is a deliberate, visible edit to this literal.
+TRANSITIONAL_EXECUTION_COUPLED_STRATEGY_FILES = {
+    "src/us_quant/auto_quant.py",
+}
+
+#: The fields ``TradeProposal`` is allowed to have.  Order identity is
+#: deliberately absent: a proposal that carried one could be submitted.
+TRADE_PROPOSAL_FIELDS = {
+    "strategy",
+    "symbol",
+    "action",
+    "desired_quantity",
+    "reference_price",
+    "reason",
+    "generated_at",
+}
+
+TRADE_PROPOSAL_FORBIDDEN_FIELDS = {
+    "order_id",
+    "broker_order_id",
+    "client_order_id",
+    "tif",
+    "outsideRth",
+    "transmit",
+    "risk_approved",
+}
+
+#: The fields ``StrategyVersion`` is allowed to have.
+STRATEGY_VERSION_FIELDS = {
+    "definition",
+    "identity",
+    "semver",
+    "status",
+    "mode",
+    "parameters",
+    "universe_hash",
+    "code_hash",
+    "risk_budget_pct",
+    "gate_passed",
+    "gate_reason",
+    "created_at",
+    "updated_at",
+}
+
+
+def _class_fields(path: pathlib.Path, name: str) -> set[str]:
+    """The annotated field names of one dataclass body."""
+
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            return {
+                statement.target.id
+                for statement in node.body
+                if isinstance(statement, ast.AnnAssign)
+                and isinstance(statement.target, ast.Name)
+            }
+    raise AssertionError(f"{name} is not defined in {path.name}")
+
+
+def _class_methods(path: pathlib.Path, name: str) -> set[str]:
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            return {
+                statement.name
+                for statement in node.body
+                if isinstance(statement, ast.FunctionDef)
+            }
+    raise AssertionError(f"{name} is not defined in {path.name}")
+
+
+def _strategy_related_files() -> list[pathlib.Path]:
+    """Modules the execution-coupling guard judges.
+
+    Scoped to strategy-named source plus AutoQuant, which is the module the
+    exception exists for.
+    """
+
+    judged: list[pathlib.Path] = []
+    for path in _all_source_files():
+        relative = path.relative_to(_SRC).as_posix()
+        if (
+            relative.startswith("strategy")
+            or relative.startswith("trading/domain/strategy")
+            or relative.startswith("trading/application/strateg")
+            or relative.startswith("trading/composition/strateg")
+            or relative.startswith("trading/adapters/sqlite/strateg")
+            or relative == "trading/ports/strategy_repository.py"
+            or relative == "desktop_v2/pages/strategy.py"
+            or relative == "auto_quant.py"
+            or relative == "auto_intraday.py"
+            or relative == "targeted_intraday.py"
+        ):
+            judged.append(path)
+    return judged
+
+
+def test_the_retired_strategy_modules_are_gone() -> None:
+    """The v1 modules are deleted, not merely unreferenced."""
+
+    for module in RETIRED_STRATEGY_MODULES:
+        path = _SRC / f"{module.removeprefix('us_quant.')}.py"
+        assert not path.exists(), (
+            f"{path.relative_to(_SRC).as_posix()} must not exist; the "
+            "strategy migration moved its behaviour to trading/"
+        )
+
+
+def test_no_module_imports_a_retired_strategy_module() -> None:
+    """No production module may import the retired strategy modules."""
+
+    offenders: list[str] = []
+    for path in _all_source_files():
+        modules = _imports(path)
+        for retired in RETIRED_STRATEGY_MODULES:
+            if retired in modules:
+                offenders.append(
+                    f"{path.relative_to(_SRC)} imports {retired}"
+                )
+    assert not offenders, offenders
+
+
+def test_the_strategy_repository_port_is_the_only_governance_surface() -> None:
+    """The port exposes exactly the four store operations and no policy."""
+
+    assert _class_methods(STRATEGY_PORT, "StrategyRepositoryPort") == {
+        "insert_version",
+        "list_versions",
+        "get_version",
+        "update_deployment",
+    }
+    names = _identifier_names(STRATEGY_PORT)
+    for forbidden in (
+        "ALLOWED_TRANSITIONS",
+        "gate_passed",
+        "transition",
+        "clone",
+        "can_clone",
+        "is_legal",
+        "sqlite3",
+    ):
+        assert forbidden not in names, (
+            f"StrategyRepositoryPort must not answer policy, found {forbidden}"
+        )
+
+
+def test_the_strategy_application_does_not_import_sqlite_or_an_adapter() -> None:
+    """The load-bearing rule: the application is storage-blind."""
+
+    offending = _matches(
+        _imports(STRATEGY_APPLICATION),
+        (
+            "sqlite3",
+            "us_quant.sqlite_support",
+            "us_quant.trading.adapters",
+            "us_quant.trading.composition",
+            "us_quant.trading.runtime",
+            "PySide6",
+        ),
+    )
+    assert not offending, sorted(offending)
+
+
+def test_the_strategy_selection_service_only_depends_on_the_application() -> None:
+    """Selection is policy over the application, not over a store."""
+
+    offending = _matches(
+        _imports(STRATEGY_SELECTION) | _imports(STRATEGY_DEFAULTS),
+        (
+            "sqlite3",
+            "us_quant.sqlite_support",
+            "us_quant.trading.adapters",
+            "us_quant.trading.composition",
+            "PySide6",
+        ),
+    )
+    assert not offending, sorted(offending)
+
+
+def test_the_strategy_domain_modules_are_pure() -> None:
+    """Strategy governance types know nothing about storage or the UI."""
+
+    for path in (STRATEGY_DOMAIN, STRATEGY_PARAMETERS):
+        offending = _matches(
+            _imports(path),
+            (
+                "sqlite3",
+                "us_quant.sqlite_support",
+                "us_quant.trading.adapters",
+                "us_quant.trading.application",
+                "us_quant.trading.ports",
+                "PySide6",
+            ),
+        )
+        assert not offending, f"{path.name} imports {sorted(offending)}"
+
+
+def test_only_strategy_composition_wires_the_concrete_strategy_repository() -> (
+    None
+):
+    """Exactly one module knows both the strategy application and its adapter."""
+
+    wiring_modules: list[str] = []
+    for path in _all_source_files():
+        modules = _imports(path)
+        if _matches(
+            modules, ("us_quant.trading.adapters.sqlite.strategy_repository",)
+        ) and _matches(modules, ("us_quant.trading.application",)):
+            wiring_modules.append(path.relative_to(_SRC).as_posix())
+    # The sqlite package's own ``__init__`` re-exports the adapter, so it
+    # names the concrete class too -- but it knows no application service.
+    assert wiring_modules == ["trading/composition/strategies.py"], (
+        wiring_modules
+    )
+
+
+def test_the_desktop_does_not_import_the_sqlite_strategy_adapter() -> None:
+    """The UI composes the application and talks only to it.
+
+    ``desktop.py`` does import ``sqlite3`` itself for an unrelated history-job
+    error handler, so this guard is about the strategy store: the window must
+    reach it through ``build_strategy_application`` and never name the
+    concrete repository class.
+    """
+
+    desktop = _SRC / "desktop.py"
+    offending = _matches(
+        _imports(desktop),
+        (
+            "us_quant.trading.adapters",
+            "us_quant.sqlite_support",
+        ),
+    )
+    assert not offending, sorted(offending)
+    assert "SQLiteStrategyRepository" not in _identifier_names(desktop)
+    assert "build_strategy_application" in _identifier_names(desktop)
+
+
+def test_the_strategy_page_imports_no_business_service() -> None:
+    """The page renders; it does not reach for a runtime or a store."""
+
+    offending = _matches(
+        _imports(STRATEGY_PAGE),
+        (
+            "PySide6.QtNetwork",
+            "ibapi",
+            "sqlite3",
+            "us_quant.sqlite_support",
+            "us_quant.trading.adapters",
+            "us_quant.trading.application",
+            "us_quant.trading.composition",
+            "us_quant.ibkr",
+            "us_quant.paper_trading_service",
+            "us_quant.paper_session",
+            "us_quant.paper_workflow",
+            "us_quant.ibkr_paper_orders",
+            "us_quant.ibkr_paper_gateway",
+            "us_quant.auto_quant",
+            "us_quant.risk",
+            "us_quant.strategy_registry",
+            "us_quant.strategy_schema",
+        ),
+    )
+    assert not offending, sorted(offending)
+    assert _matches(_imports(STRATEGY_PAGE), ("us_quant.trading.domain",)), (
+        "the page must render domain types, not invent its own view models"
+    )
+
+
+def test_no_strategy_v2_module_imports_paper_execution() -> None:
+    """Spec 89: the new strategy surface has no execution path."""
+
+    offenders: list[str] = []
+    for path in STRATEGY_V2_MODULES:
+        used = _identifier_names(path) & set(EXECUTION_COUPLING_NAMES)
+        if used:
+            offenders.append(
+                f"{path.relative_to(_SRC).as_posix()} uses {sorted(used)}"
+            )
+    assert not offenders, offenders
+
+
+def test_auto_quant_is_the_only_execution_coupled_strategy_module() -> None:
+    """Spec 90/91: the transitional exception is an exact, closed set.
+
+    Any second strategy-related module that constructs a ``PaperOrderIntent``
+    or holds an ``order_sink`` fails here.  Widening the exception means
+    editing the literal, which is the point -- it cannot grow by accident.
+    """
+
+    coupled: set[str] = set()
+    for path in _strategy_related_files():
+        used = _identifier_names(path) & set(EXECUTION_COUPLING_NAMES)
+        if used:
+            coupled.add(path.relative_to(_REPO_ROOT).as_posix())
+    assert coupled == TRANSITIONAL_EXECUTION_COUPLED_STRATEGY_FILES, (
+        "execution-coupled strategy modules changed",
+        sorted(coupled),
+        sorted(TRANSITIONAL_EXECUTION_COUPLED_STRATEGY_FILES),
+    )
+
+
+def test_trade_proposal_cannot_gain_order_identity() -> None:
+    """Spec 14: no field may make a proposal submittable."""
+
+    fields = _class_fields(STRATEGY_DOMAIN, "TradeProposal")
+    assert fields == TRADE_PROPOSAL_FIELDS
+    assert not (fields & TRADE_PROPOSAL_FORBIDDEN_FIELDS)
+
+
+def test_strategy_version_keeps_its_governance_fields() -> None:
+    """The version record carries governance state and nothing ordery."""
+
+    fields = _class_fields(STRATEGY_DOMAIN, "StrategyVersion")
+    assert fields == STRATEGY_VERSION_FIELDS
+    assert not (fields & TRADE_PROPOSAL_FORBIDDEN_FIELDS)
+
+
+def test_the_strategy_state_machine_is_domain_owned() -> None:
+    """Spec 5: the transition table lives in the domain, not in a store."""
+
+    source = STRATEGY_DOMAIN.read_text(encoding="utf-8")
+    assert "ALLOWED_TRANSITIONS" in source
+    names = _identifier_names(STRATEGY_DOMAIN)
+    assert {"StrategyStatus", "StrategyMode"} <= names
+    # The retired registry had a status called "paused" but no way back out
+    # of "stopped"; both must survive the move.
+    assert "STOPPED" in names and "LEGACY_INVALIDATED" in names
+
+
+def test_the_desktop_has_no_legacy_strategy_handlers() -> None:
+    """Spec 78: the old page, controller and combo accessors are deleted."""
+
+    methods = {
+        node.name
+        for node in ast.walk(
+            ast.parse((_SRC / "desktop.py").read_text(encoding="utf-8"))
+        )
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for removed in RETIRED_STRATEGY_METHODS:
+        assert removed not in methods, (
+            f"MainWindow.{removed} should be deleted"
+        )
+
+
+def test_the_combo_accessors_read_the_selection_service() -> None:
+    """Spec 52: the combos are views; the service is the truth.
+
+    The two accessors survived by name because nine call sites depend on them.
+    What had to change is where they get their answer: reading
+    ``QComboBox.currentData()`` made "which version runs?" depend on which tab
+    was on screen, and made the question unanswerable from anywhere that is
+    not that widget.
+    """
+
+    source = (_SRC / "desktop.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for name in (
+        "_selected_shadow_strategy_record",
+        "_selected_auto_strategy_record",
+    ):
+        node = next(
+            item
+            for item in ast.walk(tree)
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and item.name == name
+        )
+        # Only the code, not the docstring: these methods deliberately
+        # document what they stopped doing, and a guard that failed on that
+        # would push authors to stop documenting the change.
+        code = "\n".join(
+            segment
+            for segment in (
+                ast.get_source_segment(source, statement)
+                for statement in node.body
+                if not (
+                    isinstance(statement, ast.Expr)
+                    and isinstance(statement.value, ast.Constant)
+                    and isinstance(statement.value.value, str)
+                )
+            )
+            if segment
+        )
+        assert "self.strategy_selection.selected(" in code, (
+            f"{name} must ask the selection service"
+        )
+        for forbidden in (
+            "currentData(",
+            "get_version(",
+            "strategy_registry",
+        ):
+            assert forbidden not in code, (
+                f"{name} still reads {forbidden} instead of the service"
+            )
+
+
+def test_the_desktop_routes_strategy_to_the_native_v2_page() -> None:
+    """Spec 77/99: the strategy route is the v2 page, not a builder."""
+
+    source = (_SRC / "desktop.py").read_text(encoding="utf-8")
+    assert "StrategyPage" in source, (
+        "MainWindow must build the native strategy page"
+    )
+    assert '"strategy": self.strategy_page' in source, (
+        "the strategy route must resolve to the native v2 page"
+    )
+
+
+def test_the_strategy_page_builds_no_legacy_widget_stack() -> None:
+    """It renders one page; it does not resurrect the old tab builder."""
+
+    methods = _class_methods(STRATEGY_PAGE, "StrategyPage")
+    for forbidden in ("_strategy_manager_tab", "register", "transition"):
+        assert forbidden not in methods, (
+            f"StrategyPage.{forbidden} would make the page an orchestrator"
+        )
+    names = _identifier_names(STRATEGY_PAGE)
+    assert "Signal" in names, "the page talks back through Qt signals only"

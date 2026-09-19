@@ -12,7 +12,7 @@ from us_quant.trading.domain.market import MarketSnapshot
 from us_quant.runtime_events import RuntimeEvent
 from us_quant.redaction import sanitize_value
 from us_quant.shadow_paper import ShadowFill
-from us_quant.strategy_registry import StrategyRecord
+from us_quant.trading.domain.strategy import StrategyVersion
 from us_quant.targeted_replay import TargetedReplayResult
 from us_quant.targeted_robustness import TargetedRobustnessResult
 from us_quant.targeted_validation import TargetedWalkForwardResult
@@ -29,7 +29,7 @@ def export_terminal_bundle(
     *,
     portfolio: BrokerAccountPortfolio | None,
     stream: MarketSnapshot | None,
-    strategies: tuple[StrategyRecord, ...],
+    strategies: tuple[StrategyVersion, ...],
     events: tuple[RuntimeEvent, ...],
     shadow_fills: tuple[ShadowFill, ...] = (),
     targeted_replays: tuple[TargetedReplayResult, ...] = (),
@@ -112,17 +112,7 @@ def export_terminal_bundle(
     )
     _write_csv(
         target / "strategies.csv",
-        [
-            _sanitize({
-                **asdict(row),
-                "parameters": json.dumps(
-                    row.parameters,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
-            })
-            for row in strategies
-        ],
+        [_strategy_row(row) for row in strategies],
     )
     _write_csv(
         target / "runtime_events.csv",
@@ -422,6 +412,44 @@ def export_terminal_bundle(
         [_sanitize(row) for row in paper_execution_audit],
     )
     return target
+
+
+def _strategy_row(version: StrategyVersion) -> dict:
+    """Flatten one governance version for ``strategies.csv``.
+
+    Spelled out rather than taken from ``asdict``: ``StrategyVersion`` nests
+    its ``definition`` and ``identity``, and ``asdict`` would JSON-encode those
+    two sub-objects into opaque columns -- changing the artifact's schema.  The
+    retired ``StrategyRecord`` was flat, so this stays flat: the same sixteen
+    fields, with the enums written as their values and the timestamps as ISO
+    text.  Research artifacts are frozen, and a CSV that suddenly grew a
+    ``definition`` column would quietly break every downstream reader.
+    """
+
+    return _sanitize(
+        {
+            "strategy_id": version.strategy_id,
+            "name": version.name,
+            "description": version.description,
+            "version_id": version.version_id,
+            "semver": version.semver,
+            "status": version.status.value,
+            "mode": version.mode.value,
+            "parameters": json.dumps(
+                version.parameters,
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            "parameter_hash": version.parameter_hash,
+            "universe_hash": version.universe_hash,
+            "code_hash": version.code_hash,
+            "risk_budget_pct": float(version.risk_budget_pct),
+            "gate_passed": version.gate_passed,
+            "gate_reason": version.gate_reason,
+            "created_at": version.created_at.isoformat(),
+            "updated_at": version.updated_at.isoformat(),
+        }
+    )
 
 
 def _write_csv(path: Path, rows: Iterable[dict]) -> None:

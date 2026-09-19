@@ -1,57 +1,26 @@
 """Pure data models for the Paper order channel.
 
-The DTO layer only: value objects shared by the SQLite journal and the broker
+The DTO layer only: value objects shared by the order store and the broker
 adapter. Nothing here talks to a broker, a database, a GUI or a network, so it
 can be imported from anywhere.
 
-``TERMINAL_ORDER_STATUSES`` lives here because both the journal and the adapter
+What remains here is what the *session* still needs: the connection fact, the
+broker account state, and the reconciliation views the window displays.  The
+per-order DTOs -- the intent, the status update and the execution -- are gone:
+orders are domain ``OrderIntent`` / ``OrderEvent`` / ``ExecutionFill`` now, and
+a second set of order shapes is how two readings of one order start to differ.
+
+``TERMINAL_ORDER_STATUSES`` lives here because both the store and the adapter
 need the same status vocabulary and neither may import the other; two copies
-would be free to drift apart.
+would be free to drift apart.  It is the vocabulary of the *stored text*, which
+is why the broker spellings ("cancelled") appear here while the domain status
+uses its own.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-
-
-@dataclass(frozen=True, slots=True)
-class PaperOrderIntent:
-    intent_id: str
-    session_id: str
-    strategy_version_id: str
-    symbol: str
-    side: str
-    quantity: int
-    limit_price: Decimal
-    reason: str
-    generated_at: str
-    idempotency_key: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class PaperOrderUpdate:
-    intent_id: str
-    broker_order_id: int
-    status: str
-    filled: Decimal
-    remaining: Decimal
-    average_fill_price: Decimal | None
-    last_fill_price: Decimal | None
-    message: str
-    observed_at: str
-
-
-@dataclass(frozen=True, slots=True)
-class PaperExecution:
-    intent_id: str
-    broker_order_id: int
-    execution_id: str
-    symbol: str
-    side: str
-    quantity: Decimal
-    price: Decimal
-    occurred_at: str
 
 
 @dataclass(frozen=True, slots=True)

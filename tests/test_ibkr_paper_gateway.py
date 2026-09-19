@@ -20,14 +20,14 @@ from unittest.mock import patch
 
 import pytest
 
-from us_quant import ibkr_paper_gateway
-from us_quant.ibkr_paper_gateway import (
+from us_quant.trading.adapters.ibkr import execution_gateway
+from us_quant.trading.adapters.ibkr.execution_gateway import (
     IBKRPaperGatewayError,
     PaperGatewayHandshake,
     create_paper_gateway_app,
 )
 
-SOURCE = Path(ibkr_paper_gateway.__file__ or "").read_text(encoding="utf-8")
+SOURCE = Path(execution_gateway.__file__ or "").read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE)
 
 
@@ -90,7 +90,7 @@ def test_gateway_module_imports_without_the_ibkr_api() -> None:
     """Importing the bridge must not require the official IBKR package."""
 
     assert "ibapi" not in sys.modules
-    assert ibkr_paper_gateway.create_paper_gateway_app is not None
+    assert execution_gateway.create_paper_gateway_app is not None
 
 
 def _imported_modules(tree: ast.AST) -> set[str]:

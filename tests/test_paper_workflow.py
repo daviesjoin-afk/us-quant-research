@@ -126,15 +126,15 @@ class Orders:
         self.snapshot_current = True
         self.connected = True
 
-    def poll_executions(self):
-        self.calls.append("executions")
+    def fills(self):
+        self.calls.append("fills")
         return ()
 
-    def poll_updates(self):
-        self.calls.append("updates")
+    def events(self):
+        self.calls.append("events")
         return ()
 
-    def cancel_intent(self, intent_id):
+    def cancel_intent(self, order_id):
         self.calls.append("cancel")
         return True
 
@@ -252,8 +252,8 @@ def test_runtime_ingress_delegates_once_and_snapshot_reflects_result() -> None:
     controller.on_stream(object())
     controller.set_entries_paused(True)
 
-    assert orders.calls.count("executions") == 2
-    assert orders.calls.count("updates") == 2
+    assert orders.calls.count("fills") == 2
+    assert orders.calls.count("events") == 2
     assert engine.calls == ["stream", "pause"]
     assert controller.phase is PaperWorkflowPhase.PAUSED
     assert controller.snapshot(account_ready=True, market_ready=True).paper_phase is PaperWorkflowPhase.PAUSED

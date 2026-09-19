@@ -522,12 +522,12 @@ def _install_order_service_spy(window: MainWindow, spy: object) -> None:
 
     window.paper_trading = PaperTradingService(
         workflow_getter=lambda: window.paper_workflow,
-        order_service_factory=lambda config, *, journal, extended_hours_enabled: spy,
+        order_service_factory=lambda config, *, repository, extended_hours_enabled: spy,
     )
     window.paper_trading.connect_candidate(
         "teardown-spy",
         config=object(),
-        journal=object(),
+        repository=object(),
         extended_hours_enabled=False,
     )
     window.paper_trading.promote_candidate("teardown-spy")

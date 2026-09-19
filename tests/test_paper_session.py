@@ -6,6 +6,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from us_quant.paper_session import PaperSessionCoordinator
+from us_quant.trading.domain.orders import Side
+from us_quant.trading.ports.broker_execution import (
+    ExecutionSubmissionUncertain,
+)
 
 
 NOW = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
@@ -13,9 +17,11 @@ NOW = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
 
 @dataclass(frozen=True)
 class Intent:
-    intent_id: str
-    side: str
-    generated_at: str
+    """A pending order as the coordinator reads it: domain names and types."""
+
+    order_id: str
+    side: Side
+    created_at: datetime
 
 
 @dataclass(frozen=True)
@@ -101,8 +107,8 @@ class FakeEngine:
         self._record(f"execution:{execution}")
         return self.current
 
-    def on_order_update(self, update):
-        self._record(f"update:{update}")
+    def on_order_event(self, event):
+        self._record(f"update:{event}")
         return self.current
 
     def on_stream(self, snapshot, *, observed_at=None):
@@ -163,16 +169,16 @@ class FakeOrders:
         if self.timeline is not None:
             self.timeline.append(call)
 
-    def poll_executions(self):
-        self._record("poll_executions")
+    def fills(self):
+        self._record("fills")
         return self.executions
 
-    def poll_updates(self):
-        self._record("poll_updates")
+    def events(self):
+        self._record("events")
         return self.updates
 
-    def cancel_intent(self, intent_id):
-        self._record(f"cancel:{intent_id}")
+    def cancel_intent(self, order_id):
+        self._record(f"cancel:{order_id}")
         if self.cancel_error:
             raise self.cancel_error
         return True
@@ -228,7 +234,7 @@ def test_poll_applies_executions_before_updates_then_health() -> None:
 
     coordinator(engine, orders).poll()
 
-    assert orders.calls == ["poll_executions", "poll_updates", "health"]
+    assert orders.calls == ["fills", "events", "health"]
     assert engine.calls == ["execution:fill", "update:update"]
 
 
@@ -259,9 +265,9 @@ def test_poll_does_not_halt_when_stop_was_requested() -> None:
 
 
 def test_poll_cancels_only_stale_buy_using_engine_timeout() -> None:
-    stale = Intent("stale-buy", "BUY", (NOW - timedelta(seconds=30)).isoformat())
-    fresh = Intent("fresh-buy", "BUY", (NOW - timedelta(seconds=29)).isoformat())
-    sell = Intent("old-sell", "SELL", (NOW - timedelta(minutes=2)).isoformat())
+    stale = Intent("stale-buy", Side.BUY, NOW - timedelta(seconds=30))
+    fresh = Intent("fresh-buy", Side.BUY, NOW - timedelta(seconds=29))
+    sell = Intent("old-sell", Side.SELL, NOW - timedelta(minutes=2))
     engine = FakeEngine(Snapshot(pending_orders=(stale, fresh, sell)))
     orders = FakeOrders()
 
@@ -274,7 +280,7 @@ def test_poll_cancels_only_stale_buy_using_engine_timeout() -> None:
 
 
 def test_aged_sell_halts_for_human_intervention_without_cancelling_exit() -> None:
-    sell = Intent("aged-exit", "SELL", (NOW - timedelta(seconds=90)).isoformat())
+    sell = Intent("aged-exit", Side.SELL, NOW - timedelta(seconds=90))
     engine = FakeEngine(Snapshot(pending_orders=(sell,)))
     orders = FakeOrders()
 
@@ -289,7 +295,7 @@ def test_aged_sell_halts_for_human_intervention_without_cancelling_exit() -> Non
 
 
 def test_recent_sell_remains_live_and_is_never_cancelled() -> None:
-    sell = Intent("fresh-exit", "SELL", (NOW - timedelta(seconds=89)).isoformat())
+    sell = Intent("fresh-exit", Side.SELL, NOW - timedelta(seconds=89))
     engine = FakeEngine(Snapshot(pending_orders=(sell,)))
     orders = FakeOrders()
 
@@ -301,28 +307,40 @@ def test_recent_sell_remains_live_and_is_never_cancelled() -> None:
 
 def test_poll_does_not_cancel_stale_buy_cleared_by_queued_update() -> None:
     class UpdateClearsPendingEngine(FakeEngine):
-        def on_order_update(self, update):
-            self._record(f"update:{update}")
+        def on_order_event(self, event):
+            self._record(f"update:{event}")
             self.current = Snapshot(
                 **{**self.current.__dict__, "pending_orders": ()}
             )
             return self.current
 
-    stale = Intent("stale-buy", "BUY", (NOW - timedelta(minutes=1)).isoformat())
+    stale = Intent("stale-buy", Side.BUY, NOW - timedelta(minutes=1))
     engine = UpdateClearsPendingEngine(Snapshot(pending_orders=(stale,)))
     orders = FakeOrders()
 
     coordinator(engine, orders).poll()
 
     assert "cancel:stale-buy" not in orders.calls
-    assert orders.calls == ["poll_executions", "poll_updates", "health"]
+    assert orders.calls == ["fills", "events", "health"]
 
 
 def test_uncertain_stale_buy_cancel_halts_session() -> None:
-    class CancelUncertainError(Exception):
-        pass
+    class CancelUncertainError(ExecutionSubmissionUncertain):
+        """The provider-neutral uncertainty type, not a name that looks like it.
 
-    intent = Intent("buy", "BUY", (NOW - timedelta(minutes=1)).isoformat())
+        The coordinator used to guess by sniffing the class name for
+        "uncertain"; it now catches the port's type, so a cancel whose outcome
+        cannot be established has to say so through that type.
+        """
+
+        def __init__(self) -> None:
+            super().__init__(
+                "cancel outcome unknown",
+                order_id="buy",
+                broker_order_id=1,
+            )
+
+    intent = Intent("buy", Side.BUY, NOW - timedelta(minutes=1))
     engine = FakeEngine(Snapshot(pending_orders=(intent,)))
     orders = FakeOrders()
     orders.cancel_error = CancelUncertainError()
@@ -345,7 +363,7 @@ def test_unsafe_health_halts_before_stream_evaluation() -> None:
 
     assert result.state.halted
     assert timeline == [
-        "poll_executions", "execution:fill", "poll_updates", "update:update",
+        "fills", "execution:fill", "events", "update:update",
         "health", "halt:PAPER_RECONCILIATION_HALT",
     ]
 
@@ -358,29 +376,29 @@ def test_stream_sequences_once_before_strategy_evaluation() -> None:
     coordinator(engine, orders, timeline=timeline).on_stream(object())
 
     assert timeline == [
-        "poll_executions", "execution:fill", "poll_updates", "update:update",
+        "fills", "execution:fill", "events", "update:update",
         "health", "stream",
     ]
 
 
 def test_stream_cancels_only_timed_out_buys_before_health_and_strategy() -> None:
     timeline: list[str] = []
-    stale = Intent("stale-buy", "BUY", (NOW - timedelta(seconds=30)).isoformat())
-    sell = Intent("fresh-sell", "SELL", (NOW - timedelta(seconds=89)).isoformat())
+    stale = Intent("stale-buy", Side.BUY, NOW - timedelta(seconds=30))
+    sell = Intent("fresh-sell", Side.SELL, NOW - timedelta(seconds=89))
     engine = FakeEngine(Snapshot(pending_orders=(stale, sell)), timeline=timeline)
     orders = FakeOrders(timeline)
 
     coordinator(engine, orders, timeline=timeline).on_stream(object())
 
     assert timeline == [
-        "poll_executions", "execution:fill", "poll_updates", "update:update",
+        "fills", "execution:fill", "events", "update:update",
         "cancel:stale-buy", "health", "stream",
     ]
     assert "cancel:fresh-sell" not in orders.calls
 
 
 def test_pause_forces_buy_cancellation_without_waiting_for_timeout() -> None:
-    young = Intent("young-buy", "BUY", NOW.isoformat())
+    young = Intent("young-buy", Side.BUY, NOW)
     engine = FakeEngine(Snapshot(pending_orders=(young,)))
     orders = FakeOrders()
 

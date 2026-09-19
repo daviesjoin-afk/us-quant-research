@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from us_quant import paper_trading_service as module
-from us_quant.ibkr_paper_orders import IBKRPaperOrderService
+from us_quant.trading.composition.execution import build_execution_candidate
 from us_quant.paper_trading_service import (
     PaperReconciliationStatus,
     PaperTradingLifecycleError,
@@ -104,13 +104,13 @@ class _FakeFactory:
         self,
         config: object,
         *,
-        journal: object,
+        repository: object,
         extended_hours_enabled: bool,
     ) -> object:
         self.calls.append(
             {
                 "config": config,
-                "journal": journal,
+                "repository": repository,
                 "extended_hours_enabled": extended_hours_enabled,
             }
         )
@@ -175,7 +175,7 @@ def _owned(
     boundary.connect_candidate(
         candidate_id,
         config=object(),
-        journal=object(),
+        repository=object(),
         extended_hours_enabled=False,
     )
     boundary.promote_candidate(candidate_id)
@@ -270,7 +270,7 @@ def test_reads_ignore_candidates_until_they_are_promoted() -> None:
     boundary = _service(factory=_FakeFactory(service))
 
     boundary.connect_candidate(
-        "attempt-1", config=object(), journal=object(), extended_hours_enabled=False
+        "attempt-1", config=object(), repository=object(), extended_hours_enabled=False
     )
 
     assert boundary.has_candidate("attempt-1") is True
@@ -379,19 +379,19 @@ def test_connect_candidate_connects_once_and_tracks_without_promoting() -> None:
     service = _FakeService()
     factory = _FakeFactory(service)
     boundary = _service(factory=factory)
-    config, journal = object(), object()
+    config, repository = object(), object()
 
     connection = boundary.connect_candidate(
         "attempt-7",
         config=config,
-        journal=journal,
+        repository=repository,
         extended_hours_enabled=True,
     )
 
     assert connection is service.connection
     assert service.connect_calls == 1
     assert factory.calls == [
-        {"config": config, "journal": journal, "extended_hours_enabled": True}
+        {"config": config, "repository": repository, "extended_hours_enabled": True}
     ]
     assert boundary.has_candidate("attempt-7") is True
     # Connecting is not permission to own the session.
@@ -407,7 +407,7 @@ def test_connect_candidate_failure_disconnects_and_registers_nothing() -> None:
         boundary.connect_candidate(
             "attempt-1",
             config=object(),
-            journal=object(),
+            repository=object(),
             extended_hours_enabled=False,
         )
 
@@ -426,7 +426,7 @@ def test_constructor_failure_registers_nothing_and_leaves_no_connection() -> Non
         boundary.connect_candidate(
             "attempt-1",
             config=object(),
-            journal=object(),
+            repository=object(),
             extended_hours_enabled=False,
         )
 
@@ -447,7 +447,7 @@ def test_a_candidate_whose_cleanup_fails_is_still_tracked() -> None:
         boundary.connect_candidate(
             "attempt-1",
             config=object(),
-            journal=object(),
+            repository=object(),
             extended_hours_enabled=False,
         )
 
@@ -460,14 +460,14 @@ def test_a_candidate_id_cannot_be_reused() -> None:
     first, second = _FakeService(), _FakeService()
     boundary = _service(factory=_FakeFactory(first, second))
     boundary.connect_candidate(
-        "attempt-1", config=object(), journal=object(), extended_hours_enabled=False
+        "attempt-1", config=object(), repository=object(), extended_hours_enabled=False
     )
 
     with pytest.raises(PaperTradingLifecycleError, match="already registered"):
         boundary.connect_candidate(
             "attempt-1",
             config=object(),
-            journal=object(),
+            repository=object(),
             extended_hours_enabled=False,
         )
 
@@ -483,7 +483,7 @@ def test_a_candidate_id_must_be_a_non_empty_string() -> None:
             boundary.connect_candidate(
                 bad,  # type: ignore[arg-type]
                 config=object(),
-                journal=object(),
+                repository=object(),
                 extended_hours_enabled=False,
             )
 
@@ -502,10 +502,10 @@ def test_discard_disconnects_only_the_named_candidate() -> None:
     active, stale, other = _FakeService(), _FakeService(), _FakeService()
     boundary = _owned(active, factory=_FakeFactory(active, stale, other))
     boundary.connect_candidate(
-        "stale", config=object(), journal=object(), extended_hours_enabled=False
+        "stale", config=object(), repository=object(), extended_hours_enabled=False
     )
     boundary.connect_candidate(
-        "other", config=object(), journal=object(), extended_hours_enabled=False
+        "other", config=object(), repository=object(), extended_hours_enabled=False
     )
 
     boundary.discard_candidate("stale")
@@ -523,7 +523,7 @@ def test_discard_failure_keeps_the_candidate_tracked_and_raises() -> None:
     stale = _FakeService(error=RuntimeError("socket stuck"))
     boundary = _service(factory=_FakeFactory(stale))
     boundary.connect_candidate(
-        "stale", config=object(), journal=object(), extended_hours_enabled=False
+        "stale", config=object(), repository=object(), extended_hours_enabled=False
     )
 
     with pytest.raises(RuntimeError, match="socket stuck"):
@@ -547,7 +547,7 @@ def test_promote_moves_the_candidate_into_the_active_slot() -> None:
     service = _FakeService()
     boundary = _service(factory=_FakeFactory(service))
     boundary.connect_candidate(
-        "attempt-1", config=object(), journal=object(), extended_hours_enabled=False
+        "attempt-1", config=object(), repository=object(), extended_hours_enabled=False
     )
 
     boundary.promote_candidate("attempt-1")
@@ -561,7 +561,7 @@ def test_promote_refuses_to_replace_a_live_active_service() -> None:
     old, new = _FakeService(), _FakeService()
     boundary = _owned(old, factory=_FakeFactory(old, new))
     boundary.connect_candidate(
-        "attempt-2", config=object(), journal=object(), extended_hours_enabled=False
+        "attempt-2", config=object(), repository=object(), extended_hours_enabled=False
     )
 
     with pytest.raises(PaperTradingLifecycleError, match="already active"):
@@ -579,7 +579,7 @@ def test_ensure_can_promote_is_a_pure_check() -> None:
     service = _FakeService()
     boundary = _service(factory=_FakeFactory(service))
     boundary.connect_candidate(
-        "attempt-1", config=object(), journal=object(), extended_hours_enabled=False
+        "attempt-1", config=object(), repository=object(), extended_hours_enabled=False
     )
 
     boundary.ensure_candidate_can_promote("attempt-1")
@@ -595,7 +595,7 @@ def test_ensure_can_promote_reports_an_occupied_slot_before_it_is_too_late() -> 
     old, new = _FakeService(), _FakeService()
     boundary = _owned(old, factory=_FakeFactory(old, new))
     boundary.connect_candidate(
-        "attempt-2", config=object(), journal=object(), extended_hours_enabled=False
+        "attempt-2", config=object(), repository=object(), extended_hours_enabled=False
     )
 
     with pytest.raises(PaperTradingLifecycleError, match="already active"):
@@ -730,7 +730,7 @@ def test_probe_connects_reads_and_disconnects_without_owning_anything() -> None:
     boundary = _service(factory=_FakeFactory(service))
 
     connection, broker_state = boundary.probe_order_channel(
-        config=object(), journal=object(), extended_hours_enabled=False
+        config=object(), repository=object(), extended_hours_enabled=False
     )
 
     assert connection is service.connection
@@ -751,7 +751,7 @@ def test_probe_disconnects_even_when_the_read_fails() -> None:
 
     with pytest.raises(RuntimeError, match="no state"):
         boundary.probe_order_channel(
-            config=object(), journal=object(), extended_hours_enabled=False
+            config=object(), repository=object(), extended_hours_enabled=False
         )
 
     assert service.disconnect_calls == 1
@@ -763,7 +763,7 @@ def test_probe_does_not_disturb_an_active_session() -> None:
     boundary = _owned(active, factory=_FakeFactory(active, probe))
 
     boundary.probe_order_channel(
-        config=object(), journal=object(), extended_hours_enabled=False
+        config=object(), repository=object(), extended_hours_enabled=False
     )
 
     assert active.disconnect_calls == 0
@@ -773,13 +773,17 @@ def test_probe_does_not_disturb_an_active_session() -> None:
 # -- construction --------------------------------------------------------
 
 
-def test_the_default_factory_is_the_real_order_service() -> None:
-    """Production must build the real thing; tests inject their own."""
+def test_the_default_factory_is_the_execution_composition_root() -> None:
+    """Production must build the real stack; tests inject their own.
+
+    The default is the execution composition root rather than the concrete
+    adapter, so this module never names the IBKR channel or the SQLite store.
+    """
 
     signature = inspect.signature(PaperTradingService.__init__)
     default = signature.parameters["order_service_factory"].default
 
-    assert default is IBKRPaperOrderService
+    assert default is build_execution_candidate
 
 
 # -- structural boundary -------------------------------------------------
@@ -905,19 +909,21 @@ def test_module_stays_a_thin_boundary() -> None:
 def test_the_wrapped_implementation_is_still_far_larger_than_this_boundary() -> None:
     """Guards the claim above instead of trusting it.
 
-    The wrapped implementation is spread over the adapter, the journal and the
-    models; the boundary must stay a fraction of all three together. The
-    threshold is 2.5x rather than 3x because the sum sits at roughly 4.0x, and
-    a guard that close to the measured value would fail for no real reason.
+    The wrapped implementation is spread over the execution adapter, the order
+    store and the models; the boundary must stay a fraction of all three
+    together.  The threshold is 2.5x rather than 3x because the sum sits at
+    roughly 4.0x, and a guard that close to the measured value would fail for
+    no real reason.
     """
 
     package = Path(module.__file__ or "").parent
+    trading = package / "trading"
     implementation = sum(
-        (package / name).stat().st_size
-        for name in (
-            "ibkr_paper_orders.py",
-            "paper_order_journal.py",
-            "paper_order_models.py",
+        path.stat().st_size
+        for path in (
+            trading / "adapters" / "ibkr" / "execution.py",
+            trading / "adapters" / "sqlite" / "order_repository.py",
+            package / "paper_order_models.py",
         )
     )
 

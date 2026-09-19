@@ -46,7 +46,7 @@ import threading
 from dataclasses import dataclass
 from typing import Callable, Protocol, Sequence
 
-from .ibkr_paper_orders import IBKRPaperOrderService
+from .trading.composition.execution import build_execution_candidate
 from .workflow_state import PaperWorkflowPhase
 
 
@@ -80,13 +80,17 @@ class PaperOrderServicePort(Protocol):
 
 
 class PaperOrderServiceFactory(Protocol):
-    """How this service builds an order service; injectable for tests."""
+    """How this service builds an execution channel; injectable for tests.
+
+    The default is the execution composition root, so the window never names
+    the concrete IBKR adapter or the concrete order store.
+    """
 
     def __call__(
         self,
         config: object,
         *,
-        journal: object,
+        repository: object,
         extended_hours_enabled: bool,
     ) -> PaperOrderServicePort: ...
 
@@ -145,7 +149,7 @@ class PaperTradingService:
         self,
         *,
         workflow_getter: WorkflowGetter,
-        order_service_factory: PaperOrderServiceFactory = IBKRPaperOrderService,
+        order_service_factory: PaperOrderServiceFactory = build_execution_candidate,
     ) -> None:
         self._workflow_getter = workflow_getter
         self._order_service_factory = order_service_factory
@@ -253,7 +257,7 @@ class PaperTradingService:
         candidate_id: str,
         *,
         config: object,
-        journal: object,
+        repository: object,
         extended_hours_enabled: bool,
     ) -> object:
         """Build and connect one *candidate* order service; never the owner.
@@ -278,7 +282,7 @@ class PaperTradingService:
         try:
             service = self._order_service_factory(
                 config,
-                journal=journal,
+                repository=repository,
                 extended_hours_enabled=extended_hours_enabled,
             )
             connection = service.connect()
@@ -453,7 +457,7 @@ class PaperTradingService:
         self,
         *,
         config: object,
-        journal: object,
+        repository: object,
         extended_hours_enabled: bool,
     ) -> tuple[object, object]:
         """Connect, read, and disconnect an order channel that is never owned.
@@ -466,7 +470,7 @@ class PaperTradingService:
         try:
             service = self._order_service_factory(
                 config,
-                journal=journal,
+                repository=repository,
                 extended_hours_enabled=extended_hours_enabled,
             )
             connection = service.connect()

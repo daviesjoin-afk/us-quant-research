@@ -14,11 +14,20 @@ import json
 from typing import Callable, Mapping, Protocol, Sequence
 from uuid import uuid4
 
+from us_quant.trading.domain.orders import (
+    ExecutionFill,
+    OrderEvent,
+    Side,
+)
+from us_quant.trading.ports.broker_execution import (
+    ExecutionSubmissionUncertain,
+)
+
 
 class PendingOrder(Protocol):
-    intent_id: str
-    side: str
-    generated_at: str
+    order_id: str
+    side: Side
+    created_at: datetime
 
 
 class EngineSnapshot(Protocol):
@@ -35,8 +44,8 @@ class PaperEngine(Protocol):
 
     def snapshot(self, *, observed_at: datetime | None = None) -> EngineSnapshot: ...
     def on_stream(self, snapshot: object, *, observed_at: datetime | None = None) -> EngineSnapshot: ...
-    def on_execution(self, execution: object) -> EngineSnapshot: ...
-    def on_order_update(self, update: object) -> EngineSnapshot: ...
+    def on_execution(self, execution: ExecutionFill) -> EngineSnapshot: ...
+    def on_order_event(self, event: OrderEvent) -> EngineSnapshot: ...
     def pause_entries(self) -> EngineSnapshot: ...
     def resume_entries(self) -> EngineSnapshot: ...
     def request_stop(self) -> EngineSnapshot: ...
@@ -47,9 +56,17 @@ class PaperEngine(Protocol):
 
 
 class PaperOrderPort(Protocol):
-    def poll_executions(self) -> Sequence[object]: ...
-    def poll_updates(self) -> Sequence[object]: ...
-    def cancel_intent(self, intent_id: str) -> bool: ...
+    """The provider-neutral execution surface this coordinator sequences.
+
+    The event methods speak the domain's order types.  The connection,
+    account and reconciliation reads stay on the same object because they
+    describe the *session* the events belong to, and splitting them would let
+    the coordinator compare one channel's events against another's snapshot.
+    """
+
+    def fills(self) -> Sequence[ExecutionFill]: ...
+    def events(self) -> Sequence[OrderEvent]: ...
+    def cancel_intent(self, order_id: str) -> bool: ...
     def connection_snapshot(self) -> object: ...
     def broker_state(self) -> object: ...
     def reconciliation_rows_with_latency(
@@ -376,10 +393,10 @@ class PaperSessionCoordinator:
         return self._store(events)
 
     def _drain_broker_events(self) -> None:
-        for execution in self._orders.poll_executions():
-            self._engine_snapshot = self._engine.on_execution(execution)
-        for update in self._orders.poll_updates():
-            self._engine_snapshot = self._engine.on_order_update(update)
+        for fill in self._orders.fills():
+            self._engine_snapshot = self._engine.on_execution(fill)
+        for event in self._orders.events():
+            self._engine_snapshot = self._engine.on_order_event(event)
 
     def set_entries_paused(self, paused: bool) -> PaperSessionResult:
         events: list[PaperSessionEvent] = []
@@ -424,19 +441,17 @@ class PaperSessionCoordinator:
     ) -> None:
         timeout = getattr(self._engine.config, "entry_order_timeout_seconds")
         for intent in tuple(self._engine_snapshot.pending_orders):
-            if intent.side != "BUY":
+            if intent.side is not Side.BUY:
                 continue
-            if not force and _age_seconds(intent.generated_at, now) < timeout:
+            if not force and _age_seconds(intent.created_at, now) < timeout:
                 continue
             try:
-                requested = self._orders.cancel_intent(intent.intent_id)
-            except Exception as error:
-                code = (
-                    "PAPER_CANCEL_UNCERTAIN"
-                    if "uncertain" in type(error).__name__.casefold()
-                    else "PAPER_CANCEL_BLOCKED"
-                )
-                self._halt(code, events)
+                requested = self._orders.cancel_intent(intent.order_id)
+            except ExecutionSubmissionUncertain:
+                self._halt("PAPER_CANCEL_UNCERTAIN", events)
+                return
+            except Exception:
+                self._halt("PAPER_CANCEL_BLOCKED", events)
                 return
             if requested:
                 events.append(
@@ -455,9 +470,9 @@ class PaperSessionCoordinator:
             getattr(self._engine.config, "exit_order_intervention_seconds", 90)
         )
         for intent in tuple(self._engine_snapshot.pending_orders):
-            if intent.side != "SELL":
+            if intent.side is not Side.SELL:
                 continue
-            if _age_seconds(intent.generated_at, now) < timeout:
+            if _age_seconds(intent.created_at, now) < timeout:
                 continue
             self._halt("PAPER_EXIT_INTERVENTION_REQUIRED", events)
             return
@@ -648,12 +663,11 @@ def _utc(value: datetime) -> datetime:
     return (value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value).astimezone(timezone.utc)
 
 
-def _age_seconds(timestamp: str, now: datetime) -> float:
+def _age_seconds(created_at: datetime, now: datetime) -> float:
     try:
-        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        return max(0.0, (now - _utc(created_at)).total_seconds())
     except (AttributeError, TypeError, ValueError):
         return float("inf")
-    return max(0.0, (now - _utc(parsed)).total_seconds())
 
 
 def _value(row: object, key: str, default: object) -> object:
@@ -677,8 +691,8 @@ def _engine_snapshot_digest(snapshot: EngineSnapshot) -> str:
     ]
     pending = [
         {
-            "intent_id": str(_value(row, "intent_id", "")),
-            "symbol": str(_value(row, "symbol", "")),
+            "order_id": str(_value(row, "order_id", "")),
+            "symbol": str(_value(row, "execution_symbol", "")),
             "side": str(_value(row, "side", "")),
             "quantity": str(_value(row, "quantity", "")),
             "limit_price": str(_value(row, "limit_price", "")),
@@ -689,7 +703,7 @@ def _engine_snapshot_digest(snapshot: EngineSnapshot) -> str:
         "session_id": snapshot.session_id,
         "positions": sorted(positions, key=lambda row: (row["symbol"], row["quantity"])),
         "pending_orders": sorted(
-            pending, key=lambda row: (row["intent_id"], row["symbol"])
+            pending, key=lambda row: (row["order_id"], row["symbol"])
         ),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(

@@ -1,25 +1,126 @@
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 from threading import Barrier, Event, Thread
 from types import ModuleType, SimpleNamespace
+from typing import Any
 import unittest
 from unittest.mock import patch
 
+from us_quant.extended_hours import PaperOrderRouting, USEquitySession
 from us_quant.ibkr import IBKRConnectionConfig
-from us_quant.ibkr_paper_gateway import create_paper_gateway_app
-from us_quant.ibkr_paper_orders import (
-    IBKRPaperOrderService,
+from us_quant.trading.adapters.ibkr.execution import (
+    IBKRExecutionAdapter,
     IBKRPaperOrderError,
-    PaperExecution,
-    PaperOrderJournal,
-    PaperOrderUpdate,
+    IBKRPaperOrderUncertainError,
     _ReconciliationRefreshAttempt,
     ensure_paper_order_config,
-    new_paper_order_intent,
     validate_paper_order_intent,
 )
+from us_quant.trading.adapters.ibkr.execution_gateway import (
+    PaperGatewaySink,
+    create_paper_gateway_app,
+)
+from us_quant.trading.adapters.sqlite.order_repository import (
+    SQLiteOrderRepository,
+)
+from us_quant.trading.domain.orders import (
+    ExecutionFill,
+    OrderEvent,
+    OrderIntent,
+    OrderStatus,
+    Side,
+)
+from us_quant.trading.ports.broker_execution import (
+    BrokerOrderReservation,
+    ExecutionSubmissionUncertain,
+)
+
+
+#: The adapter reads routing through its own module namespace, so the tests
+#: that need a legal route patch it there rather than depend on wall-clock time.
+_ROUTING_TARGET = (
+    "us_quant.trading.adapters.ibkr.execution.paper_order_routing"
+)
+
+_OCCURRED = datetime.fromisoformat("2026-07-26T12:00:00+00:00")
+
+
+def _allow_routing(*, extended_hours_enabled: bool = False) -> PaperOrderRouting:
+    """A permanently-open regular session, so reserve/submit can run in a test."""
+
+    return PaperOrderRouting(
+        session=USEquitySession.REGULAR,
+        label="regular",
+        exchange="SMART",
+        tif="DAY",
+        outside_rth=False,
+        allowed=True,
+        reason="test regular session",
+    )
+
+
+def _config(
+    *, client_id: int = 81, timeout: float = 5
+) -> IBKRConnectionConfig:
+    return IBKRConnectionConfig(
+        host="127.0.0.1",
+        port=4002,
+        client_id=client_id,
+        api_read_only=False,
+        paper_order_submission_enabled=True,
+        connection_timeout_seconds=timeout,
+    )
+
+
+def _repository(directory: str) -> SQLiteOrderRepository:
+    return SQLiteOrderRepository(Path(directory) / "orders.sqlite3")
+
+
+def _intent(
+    *,
+    session_id: str = "session",
+    symbol: str = "AAPL",
+    side: Side = Side.BUY,
+    quantity: int = 1,
+    limit_price: Decimal = Decimal("200"),
+    reason: str = "test",
+) -> OrderIntent:
+    return OrderIntent.create(
+        session_id=session_id,
+        strategy_version_id="version",
+        signal_symbol=symbol,
+        execution_symbol=symbol,
+        side=side,
+        quantity=quantity,
+        limit_price=limit_price,
+        reason=reason,
+    )
+
+
+class _ConnectedClient:
+    """A broker client that records what the adapter asks it to do."""
+
+    def __init__(self) -> None:
+        self.placed: list[Any] = []
+        self.cancelled: list[tuple[int, str]] = []
+
+    def isConnected(self) -> bool:
+        return True
+
+    def serverVersion(self) -> int:
+        return 200
+
+    def twsConnectionTime(self) -> str:
+        return "paper"
+
+    def placeOrder(self, order_id, contract, order) -> None:
+        self.placed.append((order_id, contract, order))
+
+    def cancelOrder(self, order_id: int, manual_time: str) -> None:
+        self.cancelled.append((order_id, manual_time))
 
 
 def _ibapi_stub_modules() -> dict[str, ModuleType]:
@@ -43,16 +144,7 @@ def _ibapi_stub_modules() -> dict[str, ModuleType]:
 
 class IBKRPaperOrderTests(unittest.TestCase):
     def test_only_local_paper_order_config_is_accepted(self) -> None:
-        ensure_paper_order_config(
-            IBKRConnectionConfig(
-                host="127.0.0.1",
-                port=4002,
-                client_id=81,
-                api_read_only=False,
-                paper_order_submission_enabled=True,
-                connection_timeout_seconds=5,
-            )
-        )
+        ensure_paper_order_config(_config())
         with self.assertRaises((ValueError, IBKRPaperOrderError)):
             ensure_paper_order_config(
                 IBKRConnectionConfig(
@@ -66,29 +158,15 @@ class IBKRPaperOrderTests(unittest.TestCase):
             )
 
     def test_whole_share_limit_and_session_caps(self) -> None:
-        intent = new_paper_order_intent(
-            session_id="session",
-            strategy_version_id="version",
-            symbol="AAPL",
-            side="BUY",
-            quantity=2,
-            limit_price=Decimal("200"),
-            reason="test",
-        )
+        intent = _intent(quantity=2, limit_price=Decimal("200"))
         validate_paper_order_intent(
             intent,
             allowed_symbols=frozenset({"AAPL"}),
             max_order_notional=Decimal("500"),
             sellable_quantities={},
         )
-        invalid = new_paper_order_intent(
-            session_id="session",
-            strategy_version_id="version",
-            symbol="AAPL",
-            side="BUY",
-            quantity=3,
-            limit_price=Decimal("200"),
-            reason="too large",
+        invalid = _intent(
+            quantity=3, limit_price=Decimal("200"), reason="too large"
         )
         with self.assertRaises(IBKRPaperOrderError):
             validate_paper_order_intent(
@@ -99,14 +177,8 @@ class IBKRPaperOrderTests(unittest.TestCase):
             )
 
     def test_sell_cannot_exceed_armed_position(self) -> None:
-        intent = new_paper_order_intent(
-            session_id="session",
-            strategy_version_id="version",
-            symbol="AAPL",
-            side="SELL",
-            quantity=2,
-            limit_price=Decimal("200"),
-            reason="exit",
+        intent = _intent(
+            side=Side.SELL, quantity=2, limit_price=Decimal("200")
         )
         with self.assertRaises(IBKRPaperOrderError):
             validate_paper_order_intent(
@@ -118,18 +190,8 @@ class IBKRPaperOrderTests(unittest.TestCase):
 
     def test_journal_masks_account_and_rejects_duplicate_intent(self) -> None:
         with TemporaryDirectory() as directory:
-            journal = PaperOrderJournal(
-                Path(directory) / "orders.sqlite3"
-            )
-            intent = new_paper_order_intent(
-                session_id="session",
-                strategy_version_id="version",
-                symbol="AAPL",
-                side="BUY",
-                quantity=1,
-                limit_price=Decimal("200"),
-                reason="test",
-            )
+            journal = _repository(directory)
+            intent = _intent()
             journal.record_intent(
                 intent,
                 broker_order_id=10,
@@ -146,20 +208,10 @@ class IBKRPaperOrderTests(unittest.TestCase):
         """CR-4: the journal reports the highest ever order id so a Gateway
         restart can never regress nextValidId into reused ids."""
         with TemporaryDirectory() as directory:
-            journal = PaperOrderJournal(
-                Path(directory) / "orders.sqlite3"
-            )
+            journal = _repository(directory)
             self.assertEqual(journal.max_broker_order_id(), 0)
             for order_id in (10, 42, 17):
-                intent = new_paper_order_intent(
-                    session_id="session",
-                    strategy_version_id="version",
-                    symbol="AAPL",
-                    side="BUY",
-                    quantity=1,
-                    limit_price=Decimal("200"),
-                    reason="test",
-                )
+                intent = _intent()
                 journal.record_intent(
                     intent,
                     broker_order_id=order_id,
@@ -171,34 +223,26 @@ class IBKRPaperOrderTests(unittest.TestCase):
         self,
     ) -> None:
         with TemporaryDirectory() as directory:
-            journal = PaperOrderJournal(
-                Path(directory) / "orders.sqlite3"
-            )
-            intent = new_paper_order_intent(
-                session_id="session",
-                strategy_version_id="version",
-                symbol="AAPL",
-                side="BUY",
-                quantity=2,
-                limit_price=Decimal("200"),
-                reason="test",
-            )
+            journal = _repository(directory)
+            intent = _intent(quantity=2, limit_price=Decimal("200"))
             journal.record_intent(
                 intent,
                 broker_order_id=10,
                 account_alias="DU***17",
             )
-            journal.record_update(
-                PaperOrderUpdate(
-                    intent_id=intent.intent_id,
+            journal.record_event(
+                OrderEvent(
+                    order_id=intent.order_id,
+                    status=OrderStatus.FILLED,
                     broker_order_id=10,
-                    status="Filled",
+                    broker_status="Filled",
                     filled=Decimal("2"),
                     remaining=Decimal("0"),
                     average_fill_price=Decimal("200"),
                     last_fill_price=Decimal("200"),
                     message="",
-                    observed_at="2026-07-26T12:00:00+00:00",
+                    idempotency_key=intent.idempotency_key,
+                    occurred_at=_OCCURRED,
                 )
             )
             before = journal.reconciliation_rows(
@@ -206,18 +250,18 @@ class IBKRPaperOrderTests(unittest.TestCase):
             )[0]
             self.assertFalse(before.reconciled)
             self.assertIn("未对齐", before.reason)
-            execution = PaperExecution(
-                intent_id=intent.intent_id,
-                broker_order_id=10,
+            execution = ExecutionFill(
                 execution_id="execution-1",
+                order_id=intent.order_id,
+                broker_order_id=10,
                 symbol="AAPL",
-                side="BUY",
+                side=Side.BUY,
                 quantity=Decimal("2"),
                 price=Decimal("200"),
-                occurred_at="2026-07-26T12:00:00+00:00",
+                occurred_at=_OCCURRED,
             )
-            self.assertTrue(journal.record_execution(execution))
-            self.assertFalse(journal.record_execution(execution))
+            self.assertTrue(journal.record_fill(execution))
+            self.assertFalse(journal.record_fill(execution))
             after = journal.reconciliation_rows(
                 session_id="session"
             )[0]
@@ -229,19 +273,11 @@ class IBKRPaperOrderTests(unittest.TestCase):
         self,
     ) -> None:
         with TemporaryDirectory() as directory:
-            journal = PaperOrderJournal(
-                Path(directory) / "orders.sqlite3"
-            )
+            journal = _repository(directory)
 
             def record(session_id: str, order_id: int):
-                intent = new_paper_order_intent(
-                    session_id=session_id,
-                    strategy_version_id="version",
-                    symbol="AAPL",
-                    side="BUY",
-                    quantity=1,
-                    limit_price=Decimal("200"),
-                    reason="summary",
+                intent = _intent(
+                    session_id=session_id, reason="summary"
                 )
                 journal.record_intent(
                     intent,
@@ -251,43 +287,47 @@ class IBKRPaperOrderTests(unittest.TestCase):
                 return intent
 
             reconciled = record("session-a", 1)
-            journal.record_update(
-                PaperOrderUpdate(
-                    intent_id=reconciled.intent_id,
+            journal.record_event(
+                OrderEvent(
+                    order_id=reconciled.order_id,
+                    status=OrderStatus.FILLED,
                     broker_order_id=1,
-                    status="Filled",
+                    broker_status="Filled",
                     filled=Decimal("1"),
                     remaining=Decimal("0"),
                     average_fill_price=Decimal("200"),
                     last_fill_price=Decimal("200"),
                     message="",
-                    observed_at="2026-07-26T12:00:00+00:00",
+                    idempotency_key=reconciled.idempotency_key,
+                    occurred_at=_OCCURRED,
                 )
             )
-            journal.record_execution(
-                PaperExecution(
-                    intent_id=reconciled.intent_id,
-                    broker_order_id=1,
+            journal.record_fill(
+                ExecutionFill(
                     execution_id="summary-execution",
+                    order_id=reconciled.order_id,
+                    broker_order_id=1,
                     symbol="AAPL",
-                    side="BUY",
+                    side=Side.BUY,
                     quantity=Decimal("1"),
                     price=Decimal("200"),
-                    occurred_at="2026-07-26T12:00:00+00:00",
+                    occurred_at=_OCCURRED,
                 )
             )
             terminal_unreconciled = record("session-a", 2)
-            journal.record_update(
-                PaperOrderUpdate(
-                    intent_id=terminal_unreconciled.intent_id,
+            journal.record_event(
+                OrderEvent(
+                    order_id=terminal_unreconciled.order_id,
+                    status=OrderStatus.BROKER_REJECTED,
                     broker_order_id=2,
-                    status="Error",
+                    broker_status="Error",
                     filled=Decimal("1"),
                     remaining=Decimal("0"),
                     average_fill_price=None,
                     last_fill_price=None,
                     message="",
-                    observed_at="2026-07-26T12:01:00+00:00",
+                    idempotency_key=terminal_unreconciled.idempotency_key,
+                    occurred_at=_OCCURRED,
                 )
             )
             record("session-a", 3)
@@ -307,29 +347,11 @@ class IBKRPaperOrderTests(unittest.TestCase):
             )
             self.assertEqual(len(journal.reconciliation_rows()), 1000)
 
-            class ConnectedClient:
-                def isConnected(self) -> bool:
-                    return True
-
-                def serverVersion(self) -> int:
-                    return 200
-
-                def twsConnectionTime(self) -> str:
-                    return "paper"
-
-            service = IBKRPaperOrderService(
-                IBKRConnectionConfig(
-                    host="127.0.0.1",
-                    port=4002,
-                    client_id=81,
-                    api_read_only=False,
-                    paper_order_submission_enabled=True,
-                    connection_timeout_seconds=5,
-                ),
-                journal=journal,
+            service = IBKRExecutionAdapter(
+                _config(), repository=journal
             )
             service._connected = True
-            service._client = ConnectedClient()
+            service._client = _ConnectedClient()
             self.assertEqual(
                 service.connection_snapshot().unreconciled_local_orders,
                 1004,
@@ -338,32 +360,12 @@ class IBKRPaperOrderTests(unittest.TestCase):
     def test_connection_snapshot_generation_requires_complete_snapshot(
         self,
     ) -> None:
-        class ConnectedClient:
-            def isConnected(self) -> bool:
-                return True
-
-            def serverVersion(self) -> int:
-                return 200
-
-            def twsConnectionTime(self) -> str:
-                return "paper"
-
         with TemporaryDirectory() as directory:
-            service = IBKRPaperOrderService(
-                IBKRConnectionConfig(
-                    host="127.0.0.1",
-                    port=4002,
-                    client_id=81,
-                    api_read_only=False,
-                    paper_order_submission_enabled=True,
-                    connection_timeout_seconds=5,
-                ),
-                journal=PaperOrderJournal(
-                    Path(directory) / "orders.sqlite3"
-                ),
+            service = IBKRExecutionAdapter(
+                _config(), repository=_repository(directory)
             )
             service._connected = True
-            service._client = ConnectedClient()
+            service._client = _ConnectedClient()
             incomplete = service.connection_snapshot()
             self.assertEqual(incomplete.connection_generation, 0)
             self.assertFalse(incomplete.snapshot_complete)
@@ -474,21 +476,12 @@ class IBKRPaperOrderTests(unittest.TestCase):
                 "ibapi.execution": execution_module,
             },
         ), patch(
-            "us_quant.ibkr_paper_orders.connect_ibkr_client",
+            "us_quant.trading.adapters.ibkr.execution.connect_ibkr_client",
             lambda app, _config: setattr(app, "connected", True),
         ):
-            service = IBKRPaperOrderService(
-                IBKRConnectionConfig(
-                    host="127.0.0.1",
-                    port=4002,
-                    client_id=81,
-                    api_read_only=False,
-                    paper_order_submission_enabled=True,
-                    connection_timeout_seconds=0.05,
-                ),
-                journal=PaperOrderJournal(
-                    Path(directory) / "orders.sqlite3"
-                ),
+            service = IBKRExecutionAdapter(
+                _config(timeout=0.05),
+                repository=_repository(directory),
             )
             service.connect()
             old_app = service._client
@@ -561,32 +554,12 @@ class IBKRPaperOrderTests(unittest.TestCase):
             self.assertFalse(service._reconciliation_snapshot_complete)
 
     def test_arm_rejects_broker_open_orders(self) -> None:
-        class ConnectedClient:
-            def isConnected(self) -> bool:
-                return True
-
-            def serverVersion(self) -> int:
-                return 200
-
-            def twsConnectionTime(self) -> str:
-                return "paper"
-
         with TemporaryDirectory() as directory:
-            service = IBKRPaperOrderService(
-                IBKRConnectionConfig(
-                    host="127.0.0.1",
-                    port=4002,
-                    client_id=81,
-                    api_read_only=False,
-                    paper_order_submission_enabled=True,
-                    connection_timeout_seconds=5,
-                ),
-                journal=PaperOrderJournal(
-                    Path(directory) / "orders.sqlite3"
-                ),
+            service = IBKRExecutionAdapter(
+                _config(), repository=_repository(directory)
             )
             service._connected = True
-            service._client = ConnectedClient()
+            service._client = _ConnectedClient()
             service._account = "DU1234567"
             service._open_broker_orders[10] = (
                 "AAPL BUY 1 · Submitted"
@@ -601,30 +574,12 @@ class IBKRPaperOrderTests(unittest.TestCase):
                 )
 
     def test_armed_account_binding_blocks_submit_before_journal_write(self) -> None:
-        class ConnectedClient:
-            def isConnected(self) -> bool:
-                return True
-
-            def serverVersion(self) -> int:
-                return 200
-
-            def twsConnectionTime(self) -> str:
-                return "paper"
-
         with TemporaryDirectory() as directory:
-            service = IBKRPaperOrderService(
-                IBKRConnectionConfig(
-                    host="127.0.0.1",
-                    port=4002,
-                    client_id=81,
-                    api_read_only=False,
-                    paper_order_submission_enabled=True,
-                    connection_timeout_seconds=5,
-                ),
-                journal=PaperOrderJournal(Path(directory) / "orders.sqlite3"),
+            service = IBKRExecutionAdapter(
+                _config(), repository=_repository(directory)
             )
             service._connected = True
-            service._client = ConnectedClient()
+            service._client = _ConnectedClient()
             service._account = "DU1234567"
             service._snapshot_complete = True
             service.arm(
@@ -637,18 +592,15 @@ class IBKRPaperOrderTests(unittest.TestCase):
             self.assertTrue(service.armed_account_binding_is_valid())
 
             service._account = "DU7654321"
-            intent = new_paper_order_intent(
-                session_id="session",
-                strategy_version_id="version",
-                symbol="AAPL",
-                side="BUY",
-                quantity=1,
-                limit_price=Decimal("200"),
-                reason="account binding test",
-            )
-            with self.assertRaisesRegex(IBKRPaperOrderError, "Paper"):
-                service.submit(intent)
-            self.assertEqual(service.journal.audit_rows(), ())
+            intent = _intent(reason="account binding test")
+            # Every hard gate runs in reserve, so the refusal happens there and
+            # nothing is ever sent to the broker or written to the store.  The
+            # message is pinned to the account change: a looser pattern would
+            # also match an unrelated refusal (a closed routing window, say)
+            # and the test would pass without the gate it exists for.
+            with self.assertRaisesRegex(IBKRPaperOrderError, "账户已变化"):
+                service.reserve(intent)
+            self.assertEqual(service.repository.audit_rows(), ())
             self.assertFalse(service.armed_account_binding_is_valid())
 
             service._account = "DU1234567"
@@ -661,30 +613,12 @@ class IBKRPaperOrderTests(unittest.TestCase):
     def test_submit_rejects_incomplete_connection_snapshot(self) -> None:
         """H-6: no order may be submitted while the recovery snapshot of a
         reconnect is still incomplete."""
-        class ConnectedClient:
-            def isConnected(self) -> bool:
-                return True
-
-            def serverVersion(self) -> int:
-                return 200
-
-            def twsConnectionTime(self) -> str:
-                return "paper"
-
         with TemporaryDirectory() as directory:
-            service = IBKRPaperOrderService(
-                IBKRConnectionConfig(
-                    host="127.0.0.1",
-                    port=4002,
-                    client_id=82,
-                    api_read_only=False,
-                    paper_order_submission_enabled=True,
-                    connection_timeout_seconds=5,
-                ),
-                journal=PaperOrderJournal(Path(directory) / "orders.sqlite3"),
+            service = IBKRExecutionAdapter(
+                _config(client_id=82), repository=_repository(directory)
             )
             service._connected = True
-            service._client = ConnectedClient()
+            service._client = _ConnectedClient()
             service._account = "DU1234567"
             service._snapshot_complete = False
             service.arm(
@@ -692,61 +626,37 @@ class IBKRPaperOrderTests(unittest.TestCase):
                 allowed_symbols=("AAPL",),
                 max_order_notional=Decimal("1000"),
             )
-            intent = new_paper_order_intent(
-                session_id="session",
-                strategy_version_id="version",
-                symbol="AAPL",
-                side="BUY",
-                quantity=1,
-                limit_price=Decimal("200"),
-                reason="snapshot gate test",
-            )
+            intent = _intent(reason="snapshot gate test")
             with self.assertRaisesRegex(IBKRPaperOrderError, "快照尚未完成"):
-                service.submit(intent)
-            self.assertEqual(service.journal.audit_rows(), ())
+                service.reserve(intent)
+            self.assertEqual(service.repository.audit_rows(), ())
 
     def test_error_202_preserves_executed_quantity(self) -> None:
         """H-9: a cancel confirmation racing an actual fill must not zero the
         reported filled quantity."""
         with TemporaryDirectory() as directory:
-            journal = PaperOrderJournal(
-                Path(directory) / "orders.sqlite3"
+            journal = _repository(directory)
+            service = IBKRExecutionAdapter(
+                _config(client_id=83), repository=journal
             )
-            service = IBKRPaperOrderService(
-                IBKRConnectionConfig(
-                    host="127.0.0.1",
-                    port=4002,
-                    client_id=83,
-                    api_read_only=False,
-                    paper_order_submission_enabled=True,
-                    connection_timeout_seconds=5,
-                ),
-                journal=journal,
-            )
-            intent = new_paper_order_intent(
-                session_id="session",
-                strategy_version_id="version",
-                symbol="AAPL",
-                side="BUY",
-                quantity=4,
-                limit_price=Decimal("200"),
-                reason="error 202 test",
+            intent = _intent(
+                quantity=4, limit_price=Decimal("200"), reason="error 202 test"
             )
             journal.record_intent(
                 intent,
                 broker_order_id=7,
                 account_alias="DU***17",
             )
-            journal.record_execution(
-                PaperExecution(
-                    intent_id=intent.intent_id,
-                    broker_order_id=7,
+            journal.record_fill(
+                ExecutionFill(
                     execution_id="execution-202",
+                    order_id=intent.order_id,
+                    broker_order_id=7,
                     symbol="AAPL",
-                    side="BUY",
+                    side=Side.BUY,
                     quantity=Decimal("2"),
                     price=Decimal("200"),
-                    occurred_at="2026-07-26T12:00:00+00:00",
+                    occurred_at=_OCCURRED,
                 )
             )
             with service._correlation_lock:
@@ -761,113 +671,41 @@ class IBKRPaperOrderTests(unittest.TestCase):
             self.assertEqual(row.executed_quantity, Decimal("2"))
 
     def test_exact_intent_cancel_is_idempotent(self) -> None:
-        class ConnectedClient:
-            def __init__(self) -> None:
-                self.cancelled = []
-
-            def isConnected(self) -> bool:
-                return True
-
-            def serverVersion(self) -> int:
-                return 200
-
-            def twsConnectionTime(self) -> str:
-                return "paper"
-
-            def cancelOrder(
-                self, order_id: int, manual_time: str
-            ) -> None:
-                self.cancelled.append((order_id, manual_time))
-
         with TemporaryDirectory() as directory:
-            service = IBKRPaperOrderService(
-                IBKRConnectionConfig(
-                    host="127.0.0.1",
-                    port=4002,
-                    client_id=81,
-                    api_read_only=False,
-                    paper_order_submission_enabled=True,
-                    connection_timeout_seconds=5,
-                ),
-                journal=PaperOrderJournal(
-                    Path(directory) / "orders.sqlite3"
-                ),
+            service = IBKRExecutionAdapter(
+                _config(), repository=_repository(directory)
             )
-            intent = new_paper_order_intent(
-                session_id="session",
-                strategy_version_id="version",
-                symbol="AAPL",
-                side="BUY",
-                quantity=1,
-                limit_price=Decimal("200"),
-                reason="test cancel",
-            )
-            client = ConnectedClient()
+            intent = _intent(reason="test cancel")
+            client = _ConnectedClient()
             service._connected = True
             service._client = client
             service._account = "DU1234567"
             with service._correlation_lock:
                 service._intent_by_order[10] = intent
-                service._order_by_intent[intent.intent_id] = 10
-            self.assertTrue(service.cancel_intent(intent.intent_id))
-            self.assertFalse(service.cancel_intent(intent.intent_id))
+                service._order_by_intent[intent.order_id] = 10
+            self.assertTrue(service.cancel_intent(intent.order_id))
+            self.assertFalse(service.cancel_intent(intent.order_id))
             self.assertEqual(client.cancelled, [(10, "")])
 
     def test_concurrent_exact_intent_cancel_is_idempotent(self) -> None:
-        class ConnectedClient:
-            def __init__(self) -> None:
-                self.cancelled = []
-
-            def isConnected(self) -> bool:
-                return True
-
-            def serverVersion(self) -> int:
-                return 200
-
-            def twsConnectionTime(self) -> str:
-                return "paper"
-
-            def cancelOrder(
-                self, order_id: int, manual_time: str
-            ) -> None:
-                self.cancelled.append((order_id, manual_time))
-
         with TemporaryDirectory() as directory:
-            service = IBKRPaperOrderService(
-                IBKRConnectionConfig(
-                    host="127.0.0.1",
-                    port=4002,
-                    client_id=81,
-                    api_read_only=False,
-                    paper_order_submission_enabled=True,
-                    connection_timeout_seconds=5,
-                ),
-                journal=PaperOrderJournal(
-                    Path(directory) / "orders.sqlite3"
-                ),
+            service = IBKRExecutionAdapter(
+                _config(), repository=_repository(directory)
             )
-            intent = new_paper_order_intent(
-                session_id="session",
-                strategy_version_id="version",
-                symbol="AAPL",
-                side="BUY",
-                quantity=1,
-                limit_price=Decimal("200"),
-                reason="concurrent cancel",
-            )
-            client = ConnectedClient()
+            intent = _intent(reason="concurrent cancel")
+            client = _ConnectedClient()
             service._connected = True
             service._client = client
             service._account = "DU1234567"
             with service._correlation_lock:
                 service._intent_by_order[10] = intent
-                service._order_by_intent[intent.intent_id] = 10
+                service._order_by_intent[intent.order_id] = 10
             barrier = Barrier(8)
             results: list[bool] = []
 
             def cancel() -> None:
                 barrier.wait()
-                results.append(service.cancel_intent(intent.intent_id))
+                results.append(service.cancel_intent(intent.order_id))
 
             threads = [Thread(target=cancel) for _ in range(8)]
             for thread in threads:
@@ -884,10 +722,8 @@ class IBKRPaperOrderTests(unittest.TestCase):
     ) -> None:
         """The adapter must proxy the rollup, not own it.
 
-        ``sessions`` used to run its own SQL against ``self.path`` -- an
-        attribute this class never had, so every call raised AttributeError.
-        The journal is replaced with a recorder here: the adapter must not
-        touch a broker or a database to answer this question.
+        The store is replaced with a recorder here: the adapter must not touch a
+        broker or a database to answer this question.
         """
 
         class RecordingJournal:
@@ -898,18 +734,10 @@ class IBKRPaperOrderTests(unittest.TestCase):
                 self.calls.append(limit)
                 return ({"session_id": "s-1", "intent_count": limit},)
 
-        with TemporaryDirectory() as directory:
+        with TemporaryDirectory():
             journal = RecordingJournal()
-            service = IBKRPaperOrderService(
-                IBKRConnectionConfig(
-                    host="127.0.0.1",
-                    port=4002,
-                    client_id=81,
-                    api_read_only=False,
-                    paper_order_submission_enabled=True,
-                    connection_timeout_seconds=5,
-                ),
-                journal=journal,  # type: ignore[arg-type]
+            service = IBKRExecutionAdapter(
+                _config(), repository=journal  # type: ignore[arg-type]
             )
 
             rows = service.sessions(limit=7)
@@ -932,16 +760,8 @@ class IBKRPaperOrderTests(unittest.TestCase):
 
         with TemporaryDirectory():
             journal = RecordingJournal()
-            service = IBKRPaperOrderService(
-                IBKRConnectionConfig(
-                    host="127.0.0.1",
-                    port=4002,
-                    client_id=81,
-                    api_read_only=False,
-                    paper_order_submission_enabled=True,
-                    connection_timeout_seconds=5,
-                ),
-                journal=journal,  # type: ignore[arg-type]
+            service = IBKRExecutionAdapter(
+                _config(), repository=journal  # type: ignore[arg-type]
             )
             self.assertEqual(service.sessions(), ())
             self.assertEqual(journal.calls, [50])
@@ -957,18 +777,9 @@ class IBKRPaperOrderTests(unittest.TestCase):
         built: list[tuple[object, int]] = []
 
         with TemporaryDirectory() as directory:
-            service = IBKRPaperOrderService(
-                IBKRConnectionConfig(
-                    host="127.0.0.1",
-                    port=4002,
-                    client_id=81,
-                    api_read_only=False,
-                    paper_order_submission_enabled=True,
-                    connection_timeout_seconds=0.05,
-                ),
-                journal=PaperOrderJournal(
-                    Path(directory) / "orders.sqlite3"
-                ),
+            service = IBKRExecutionAdapter(
+                _config(timeout=0.05),
+                repository=_repository(directory),
             )
 
             def fake_factory(*, sink, epoch):
@@ -976,7 +787,8 @@ class IBKRPaperOrderTests(unittest.TestCase):
                 raise IBKRPaperOrderError("stop after wiring")
 
             with patch(
-                "us_quant.ibkr_paper_orders.create_paper_gateway_app",
+                "us_quant.trading.adapters.ibkr.execution"
+                ".create_paper_gateway_app",
                 fake_factory,
             ), self.assertRaises(IBKRPaperOrderError):
                 service.connect()
@@ -998,7 +810,10 @@ class IBKRPaperOrderTests(unittest.TestCase):
             Path(__file__).resolve().parents[1]
             / "src"
             / "us_quant"
-            / "ibkr_paper_orders.py"
+            / "trading"
+            / "adapters"
+            / "ibkr"
+            / "execution.py"
         ).read_text(encoding="utf-8")
 
         for forbidden in ("class PaperApp", "EWrapper", "EClient"):
@@ -1012,7 +827,10 @@ class IBKRPaperOrderTests(unittest.TestCase):
             Path(__file__).resolve().parents[1]
             / "src"
             / "us_quant"
-            / "ibkr_paper_orders.py"
+            / "trading"
+            / "adapters"
+            / "ibkr"
+            / "execution.py"
         ).read_text(encoding="utf-8")
         connect_body = source.split("def connect(self)")[1].split(
             "\n    def "
@@ -1025,11 +843,9 @@ class IBKRPaperOrderTests(unittest.TestCase):
     def test_service_implements_the_gateway_sink_protocol(self) -> None:
         """Every protocol method must exist on the service, one per callback."""
 
-        from us_quant.ibkr_paper_gateway import PaperGatewaySink
-
         for name in PaperGatewaySink.__protocol_attrs__:
             self.assertTrue(
-                callable(getattr(IBKRPaperOrderService, name, None)), name
+                callable(getattr(IBKRExecutionAdapter, name, None)), name
             )
 
     def test_gateway_callbacks_reach_the_service_handlers(self) -> None:
@@ -1042,18 +858,8 @@ class IBKRPaperOrderTests(unittest.TestCase):
         recorded: list[tuple[int, str]] = []
 
         with TemporaryDirectory() as directory:
-            service = IBKRPaperOrderService(
-                IBKRConnectionConfig(
-                    host="127.0.0.1",
-                    port=4002,
-                    client_id=81,
-                    api_read_only=False,
-                    paper_order_submission_enabled=True,
-                    connection_timeout_seconds=5,
-                ),
-                journal=PaperOrderJournal(
-                    Path(directory) / "orders.sqlite3"
-                ),
+            service = IBKRExecutionAdapter(
+                _config(), repository=_repository(directory)
             )
             service._record_order_status = (  # type: ignore[method-assign]
                 lambda **kwargs: recorded.append(
@@ -1079,18 +885,8 @@ class IBKRPaperOrderTests(unittest.TestCase):
         recorded: list[tuple[int, str]] = []
 
         with TemporaryDirectory() as directory:
-            service = IBKRPaperOrderService(
-                IBKRConnectionConfig(
-                    host="127.0.0.1",
-                    port=4002,
-                    client_id=81,
-                    api_read_only=False,
-                    paper_order_submission_enabled=True,
-                    connection_timeout_seconds=5,
-                ),
-                journal=PaperOrderJournal(
-                    Path(directory) / "orders.sqlite3"
-                ),
+            service = IBKRExecutionAdapter(
+                _config(), repository=_repository(directory)
             )
             service._record_order_status = (  # type: ignore[method-assign]
                 lambda **kwargs: recorded.append(
@@ -1114,18 +910,8 @@ class IBKRPaperOrderTests(unittest.TestCase):
     def _service_with_handshake(self, directory: str):
         """A service whose account binding and handshake can be inspected."""
 
-        return IBKRPaperOrderService(
-            IBKRConnectionConfig(
-                host="127.0.0.1",
-                port=4002,
-                client_id=81,
-                api_read_only=False,
-                paper_order_submission_enabled=True,
-                connection_timeout_seconds=5,
-            ),
-            journal=PaperOrderJournal(
-                Path(directory) / "orders.sqlite3"
-            ),
+        return IBKRExecutionAdapter(
+            _config(), repository=_repository(directory)
         )
 
     def test_gateway_order_status_preserves_the_full_business_behaviour(
@@ -1352,9 +1138,9 @@ class IBKRPaperOrderTests(unittest.TestCase):
 
         with TemporaryDirectory() as directory:
             service = self._service_with_handshake(directory)
-            journaled: list[tuple[Any, Any]] = []
+            recorded: list[tuple[Any, Any]] = []
             service._record_execution = (  # type: ignore[method-assign]
-                lambda contract, execution: journaled.append((contract, execution))
+                lambda contract, execution: recorded.append((contract, execution))
             )
 
             with patch.dict(sys.modules, _ibapi_stub_modules()):
@@ -1380,7 +1166,7 @@ class IBKRPaperOrderTests(unittest.TestCase):
 
             app.execDetails(91_103, "contract", "execution")
 
-            self.assertEqual(journaled, [])
+            self.assertEqual(recorded, [])
             self.assertEqual(
                 service._refresh_attempt.executions,
                 [("contract", "execution")],
@@ -1416,6 +1202,204 @@ class IBKRPaperOrderTests(unittest.TestCase):
 
             self.assertFalse(service.gateway_is_current(old, 3))
             self.assertTrue(service.gateway_is_current(new, 4))
+
+    # ------------------------------------------------------------------
+    # Two-phase reserve / submit.  These are the new boundary: reserving
+    # allocates the broker id and sends nothing, so every hard refusal and
+    # the durable-correlation ordering can be asserted directly.
+    # ------------------------------------------------------------------
+
+    def _armed_service(
+        self,
+        directory: str,
+        client: Any,
+        *,
+        sellable: dict[str, int] | None = None,
+        next_order_id: int = 100,
+    ) -> tuple[IBKRExecutionAdapter, SQLiteOrderRepository]:
+        """A service armed on ``session`` with a connected, snapshotted channel."""
+
+        repository = _repository(directory)
+        service = IBKRExecutionAdapter(_config(), repository=repository)
+        service._connected = True
+        service._client = client
+        service._account = "DU1234567"
+        service._snapshot_complete = True
+        service._next_order_id = next_order_id
+        service.arm(
+            session_id="session",
+            allowed_symbols=("AAPL",),
+            max_order_notional=Decimal("1000"),
+            sellable_quantities=sellable,
+        )
+        return service, repository
+
+    def test_reserve_allocates_a_broker_order_id_without_sending(self) -> None:
+        """Reserving must allocate the id and call nothing on the broker."""
+
+        with TemporaryDirectory() as directory:
+            client = _ConnectedClient()
+            service, _repository = self._armed_service(directory, client)
+            intent = _intent()
+
+            with patch(_ROUTING_TARGET, _allow_routing):
+                reservation = service.reserve(intent)
+
+            self.assertIsInstance(reservation, BrokerOrderReservation)
+            self.assertEqual(reservation.order_id, intent.order_id)
+            self.assertEqual(reservation.broker_order_id, 100)
+            self.assertEqual(reservation.account_alias, "DU***67")
+            # Reserve allocated the id but sent nothing.
+            self.assertEqual(client.placed, [])
+
+    def test_reserving_twice_reuses_the_same_broker_order_id(self) -> None:
+        """A duplicate reserve for one order identity must not burn a second id."""
+
+        with TemporaryDirectory() as directory:
+            client = _ConnectedClient()
+            service, _repository = self._armed_service(directory, client)
+            intent = _intent()
+
+            with patch(_ROUTING_TARGET, _allow_routing):
+                first = service.reserve(intent)
+                second = service.reserve(intent)
+
+            self.assertEqual(first.broker_order_id, second.broker_order_id)
+            # Exactly one id was consumed from the counter.
+            self.assertEqual(service._next_order_id, 101)
+            self.assertEqual(client.placed, [])
+
+    def test_submit_uncertain_queues_an_unknown_event(self) -> None:
+        """A failed place call is UNKNOWN, never FILLED, and names the order."""
+
+        class FailingClient(_ConnectedClient):
+            def placeOrder(self, order_id, contract, order) -> None:
+                raise RuntimeError("socket gone")
+
+        with TemporaryDirectory() as directory:
+            client = FailingClient()
+            service, repository = self._armed_service(directory, client)
+            intent = _intent()
+
+            with patch(_ROUTING_TARGET, _allow_routing):
+                reservation = service.reserve(intent)
+                # The application writes the durable correlation between the
+                # two phases; the adapter does not.
+                repository.record_intent(
+                    intent,
+                    broker_order_id=reservation.broker_order_id,
+                    account_alias=reservation.account_alias,
+                )
+                with self.assertRaises(
+                    IBKRPaperOrderUncertainError
+                ) as caught:
+                    service.submit(reservation)
+
+            error = caught.exception
+            self.assertIsInstance(error, ExecutionSubmissionUncertain)
+            self.assertEqual(error.order_id, intent.order_id)
+            self.assertEqual(error.broker_order_id, reservation.broker_order_id)
+
+            events = service.events()
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].broker_status, "SubmitUncertain")
+            self.assertIs(events[0].status, OrderStatus.UNKNOWN)
+            self.assertIsNot(events[0].status, OrderStatus.FILLED)
+            self.assertEqual(events[0].order_id, intent.order_id)
+            self.assertEqual(events[0].broker_order_id, reservation.broker_order_id)
+
+    def test_events_map_ibkr_status_text_to_domain_status(self) -> None:
+        """The broker's verbatim text travels with the mapped domain status."""
+
+        with TemporaryDirectory() as directory:
+            client = _ConnectedClient()
+            service, repository = self._armed_service(directory, client)
+            intent = _intent()
+
+            with patch(_ROUTING_TARGET, _allow_routing):
+                reservation = service.reserve(intent)
+            repository.record_intent(
+                intent,
+                broker_order_id=reservation.broker_order_id,
+                account_alias=reservation.account_alias,
+            )
+
+            with patch.dict(sys.modules, _ibapi_stub_modules()):
+                app = create_paper_gateway_app(sink=service, epoch=1)
+
+            service._client = app
+            service._physical_connection_epoch = 1
+            expected = (
+                ("Filled", OrderStatus.FILLED),
+                ("Cancelled", OrderStatus.CANCELED),
+                ("Inactive", OrderStatus.INACTIVE),
+                ("Submitted", OrderStatus.ACKNOWLEDGED),
+            )
+            for text, _domain in expected:
+                app.orderStatus(
+                    reservation.broker_order_id,
+                    text,
+                    0,
+                    1,
+                    0,
+                    1,
+                    0,
+                    0,
+                    1,
+                    "",
+                    0,
+                )
+
+            events = service.events()
+            self.assertEqual(
+                [(event.broker_status, event.status) for event in events],
+                list(expected),
+            )
+
+    def test_a_fractional_execution_is_not_truncated(self) -> None:
+        """A 1.5-share fill is delivered as 1.5 and never rounds the book."""
+
+        with TemporaryDirectory() as directory:
+            client = _ConnectedClient()
+            service, repository = self._armed_service(
+                directory, client, sellable={"AAPL": 3}
+            )
+            intent = _intent()
+
+            with patch(_ROUTING_TARGET, _allow_routing):
+                reservation = service.reserve(intent)
+            repository.record_intent(
+                intent,
+                broker_order_id=reservation.broker_order_id,
+                account_alias=reservation.account_alias,
+            )
+
+            with patch.dict(sys.modules, _ibapi_stub_modules()):
+                app = create_paper_gateway_app(sink=service, epoch=1)
+
+            service._client = app
+            service._physical_connection_epoch = 1
+            app.execDetails(
+                91_003,
+                SimpleNamespace(symbol="AAPL"),
+                SimpleNamespace(
+                    orderId=reservation.broker_order_id,
+                    execId="execution-fractional",
+                    side="BOT",
+                    shares=Decimal("1.5"),
+                    price=Decimal("100"),
+                    time="20260726 12:00:00",
+                ),
+            )
+
+            fills = service.fills()
+            self.assertEqual(len(fills), 1)
+            self.assertEqual(fills[0].quantity, Decimal("1.5"))
+            self.assertNotEqual(fills[0].quantity, Decimal("1"))
+            self.assertEqual(fills[0].order_id, intent.order_id)
+            # Whole-share sellable bookkeeping must not move for a fractional
+            # fill; the fill still reaches the runtime, which halts on it.
+            self.assertEqual(service._sellable_quantities.get("AAPL", 0), 3)
 
 
 if __name__ == "__main__":

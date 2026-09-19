@@ -233,6 +233,16 @@ BROKER_ACCOUNT_V2_METHODS = (
     "_start_shadow",
 )
 
+# Execution v2: the Paper execution stack moved out of the root package into
+# the trading layer, so ``desktop.py`` builds its order store and execution
+# service through the composition root instead of naming ``PaperOrderJournal``
+# and ``IBKRPaperOrderService``.  Declared so the guard can assert the delta.
+EXECUTION_V2_METHODS = (
+    "_start_auto_quant",
+    "_check_auto_order_channel",
+    "_finish_auto_quant_session_if_safe",
+)
+
 #: The frozen handlers this round legitimately rewrote, with the reason.
 #: Declared so `test_the_settings_handler_is_unchanged` can assert the
 #: exact delta instead of only the untouched remainder.
@@ -1519,6 +1529,7 @@ def test_only_the_settings_tab_was_rewritten() -> None:
         | set(MARKET_DATA_V2_METHODS)
         | set(BROKER_ACCOUNT_V2_METHODS)
         | set(STRATEGY_V2_METHODS)
+        | set(EXECUTION_V2_METHODS)
     )
     # Exact, not a subset: every changed method must be declared, and
     # every declared method must actually have changed.
@@ -1526,6 +1537,7 @@ def test_only_the_settings_tab_was_rewritten() -> None:
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)
     assert set(BROKER_ACCOUNT_V2_METHODS) <= set(changed)
     assert set(STRATEGY_V2_METHODS) <= set(changed)
+    assert set(EXECUTION_V2_METHODS) <= set(changed)
     assert "_settings_tab" in changed
 
 

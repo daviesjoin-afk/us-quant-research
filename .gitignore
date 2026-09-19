@@ -33,6 +33,13 @@ research/artifacts/*.png
 configs/*.local.toml
 secrets/
 
+# Local agent/session state.  Root-anchored on purpose, the same way /runtime/
+# is: these notes carry machine-specific provenance (session paths, local
+# branches) that must not reach a published tree, and the publish-safety gate
+# scans untracked files, so leaving them publishable would make the gate fail
+# on scratch rather than on real leaks.
+/.workbuddy/
+
 # Editors and OS
 .idea/
 .vscode/

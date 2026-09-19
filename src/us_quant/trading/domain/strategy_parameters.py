@@ -1,3 +1,20 @@
+"""Strategy parameter validation, moved verbatim from ``strategy_schema.py``.
+
+This is the domain's rulebook for what a strategy's parameters may say.  Every
+range, comparison and normalisation below is reproduced exactly as it was:
+this is a relocation, not a research revision.  Tightening a bound here would
+silently invalidate every already-governed version that sits just inside the
+old one, and loosening one would admit parameters no evidence supports.
+
+Two conventions are worth naming because they look like accidents and are not:
+
+* a numeric parameter is stored back as ``str`` (``_number``), so the
+  canonical JSON -- and therefore the parameter hash -- is stable across
+  Python float repr changes;
+* ``whole_shares`` may not be turned off for any strategy family.  Whole-share
+  execution is a safety invariant, not a tunable.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Mapping
@@ -253,3 +270,10 @@ def _whole_shares(parameters: dict[str, Any]) -> None:
     if value is not True:
         raise StrategyParameterError("whole_shares 必须保持 true")
     parameters["whole_shares"] = True
+
+
+__all__ = [
+    "StrategyParameterError",
+    "strategy_schema_summary",
+    "validate_strategy_parameters",
+]

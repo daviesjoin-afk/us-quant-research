@@ -7,12 +7,34 @@
 Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只记录它们的
 归宿，不声称已完成。
 
-> **进度更新（Market Data v2）**：Market 链已完成迁移，见 §4 Market 与
-> §10 roadmap。
+> **进度更新（Strategy v2）**：Strategy Governance、Strategy Repository、
+> Strategy Selection 与 Desktop StrategyPage 已完成迁移。**Strategy Runtime
+> 仍是 TRANSITIONAL**，因为 `AutoQuantEngine` 依然直接构造
+> `PaperOrderIntent` 并持有 `order_sink`；见 §10.2。下一条主线是 **Risk v2**。
 >
 > **进度更新（Broker / Account v2）**：Account 链已完成迁移，见 §4 Account。
-> 下一条主线是 **Strategy v2**。Strategy、Risk、Execution 三条链仍属路线图，
-> 未迁移。
+>
+> **进度更新（Market Data v2）**：Market 链已完成迁移，见 §4 Market 与
+> §10 roadmap。
+
+## 迁移状态一览
+
+| 链 | 状态 |
+| --- | --- |
+| Market Data | MIGRATED |
+| Broker / Account | MIGRATED |
+| Strategy Governance | MIGRATED |
+| Strategy Repository | MIGRATED |
+| Strategy Selection | MIGRATED |
+| Desktop StrategyPage | MIGRATED |
+| Strategy Runtime | **TRANSITIONAL** |
+| Risk | NOT STARTED |
+| Execution | NOT STARTED |
+
+**这不是"Strategy 已完全迁移"。** 策略的治理、存储、选择与界面已经在内，
+但策略的**运行时执行路径**仍然绕过 Risk / Execution，由 `AutoQuantEngine`
+直连 Paper 订单通道。这一点在 §10.2 明确记录，并由
+`tests/test_trading_architecture.py` 以精确集合强制。
 
 ## 1. 核心依赖方向
 
@@ -150,16 +172,60 @@ Domain 类型没有 `account_id` / `account_number` / `raw_account` /
 **数量诚实。** `BrokerPositionSnapshot.quantity` 保持 `Decimal`，绝不取整：
 whole-share 是 Execution policy，不是 observation policy。
 
-### Strategy
+### Strategy —— 治理/存储/选择/界面已迁移，运行时仍为过渡态
+
+真实主链（§110）：
 
 ```text
-StrategyRepository
+SQLite（strategy_definition / strategy_version /
+        strategy_deployment / strategy_audit —— schema 冻结）
         ↓
-Strategy selection
+trading/adapters/sqlite/strategy_repository.py    SQLiteStrategyRepository
         ↓
-Strategy runtime
+trading/ports/strategy_repository.py              StrategyRepositoryPort
         ↓
+trading/application/strategies.py                 StrategyApplication
+        ↓
+trading/application/strategy_selection.py         StrategySelectionService
+        ↓
+desktop_v2/pages/strategy.py · Research · AutoQuant setup
+```
+
+装配点唯一：`trading/composition/strategies.py` 的
+`build_strategy_application(path)` 是唯一同时认识 application 与具体
+SQLite adapter 的模块；application 本身不 import 任何 adapter、不 import
+`sqlite3`（由 `tests/test_trading_architecture.py` 强制）。
+
+Domain 拥有状态机。`StrategyStatus` / `StrategyMode` / `ALLOWED_TRANSITIONS`
+住在 `trading/domain/strategy.py`：`STOPPED` 与 `LEGACY_INVALIDATED` 都是
+终态，进入 `PAPER_SHADOW` 仍需 `gate_passed`。Repository 不判断任何
+policy —— 它只保存 application 已经决定的结果。
+
+`StrategyVersion.risk_budget_pct` 是 `Decimal`，`created_at` / `updated_at`
+必须是 timezone-aware；naive 时间戳抛出而不是被补上 UTC。
+`created_at` 来自 `strategy_version` 表，`updated_at` 只存在于
+`strategy_deployment` 表，因此它照旧从 join 读取。
+
+`parameter_hash` 的算法逐字保持：`json.dumps(parameters,
+ensure_ascii=False, sort_keys=True, separators=(",", ":"))` 后取 SHA-256，
+并且**在 validate 之后的归一化文档上**计算。已治理版本的哈希、回测
+artifact 引用的哈希都依赖这一点；`tests/fixtures/strategy_seed_baseline.json`
+保存了旧模块删除前录下的 11 条种子记录，测试用它证明新旧哈希相等。
+
+未来链（§111）—— 尚未实现：
+
+```text
+MarketSnapshot
+      ↓
+StrategyRuntime        ← 待建；今天的 AutoQuantEngine 是它的临时替身
+      ↓
 TradeProposal
+      ↓
+RiskEngine
+      ↓
+OrderIntent
+      ↓
+Execution
 ```
 
 ### Risk
@@ -223,7 +289,8 @@ compatibility re-export**。同一个类型不允许有两个 import 路径。
 | `account.py` | `Position`、`RiskAccountSnapshot`（由 `AccountSnapshot` 机械改名）；`BrokerAccountSnapshot` / `BrokerPositionSnapshot` / `BrokerAccountPortfolio` / `BrokerDiagnostic`（Broker / Account v2 新增）；`BrokerConnectionState` |
 | `orders.py` | `Side`、`OrderStatus`、`OrderIntent`、`OrderEvent`（迁移）；`ExecutionFill`（新增） |
 | `risk.py` | `RiskDecision`（迁移） |
-| `strategy.py` | `TradeAction`、`StrategyIdentity`、`TradeProposal`（全部新增） |
+| `strategy.py` | `TradeAction`、`StrategyIdentity`、`TradeProposal`（全部新增）；`StrategyStatus`、`StrategyMode`、`ALLOWED_TRANSITIONS`、`StrategyDefinition`、`StrategyVersion`、`canonical_parameters_json`、`parameter_hash_for`（Strategy v2 新增） |
+| `strategy_parameters.py` | `StrategyParameterError`、`validate_strategy_parameters`、`strategy_schema_summary`（Strategy v2 由 `strategy_schema.py` 逐字迁入） |
 | `session.py` | `TradingSessionPhase`、`TradingSnapshot`（全部新增） |
 
 迁移是**逐字搬家**：`quantity` 仍是 `int`（显式拒绝 `bool`，因为
@@ -264,7 +331,7 @@ Ports 只允许 import 标准库、`typing` / `collections.abc` 和
 | `MarketDataPort` | `run` / `stop` / `snapshot` / `health`（Market Data v2 起为 `run`，不再是 `start(subscription)`） |
 | `BrokerAccountPort` | `refresh(timeout_seconds)`（**只读**，无 submit；Broker / Account v2 起改为反映真实的一次性 connect/read/disconnect） |
 | `BrokerExecutionPort` | `connect` / `disconnect` / `submit` / `cancel` / `fills` |
-| `StrategyRepositoryPort` | `list_strategies` / `get_strategy`，配 `StrategyRecordView` |
+| `StrategyRepositoryPort` | `list_versions` / `get_version` / `insert_version` / `update_deployment`，配 `StrategyAuditEvent`（Strategy v2 起重写，返回 `StrategyVersion` 而非行视图） |
 | `OrderRepositoryPort` | `record_intent` / `record_event` / `record_fill` / `status` / `intent` / `fills` |
 
 `MarketDataPort` 另有 `SnapshotListener`（`Callable[[MarketSnapshot], None]`）
@@ -280,8 +347,13 @@ Ports 只允许 import 标准库、`typing` / `collections.abc` 和
 `BrokerAccountActiveError`）；UI / CLI 不再 catch `IBKRReadOnlyError` 或
 `IBKRAPIUnavailable`，adapter 在边界上完成转换。
 
-`StrategyRecordView` 的字段来自当前 `StrategyRegistry.StrategyRecord` 的真实
-能力，没有凭空发明字段。
+`StrategyRecordView` 已随 Strategy v2 消失：Port 现在直接以
+`StrategyVersion` 交换数据，行形状只存在于 adapter 内部。
+
+Port 也不判断 policy。它不认识 `ALLOWED_TRANSITIONS`，不读 `gate_passed`，
+不决定 transition 是否合法、能否 clone；这些都是 `StrategyApplication` 的
+职责。由 `test_the_strategy_repository_port_is_the_only_governance_surface`
+强制：port 的四个方法之外不得出现任何 policy 符号。
 
 ## 8. 本轮建立的 Desktop UI v2
 
@@ -325,7 +397,7 @@ submit order。`tests/test_desktop_v2_shell.py` 以结构守卫强制这一点�
 dashboard  → _dashboard_tab()
 market     → _quotes_tab()
 account    → desktop_v2/pages/account.py   ✅ native v2
-strategy   → _strategy_manager_tab()
+strategy   → desktop_v2/pages/strategy.py  ✅ native v2
 risk       → _safety_tab()
 execution  → _auto_quant_tab()
 research   → QTabWidget（针对性验证 / 广域标的池 / 历史数据 / 市场扫描 / 回测 / 横截面研究）
@@ -340,6 +412,26 @@ system     → QTabWidget（运行事件 / 系统设置）
 `desktop_v2/pages/account.py` 的 `AccountPage` 承担。页面只渲染，不取数：没有
 application、没有 adapter、没有 `ibapi`，刷新由窗口执行后把
 `BrokerAccountPortfolio` 交给 `AccountPage.render()`。
+
+**`strategy` 是第二个。** `MainWindow._strategy_manager_tab`、
+`_populate_strategy_registry`、`_selected_strategy_record`、
+`_strategy_registry_selection_changed`、`_clone_strategy_version`、
+`_transition_selected_strategy` 全部删除，页面由
+`desktop_v2/pages/strategy.py` 的 `StrategyPage` 承担。它同样只渲染：没有
+application、没有 repository、没有 `sqlite3`，只 import domain 类型、Qt 与
+可复用展示控件；它通过 `version_selected` / `clone_requested` /
+`transition_requested` 三个信号把意图交回窗口，由窗口调用
+`StrategyApplication`。
+
+**治理选中 ≠ 运行时选择。** 在策略页点一行只代表"当前查看的版本"，不得
+改写 `AUTO_ROTATION` / `TARGETED_SHADOW` 的运行时选择。后者由
+`StrategySelectionService` 拥有，只有那两个页面上的组合框会与它对话，且
+组合框只是该服务的**视图**：填充来自 `options(purpose)`，当前项来自
+`restore_or_default(purpose)`，用户改选则写回服务。这样"自动轮动跑哪个
+版本"在任何地方都只有一个答案，不再取决于当时显示的是哪个标签页。
+
+页面自身不做参数校验：编辑框里的 JSON 原样交给窗口，由 application 决定
+是否合法；页面只会拒绝"空版本号"这种无法构成请求的输入。
 
 `AccountPage` 也不显示任何行情状态：没有 quote type、没有 mark source、没有
 STALE/FRESH 列。唯一的类价格数字 `Broker Mark` 来自
@@ -426,6 +518,54 @@ AccountSnapshot
 **没有 compatibility re-export**：旧路径不放回任何 `# deprecated` 转发，
 也没有 shim。
 
+### 9.3 Strategy v1（Strategy v2 删除）
+
+```text
+src/us_quant/strategy_registry.py
+src/us_quant/strategy_schema.py
+tests/test_strategy_registry.py
+tests/test_strategy_schema.py
+
+StrategyRegistry            → StrategyApplication + SQLiteStrategyRepository
+StrategyRecord              → StrategyVersion（+ StrategyDefinition / StrategyIdentity）
+StrategyRecordView          → 删除；Port 直接交换 StrategyVersion
+STRATEGY_STATUSES           → StrategyStatus
+ALLOWED_TRANSITIONS         → trading/domain/strategy.py（行为逐字保持）
+_canonical_parameters       → canonical_parameters_json（哈希算法逐字保持）
+seed_defaults()             → DEFAULT_STRATEGY_SEEDS + StrategyApplication.bootstrap()
+_retire_embedded_symbol_versions → StrategyApplication.retire_embedded_symbol_versions()
+
+MainWindow._strategy_manager_tab           → desktop_v2/pages/strategy.py
+MainWindow._populate_strategy_registry      → StrategyPage.render + 组合框视图
+MainWindow._selected_strategy_record        → StrategyPage 选中行
+MainWindow._strategy_registry_selection_changed → StrategyPage._selection_changed
+MainWindow._clone_strategy_version          → _strategy_clone_requested
+MainWindow._transition_selected_strategy    → _strategy_transition_requested
+```
+
+数据库 schema **一字节未改**：四张表的 `CREATE` 文本、列、类型与唯一约束
+都是旧的，包括旧代码留下的缩进 —— SQLite 记录的是它收到的语句原文，因此
+一个新建的库与一个由旧 DDL 建出的库，`sqlite_master` 内容完全相同。
+`test_the_schema_matches_the_retired_registry_exactly` 逐字比对这一点，
+`test_the_adapter_never_drops_deletes_or_renames` 禁止 adapter 里出现
+`DROP` / `DELETE` / `ALTER` / `RENAME`。既有 `strategies.sqlite3` 直接打开，
+不需要删库或重建。
+
+两个旧行为被**刻意保留**，因为它们属于"现状"，不是可以顺手修掉的东西：
+
+1. **`strategy_definition` 按 family 折叠。** 该表以 `strategy_id` 为主键
+   且用 `INSERT OR IGNORE` 写入，所以一个家族的 name / description 来自它
+   第一个注册的版本，后续版本读回同一段文本。种子里 `sector-momentum`
+   的 2.1.0 带着不同的描述文字，录下来的基线就是这么记的。改成 upsert
+   会静默改写一个从未被编辑过的版本在界面上显示的说明。
+2. **旧的 `code_hash` 不被"修正"。** `unverified-local-source-0.7.0` 出现在
+   远晚于 0.7.0 的策略上，保持原样；重新盖章等于把旧证据标成当前源码证据。
+
+`_canonical_parameters` / `_contains_embedded_symbol` 这类模块级私有函数随
+模块一起消失，语义分别进入 `trading/domain/strategy.py` 的
+`canonical_parameters_json` 与 `trading/application/strategies.py` 的
+`contains_embedded_symbol`。
+
 ## 10. 现有模块的未来归宿（roadmap）
 
 ```text
@@ -435,28 +575,26 @@ alpaca_stream.py          → trading/adapters/alpaca/market_data.py ✅ 已迁�
 finnhub_stream.py         → trading/adapters/finnhub/market_data.py ✅ 已迁移
 ibkr_readonly.py          → trading/adapters/ibkr/account.py     ✅ 已迁移
 portfolio_view.py         → trading/domain/account.py            ✅ 已删除
-strategy_registry.py      → trading/adapters/sqlite/strategy_repository.py
-risk.py                   → trading/application/risk.py
-paper_order_journal.py    → trading/adapters/sqlite/order_repository.py
-ibkr_paper_orders.py      → trading/adapters/ibkr/execution.py
-paper_workflow.py         → trading/runtime/session.py
+strategy_registry.py      → trading/adapters/sqlite/strategy_repository.py ✅ 已迁移
+strategy_schema.py        → trading/domain/strategy_parameters.py ✅ 已迁移
+risk.py                   → trading/application/risk.py          ⏭ 下一条主线
+paper_order_journal.py    → trading/adapters/sqlite/order_repository.py ⏭
+ibkr_paper_orders.py      → trading/adapters/ibkr/execution.py   ⏭
+paper_workflow.py         → trading/runtime/session.py           ⏭
 ```
 
-**下一条主线：Strategy v2。** 目标链路：
+**下一条主线：Risk v2。** 目标链路：
 
 ```text
-StrategyRegistry
-        ↓
-StrategyRepositoryPort
-        ↓
-StrategySelectionService
-        ↓
-StrategyRuntime
-        ↓
 TradeProposal
+        ↓
+RiskEngine
+        ↓
+RiskDecision
 ```
 
-并开始终结 `AutoQuant strategy → order_sink`。
+Risk v2 完成后才谈 Execution v2，因为策略必须先产出 `TradeProposal`、由
+风控批准，才轮得到 Execution Service 构造可提交的 `OrderIntent`。
 
 ### 10.0 过渡残留：现已清零
 
@@ -472,18 +610,45 @@ Market Data v2 曾留下两点已声明的过渡状态，Broker / Account v2 已
 2. **`MarketQuote` 双重定义 —— 已消失。**
    `ibkr_readonly.py` 已删除，`KNOWN_TRANSITIONAL_OVERLAPS` 现为空字典。
 
-### 10.1 AutoQuant 的未来归宿
+### 10.2 Strategy Runtime 的过渡态（唯一 exception）
 
-`AutoQuantEngine` 暂时保留。未来拆成：
+**AutoQuantEngine remains the sole transitional execution-coupled strategy
+implementation.**
+
+`AutoQuantEngine` 暂时保留，并且是**唯一**仍然允许直接构造
+`PaperOrderIntent`、调用 `new_paper_order_intent` 或持有
+`order_sink` 的策略相关模块。Strategy v2 新建的 domain / ports / adapters /
+application / composition / page 六个层面都不认识执行侧的任何类型，由
+`test_no_strategy_v2_module_imports_paper_execution` 强制。
+
+这个例外是**精确集合**，不是"差不多就行"：
+
+```python
+TRANSITIONAL_EXECUTION_COUPLED_STRATEGY_FILES = {"src/us_quant/auto_quant.py"}
+```
+
+`test_auto_quant_is_the_only_execution_coupled_strategy_module` 会扫描全部
+策略相关文件，把实际耦合集合与上面这个字面量比对；出现第二个耦合文件
+直接 test fail，扩大例外必须显式改这一行 —— 它不能悄悄长大。Risk v2 与
+Execution v2 完成后，这个集合应当变成空集。
+
+为什么现在不改它：`AutoQuantEngine` 不仅生产提案，还直接提交限价单。
+在 Risk Engine 与 Execution Service 存在之前删除 `order_sink`，等于在没有
+替代品的情况下改写实盘交易路径 —— 与"未迁移的代码保持原样"是同一条原则。
+
+### 10.3 终结 auto_quant 的路线
+
+未来拆成：
 
 ```text
-Strategy Runtime
+Strategy Runtime        ← 现在由 AutoQuantEngine 兼任
 +
 Trading Runtime
 ```
 
-尤其最终删除 `order_sink: Callable[[PaperOrderIntent], int]` 这种
-Strategy → Execution 直连。**本轮不改它。**
+最终删除 `order_sink: Callable[[PaperOrderIntent], int]` 这种
+Strategy → Execution 直连，改为 `TradeProposal` → Risk → `OrderIntent`。
+**本轮不改它。**
 
 ## 11. 后续允许删除
 
@@ -493,13 +658,16 @@ Strategy → Execution 直连。**本轮不改它。**
 旧 MarketDataService v1                ✅ 已删除（Market Data v2）
 旧 readonly account assembly           ✅ 已删除（Broker / Account v2）
 旧 account page builder                ✅ 已删除（Broker / Account v2）
+旧 strategy registry / schema 模块      ✅ 已删除（Strategy v2）
+旧 strategy page builder 与其 6 个 handler ✅ 已删除（Strategy v2）
+旧 strategy selection glue             ✅ 已删除（Strategy v2）
+旧组合框即真相的取数方式                ✅ 已删除（Strategy v2）
 旧 MainWindow stream lifecycle         ⏭ 后续
-旧 strategy selection glue
-旧 AutoQuant order_sink
-旧 Paper-specific orchestration glue
-旧 workflow duplicate state
-旧页面 builder
-旧 desktop service
+旧 AutoQuant order_sink                ⏭ Risk v2 / Execution v2 之后
+旧 Paper-specific orchestration glue   ⏭ 后续
+旧 workflow duplicate state            ⏭ 后续
+旧页面 builder（risk / execution / …）  ⏭ 后续
+旧 desktop service                     ⏭ 后续
 ```
 
 ## 12. 本轮冻结的行为
@@ -546,10 +714,13 @@ HALTED
 
 ## 14. 下一轮
 
-**Strategy v2 migration** —— 从策略开始填 `StrategyRepositoryPort` 与
-`StrategyRuntime`，把 `strategy_registry.py` 的读取链路搬到
-`trading/adapters/sqlite/strategy_repository.py`，并以 `TradeProposal` 为边界
-终结 `AutoQuant strategy → order_sink`。
+**Risk v2** —— 让 `PreTradeRiskEngine` 成为 `TradeProposal` → `RiskDecision`
+的唯一通道，把 `risk.py` 的评估链路搬进 `trading/application/risk.py`，
+并以此为前提开始终结 `AutoQuant strategy → order_sink`。**本轮不实现它。**
+
+Risk v2 完成后是 Execution v2：`OrderIntent` → `ExecutionService` →
+`BrokerExecutionPort`。`BrokerExecutionPort` 已经把边界画好了，只是还没有
+实现者。
 
 本轮刻意不创建 `TradingManager`、`TradingGodService`、`GlobalAppState`、
 `ServiceLocator` 或 `ApplicationContext`：runtime 由 composition root 显式

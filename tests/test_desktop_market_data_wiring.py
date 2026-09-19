@@ -197,7 +197,7 @@ def test_stream_worker_reports_a_runtime_failure_to_the_service(
     """A stream that raises out of its loop must not leave the service
     claiming it is still healthy."""
 
-    _install(monkeypatch, "IBKRReadOnlyStream")
+    created = _install(monkeypatch, "IBKRReadOnlyStream")
     service = _service()
     worker = StreamWorker(
         service,
@@ -209,7 +209,9 @@ def test_stream_worker_reports_a_runtime_failure_to_the_service(
     def explode() -> None:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(service.adapter, "run", explode)
+    # The recorder is the object the application built, so the test drives it
+    # without the application exposing its private adapter.
+    monkeypatch.setattr(created[0], "run", explode)
     worker.run()
 
     assert captured and "boom" in captured[0]
@@ -244,6 +246,247 @@ def test_stream_worker_venue_comes_from_the_service(monkeypatch) -> None:
         SOURCE_IBKR_EXTENDED
     )
     worker.deleteLater()
+
+
+def test_stream_worker_reads_the_prepared_venue_without_re_resolving() -> None:
+    """The worker must not resolve the venue a second time.
+
+    The resolver follows the US equity session, so a second call around a
+    SMART/OVERNIGHT boundary can legitimately return a different venue.  The
+    worker would then report a venue the live adapter was never built for, and
+    ``_maybe_rotate_extended_ibkr_session`` would skip the reconnect it owes.
+
+    The resolver here flips on every call, so a second resolution cannot pass
+    by coincidence.
+    """
+
+    created: list = []
+    values = iter(["SMART", "OVERNIGHT"])
+    calls: list[str] = []
+
+    def resolver() -> str:
+        value = next(values)
+        calls.append(value)
+        return value
+
+    def factory(request, listener, config):
+        record = _Recorder(args=(config,), kwargs={"request": request})
+        created.append(record)
+        return record
+
+    service = MarketDataApplication(
+        _config(),
+        factories={
+            SOURCE_IBKR: factory,
+            SOURCE_IBKR_EXTENDED: factory,
+        },
+        exchange_resolver=resolver,
+    )
+
+    worker = StreamWorker(
+        service,
+        MarketDataStartRequest(
+            source_id=SOURCE_IBKR_EXTENDED, symbols=("SPY",)
+        ),
+    )
+
+    assert calls == ["SMART"], (
+        "the worker re-resolved the venue; it must read the prepared value"
+    )
+    assert created[0].kwargs["request"].market_exchange == "SMART"
+    assert worker.market_exchange == "SMART"
+    assert worker.market_exchange != "OVERNIGHT"
+    # And the worker holds no adapter.
+    assert not hasattr(worker, "service")
+    assert not hasattr(worker, "adapter")
+    worker.deleteLater()
+
+
+def test_stream_worker_carries_an_explicit_venue_verbatim() -> None:
+    """An explicit venue must reach both the adapter and the worker."""
+
+    created: list = []
+    calls: list[int] = []
+
+    def resolver() -> str:
+        calls.append(len(calls))
+        return "OVERNIGHT"
+
+    def factory(request, listener, config):
+        record = _Recorder(args=(config,), kwargs={"request": request})
+        created.append(record)
+        return record
+
+    service = MarketDataApplication(
+        _config(),
+        factories={SOURCE_IBKR_EXTENDED: factory},
+        exchange_resolver=resolver,
+    )
+
+    worker = StreamWorker(
+        service,
+        MarketDataStartRequest(
+            source_id=SOURCE_IBKR_EXTENDED,
+            symbols=("SPY",),
+            market_exchange="SMART",
+        ),
+    )
+
+    assert calls == []
+    assert created[0].kwargs["request"].market_exchange == "SMART"
+    assert worker.market_exchange == "SMART"
+    worker.deleteLater()
+
+
+def test_the_stream_worker_source_never_re_resolves_the_venue() -> None:
+    """Structural guard: the worker may only read prepared truth.
+
+    A behavioural test can miss a redundant call whose result happens to be
+    discarded, so the source is checked directly.  This is an AST check, not a
+    text search: the docstring and comments deliberately *name* the forbidden
+    methods to explain why they are absent, and a substring search would flag
+    its own explanation.
+    """
+
+    import ast
+
+    tree = ast.parse(inspect.getsource(StreamWorker))
+    called = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+    }
+
+    for forbidden in ("market_exchange_for", "desired_market_exchange"):
+        assert forbidden not in called, (
+            f"StreamWorker must not call {forbidden}(); it reads "
+            "prepared_market_exchange instead"
+        )
+
+    read = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+    }
+    assert "prepared_market_exchange" in read
+
+
+def test_session_rotation_fires_when_the_venue_moves_on(monkeypatch) -> None:
+    """End to end: the desktop detects the session change and rotates.
+
+    The worker must report the venue its adapter was built with, so that when
+    the desired venue later differs the rotation guard can see the difference.
+    If the worker had re-resolved, it would report the *new* venue and the
+    rotation would be skipped -- leaving the live feed on the stale venue.
+    """
+
+    created: list = []
+    calls: list[str] = []
+
+    def resolver() -> str:
+        # SMART for the prepare, then the session moves on for good.
+        value = "SMART" if not calls else "OVERNIGHT"
+        calls.append(value)
+        return value
+
+    def factory(request, listener, config):
+        record = _Recorder(args=(config,), kwargs={"request": request})
+        created.append(record)
+        return record
+
+    window = _window()
+    try:
+        # Replace the composed application with one whose resolver flips.
+        window.market_data = MarketDataApplication(
+            window.config.ibkr,
+            factories={SOURCE_IBKR_EXTENDED: factory},
+            exchange_resolver=resolver,
+        )
+        index = window.stream_mode.findData(SOURCE_IBKR_EXTENDED)
+        assert index >= 0
+        window.stream_mode.setCurrentIndex(index)
+        window.stream_symbols.setText("SPY")
+
+        window._start_stream()
+
+        worker = window.stream_worker
+        assert worker is not None
+        # The adapter was built for SMART and the worker reports SMART, even
+        # though the resolver now returns OVERNIGHT.
+        assert created[0].kwargs["request"].market_exchange == "SMART"
+        assert worker.market_exchange == "SMART"
+        assert (
+            window.market_data.desired_market_exchange(
+                SOURCE_IBKR_EXTENDED
+            )
+            == "OVERNIGHT"
+        )
+
+        # The rotation guard must therefore fire.
+        switches: list[tuple] = []
+        monkeypatch.setattr(
+            window,
+            "_request_stream_switch",
+            lambda provider, **kwargs: switches.append(
+                (provider, kwargs)
+            ),
+        )
+        monkeypatch.setattr(
+            window.stream_worker, "isRunning", lambda: True
+        )
+
+        window._maybe_rotate_extended_ibkr_session()
+
+        assert len(switches) == 1, "the session rotation did not fire"
+        provider, kwargs = switches[0]
+        assert provider == SOURCE_IBKR_EXTENDED
+        assert kwargs.get("allow_auto_session_switch") is True
+    finally:
+        window._stop_stream()
+        window.deleteLater()
+
+
+def test_no_rotation_when_the_venue_is_unchanged(monkeypatch) -> None:
+    """Belt and braces: a stable session must not trigger a reconnect."""
+
+    created: list = []
+
+    def factory(request, listener, config):
+        record = _Recorder(args=(config,), kwargs={"request": request})
+        created.append(record)
+        return record
+
+    window = _window()
+    try:
+        window.market_data = MarketDataApplication(
+            window.config.ibkr,
+            factories={SOURCE_IBKR_EXTENDED: factory},
+            exchange_resolver=lambda: "SMART",
+        )
+        index = window.stream_mode.findData(SOURCE_IBKR_EXTENDED)
+        window.stream_mode.setCurrentIndex(index)
+        window.stream_symbols.setText("SPY")
+        window._start_stream()
+
+        switches: list[tuple] = []
+        monkeypatch.setattr(
+            window,
+            "_request_stream_switch",
+            lambda provider, **kwargs: switches.append(
+                (provider, kwargs)
+            ),
+        )
+        monkeypatch.setattr(
+            window.stream_worker, "isRunning", lambda: True
+        )
+
+        window._maybe_rotate_extended_ibkr_session()
+
+        assert switches == []
+    finally:
+        window._stop_stream()
+        window.deleteLater()
 
 
 def test_stream_worker_rejects_an_unknown_provider(monkeypatch) -> None:
@@ -524,7 +767,9 @@ def test_starting_the_stream_uses_the_service_built_adapter(
         # UI never holds the adapter itself.  This is the boundary under test.
         assert worker.market_data is window.market_data
         assert worker.source_id == SOURCE_IBKR
-        assert window.market_data.adapter is created[0]
+        # The factory sentinel is the object the application built, and the
+        # worker's venue is the one that adapter was actually given.
+        assert created[0].kwargs["market_exchange"] == worker.market_exchange
         assert created[0].kwargs["symbols"] == ("SPY", "QQQ")
         assert created[0].kwargs["provider_label"] == "IBKR"
     finally:

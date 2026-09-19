@@ -80,10 +80,13 @@ class StreamWorker(QThread):
         # for the adapter directly.
         self.market_data = market_data
         market_data.prepare(request, listener=self.snapshot_ready.emit)
-        # Mirrors the venue the feed was built for; the desktop compares it
-        # against the application's current session venue to decide whether an
-        # extended-hours stream has to be rotated.
-        self.market_exchange = market_data.market_exchange_for(request)
+        # The venue the application actually built the adapter with, read back
+        # rather than re-derived.  The resolver follows the US equity session,
+        # so asking it again here could return a different venue around a
+        # SMART/OVERNIGHT boundary; the desktop would then compare the live
+        # adapter against a venue it was never built for and skip the session
+        # rotation it owes.
+        self.market_exchange = market_data.prepared_market_exchange
 
     def run(self) -> None:
         # ``market_data.run()`` owns the lifecycle half -- it marks the feed

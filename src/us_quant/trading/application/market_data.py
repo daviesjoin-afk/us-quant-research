@@ -163,6 +163,13 @@ class MarketDataApplication:
         self._adapter: MarketDataPort | None = None
         self._source_id: str = ""
         self._symbols: tuple[str, ...] = ()
+        #: The venue the *current* prepared adapter was actually built with.
+        #: This is committed only after the factory returns, so it always
+        #: describes a real adapter rather than an attempted one.  It is the
+        #: single source of truth for the venue: callers read it instead of
+        #: re-resolving, because the resolver is session-dependent and a second
+        #: call can legitimately return a different venue.
+        self._market_exchange: str = DEFAULT_MARKET_EXCHANGE
         # Lifecycle is three separate flags rather than one state machine.
         # They are *not* interchangeable: ``stop()`` only asks the adapter to
         # wind down and says nothing about whether ``run()`` has returned.
@@ -216,14 +223,20 @@ class MarketDataApplication:
                 "no market data factory registered for source: "
                 f"{request.source_id!r}"
             )
-        # Resolve the venue exactly once and hand the adapter the resolved
-        # request.  The worker reads the same resolution straight after
-        # ``prepare``, so the venue the adapter routes on and the venue the
-        # desktop compares against cannot drift apart.
-        resolved = replace(
-            request,
-            market_exchange=self.market_exchange_for(request),
-        )
+        # Resolve the venue exactly once for this prepare transaction and hand
+        # the adapter the resolved request.  The resolved value is committed to
+        # ``_market_exchange`` below, *after* the factory succeeds, and that is
+        # what :attr:`prepared_market_exchange` reports -- so the venue the
+        # adapter routes on and the venue the caller compares against cannot
+        # drift apart.
+        #
+        # The resolver is session-dependent: calling it twice around a
+        # SMART/OVERNIGHT boundary can legitimately return two different
+        # answers.  A second resolution would therefore produce an adapter
+        # built for one venue while the worker reported the other, and the
+        # desktop's session rotation would then skip the reconnect it owes.
+        resolved_exchange = self.market_exchange_for(request)
+        resolved = replace(request, market_exchange=resolved_exchange)
         try:
             adapter = factory(
                 resolved,
@@ -234,9 +247,16 @@ class MarketDataApplication:
             # Fail closed: record why, then let the caller see the real
             # exception.  ``Exception`` only -- an operator aborting the
             # process must not be turned into a market data error.
+            #
+            # Prepared state is deliberately *not* touched here, including
+            # ``_market_exchange``: a failed attempt must not leave a venue
+            # that no adapter was built for.  This matches the existing
+            # semantics, where a failed prepare also leaves the previous
+            # source id and symbols in place.
             self._last_error = f"{type(error).__name__}: {error}"
             raise
         self._adapter = adapter
+        self._market_exchange = resolved_exchange
         self._source_id = request.source_id
         # The adapters normalise (strip/upper/dedupe) their watchlist; read it
         # back so the lifecycle reports what was actually subscribed rather
@@ -281,6 +301,12 @@ class MarketDataApplication:
         *running* extended IBKR stream is on the wrong venue for the current
         session and rotate it.  That check is provider knowledge too, so the
         UI reads it from here rather than importing the session helper.
+
+        This is a *query about the present*, not the venue of the prepared
+        adapter: it re-runs the resolver on every call by design, because the
+        caller is asking "has the session moved on?".  Compare it against
+        :attr:`prepared_market_exchange`, which is the frozen record of what
+        the live adapter was actually built with.
         """
 
         if source_id == SOURCE_IBKR_EXTENDED and (
@@ -288,6 +314,25 @@ class MarketDataApplication:
         ):
             return self._exchange_resolver()
         return DEFAULT_MARKET_EXCHANGE
+
+    @property
+    def prepared_market_exchange(self) -> str:
+        """The venue the currently prepared adapter was built with.
+
+        This is the *only* correct source for "which venue is the live feed
+        on?".  Re-deriving it by calling :meth:`market_exchange_for` or
+        :meth:`desired_market_exchange` a second time is a bug: the resolver
+        follows the US equity session, so around a SMART/OVERNIGHT boundary two
+        calls can legitimately disagree.  An adapter built for one venue while
+        the caller believed the other would make the desktop's session rotation
+        skip a reconnect it owes.
+
+        Before any successful prepare this reports
+        :data:`DEFAULT_MARKET_EXCHANGE`, which is what a freshly constructed
+        application has.
+        """
+
+        return self._market_exchange
 
     # -- lifecycle ------------------------------------------------------
 
@@ -422,17 +467,6 @@ class MarketDataApplication:
             ),
             last_error=self._last_error,
         )
-
-    @property
-    def adapter(self) -> MarketDataPort | None:
-        """The prepared adapter, for adapter-level integration tests.
-
-        The UI must not use this -- it reads :meth:`snapshot` and
-        :meth:`lifecycle`.  It exists so adapter tests can drive the real
-        object the application built.
-        """
-
-        return self._adapter
 
 
 __all__ = [

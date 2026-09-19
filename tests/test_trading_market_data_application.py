@@ -261,6 +261,247 @@ def test_desired_market_exchange_only_routes_the_extended_source() -> None:
         assert app.desired_market_exchange(source) == "SMART"
 
 
+# -- venue: resolved exactly once per prepare ---------------------------
+
+
+def test_prepare_resolves_the_venue_once_and_commits_it() -> None:
+    """The prepared venue is the one the adapter was actually given.
+
+    The resolver follows the US equity session, so it can legitimately return
+    a different answer on a second call.  Resolving twice would let the
+    application report a venue the live adapter was never built for, and the
+    desktop's session rotation would then skip a reconnect it owes.
+    """
+
+    created: list[_Recorder] = []
+    calls: list[int] = []
+
+    def resolver() -> str:
+        calls.append(len(calls))
+        return "SMART"
+
+    def factory(request, listener, config):
+        created.append(_Recorder(kwargs={"request": request}))
+        return created[-1]
+
+    app = _application(
+        factories={SOURCE_IBKR_EXTENDED: factory}, resolver=resolver
+    )
+
+    app.prepare(
+        MarketDataStartRequest(
+            source_id=SOURCE_IBKR_EXTENDED, symbols=("SPY",)
+        )
+    )
+
+    assert len(calls) == 1, "the resolver must run exactly once per prepare"
+    assert created[0].kwargs["request"].market_exchange == "SMART"
+    assert app.prepared_market_exchange == "SMART"
+
+
+def test_a_changing_resolver_cannot_desynchronise_the_prepared_venue() -> None:
+    """A resolver that flips mid-transaction must not produce a mismatch.
+
+    This is the regression the single resolution exists for: with two calls the
+    adapter would be built for ``SMART`` while ``prepared_market_exchange``
+    reported ``OVERNIGHT``.
+    """
+
+    created: list[_Recorder] = []
+    values = iter(["SMART", "OVERNIGHT"])
+    calls: list[str] = []
+
+    def resolver() -> str:
+        value = next(values)
+        calls.append(value)
+        return value
+
+    def factory(request, listener, config):
+        created.append(_Recorder(kwargs={"request": request}))
+        return created[-1]
+
+    app = _application(
+        factories={SOURCE_IBKR_EXTENDED: factory}, resolver=resolver
+    )
+
+    app.prepare(
+        MarketDataStartRequest(
+            source_id=SOURCE_IBKR_EXTENDED, symbols=("SPY",)
+        )
+    )
+
+    assert calls == ["SMART"], "the resolver must not be consulted twice"
+    assert created[0].kwargs["request"].market_exchange == "SMART"
+    assert app.prepared_market_exchange == "SMART"
+    assert app.prepared_market_exchange != "OVERNIGHT"
+
+
+def test_an_explicit_venue_bypasses_the_resolver_entirely() -> None:
+    created: list[_Recorder] = []
+    calls: list[int] = []
+
+    def resolver() -> str:
+        calls.append(len(calls))
+        return "OVERNIGHT"
+
+    def factory(request, listener, config):
+        created.append(_Recorder(kwargs={"request": request}))
+        return created[-1]
+
+    app = _application(
+        factories={SOURCE_IBKR_EXTENDED: factory}, resolver=resolver
+    )
+
+    app.prepare(
+        MarketDataStartRequest(
+            source_id=SOURCE_IBKR_EXTENDED,
+            symbols=("SPY",),
+            market_exchange="SMART",
+        )
+    )
+
+    assert calls == [], "an explicit venue must not consult the resolver"
+    assert created[0].kwargs["request"].market_exchange == "SMART"
+    assert app.prepared_market_exchange == "SMART"
+
+
+def test_prepared_venue_defaults_before_any_prepare() -> None:
+    app = _application(resolver=lambda: "OVERNIGHT")
+
+    assert app.prepared_market_exchange == DEFAULT_MARKET_EXCHANGE
+
+
+def test_a_failed_factory_does_not_half_update_the_prepared_venue() -> None:
+    """A failed prepare must not leave a venue no adapter was built for.
+
+    The previous successful prepare's venue stays in place, matching the
+    existing semantics where a failed prepare also leaves the previous source
+    id and symbols untouched.
+    """
+
+    created: list[_Recorder] = []
+    values = iter(["SMART", "OVERNIGHT"])
+
+    def resolver() -> str:
+        return next(values)
+
+    def good_factory(request, listener, config):
+        created.append(_Recorder(kwargs={"request": request}))
+        return created[-1]
+
+    app = _application(
+        factories={SOURCE_IBKR_EXTENDED: good_factory}, resolver=resolver
+    )
+    app.prepare(
+        MarketDataStartRequest(
+            source_id=SOURCE_IBKR_EXTENDED, symbols=("SPY",)
+        )
+    )
+    assert app.prepared_market_exchange == "SMART"
+
+    # Free the slot, then make the next factory fail after the resolver has
+    # already produced a different venue.
+    app.stop()
+
+    def exploding_factory(request, listener, config):
+        raise RuntimeError("socket exploded")
+
+    app._factories[SOURCE_IBKR_EXTENDED] = exploding_factory
+
+    with pytest.raises(RuntimeError):
+        app.prepare(
+            MarketDataStartRequest(
+                source_id=SOURCE_IBKR_EXTENDED, symbols=("QQQ",)
+            )
+        )
+
+    # Still the venue of the last *successful* prepare, not "OVERNIGHT".
+    # This is the whole point: a failed attempt must not leave a venue that no
+    # adapter was built for.
+    assert app.prepared_market_exchange == "SMART"
+    assert app.prepared_market_exchange != "OVERNIGHT"
+
+
+def test_the_prepared_venue_tracks_a_successful_reprepare() -> None:
+    """A later successful prepare does move the prepared venue."""
+
+    created: list[_Recorder] = []
+    values = iter(["SMART", "OVERNIGHT"])
+
+    def resolver() -> str:
+        return next(values)
+
+    def factory(request, listener, config):
+        created.append(_Recorder(kwargs={"request": request}))
+        return created[-1]
+
+    app = _application(
+        factories={SOURCE_IBKR_EXTENDED: factory}, resolver=resolver
+    )
+    app.prepare(
+        MarketDataStartRequest(
+            source_id=SOURCE_IBKR_EXTENDED, symbols=("SPY",)
+        )
+    )
+    assert app.prepared_market_exchange == "SMART"
+
+    app.stop()
+    app.prepare(
+        MarketDataStartRequest(
+            source_id=SOURCE_IBKR_EXTENDED, symbols=("SPY",)
+        )
+    )
+
+    assert app.prepared_market_exchange == "OVERNIGHT"
+    assert created[1].kwargs["request"].market_exchange == "OVERNIGHT"
+
+
+def test_rotation_is_visible_when_the_session_moves_on() -> None:
+    """The adapter's venue and the desired venue must be comparable.
+
+    ``_maybe_rotate_extended_ibkr_session`` only reconnects when the live
+    adapter's venue differs from the desired one, so the two values have to be
+    independently obtainable -- and must actually differ once the session has
+    moved on.
+    """
+
+    created: list[_Recorder] = []
+    values = iter(["SMART", "OVERNIGHT"])
+
+    def resolver() -> str:
+        return next(values)
+
+    def factory(request, listener, config):
+        created.append(_Recorder(kwargs={"request": request}))
+        return created[-1]
+
+    app = _application(
+        factories={SOURCE_IBKR_EXTENDED: factory}, resolver=resolver
+    )
+    app.prepare(
+        MarketDataStartRequest(
+            source_id=SOURCE_IBKR_EXTENDED, symbols=("SPY",)
+        )
+    )
+
+    built_with = app.prepared_market_exchange
+    desired = app.desired_market_exchange(SOURCE_IBKR_EXTENDED)
+
+    assert built_with == "SMART"
+    assert desired == "OVERNIGHT"
+    assert built_with != desired, "rotation must be able to detect the change"
+
+
+def test_the_adapter_is_not_exposed_publicly() -> None:
+    """The application owns the adapter; callers read queries instead."""
+
+    app = _application()
+    assert not hasattr(app, "adapter"), (
+        "the concrete adapter must stay private; callers use "
+        "prepared_market_exchange / lifecycle / snapshot"
+    )
+
+
 def test_credentials_are_passed_through_for_alpaca_and_finnhub(
     monkeypatch,
 ) -> None:
@@ -652,8 +893,12 @@ def test_run_records_an_exception_and_still_clears_running(
 # -- lifecycle: a stop request is not a finished feed --------------------
 
 
-def _run_in_a_thread(app: MarketDataApplication) -> tuple:
+def _run_in_a_thread(app: MarketDataApplication, adapter: object) -> tuple:
     """Start ``app.run()`` in its own thread and return its handles.
+
+    ``adapter`` is the recorder the test's factory produced, so the test drives
+    the object the application built without the application having to expose
+    it.
 
     Returns ``(thread, entered, release, outcome)``: the caller waits on
     ``entered`` so the test only proceeds once ``run`` is genuinely inside the
@@ -666,14 +911,14 @@ def _run_in_a_thread(app: MarketDataApplication) -> tuple:
     release = threading.Event()
     outcome: list[BaseException | None] = []
 
-    original_run = app.adapter.run
+    original_run = adapter.run
 
     def blocking_run() -> None:
         entered.set()
         release.wait(5)
         return original_run()
 
-    app.adapter.run = blocking_run
+    adapter.run = blocking_run
 
     def target() -> None:
         try:
@@ -704,7 +949,7 @@ def test_a_stop_request_does_not_release_the_live_feed(
     app.prepare(
         MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("A",))
     )
-    thread, release, outcome = _run_in_a_thread(app)
+    thread, release, outcome = _run_in_a_thread(app, created[0])
     try:
         app.stop()
         assert created[0].stopped is True

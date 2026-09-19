@@ -191,8 +191,14 @@ class _FakeService:
         self.built.append({"request": request, "listener": listener})
         return self.stream
 
-    def market_exchange_for(self, request) -> str:
-        self.exchanges_asked.append(request)
+    @property
+    def prepared_market_exchange(self) -> str:
+        """The venue the (fake) adapter was built with.
+
+        Mirrors the real application: the worker reads this instead of
+        re-resolving, so the fake has to expose it rather than the resolver.
+        """
+
         return self.exchange
 
     def run(self) -> None:
@@ -223,7 +229,9 @@ def test_stream_worker_asks_the_service_for_its_stream() -> None:
 
     assert len(service.built) == 1
     assert service.built[0]["request"] is request
-    assert len(service.exchanges_asked) == 1
+    # The venue comes from the application's prepared state, not from a second
+    # resolution: ``market_exchange_for`` is never called here.
+    assert service.exchanges_asked == []
 
     assert worker.source_id == request.source_id
     assert worker.market_data is service

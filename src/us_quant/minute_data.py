@@ -305,12 +305,19 @@ class MinuteQuoteStore:
                     ON minute_quote(symbol, minute)
                     """
                 )
+                # Snapshot of the schema the database *arrived* with, taken
+                # before any ALTER below: it is what tells us whether this is
+                # a Market Data v1 database that still carries the retired
+                # ``market_data_type`` column.
                 columns = {
                     row[1]
                     for row in connection.execute(
                         "PRAGMA table_info(minute_quote)"
                     ).fetchall()
                 }
+                had_legacy_market_data_type = (
+                    "market_data_type" in columns
+                )
                 if "evidence_origin" not in columns:
                     connection.execute(
                         """
@@ -330,9 +337,68 @@ class MinuteQuoteStore:
                             f"ALTER TABLE minute_quote "
                             f"ADD COLUMN {column} {declaration}"
                         )
+                # Same transaction as the ``mode`` ALTER above: either the
+                # column and its backfill both land, or neither does.
+                if had_legacy_market_data_type:
+                    _migrate_legacy_market_data_type(
+                        connection,
+                        columns=columns,
+                    )
 
     def _connect(self) -> sqlite3.Connection:
         return connect_sqlite(self.path)
+
+
+def _migrate_legacy_market_data_type(
+    connection: sqlite3.Connection,
+    *,
+    columns: set[str],
+) -> None:
+    """Backfill ``mode`` from the retired ``market_data_type`` column.
+
+    Market Data v1 persisted the IBKR market-data type as an integer
+    (``1`` realtime, ``2`` frozen, ``3`` delayed, ``4`` delayed/frozen);
+    v2 persists a ``mode`` string.  An upgraded database therefore carries
+    the legacy column with no ``mode`` value, and reading that as
+    ``UNKNOWN`` would silently downgrade historically valid realtime
+    evidence: ``targeted_replay`` rebuilds a domain ``MarketQuote`` from the
+    stored row, and ``MarketQuote.realtime_ready`` requires
+    ``mode is REALTIME``.
+
+    The mapping is taken from ``MarketDataMode`` itself rather than from
+    hard-coded strings.  Anything else -- ``NULL``, ``99``, a negative
+    value -- maps to ``UNKNOWN`` and stays unusable, because guessing
+    "realtime" from an unrecognised legacy type would let stale evidence
+    drive an intraday signal.
+
+    Only rows with no usable ``mode`` are touched, so re-running this on an
+    already-migrated database (or on a row a v2 build has since rewritten)
+    is a no-op and never overwrites a newer value.  The legacy column is
+    left in place as retired evidence; it is no longer read or written.
+    """
+
+    if "market_data_type" not in columns:
+        return
+    connection.execute(
+        """
+        UPDATE minute_quote
+        SET mode = CASE market_data_type
+                WHEN 1 THEN ?
+                WHEN 2 THEN ?
+                WHEN 3 THEN ?
+                WHEN 4 THEN ?
+                ELSE ?
+            END
+        WHERE mode IS NULL OR mode = ''
+        """,
+        (
+            MarketDataMode.REALTIME.value,
+            MarketDataMode.FROZEN.value,
+            MarketDataMode.DELAYED.value,
+            MarketDataMode.DELAYED_FROZEN.value,
+            MarketDataMode.UNKNOWN.value,
+        ),
+    )
 
 
 def _row_to_record(row: tuple[object, ...]) -> MinuteQuoteRecord:

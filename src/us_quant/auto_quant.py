@@ -1152,15 +1152,10 @@ class AutoQuantEngine:
         converted to whole shares at the limit price.
         """
 
-        session_fraction = (
-            self.risk.session_overrides.max_position_fraction
+        notional_cap = (
+            self.config.initial_cash
+            * self.config.max_position_fraction
         )
-        fraction = (
-            session_fraction
-            if session_fraction is not None
-            else self.config.max_position_fraction
-        )
-        notional_cap = self.config.initial_cash * fraction
         existing = self.positions.get(symbol)
         if existing is not None:
             notional_cap -= (

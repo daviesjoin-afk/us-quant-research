@@ -141,6 +141,7 @@ from us_quant.extended_hours import (
     us_equity_session,
 )
 from us_quant.desktop_v2.pages.account import AccountPage
+from us_quant.desktop_v2.pages.risk import RiskPage
 from us_quant.desktop_v2.pages.strategy import (
     StrategyPage,
     strategy_option_label,
@@ -193,7 +194,9 @@ from us_quant.auto_launch import (
     auto_launch_plan_matches,
     build_auto_launch_plan,
 )
-from us_quant.risk import LayeredRiskLimits
+from us_quant.trading.application.risk import RiskApplication
+from us_quant.trading.composition.risk import build_risk_application
+from us_quant.trading.domain.risk import LayeredRiskLimits
 from us_quant.runtime_supervisor import RuntimeSnapshot, RuntimeSupervisor
 from us_quant.ibkr_paper_orders import (
     IBKRPaperOrderError,
@@ -697,6 +700,11 @@ class MainWindow(QMainWindow):
         self.account_page.refresh_requested.connect(
             self._refresh_account_snapshot
         )
+        # The risk page renders the limits the risk layer enforces and the
+        # standing safety boundaries.  It is read-only by construction: it has
+        # no service to call and no control that could widen a ceiling.
+        self.risk_page = RiskPage(palette=self.theme)
+        self.risk_page.render(self.config.risk_limits)
         # The research-capital input lives on the research page and updates a
         # card on the account page.  The page owns the card; the window owns
         # the wiring, so the card is never reached for by attribute name from
@@ -724,7 +732,7 @@ class MainWindow(QMainWindow):
             "market": self._quotes_tab(),
             "account": self.account_page,
             "strategy": self.strategy_page,
-            "risk": self._safety_tab(),
+            "risk": self.risk_page,
             "execution": self._auto_quant_tab(),
             "research": research,
             "system": system,
@@ -2540,34 +2548,6 @@ class MainWindow(QMainWindow):
         self._refresh_credential_status()
         return panel
 
-    def _safety_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        title = QLabel("不可绕过的首期边界")
-        title.setObjectName("sectionTitle")
-        text = QTextEdit()
-        text.setReadOnly(True)
-        text.setPlainText(
-            "1. IBKR Paper 模拟下单能力默认关闭。设置开关本身不会下单；"
-            "只有“自动量化”页核验唯一 DU 账户、实时行情、候选、策略、"
-            "金额上限并由用户逐会话确认后，独立适配器才允许发送 DAY 限价单。\n\n"
-            "2. 券商链路只允许 IB Gateway 模拟端口 4002 和唯一 DU "
-            "账户；Live 端口/账户硬阻断。行情链路可独立使用 Finnhub、"
-            "Alpaca 或 IBKR Market Data。\n\n"
-            "3. 不做碎股；所有资金可买数量均向下取整为整股。\n\n"
-            "4. 中国概念股不进入研究池或交易池。日本、欧洲、加拿大、"
-            "拉美等非中国发行人可研究；ADR 或 20-F 本身不构成排除理由。\n\n"
-            "5. 龙头和优质二线分层独立于策略分数。后排股票即使技术"
-            "指标得分高，也只能作为广域研究样本。\n\n"
-            "6. 杠杆或替代执行品按通用风险倍数和最长持有期管理，"
-            "不会被当作独立 Alpha 策略或重点标的。\n\n"
-            "7. 历史收益不保证未来盈利；大模型不会被放进实时下单链路。"
-            "策略优化采用可复现参数、走样本外验证和成本压力测试。"
-        )
-        layout.addWidget(title)
-        layout.addWidget(text)
-        return page
-
     def _configure_table(self, table: QTableWidget) -> None:
         table.setAlternatingRowColors(True)
         table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -4118,22 +4098,20 @@ class MainWindow(QMainWindow):
                 daily_loss_limit=(
                     Decimal(paper_capital) * Decimal("0.01")
                 ),
-                symbol_risk_multipliers=(
-                    self._configured_exposure_multipliers()
-                ),
-                layered_risk_limits=LayeredRiskLimits(
-                    account=self.config.risk_limits,
-                ),
             )
+            # One risk authority, built from the configuration this window is
+            # actually running with, and injected.  It used to be split: the
+            # account limits went into ``ShadowConfig.layered_risk_limits``
+            # while the engine read a separate constructor argument that was
+            # never passed here, so the configured ``risk_limits`` reached a
+            # field nobody read.
+            risk = self._build_auto_quant_risk()
             engine = AutoQuantEngine(
                 candidates=self.auto_quant_candidates,
                 config=config,
-                strategy_version_id=strategy.version_id,
-                parameter_hash=strategy.parameter_hash,
+                strategy=strategy.identity,
+                risk=risk,
                 order_sink=service.submit,
-                symbol_risk_multipliers=(
-                    self._configured_exposure_multipliers()
-                ),
                 market_reference_symbols=tuple(
                     dict.fromkeys(
                         str(symbol).strip().upper()
@@ -5933,6 +5911,29 @@ class MainWindow(QMainWindow):
             rule.execution_symbol: rule.exposure_multiplier
             for rule in self.config.substitutions.values()
         }
+
+    def _build_auto_quant_risk(self) -> RiskApplication:
+        """The single pre-trade risk authority for the auto-rotation session.
+
+        Built from this window's current configuration and handed to the
+        engine as one object.  It used to be two: the account limits were
+        placed in ``ShadowConfig.layered_risk_limits`` while ``AutoQuantEngine``
+        read ``layered_risk_limits`` from a separate constructor argument the
+        window never passed, so the configured limits sat in a field nobody
+        read and the running engine enforced none of them.  Unit tests passed
+        because they injected the argument directly.
+
+        Keeping the construction in one named method is what makes "the
+        configured limits are the enforced limits" assertable without standing
+        up a Paper session -- see ``test_desktop_risk_wiring``.
+        """
+
+        return build_risk_application(
+            LayeredRiskLimits(account=self.config.risk_limits),
+            exposure_multipliers=(
+                self._configured_exposure_multipliers()
+            ),
+        )
 
     def _research_scenario_capital(self) -> Decimal:
         control = getattr(self, "research_capital_input", None)
@@ -8554,6 +8555,10 @@ class MainWindow(QMainWindow):
         # has to be told when the palette changes.  It re-renders its own rows.
         if hasattr(self, "strategy_page"):
             self.strategy_page.set_palette(self.theme)
+        # The risk page colours the margin-borrowing card from the palette,
+        # so it has to be told when the palette changes.
+        if hasattr(self, "risk_page"):
+            self.risk_page.set_palette(self.theme)
         for chart_name in ("dashboard_chart", "strategy_chart"):
             chart = getattr(self, chart_name, None)
             if chart is not None:

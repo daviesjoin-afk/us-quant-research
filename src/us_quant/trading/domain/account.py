@@ -104,6 +104,12 @@ class RiskAccountSnapshot:
             self.high_watermark,
         ) < ZERO:
             raise ValueError("account values cannot be negative")
+        # The default is already aware; a caller-supplied one must be too.
+        # The daily-loss and drawdown halts compare a snapshot against a
+        # day's starting equity, so a timestamp with no offset would put "how
+        # old is this reading" at the mercy of the machine's locale -- and a
+        # risk decision is exactly the wrong place to guess.
+        _require_aware(self.timestamp, "risk account")
 
 
 @dataclass(frozen=True, slots=True)

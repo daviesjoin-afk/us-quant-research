@@ -3,7 +3,6 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, Mapping
 
-from us_quant.risk import LayeredRiskLimits
 from us_quant.shadow_paper import ShadowConfig
 from us_quant.trading.domain.strategy_parameters import (
     validate_strategy_parameters,
@@ -36,9 +35,18 @@ def build_auto_rotation_config(
     initial_cash: Decimal,
     capital_source: str,
     daily_loss_limit: Decimal,
-    symbol_risk_multipliers: Mapping[str, Decimal] | None = None,
-    layered_risk_limits: LayeredRiskLimits | None = None,
 ) -> ShadowConfig:
+    """Build the strategy/session parameters for one rotation session.
+
+    It deliberately carries no account risk.  Those limits used to be smuggled
+    in here -- as ``symbol_risk_multipliers`` and as a whole
+    ``LayeredRiskLimits`` stuffed into ``ShadowConfig`` -- so the runtime had
+    to go and find them again, and the Desktop's real ``risk_limits`` reached
+    the engine only by luck.  Risk policy is now passed to the engine as a
+    ``RiskApplication`` instead, and this builder describes only what the
+    strategy wants.
+    """
+
     values = validate_strategy_parameters(
         "intraday-auto-rotation", parameters
     )
@@ -48,7 +56,6 @@ def build_auto_rotation_config(
         max_position_fraction=_decimal(
             values, "max_position_fraction"
         ),
-        symbol_risk_multipliers=symbol_risk_multipliers or {},
         min_order_notional=_decimal(values, "min_order_notional"),
         commission_per_order=_decimal(
             values, "commission_per_order"
@@ -80,7 +87,6 @@ def build_auto_rotation_config(
             values.get("entry_order_timeout_seconds", 90)
         ),
         daily_loss_limit=daily_loss_limit,
-        layered_risk_limits=layered_risk_limits,
     )
 
 

@@ -24,8 +24,60 @@ from us_quant.trading.domain.market import (
     MarketQuote,
     MarketSnapshot,
 )
-from us_quant.risk import LayeredRiskLimits, RiskLimits, SymbolRiskOverrides
+from us_quant.trading.application.risk import RiskApplication
+from us_quant.trading.domain.risk import (
+    LayeredRiskLimits,
+    RiskDecision,
+    RiskEvaluationRequest,
+    RiskLimits,
+    SessionRiskOverrides,
+    SymbolRiskOverrides,
+)
+from us_quant.trading.domain.strategy import (
+    StrategyIdentity,
+    TradeAction,
+)
 from us_quant.shadow_paper import ShadowConfig
+
+
+#: The identity the engine binds.  AutoQuantSnapshot still reports
+#: ``strategy_version_id`` / ``parameter_hash``; they are now projections of
+#: this object rather than two more constructor arguments.
+_STRATEGY = StrategyIdentity(
+    strategy_id="intraday-auto-rotation",
+    version_id="version",
+    parameter_hash="hash",
+)
+
+
+def _risk(
+    *,
+    account_limits: RiskLimits | None = None,
+    symbols: dict[str, SymbolRiskOverrides] | None = None,
+    exposure_multipliers: dict[str, Decimal] | None = None,
+) -> RiskApplication:
+    """A risk application that is permissive by default.
+
+    The ceilings default to "all of it" on purpose.  These tests are about the
+    session's signal, sizing and order-lifecycle behaviour; a permissive
+    application keeps the strategy's own ``max_position_fraction`` the binding
+    ceiling, which is the sizing the pre-migration engine produced.  The risk
+    arithmetic itself is asserted in ``test_trading_risk_application``.
+    """
+
+    return RiskApplication(
+        LayeredRiskLimits(
+            account=account_limits
+            or RiskLimits(
+                max_gross_exposure_pct=Decimal("1"),
+                max_position_exposure_pct=Decimal("1"),
+                daily_loss_halt_pct=Decimal("1"),
+                drawdown_halt_pct=Decimal("1"),
+            ),
+            symbols=symbols or {},
+        ),
+        exposure_multipliers=exposure_multipliers,
+    )
 
 
 class AutoQuantTests(unittest.TestCase):
@@ -537,8 +589,8 @@ class AutoQuantTests(unittest.TestCase):
                 maximum_momentum=Decimal("0.10"),
                 slippage_bps=Decimal("2"),
             ),
-            strategy_version_id="version",
-            parameter_hash="hash",
+            strategy=_STRATEGY,
+            risk=_risk(),
             order_sink=uncertain,
         )
         engine.start()
@@ -579,8 +631,8 @@ class AutoQuantTests(unittest.TestCase):
                 minimum_positive_steps=2,
                 maximum_one_minute_move=Decimal("0.01"),
             ),
-            strategy_version_id="version",
-            parameter_hash="hash",
+            strategy=_STRATEGY,
+            risk=_risk(),
             order_sink=lambda intent: submitted.append(intent) or 1,
         )
         engine.start()
@@ -711,8 +763,8 @@ def _engine(
             maximum_momentum=Decimal("0.10"),
             slippage_bps=Decimal("2"),
         ),
-        strategy_version_id="version",
-        parameter_hash="hash",
+        strategy=_STRATEGY,
+        risk=_risk(),
         order_sink=sink,
         market_reference_symbols=market_reference_symbols,
     )
@@ -790,23 +842,16 @@ class MultiSymbolTests(unittest.TestCase):
                 warmup_minutes=0,
                 momentum_lookback_minutes=1,
             ),
-            strategy_version_id="v1",
-            parameter_hash="p1",
-            order_sink=sink,
-            layered_risk_limits=LayeredRiskLimits(
-                account=RiskLimits(
-                    max_gross_exposure_pct=Decimal("1"),
-                    max_position_exposure_pct=Decimal("1"),
-                    daily_loss_halt_pct=Decimal("1"),
-                    drawdown_halt_pct=Decimal("1"),
-                ),
+            strategy=_STRATEGY,
+            risk=_risk(
                 symbols={
                     "AAA": SymbolRiskOverrides(
                         max_position_exposure_pct=Decimal("0.05")
                     ),
                     "BBB": SymbolRiskOverrides(allowed=False),
-                },
+                }
             ),
+            order_sink=sink,
         )
         engine.start()
         engine._histories = {
@@ -861,17 +906,16 @@ class MultiSymbolTests(unittest.TestCase):
                 maximum_trades_per_day=10,
                 max_open_symbols=2,
             ),
-            strategy_version_id="version",
-            parameter_hash="hash",
-            order_sink=lambda intent: submitted.append(intent) or len(submitted),
-            layered_risk_limits=LayeredRiskLimits(
-                account=RiskLimits(
+            strategy=_STRATEGY,
+            risk=_risk(
+                account_limits=RiskLimits(
                     max_gross_exposure_pct=Decimal("1"),
                     max_position_exposure_pct=Decimal("1"),
                     daily_loss_halt_pct=Decimal("0.01"),
                     drawdown_halt_pct=Decimal("0.50"),
                 )
             ),
+            order_sink=lambda intent: submitted.append(intent) or len(submitted),
         )
         engine.start()
         start = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
@@ -918,6 +962,7 @@ class MultiSymbolTests(unittest.TestCase):
         )
         # AAPL collapses 15% (below the 1% account daily-loss halt) while
         # MSFT develops a fresh momentum signal; the entry must be blocked.
+        # The verdict now comes from the risk layer, and the status names it.
         at = start + timedelta(minutes=3)
         engine.on_stream(
             _snapshot(
@@ -926,7 +971,7 @@ class MultiSymbolTests(unittest.TestCase):
             ),
             observed_at=at,
         )
-        self.assertIn("熔断", engine.status)
+        self.assertIn("daily account loss halt is active", engine.status)
         self.assertEqual(
             len([i for i in submitted if i.side == "BUY"]), 1
         )
@@ -961,17 +1006,16 @@ class MultiSymbolTests(unittest.TestCase):
                 maximum_trades_per_day=10,
                 max_open_symbols=2,
             ),
-            strategy_version_id="version",
-            parameter_hash="hash",
-            order_sink=lambda intent: submitted.append(intent) or len(submitted),
-            layered_risk_limits=LayeredRiskLimits(
-                account=RiskLimits(
+            strategy=_STRATEGY,
+            risk=_risk(
+                account_limits=RiskLimits(
                     max_gross_exposure_pct=Decimal("1"),
                     max_position_exposure_pct=Decimal("1"),
                     daily_loss_halt_pct=Decimal("0.10"),
                     drawdown_halt_pct=Decimal("0.05"),
                 )
             ),
+            order_sink=lambda intent: submitted.append(intent) or len(submitted),
         )
         engine.start()
         start = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
@@ -1025,7 +1069,7 @@ class MultiSymbolTests(unittest.TestCase):
             _snapshot(at, {"AAPL": Decimal("80"), "MSFT": Decimal("404")}),
             observed_at=at,
         )
-        self.assertIn("熔断", engine.status)
+        self.assertIn("account drawdown halt is active", engine.status)
         self.assertEqual(
             len([i for i in submitted if i.side == "BUY"]), 1
         )
@@ -1120,8 +1164,8 @@ class MultiSymbolTests(unittest.TestCase):
                 warmup_minutes=0,
                 momentum_lookback_minutes=1,
             ),
-            strategy_version_id="v1",
-            parameter_hash="p1",
+            strategy=_STRATEGY,
+            risk=_risk(),
             order_sink=sink,
         )
         engine.positions = {
@@ -1133,3 +1177,566 @@ class MultiSymbolTests(unittest.TestCase):
         engine._check_exit(observed, quote)
         self.assertEqual(len(intents), 1)
         self.assertEqual(intents[0].symbol, "AAA")
+
+
+class _RecordingRisk(RiskApplication):
+    """A real risk application that remembers what it was asked."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.requests: list[RiskEvaluationRequest] = []
+
+    def evaluate(self, *, request, **kwargs):
+        self.requests.append(request)
+        return super().evaluate(request=request, **kwargs)
+
+    @property
+    def actions(self) -> list[TradeAction]:
+        return [
+            recorded.proposal.action for recorded in self.requests
+        ]
+
+
+class _RefusingExitRisk(_RecordingRisk):
+    """Refuses every reduction, to prove the halt path is reachable."""
+
+    def evaluate(self, *, request, **kwargs):
+        self.requests.append(request)
+        if request.proposal.action is TradeAction.SELL:
+            return RiskDecision.reject(
+                "synthetic refusal",
+                requested_quantity=request.proposal.desired_quantity,
+            )
+        return super().evaluate(request=request, **kwargs)
+
+
+def _single_candidate_engine(
+    risk: RiskApplication,
+    submitted: list,
+    *,
+    config: ShadowConfig | None = None,
+) -> AutoQuantEngine:
+    """One candidate, warmed up, with a permissive risk application."""
+
+    engine = AutoQuantEngine(
+        candidates=(
+            AutoQuantCandidate(
+                "AAA", "A", "T", 1, Decimal("80"), "趋势候选"
+            ),
+        ),
+        config=config
+        or ShadowConfig(
+            initial_cash=Decimal("10000"),
+            capital_source="test",
+            max_position_fraction=Decimal("0.5"),
+            minimum_momentum=Decimal("0"),
+            maximum_momentum=Decimal("1"),
+            warmup_minutes=0,
+            momentum_lookback_minutes=1,
+            maximum_spread_fraction=Decimal("1"),
+        ),
+        strategy=_STRATEGY,
+        risk=risk,
+        order_sink=lambda intent: submitted.append(intent) or 1,
+    )
+    engine.start()
+    engine._histories["AAA"] = deque(
+        [
+            (
+                datetime(2024, 1, 2, 19, 59, tzinfo=timezone.utc),
+                Decimal("9.95"),
+            ),
+            (
+                datetime(2024, 1, 2, 20, 0, tzinfo=timezone.utc),
+                Decimal("10"),
+            ),
+        ],
+        maxlen=10,
+    )
+    return engine
+
+
+class AutoQuantRiskIntegrationTests(unittest.TestCase):
+    """The runtime chain: signal → TradeProposal → RiskApplication → intent.
+
+    These are the tests that would have caught the wiring defect this round
+    exists to close: the engine's own risk arithmetic used to be authoritative
+    and a unit test could pass while the running system enforced nothing.
+    """
+
+    def test_the_engine_no_longer_owns_a_second_risk_policy(self) -> None:
+        engine = _single_candidate_engine(_risk(), [])
+        for retired in (
+            "_layered_risk_limits",
+            "_symbol_risk_overrides",
+            "_session_risk_overrides",
+            "risk_multipliers",
+            "strategy_version_id",
+            "parameter_hash",
+        ):
+            self.assertFalse(
+                hasattr(engine, retired),
+                f"AutoQuantEngine.{retired} should be gone",
+            )
+        self.assertIsInstance(engine.risk, RiskApplication)
+        self.assertIs(engine.strategy, _STRATEGY)
+
+    def test_the_engine_refuses_a_missing_or_wrong_risk_application(self) -> None:
+        with self.assertRaises(TypeError):
+            AutoQuantEngine(
+                candidates=(
+                    AutoQuantCandidate(
+                        "AAA", "A", "T", 1, Decimal("80"), "UP"
+                    ),
+                ),
+                config=ShadowConfig(
+                    initial_cash=Decimal("1000"), capital_source="test"
+                ),
+                strategy=_STRATEGY,
+                risk=None,
+                order_sink=lambda intent: 1,
+            )
+        with self.assertRaises(TypeError):
+            AutoQuantEngine(
+                candidates=(
+                    AutoQuantCandidate(
+                        "AAA", "A", "T", 1, Decimal("80"), "UP"
+                    ),
+                ),
+                config=ShadowConfig(
+                    initial_cash=Decimal("1000"), capital_source="test"
+                ),
+                strategy="version",
+                risk=_risk(),
+                order_sink=lambda intent: 1,
+            )
+
+    def test_the_snapshot_projects_the_bound_identity(self) -> None:
+        engine = _single_candidate_engine(_risk(), [])
+        snapshot = engine.snapshot()
+        self.assertEqual(
+            snapshot.strategy_version_id, _STRATEGY.version_id
+        )
+        self.assertEqual(
+            snapshot.parameter_hash, _STRATEGY.parameter_hash
+        )
+
+    def test_the_risk_layer_trims_the_quantity_the_sink_receives(self) -> None:
+        """Spec 105: strategy wants half the account, risk allows 10%."""
+
+        submitted: list[PaperOrderIntent] = []
+        risk = _RecordingRisk(
+            LayeredRiskLimits(
+                account=RiskLimits(
+                    max_gross_exposure_pct=Decimal("1"),
+                    max_position_exposure_pct=Decimal("0.10"),
+                    daily_loss_halt_pct=Decimal("1"),
+                    drawdown_halt_pct=Decimal("1"),
+                )
+            )
+        )
+        engine = _single_candidate_engine(risk, submitted)
+        observed = datetime(2024, 1, 2, 20, 0, tzinfo=timezone.utc)
+        engine.on_stream(
+            _snapshot(observed, {"AAA": Decimal("10")}),
+            observed_at=observed,
+        )
+        self.assertEqual(len(submitted), 1)
+        intent = submitted[0]
+        # Strategy request: (10000 × 0.5 − 0.35) ÷ 10.02 = 498 whole shares.
+        # Risk ceiling: 10000 × 10% = 1000, i.e. 99 whole shares at 10.02.
+        self.assertEqual(intent.quantity, 99)
+        self.assertLess(intent.quantity, 498)
+        self.assertIn("风险缩量 498 → 99", intent.reason)
+        self.assertIn("position exposure cap", intent.reason)
+        self.assertEqual(risk.requests[-1].proposal.desired_quantity, 498)
+
+    def test_a_blocked_leader_does_not_stop_the_next_candidate(self) -> None:
+        """Spec 106: the blocked strongest candidate is skipped, not fatal."""
+
+        candidates = (
+            AutoQuantCandidate(
+                "AAA", "A", "T", 1, Decimal("80"), "趋势候选"
+            ),
+            AutoQuantCandidate(
+                "BBB", "B", "T", 1, Decimal("75"), "趋势候选"
+            ),
+        )
+        intents: list[PaperOrderIntent] = []
+        engine = AutoQuantEngine(
+            candidates=candidates,
+            config=ShadowConfig(
+                initial_cash=Decimal("10000"),
+                capital_source="test",
+                max_open_symbols=1,
+                max_position_fraction=Decimal("0.5"),
+                minimum_momentum=Decimal("0"),
+                maximum_momentum=Decimal("1"),
+                warmup_minutes=0,
+                momentum_lookback_minutes=1,
+                maximum_spread_fraction=Decimal("1"),
+            ),
+            strategy=_STRATEGY,
+            risk=_risk(
+                symbols={"AAA": SymbolRiskOverrides(allowed=False)}
+            ),
+            order_sink=lambda intent: intents.append(intent) or 1,
+        )
+        engine.start()
+        engine._histories = {
+            "AAA": deque(
+                [
+                    (
+                        datetime(2024, 1, 2, 19, 59, tzinfo=timezone.utc),
+                        Decimal("9.95"),
+                    ),
+                    (
+                        datetime(2024, 1, 2, 20, 0, tzinfo=timezone.utc),
+                        Decimal("10"),
+                    ),
+                ],
+                maxlen=10,
+            ),
+            "BBB": deque(
+                [
+                    (
+                        datetime(2024, 1, 2, 19, 59, tzinfo=timezone.utc),
+                        Decimal("19.95"),
+                    ),
+                    (
+                        datetime(2024, 1, 2, 20, 0, tzinfo=timezone.utc),
+                        Decimal("20"),
+                    ),
+                ],
+                maxlen=10,
+            ),
+        }
+        observed = datetime(2024, 1, 2, 20, 0, tzinfo=timezone.utc)
+        engine.on_stream(
+            _snapshot(
+                observed, {"AAA": Decimal("10"), "BBB": Decimal("20")}
+            ),
+            observed_at=observed,
+        )
+        self.assertEqual([intent.symbol for intent in intents], ["BBB"])
+        self.assertEqual(len(intents), 1)
+
+    def test_an_account_wide_halt_leaves_no_buy_intents(self) -> None:
+        """Spec 107: many candidates, one account-wide halt, zero orders."""
+
+        candidates = (
+            AutoQuantCandidate(
+                "AAA", "A", "T", 1, Decimal("80"), "趋势候选"
+            ),
+            AutoQuantCandidate(
+                "BBB", "B", "T", 1, Decimal("75"), "趋势候选"
+            ),
+        )
+        intents: list[PaperOrderIntent] = []
+        engine = AutoQuantEngine(
+            candidates=candidates,
+            config=ShadowConfig(
+                initial_cash=Decimal("10000"),
+                capital_source="test",
+                max_open_symbols=1,
+                max_position_fraction=Decimal("0.5"),
+                minimum_momentum=Decimal("0"),
+                maximum_momentum=Decimal("1"),
+                warmup_minutes=0,
+                momentum_lookback_minutes=1,
+                maximum_spread_fraction=Decimal("1"),
+            ),
+            strategy=_STRATEGY,
+            risk=_risk(
+                account_limits=RiskLimits(
+                    max_gross_exposure_pct=Decimal("1"),
+                    max_position_exposure_pct=Decimal("1"),
+                    daily_loss_halt_pct=Decimal("0.05"),
+                    drawdown_halt_pct=Decimal("1"),
+                )
+            ),
+            order_sink=lambda intent: intents.append(intent) or 1,
+        )
+        engine.start()
+        # A 10% equity loss with no positions: the halt is an account fact,
+        # not something a candidate can route around.
+        engine.estimated_cash = Decimal("9000")
+        engine._histories = {
+            "AAA": deque(
+                [
+                    (
+                        datetime(2024, 1, 2, 19, 59, tzinfo=timezone.utc),
+                        Decimal("9.95"),
+                    ),
+                    (
+                        datetime(2024, 1, 2, 20, 0, tzinfo=timezone.utc),
+                        Decimal("10"),
+                    ),
+                ],
+                maxlen=10,
+            ),
+            "BBB": deque(
+                [
+                    (
+                        datetime(2024, 1, 2, 19, 59, tzinfo=timezone.utc),
+                        Decimal("19.95"),
+                    ),
+                    (
+                        datetime(2024, 1, 2, 20, 0, tzinfo=timezone.utc),
+                        Decimal("20"),
+                    ),
+                ],
+                maxlen=10,
+            ),
+        }
+        observed = datetime(2024, 1, 2, 20, 0, tzinfo=timezone.utc)
+        engine.on_stream(
+            _snapshot(
+                observed, {"AAA": Decimal("10"), "BBB": Decimal("20")}
+            ),
+            observed_at=observed,
+        )
+        self.assertEqual(intents, [])
+        self.assertIn("daily account loss halt is active", engine.status)
+
+    def test_every_exit_is_proposed_to_the_risk_layer(self) -> None:
+        """Spec 108: stop-loss, force-flat and user stops all pass risk."""
+
+        submitted: list[PaperOrderIntent] = []
+        risk = _RecordingRisk(
+            LayeredRiskLimits(
+                account=RiskLimits(
+                    max_gross_exposure_pct=Decimal("1"),
+                    max_position_exposure_pct=Decimal("1"),
+                    daily_loss_halt_pct=Decimal("1"),
+                    drawdown_halt_pct=Decimal("1"),
+                )
+            )
+        )
+        engine = _single_candidate_engine(risk, submitted)
+        observed = datetime(2024, 1, 2, 20, 0, tzinfo=timezone.utc)
+        engine.on_stream(
+            _snapshot(observed, {"AAA": Decimal("10")}),
+            observed_at=observed,
+        )
+        buy = submitted[0]
+        engine.on_execution(
+            PaperExecution(
+                intent_id=buy.intent_id,
+                broker_order_id=1,
+                execution_id="exec-risk-exit",
+                symbol=buy.symbol,
+                side="BUY",
+                quantity=Decimal(buy.quantity),
+                price=buy.limit_price,
+                occurred_at=observed.isoformat(),
+            )
+        )
+        engine.on_order_update(
+            PaperOrderUpdate(
+                intent_id=buy.intent_id,
+                broker_order_id=1,
+                status="Filled",
+                filled=Decimal(buy.quantity),
+                remaining=Decimal("0"),
+                average_fill_price=buy.limit_price,
+                last_fill_price=buy.limit_price,
+                message="",
+                observed_at=observed.isoformat(),
+            )
+        )
+        # A 5% collapse trips the 0.7% stop-loss on the next tick.
+        later = observed + timedelta(minutes=1)
+        engine.on_stream(
+            _snapshot(later, {"AAA": Decimal("9.5")}),
+            observed_at=later,
+        )
+        sells = [intent for intent in submitted if intent.side == "SELL"]
+        self.assertEqual(len(sells), 1)
+        self.assertEqual(sells[0].quantity, buy.quantity)
+        self.assertIn(TradeAction.SELL, risk.actions)
+        sell_request = risk.requests[-1]
+        self.assertIs(sell_request.proposal.action, TradeAction.SELL)
+        self.assertEqual(
+            sell_request.proposal.desired_quantity, buy.quantity
+        )
+
+    def test_a_refused_exit_halts_the_session_for_a_human(self) -> None:
+        """Spec 77: a refusal of a lawful reduction is not retried through."""
+
+        submitted: list[PaperOrderIntent] = []
+        risk = _RefusingExitRisk(
+            LayeredRiskLimits(
+                account=RiskLimits(
+                    max_gross_exposure_pct=Decimal("1"),
+                    max_position_exposure_pct=Decimal("1"),
+                    daily_loss_halt_pct=Decimal("1"),
+                    drawdown_halt_pct=Decimal("1"),
+                )
+            )
+        )
+        engine = _single_candidate_engine(risk, submitted)
+        observed = datetime(2024, 1, 2, 20, 0, tzinfo=timezone.utc)
+        engine.on_stream(
+            _snapshot(observed, {"AAA": Decimal("10")}),
+            observed_at=observed,
+        )
+        buy = submitted[0]
+        engine.on_execution(
+            PaperExecution(
+                intent_id=buy.intent_id,
+                broker_order_id=1,
+                execution_id="exec-refused-exit",
+                symbol=buy.symbol,
+                side="BUY",
+                quantity=Decimal(buy.quantity),
+                price=buy.limit_price,
+                occurred_at=observed.isoformat(),
+            )
+        )
+        engine.on_order_update(
+            PaperOrderUpdate(
+                intent_id=buy.intent_id,
+                broker_order_id=1,
+                status="Filled",
+                filled=Decimal(buy.quantity),
+                remaining=Decimal("0"),
+                average_fill_price=buy.limit_price,
+                last_fill_price=buy.limit_price,
+                message="",
+                observed_at=observed.isoformat(),
+            )
+        )
+        later = observed + timedelta(minutes=1)
+        engine.on_stream(
+            _snapshot(later, {"AAA": Decimal("9.5")}),
+            observed_at=later,
+        )
+        self.assertFalse(engine.active)
+        self.assertIn("人工对账", engine.status)
+        self.assertEqual(
+            [intent for intent in submitted if intent.side == "SELL"], []
+        )
+
+    def test_only_one_active_sell_per_position_is_ever_open(self) -> None:
+        """CR-1: a refused-then-approved exit loop must not flood the broker."""
+
+        submitted: list[PaperOrderIntent] = []
+        engine = _single_candidate_engine(_risk(), submitted)
+        observed = datetime(2024, 1, 2, 20, 0, tzinfo=timezone.utc)
+        engine.on_stream(
+            _snapshot(observed, {"AAA": Decimal("10")}),
+            observed_at=observed,
+        )
+        buy = submitted[0]
+        engine.on_execution(
+            PaperExecution(
+                intent_id=buy.intent_id,
+                broker_order_id=1,
+                execution_id="exec-cr1",
+                symbol=buy.symbol,
+                side="BUY",
+                quantity=Decimal(buy.quantity),
+                price=buy.limit_price,
+                occurred_at=observed.isoformat(),
+            )
+        )
+        engine.on_order_update(
+            PaperOrderUpdate(
+                intent_id=buy.intent_id,
+                broker_order_id=1,
+                status="Filled",
+                filled=Decimal(buy.quantity),
+                remaining=Decimal("0"),
+                average_fill_price=buy.limit_price,
+                last_fill_price=buy.limit_price,
+                message="",
+                observed_at=observed.isoformat(),
+            )
+        )
+        for minute in range(1, 4):
+            at = observed + timedelta(minutes=minute)
+            engine.on_stream(
+                _snapshot(at, {"AAA": Decimal("9.5")}),
+                observed_at=at,
+            )
+        self.assertEqual(
+            len([i for i in submitted if i.side == "SELL"]), 1
+        )
+        self.assertEqual(len(engine.pending), 1)
+
+    def test_held_symbols_are_priced_from_their_marks_with_an_average_fallback(
+        self,
+    ) -> None:
+        """Spec 68: an inherited fallback, pinned so it stays a decision.
+
+        The session's own equity and snapshot calculations already value a
+        holding at its last mark when one exists and at its average price
+        otherwise.  Passing the same convention to the risk layer keeps a
+        stale quote from refusing every purchase -- a behaviour change this
+        migration does not intend -- while the risk layer itself still fails
+        closed when a caller supplies no price at all.
+        """
+
+        engine = _single_candidate_engine(_risk(), [])
+        engine.positions = {
+            "AAA": AutoQuantPosition(
+                symbol="AAA",
+                quantity=5,
+                average_price=Decimal("10"),
+                opened_at=datetime(
+                    2024, 1, 2, 10, 0, tzinfo=timezone.utc
+                ).isoformat(),
+                high_water=Decimal("11"),
+                provider="test",
+            )
+        }
+        engine._marks.clear()
+        self.assertEqual(
+            engine._risk_market_prices(), {"AAA": Decimal("10")}
+        )
+        engine._marks["AAA"] = Decimal("12")
+        self.assertEqual(
+            engine._risk_market_prices(), {"AAA": Decimal("12")}
+        )
+        positions = engine._risk_positions()
+        self.assertEqual(positions["AAA"].quantity, 5)
+        self.assertEqual(positions["AAA"].average_price, Decimal("10"))
+        self.assertEqual(
+            positions["AAA"].exposure_multiplier,
+            engine.risk.exposure_multiplier("AAA"),
+        )
+
+    def test_the_session_fraction_is_visible_as_a_risk_reduction(self) -> None:
+        """The strategy requests its size; risk alone applies the session cap."""
+
+        submitted: list[PaperOrderIntent] = []
+        risk = _RecordingRisk(
+            LayeredRiskLimits(
+                account=RiskLimits(
+                    max_gross_exposure_pct=Decimal("1"),
+                    max_position_exposure_pct=Decimal("1"),
+                    daily_loss_halt_pct=Decimal("1"),
+                    drawdown_halt_pct=Decimal("1"),
+                ),
+                session=SessionRiskOverrides(
+                    max_position_fraction=Decimal("0.25")
+                ),
+            )
+        )
+        engine = _single_candidate_engine(risk, submitted)
+        engine.config = replace(
+            engine.config, max_position_fraction=Decimal("0.5")
+        )
+        observed = datetime(2024, 1, 2, 20, 0, tzinfo=timezone.utc)
+        engine.on_stream(
+            _snapshot(observed, {"AAA": Decimal("10")}),
+            observed_at=observed,
+        )
+        self.assertEqual(len(submitted), 1)
+        # Strategy request: (10000 × 0.5 − 0.35) ÷ 10.02 = 498 whole shares.
+        # Session risk cap: 10000 × 25% = 2500, i.e. 249 whole shares.
+        self.assertEqual(risk.requests[-1].proposal.desired_quantity, 498)
+        self.assertEqual(submitted[0].quantity, 249)
+        self.assertIn("风险缩量 498 → 249", submitted[0].reason)
+        self.assertIn("position exposure cap", submitted[0].reason)

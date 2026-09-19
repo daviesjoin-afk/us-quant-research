@@ -15,7 +15,7 @@ field from an ``int`` one; ``isinstance`` is what actually pins the contract.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from decimal import Decimal
 
 import pytest
@@ -55,6 +55,24 @@ from us_quant.trading.domain.strategy import (
 
 
 _AT = datetime(2026, 9, 18, 14, 30, tzinfo=timezone.utc)
+
+
+class _OffsetlessTz(tzinfo):
+    """A ``tzinfo`` that reports no UTC offset.
+
+    ``tzinfo is not None`` is true for it, but ``utcoffset()`` returns
+    ``None``, so a naive check based on the first property alone would let it
+    through and fail much later, inside a subtraction.
+    """
+
+    def utcoffset(self, dt):  # type: ignore[no-untyped-def]
+        return None
+
+    def tzname(self, dt):  # type: ignore[no-untyped-def]
+        return "offsetless"
+
+    def dst(self, dt):  # type: ignore[no-untyped-def]
+        return None
 
 
 def _bar(**overrides) -> Bar:
@@ -195,6 +213,36 @@ def test_account_snapshot_defaults_its_timestamp_to_now_utc() -> None:
     assert snapshot.timestamp.tzinfo is not None
 
 
+def test_account_snapshot_refuses_a_naive_timestamp() -> None:
+    """Risk v2: the halts compare this snapshot against a trading day.
+
+    A reading with no offset would leave "how old is this?" up to the
+    machine's locale, and the daily-loss ratio up to whatever the local clock
+    believed.  The default is aware; a supplied one has to be too.
+    """
+
+    with pytest.raises(ValueError, match="must be timezone-aware"):
+        RiskAccountSnapshot(
+            net_liquidation=Decimal("100"),
+            cash=Decimal("50"),
+            day_start_equity=Decimal("90"),
+            high_watermark=Decimal("110"),
+            timestamp=datetime(2026, 9, 19, 12, 0),
+        )
+    # A ``tzinfo`` whose ``utcoffset()`` is ``None`` is still effectively
+    # naive, so ``tzinfo is not None`` alone is not enough.
+    with pytest.raises(ValueError, match="must be timezone-aware"):
+        RiskAccountSnapshot(
+            net_liquidation=Decimal("100"),
+            cash=Decimal("50"),
+            day_start_equity=Decimal("90"),
+            high_watermark=Decimal("110"),
+            timestamp=datetime(
+                2026, 9, 19, 12, 0, tzinfo=_OffsetlessTz()
+            ),
+        )
+
+
 # -- OrderIntent / Side / OrderStatus -------------------------------------
 
 
@@ -289,15 +337,34 @@ def test_execution_fill_requires_whole_share_quantity_and_decimal_price() -> Non
 
 
 # -- RiskDecision ---------------------------------------------------------
+#
+# The full invariant matrix lives in ``test_trading_risk_domain``.  What is
+# pinned here is the shape the rest of the domain depends on: a verdict names
+# whole-share quantities, and the two named constructors produce consistent
+# ones.
 
 
 def test_risk_decision_approve_and_reject() -> None:
-    approved = RiskDecision.approve()
+    approved = RiskDecision.approve(requested_quantity=8)
     assert approved.approved is True
+    assert approved.approved_quantity == 8
     assert approved.reasons == ()
+    assert approved.adjustments == ()
 
-    rejected = RiskDecision.reject("too large", "no cash")
+    trimmed = RiskDecision.approve(
+        requested_quantity=8,
+        approved_quantity=3,
+        adjustments=("cash cap reduced quantity 8 → 3",),
+    )
+    assert trimmed.approved is True
+    assert trimmed.approved_quantity == 3
+
+    rejected = RiskDecision.reject(
+        "too large", "no cash", requested_quantity=8
+    )
     assert rejected.approved is False
+    assert rejected.approved_quantity == 0
+    assert rejected.requested_quantity == 8
     assert rejected.reasons == ("too large", "no cash")
     assert isinstance(rejected.reasons, tuple)
 

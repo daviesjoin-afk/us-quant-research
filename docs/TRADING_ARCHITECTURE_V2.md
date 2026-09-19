@@ -7,10 +7,13 @@
 Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只记录它们的
 归宿，不声称已完成。
 
+> **进度更新（Risk v2）**：Risk Domain、Risk Application、Desktop RiskPage 与
+> AutoQuant 的风险集成已完成迁移。**Strategy Runtime 仍是 TRANSITIONAL**，
+> 因为 `AutoQuantEngine` 依然直接构造 `PaperOrderIntent` 并持有 `order_sink`；
+> 见 §10.2。下一条主线是 **Execution v2**。
+>
 > **进度更新（Strategy v2）**：Strategy Governance、Strategy Repository、
-> Strategy Selection 与 Desktop StrategyPage 已完成迁移。**Strategy Runtime
-> 仍是 TRANSITIONAL**，因为 `AutoQuantEngine` 依然直接构造
-> `PaperOrderIntent` 并持有 `order_sink`；见 §10.2。下一条主线是 **Risk v2**。
+> Strategy Selection 与 Desktop StrategyPage 已完成迁移。
 >
 > **进度更新（Broker / Account v2）**：Account 链已完成迁移，见 §4 Account。
 >
@@ -27,14 +30,17 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Strategy Repository | MIGRATED |
 | Strategy Selection | MIGRATED |
 | Desktop StrategyPage | MIGRATED |
+| Risk Domain | MIGRATED |
+| Risk Application | MIGRATED |
+| Desktop RiskPage | MIGRATED |
+| AutoQuant Risk Integration | MIGRATED |
 | Strategy Runtime | **TRANSITIONAL** |
-| Risk | NOT STARTED |
 | Execution | NOT STARTED |
 
-**这不是"Strategy 已完全迁移"。** 策略的治理、存储、选择与界面已经在内，
-但策略的**运行时执行路径**仍然绕过 Risk / Execution，由 `AutoQuantEngine`
-直连 Paper 订单通道。这一点在 §10.2 明确记录，并由
-`tests/test_trading_architecture.py` 以精确集合强制。
+**这不是"策略已完全迁移"。** 策略的治理、存储、选择与界面已经在内，风控也已
+成为唯一权威，但策略的**运行时执行路径**仍然由 `AutoQuantEngine` 直连 Paper
+订单通道——它现在先产出 `TradeProposal`、拿到 `RiskDecision`，然后才构造
+`PaperOrderIntent`。这段桥接是 Execution v2 的活，见 §10.2。
 
 ## 1. 核心依赖方向
 
@@ -221,22 +227,55 @@ StrategyRuntime        ← 待建；今天的 AutoQuantEngine 是它的临时替
       ↓
 TradeProposal
       ↓
-RiskEngine
+RiskApplication
       ↓
 OrderIntent
       ↓
 Execution
 ```
 
-### Risk
+### Risk —— **已迁移（Risk v2）**
 
 ```text
 TradeProposal
         ↓
-RiskEngine
+RiskEvaluationRequest
         ↓
-RiskDecision
+RiskApplication.evaluate()          trading/application/risk.py
+        ↓
+RiskDecision（approved / requested_quantity / approved_quantity /
+              reasons / adjustments）
 ```
+
+Risk 是**唯一**的盘前风险权威。它输入 `TradeProposal` + `RiskAccountSnapshot`
++ 当前持仓 + 行情，输出一个**整股数量**的裁决；它不产生订单。
+
+```text
+Risk 可以决定：
+    是否允许这笔提案
+    允许多少整股
+    为什么拒绝、为什么缩量（adjustments 必须写明是哪个上限在生效）
+
+Risk 不能：
+    创建订单 ID
+    创建券商订单
+    提交 / 撤单 / 对账
+```
+
+两条不变量是结构性的，不是约定：
+
+1. **风险缩量，而不是否决。** 策略请求 100 股、上限只允许 20 股时，返回的是
+   `approved=True` / `approved_quantity=20`，并把触发缩量的上限写进
+   `adjustments`。这保持了迁移前 runtime 本来就在做的"先把数量裁到安全值"，
+   同时把这段算术收进一个地方。
+2. **熔断永不阻止减仓。** 单日亏损熔断、回撤熔断、symbol 被禁止、账户已经
+   超限、缺无关标的行情——这些全部只阻止**买入**。SELL 只对着持仓校验：
+   有仓位、数量为正、不超过持有量。把"账户已经危险"变成"不允许平仓"，
+   等于让风控成为无法离场的原因。
+
+`MainWindow` 现在只通过 `build_risk_application()`（`trading/composition/risk.py`）
+构造一个 `RiskApplication`，并以构造参数注入 `AutoQuantEngine`。旧的双入口
+缺陷见 §10.4。
 
 ### Execution
 
@@ -252,7 +291,31 @@ BrokerExecutionPort
 IBKR Paper adapter
 ```
 
-## 5. 未来唯一正确的交易路径
+## 5. 当前唯一正确的交易路径
+
+Risk v2 之后，真实运行链已经是：
+
+```text
+AutoQuant signal logic
+      ↓
+TradeProposal                        （策略想要什么）
+      ↓
+RiskApplication.evaluate()
+      ↓
+RiskDecision                         （能不能做、做多少）
+      ↓
+auto_quant.py 内唯一 transitional bridge
+      ↓
+PaperOrderIntent
+      ↓
+order_sink
+      ↓
+现有 Paper execution stack
+```
+
+`PaperOrderIntent` / `order_sink` **本轮仍然存在**，到 Execution v2 才删除。
+
+### 5.1 目标形态
 
 ```text
 MarketSnapshot
@@ -261,7 +324,7 @@ Strategy Runtime
       ↓
 TradeProposal
       ↓
-Risk Engine
+Risk Application
       ↓
 OrderIntent
       ↓
@@ -275,7 +338,12 @@ BrokerExecutionPort
 这正是 `TradeProposal` 与 `OrderIntent` 必须是两个类型的原因。
 `OrderIntent` 带 `order_id` 和 `client_order_id`，因此它是**可提交的**；
 `TradeProposal` 两者都没有，所以策略在类型层面就够不到券商。中间必须经过
-Risk Engine 批准、再由 Execution Service 构造 `OrderIntent`。
+Risk Application 批准、再由 Execution Service 构造 `OrderIntent`。
+
+Risk v2 已经把这句"必须经过"变成事实：`RiskEvaluationRequest` 同样没有
+`order_id` / `client_order_id` / `broker_order_id` / `tif` / `transmit`，
+由 `tests/test_trading_risk_domain.py` 与
+`tests/test_trading_architecture.py` 强制。
 
 ## 6. 本轮建立的 Domain
 
@@ -288,7 +356,7 @@ compatibility re-export**。同一个类型不允许有两个 import 路径。
 | `market.py` | `Bar`、`MarketSlice`（迁移）；`MarketQuote`、`MarketSnapshot`、`MarketSubscription`、`MarketDataHealth`、`MarketDataMode`（Market Data v2 起为完整领域类型） |
 | `account.py` | `Position`、`RiskAccountSnapshot`（由 `AccountSnapshot` 机械改名）；`BrokerAccountSnapshot` / `BrokerPositionSnapshot` / `BrokerAccountPortfolio` / `BrokerDiagnostic`（Broker / Account v2 新增）；`BrokerConnectionState` |
 | `orders.py` | `Side`、`OrderStatus`、`OrderIntent`、`OrderEvent`（迁移）；`ExecutionFill`（新增） |
-| `risk.py` | `RiskDecision`（迁移） |
+| `risk.py` | `RiskDecision`（迁移，Risk v2 升级）；`RiskEvaluationRequest`、`RiskLimits`、`SymbolRiskOverrides`、`SessionRiskOverrides`、`LayeredRiskLimits`、`resolve_symbol_risk_overrides`、`resolve_session_risk_overrides`（Risk v2 由 `us_quant/risk.py` 迁入并补校验） |
 | `strategy.py` | `TradeAction`、`StrategyIdentity`、`TradeProposal`（全部新增）；`StrategyStatus`、`StrategyMode`、`ALLOWED_TRANSITIONS`、`StrategyDefinition`、`StrategyVersion`、`canonical_parameters_json`、`parameter_hash_for`（Strategy v2 新增） |
 | `strategy_parameters.py` | `StrategyParameterError`、`validate_strategy_parameters`、`strategy_schema_summary`（Strategy v2 由 `strategy_schema.py` 逐字迁入） |
 | `session.py` | `TradingSessionPhase`、`TradingSnapshot`（全部新增） |
@@ -380,8 +448,8 @@ shell.py        DesktopShellV2：导航轨 + QStackedWidget
 Shell 只负责：route 注册、导航点击、当前 route、页面切换。仅此而已。
 
 Shell **不得** import `MarketDataService`、`PaperTradingService`、
-`PaperWorkflowController`、`AutoQuantEngine`、`PreTradeRiskEngine`、
-`StrategyRegistry` 或任何 IBKR 模块，也不得 connect broker、start stream 或
+`PaperWorkflowController`、`AutoQuantEngine`、`RiskApplication`、
+`StrategyApplication` 或任何 IBKR 模块，也不得 connect broker、start stream 或
 submit order。`tests/test_desktop_v2_shell.py` 以结构守卫强制这一点。
 
 页面身份被保留：传入的 widget 对象就是放进 stack 的那个对象，不复制、不重建。
@@ -398,7 +466,7 @@ dashboard  → _dashboard_tab()
 market     → _quotes_tab()
 account    → desktop_v2/pages/account.py   ✅ native v2
 strategy   → desktop_v2/pages/strategy.py  ✅ native v2
-risk       → _safety_tab()
+risk       → desktop_v2/pages/risk.py      ✅ native v2
 execution  → _auto_quant_tab()
 research   → QTabWidget（针对性验证 / 广域标的池 / 历史数据 / 市场扫描 / 回测 / 横截面研究）
 system     → QTabWidget（运行事件 / 系统设置）
@@ -432,6 +500,19 @@ application、没有 repository、没有 `sqlite3`，只 import domain 类型、
 
 页面自身不做参数校验：编辑框里的 JSON 原样交给窗口，由 application 决定
 是否合法；页面只会拒绝"空版本号"这种无法构成请求的输入。
+
+**`risk` 是第三个。** `MainWindow._safety_tab` 已删除，页面由
+`desktop_v2/pages/risk.py` 的 `RiskPage` 承担。它把原来那段静态安全说明
+**逐字搬进** `SAFETY_ITEMS`，并新增展示风险层真正在执行的四个上限
+（总敞口 / 单标的 / 单日亏损 / 回撤）与保证金借款状态。
+
+它是**只读**的，而且是结构性只读：页面里没有任何 `QPushButton` /
+`QLineEdit` / `QComboBox` / `QAbstractSpinBox`，由
+`test_the_page_has_no_control_that_could_change_a_limit` 强制。一个能在
+运行时放宽上限的界面，会让所有上限变成建议值。
+
+页面还印出风控层"能做什么 / 不能做什么"（`RISK_BOUNDARY`）：是否允许、
+允许多少整股、为什么；以及不能创建订单 ID、不能提交、不能撤单、不能对账。
 
 `AccountPage` 也不显示任何行情状态：没有 quote type、没有 mark source、没有
 STALE/FRESH 列。唯一的类价格数字 `Broker Mark` 来自
@@ -566,6 +647,49 @@ MainWindow._transition_selected_strategy    → _strategy_transition_requested
 `canonical_parameters_json` 与 `trading/application/strategies.py` 的
 `contains_embedded_symbol`。
 
+### 9.4 Risk v1（Risk v2 删除）
+
+```text
+src/us_quant/risk.py
+tests/test_risk.py
+
+RiskLimits / SymbolRiskOverrides / SessionRiskOverrides / LayeredRiskLimits
+resolve_symbol_risk_overrides / resolve_session_risk_overrides
+        → trading/domain/risk.py（纯搬迁 + 新增校验）
+
+PreTradeRiskEngine.evaluate()
+        → trading/application/risk.py 的 RiskApplication.evaluate()
+
+RiskDecision(approved, reasons)
+        → RiskDecision(approved, requested_quantity, approved_quantity,
+                       reasons, adjustments)   （见 §4 Risk）
+
+MainWindow._safety_tab()
+        → desktop_v2/pages/risk.py 的 RiskPage
+```
+
+`tests/test_risk.py` 拆成 `tests/test_trading_risk_domain.py` 与
+`tests/test_trading_risk_application.py`。新测试不是把旧断言搬个位置：
+旧文件里的 `PreTradeRiskEngine` 用 `OrderIntent` 表达请求，新套件用
+`TradeProposal` + `RiskEvaluationRequest`，并且覆盖了旧引擎根本没有的
+行为——缩量、`adjustments`、三层上限取最小、override 只能收紧。
+
+**两处语义被刻意改变**（不是顺手修，是本次迁移的目的）：
+
+1. **symbol override 只能收紧。** 旧引擎在 `symbol
+   max_position_exposure_pct != None` 时**直接替代**账户上限，因此一个
+   symbol 配置可以把账户自己的硬上限抬高。新实现取
+   `min(account, symbol, session)`，由
+   `test_a_symbol_ceiling_can_only_tighten_the_account_ceiling` 钉住。
+2. **`RiskDecision` 能表达"缩量"。** 旧返回类型只有 `approved` / `reasons`，
+   任何超限都是整体拒绝。Risk v2 把它扩成带数量的裁决，`approved_quantity`
+   不可能超过 `requested_quantity`，且缩量必须写明原因——这些不变量在
+   `__post_init__` 里强制，不合逻辑的裁决**构造不出来**。
+
+`RiskAccountSnapshot.timestamp` 顺带补上 aware datetime 校验：两个熔断都是
+拿快照和"当日起始净值"相比，一个没有时区的读数会让"这条读数有多旧"取决于
+本机 locale。
+
 ## 10. 现有模块的未来归宿（roadmap）
 
 ```text
@@ -577,24 +701,32 @@ ibkr_readonly.py          → trading/adapters/ibkr/account.py     ✅ 已迁移
 portfolio_view.py         → trading/domain/account.py            ✅ 已删除
 strategy_registry.py      → trading/adapters/sqlite/strategy_repository.py ✅ 已迁移
 strategy_schema.py        → trading/domain/strategy_parameters.py ✅ 已迁移
-risk.py                   → trading/application/risk.py          ⏭ 下一条主线
-paper_order_journal.py    → trading/adapters/sqlite/order_repository.py ⏭
-ibkr_paper_orders.py      → trading/adapters/ibkr/execution.py   ⏭
+risk.py                   → trading/domain/risk.py + trading/application/risk.py ✅ 已迁移
+paper_order_journal.py    → trading/adapters/sqlite/order_repository.py ⏭ 下一条主线
+ibkr_paper_orders.py      → trading/adapters/ibkr/execution.py   ⏭ 下一条主线
 paper_workflow.py         → trading/runtime/session.py           ⏭
 ```
 
-**下一条主线：Risk v2。** 目标链路：
+**下一条主线：Execution v2。** 目标链路：
 
 ```text
 TradeProposal
         ↓
-RiskEngine
-        ↓
 RiskDecision
+        ↓
+ExecutionApplication
+        ↓
+OrderIntent
+        ↓
+OrderRepositoryPort / BrokerExecutionPort
 ```
 
-Risk v2 完成后才谈 Execution v2，因为策略必须先产出 `TradeProposal`、由
-风控批准，才轮得到 Execution Service 构造可提交的 `OrderIntent`。
+Execution v2 才删除 `PaperOrderIntent`、`new_paper_order_intent` 与
+`order_sink`。Risk PR 不抢跑：`BrokerExecutionPort` 与 `OrderRepositoryPort`
+本轮仍然**只有定义、没有实现者**，`paper_order_models.py`、
+`ibkr_paper_orders.py`、`ibkr_paper_gateway.py`、`paper_trading_service.py`、
+`paper_order_journal.py`、`paper_session.py`、`paper_workflow.py`、
+`workflow_state.py` 一字节未改。
 
 ### 10.0 过渡残留：现已清零
 
@@ -629,12 +761,15 @@ TRANSITIONAL_EXECUTION_COUPLED_STRATEGY_FILES = {"src/us_quant/auto_quant.py"}
 
 `test_auto_quant_is_the_only_execution_coupled_strategy_module` 会扫描全部
 策略相关文件，把实际耦合集合与上面这个字面量比对；出现第二个耦合文件
-直接 test fail，扩大例外必须显式改这一行 —— 它不能悄悄长大。Risk v2 与
-Execution v2 完成后，这个集合应当变成空集。
+直接 test fail，扩大例外必须显式改这一行 —— 它不能悄悄长大。Risk v2 没有
+扩大它，也没有缩小它：风控层由 `test_no_risk_v2_module_touches_paper_execution`
+单独禁止出现 `PaperOrderIntent` / `order_sink` / `OrderIntent` 等任何执行面
+名字。Execution v2 完成后，这个集合应当变成空集。
 
 为什么现在不改它：`AutoQuantEngine` 不仅生产提案，还直接提交限价单。
-在 Risk Engine 与 Execution Service 存在之前删除 `order_sink`，等于在没有
-替代品的情况下改写实盘交易路径 —— 与"未迁移的代码保持原样"是同一条原则。
+在 Execution Service 存在之前删除 `order_sink`，等于在没有替代品的情况下
+改写实盘交易路径 —— 与"未迁移的代码保持原样"是同一条原则。Risk v2 只把
+**风控**这一段从它身上摘掉。
 
 ### 10.3 终结 auto_quant 的路线
 
@@ -650,6 +785,55 @@ Trading Runtime
 Strategy → Execution 直连，改为 `TradeProposal` → Risk → `OrderIntent`。
 **本轮不改它。**
 
+### 10.4 已关闭的风险接线缺陷（Risk v2 修复）
+
+旧 Desktop 把风险限额放进了错误的地方：
+
+```python
+config = build_auto_rotation_config(
+    ...,
+    layered_risk_limits=LayeredRiskLimits(account=self.config.risk_limits),
+)
+engine = AutoQuantEngine(
+    ...,
+    # 没有传 layered_risk_limits
+)
+```
+
+`layered_risk_limits` 存进了 `ShadowConfig`，而 `AutoQuantEngine` 读的是
+**另一个**构造参数 `layered_risk_limits`，Desktop 从来没有把当前 config 的
+`risk_limits` 传进去。结果是两条不同路径：
+
+```text
+Desktop config → ShadowConfig.layered_risk_limits   （没人读）
+AutoQuantEngine._layered_risk_limits = None         （真正在跑的那个）
+```
+
+测试里直接给 Engine 传 `layered_risk_limits`，所以测试能通过；真实 Desktop
+路径却可能完全没有启用这些账户级限额。
+
+新架构只有一个真值：
+
+```text
+current config
+      ↓
+build_risk_application(LayeredRiskLimits(account=config.risk_limits),
+                       exposure_multipliers=…)
+      ↓
+AutoQuantEngine(risk=…)
+```
+
+`build_auto_rotation_config()` 同时回归**纯策略/session config builder**：
+`layered_risk_limits` 与 `symbol_risk_multipliers` 两个参数都已删除。
+`ShadowConfig.layered_risk_limits` 字段**保留**，因为 `ShadowPaperEngine`
+仍在真实使用它——那是 Shadow runtime 自己的独立问题。
+
+`tests/test_desktop_risk_wiring.py` 从两端钉住这件事：行为上，用窗口的当前
+配置构造 `RiskApplication` 再注入 Engine，断言 Engine 拿到的是**窗口配置的
+那套限额**；结构上，断言 `AutoQuantEngine(...)` 调用点传了 `risk=` 且不再
+出现 `layered_risk_limits` / `symbol_risk_multipliers` / `strategy_version_id`
+/ `parameter_hash` 四个参数。
+
 ## 11. 后续允许删除
 
 替代完成后直接删，不长期维护双轨：
@@ -662,11 +846,18 @@ Strategy → Execution 直连，改为 `TradeProposal` → Risk → `OrderIntent
 旧 strategy page builder 与其 6 个 handler ✅ 已删除（Strategy v2）
 旧 strategy selection glue             ✅ 已删除（Strategy v2）
 旧组合框即真相的取数方式                ✅ 已删除（Strategy v2）
+旧 root risk.py 模块                   ✅ 已删除（Risk v2）
+旧 PreTradeRiskEngine                  ✅ 已删除（Risk v2）
+MainWindow._safety_tab                 ✅ 已删除（Risk v2）
+AutoQuant 账户级 loss / drawdown 计算   ✅ 已删除（Risk v2）
+AutoQuant symbol 风险策略缓存           ✅ 已删除（Risk v2）
+AutoQuant gross / account position sizing ✅ 已删除（Risk v2）
+AutoQuant layered_risk_limits 构造参数  ✅ 已删除（Risk v2）
 旧 MainWindow stream lifecycle         ⏭ 后续
-旧 AutoQuant order_sink                ⏭ Risk v2 / Execution v2 之后
+旧 AutoQuant order_sink                ⏭ Execution v2 之后
 旧 Paper-specific orchestration glue   ⏭ 后续
 旧 workflow duplicate state            ⏭ 后续
-旧页面 builder（risk / execution / …）  ⏭ 后续
+旧页面 builder（execution / …）         ⏭ 后续
 旧 desktop service                     ⏭ 后续
 ```
 
@@ -678,15 +869,18 @@ Strategy → Execution 直连，改为 `TradeProposal` → Risk → `OrderIntent
 paper_trading_service.py    paper_session.py        paper_workflow.py
 ibkr_paper_orders.py        ibkr_paper_gateway.py   paper_order_journal.py
 workflow_state.py
-
-PreTradeRiskEngine.evaluate()      （仅 AccountSnapshot → RiskAccountSnapshot
-                                    的机械改名，函数体等价）
 ```
 
-`ibkr_paper_orders.py` 唯一的变化是把 `mask_account_id` /
-`INFORMATIONAL_ERROR_CODES` 的 import 从 `ibkr_readonly` 改到
-`trading/adapters/ibkr/support.py`——这是为了删除 `ibkr_readonly.py` 所必需的
-纯 import 迁移，两个符号的定义未变。
+以上八个 Paper execution 文件在 Risk v2 中**一字节未改**：`PaperOrderIntent`、
+`new_paper_order_intent`、`order_sink`、订单生命周期（`on_order_update` /
+`on_execution` / 成交对账 / 在途单收尾 / 重复成交处理）、人工恢复流程
+（`HALTED → RECONCILING → RECONCILING_READY → 显式确认 → RUNNING`）与
+`ExecutionLease` 互斥规则全部保持原样。`resubmit_pending_intent` 也冻结：
+它是人工对账后的原订单重挂，不是新的策略信号，因此**不**重新走一遍策略风控。
+
+`ibkr_paper_orders.py` 本轮唯一的变化仍然只是 `mask_account_id` /
+`INFORMATIONAL_ERROR_CODES` 的 import 来源（Broker / Account v2 的遗留），
+两个符号的定义未变。
 
 Paper execution stack 与当前 base（`ca8399c`）保持 byte-identical（上述 import
 迁移除外）：账户链与执行链是不同的 socket，本轮不合并、不复用。
@@ -714,13 +908,25 @@ HALTED
 
 ## 14. 下一轮
 
-**Risk v2** —— 让 `PreTradeRiskEngine` 成为 `TradeProposal` → `RiskDecision`
-的唯一通道，把 `risk.py` 的评估链路搬进 `trading/application/risk.py`，
-并以此为前提开始终结 `AutoQuant strategy → order_sink`。**本轮不实现它。**
+**Execution v2** —— 把最后这段
 
-Risk v2 完成后是 Execution v2：`OrderIntent` → `ExecutionService` →
-`BrokerExecutionPort`。`BrokerExecutionPort` 已经把边界画好了，只是还没有
-实现者。
+```text
+RiskDecision → PaperOrderIntent → order_sink
+```
+
+替换成
+
+```text
+RiskDecision → OrderIntent → ExecutionApplication → BrokerExecutionPort
+```
+
+`BrokerExecutionPort` 与 `OrderRepositoryPort` 已经把边界画好了，只是还没有
+实现者。届时 `auto_quant.py` 才能彻底退出 Paper execution，
+`TRANSITIONAL_EXECUTION_COUPLED_STRATEGY_FILES` 随之变为空集。
+
+Risk v2 刻意不抢跑：`trading/application/execution.py`、
+`trading/adapters/ibkr/execution.py`、`trading/adapters/sqlite/order_repository.py`
+本轮都不存在。
 
 本轮刻意不创建 `TradingManager`、`TradingGodService`、`GlobalAppState`、
 `ServiceLocator` 或 `ApplicationContext`：runtime 由 composition root 显式

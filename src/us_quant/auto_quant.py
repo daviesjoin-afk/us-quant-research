@@ -4,7 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
-from typing import Callable, Iterable, Mapping
+from typing import Callable, Iterable
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -15,16 +15,23 @@ from us_quant.ibkr_paper_orders import (
     PaperOrderUpdate,
     new_paper_order_intent,
 )
+from us_quant.trading.application.risk import RiskApplication
+from us_quant.trading.domain.account import (
+    Position,
+    RiskAccountSnapshot,
+)
 from us_quant.trading.domain.market import (
     MarketQuote,
     MarketSnapshot,
 )
-from us_quant.risk import (
-    LayeredRiskLimits,
-    SessionRiskOverrides,
-    SymbolRiskOverrides,
-    resolve_session_risk_overrides,
-    resolve_symbol_risk_overrides,
+from us_quant.trading.domain.risk import (
+    RiskDecision,
+    RiskEvaluationRequest,
+)
+from us_quant.trading.domain.strategy import (
+    StrategyIdentity,
+    TradeAction,
+    TradeProposal,
 )
 from us_quant.shadow_paper import ShadowConfig
 
@@ -234,12 +241,27 @@ def evaluate_auto_quant_preflight(
 
 
 class AutoQuantEngine:
-    """Multi-symbol signal engine that emits IBKR Paper limit intents.
+    """Multi-symbol signal engine that proposes, then submits what risk allows.
 
-    It never calls IBKR directly. The injected sink is the only execution
-    boundary, which keeps signal generation deterministic and testable.
+    It never calls IBKR directly.  The injected sink is the only execution
+    boundary, which keeps signal generation deterministic and testable, and
+    the injected ``RiskApplication`` is the only risk authority: this class
+    decides *that* a signal fired and what the strategy would like to buy, and
+    the risk layer decides whether that may happen and at what size.
+
     Current research mode holds at most one position while scanning all
     candidates for the strongest eligible intraday momentum.
+
+    TRANSITIONAL (Execution v2 is the next change): the verdict is turned into
+    a ``PaperOrderIntent`` here rather than through an execution service, and
+    this module calls the order sink.  That bridge is the last
+    execution-coupled piece of the strategy path and it stays confined to one
+    file -- see ``TRANSITIONAL_EXECUTION_COUPLED_STRATEGY_FILES``.
+
+    TRANSITIONAL PRICING OWNERSHIP: the proposal's ``reference_price`` is the
+    slippage-adjusted Paper limit this engine already computes.  Execution v2
+    takes ownership of the final limit price; until then, reusing it keeps
+    sizing and cash semantics identical to the pre-migration path.
     """
 
     def __init__(
@@ -247,11 +269,9 @@ class AutoQuantEngine:
         *,
         candidates: tuple[AutoQuantCandidate, ...],
         config: ShadowConfig,
-        strategy_version_id: str,
-        parameter_hash: str,
+        strategy: StrategyIdentity,
+        risk: RiskApplication,
         order_sink: Callable[[PaperOrderIntent], int],
-        symbol_risk_multipliers: Mapping[str, Decimal] | None = None,
-        layered_risk_limits: LayeredRiskLimits | None = None,
         market_reference_symbols: tuple[str, ...] = (),
     ) -> None:
         if not candidates:
@@ -261,6 +281,13 @@ class AutoQuantEngine:
             raise ValueError("自动量化候选代码不能重复")
         if config.initial_cash <= 0:
             raise ValueError("自动量化初始净值必须为正")
+        if not isinstance(strategy, StrategyIdentity):
+            raise TypeError("自动量化必须绑定一个策略版本身份")
+        if not isinstance(risk, RiskApplication):
+            raise TypeError(
+                "自动量化必须注入唯一风险评估服务，"
+                "不能再由引擎自行解释风险限额"
+            )
         self.candidates = tuple(
             AutoQuantCandidate(
                 symbol=row.symbol.strip().upper(),
@@ -273,16 +300,10 @@ class AutoQuantEngine:
             for row in candidates
         )
         self.config = config
-        self.strategy_version_id = strategy_version_id
-        self.parameter_hash = parameter_hash
+        self.strategy = strategy
+        self.risk = risk
         self.order_sink = order_sink
-        self.risk_multipliers = dict(
-            symbol_risk_multipliers or {}
-        )
-        self._layered_risk_limits = layered_risk_limits
         self._peak_equity = Decimal("0")
-        self._session_risk_overrides: SessionRiskOverrides | None = None
-        self._symbol_risk_overrides: dict[str, SymbolRiskOverrides] = {}
         self.session_id: str | None = None
         self.active = False
         self.positions: dict[str, AutoQuantPosition] = {}
@@ -330,32 +351,81 @@ class AutoQuantEngine:
     def _current_time_utc() -> datetime:
         return datetime.now(timezone.utc)
 
-    def _session_overrides(self) -> SessionRiskOverrides:
-        if self._session_risk_overrides is None:
-            self._session_risk_overrides = (
-                resolve_session_risk_overrides(
-                    self._layered_risk_limits
-                )
-                if self._layered_risk_limits is not None
-                else SessionRiskOverrides()
-            )
-        return self._session_risk_overrides
+    # -- risk context ----------------------------------------------------
+    #
+    # These helpers project this engine's own estimates into the domain types
+    # the risk layer consumes.  ``RiskApplication`` never imports
+    # ``AutoQuantPosition``: the projection is the caller's job, which is what
+    # keeps the risk layer independent of how a position came to exist.
 
-    def _symbol_overrides(
-        self, symbol: str
-    ) -> SymbolRiskOverrides:
-        overrides = self._symbol_risk_overrides.get(symbol)
-        if overrides is not None:
-            return overrides
-        overrides = (
-            resolve_symbol_risk_overrides(
-                symbol, self._layered_risk_limits
-            )
-            if self._layered_risk_limits is not None
-            else SymbolRiskOverrides()
+    def _risk_account_snapshot(
+        self, *, now: datetime
+    ) -> RiskAccountSnapshot:
+        """The account as this session estimates it, in risk-domain form.
+
+        ``day_start_equity`` is the session's starting capital and
+        ``high_watermark`` the peak equity seen -- exactly what the two
+        account halts compare against.  Cash and net liquidation are floored
+        at zero because a negative balance cannot be represented and because a
+        negative estimate means there is nothing left to buy with; the risk
+        layer then refuses purchases, which is the fail-closed direction.
+
+        This is the session's own book, not broker truth.  Reconciling it
+        against the Paper account is the workflow's job, not this engine's.
+        """
+
+        return RiskAccountSnapshot(
+            net_liquidation=max(
+                Decimal("0"), self._estimated_equity()
+            ),
+            cash=max(Decimal("0"), self.estimated_cash),
+            day_start_equity=self.config.initial_cash,
+            high_watermark=self._peak_equity,
+            timestamp=now,
         )
-        self._symbol_risk_overrides[symbol] = overrides
-        return overrides
+
+    def _risk_positions(self) -> dict[str, Position]:
+        """The session's holdings projected into the risk domain.
+
+        The exposure multiplier is read from the risk application, which owns
+        that policy, so this record and the calculation it feeds cannot
+        disagree about how a holding is weighted.
+        """
+
+        return {
+            symbol: Position(
+                symbol=symbol,
+                quantity=position.quantity,
+                average_price=position.average_price,
+                exposure_multiplier=self.risk.exposure_multiplier(symbol),
+            )
+            for symbol, position in self.positions.items()
+        }
+
+    def _risk_market_prices(self) -> dict[str, Decimal]:
+        """Marks for the held symbols, falling back to average price.
+
+        The fallback is inherited sizing semantics rather than a new
+        decision: the session's own equity and snapshot calculations already
+        value a holding at ``self._marks[symbol]`` when a fresh mark exists
+        and at its average price otherwise, and the pre-migration sizing did
+        the same.  Zero would be wrong -- it would report a holding as having
+        no exposure at all -- and omitting the symbol would make the risk
+        layer refuse every purchase for as long as a quote is stale, which is
+        a behaviour change this migration does not intend.
+        """
+
+        return {
+            symbol: self._marks.get(symbol, position.average_price)
+            for symbol, position in self.positions.items()
+        }
+
+    def _allowed_symbols(self) -> frozenset[str]:
+        """The runtime scope the risk layer checks purchases against."""
+
+        return frozenset(
+            candidate.symbol for candidate in self.candidates
+        )
 
     def start(self) -> AutoQuantSnapshot:
         if self.active:
@@ -373,8 +443,6 @@ class AutoQuantEngine:
         self._executed_quantities.clear()
         self._terminal_updates.clear()
         self._last_evaluation_minute = None
-        self._session_risk_overrides = None
-        self._symbol_risk_overrides.clear()
         self._stop_requested = False
         self._entries_paused = False
         self.estimated_cash = self.config.initial_cash
@@ -459,6 +527,10 @@ class AutoQuantEngine:
                     if intent.side == "SELL"
                 }
                 for position in list(self.positions.values()):
+                    # A refused exit halts the session; emitting more orders
+                    # after that would contradict the halt.
+                    if not self.active:
+                        break
                     if position.symbol in pending_sell_symbols:
                         continue
                     quote = ready.get(position.symbol)
@@ -470,7 +542,7 @@ class AutoQuantEngine:
                             quote.bid,
                             "用户停止；提交 Paper 限价平仓",
                         )
-                if not pending_sell_symbols:
+                if self.active and not pending_sell_symbols:
                     self.status = (
                         "已请求停止；等待 fresh bid 生成 Paper 限价平仓单"
                     )
@@ -478,6 +550,8 @@ class AutoQuantEngine:
         if self.positions and not self.pending:
             if eastern_time >= self.config.force_flat:
                 for position in list(self.positions.values()):
+                    if not self.active:
+                        break
                     quote = ready.get(position.symbol)
                     if quote is not None and quote.bid is not None:
                         self._emit_exit(
@@ -489,12 +563,18 @@ class AutoQuantEngine:
                         )
             else:
                 for position in list(self.positions.values()):
+                    if not self.active:
+                        break
                     self._check_exit(
                         now, ready.get(position.symbol)
                     )
         minute = now.replace(second=0, microsecond=0)
         if (
-            len(self.positions) < self.config.max_open_symbols
+            # The exit paths above can now halt the session -- a refused
+            # reduction does exactly that -- and a halted session must not go
+            # on to open a new position in the same tick.
+            self.active
+            and len(self.positions) < self.config.max_open_symbols
             and not self.pending
             and self._last_evaluation_minute != minute
         ):
@@ -505,7 +585,7 @@ class AutoQuantEngine:
                 )
             else:
                 self._evaluate_entry(now, ready, reference_ready)
-        if not ready and not self._entries_paused:
+        if self.active and not ready and not self._entries_paused:
             self.status = "等待 fresh 实时 bid/ask"
         return self.snapshot(observed_at=now)
 
@@ -752,7 +832,7 @@ class AutoQuantEngine:
             return None
         new_intent = new_paper_order_intent(
             session_id=self.session_id or intent.session_id,
-            strategy_version_id=self.strategy_version_id,
+            strategy_version_id=self.strategy.version_id,
             symbol=intent.symbol,
             side=intent.side,
             quantity=intent.quantity,
@@ -785,8 +865,11 @@ class AutoQuantEngine:
         return AutoQuantSnapshot(
             session_id=self.session_id,
             active=self.active,
-            strategy_version_id=self.strategy_version_id,
-            parameter_hash=self.parameter_hash,
+            # Projected from the bound identity rather than stored a second
+            # time: the artifact and UI field names are unchanged, but there
+            # is one source for them.
+            strategy_version_id=self.strategy.version_id,
+            parameter_hash=self.strategy.parameter_hash,
             candidate_count=len(self.candidates),
             initial_equity=self.config.initial_cash,
             estimated_cash=self.estimated_cash,
@@ -815,35 +898,17 @@ class AutoQuantEngine:
         ready: dict[str, MarketQuote],
         reference_ready: dict[str, MarketQuote],
     ) -> None:
-        session_overrides = self._session_overrides()
-        account_limits = (
-            self._layered_risk_limits.account
-            if self._layered_risk_limits is not None
-            else None
-        )
-        if account_limits is not None:
-            equity = self._estimated_equity()
-            loss_ratio = (
-                (self.config.initial_cash - equity)
-                / self.config.initial_cash
-                if self.config.initial_cash > 0
-                else Decimal("1")
-            )
-            if loss_ratio >= account_limits.daily_loss_halt_pct:
-                self.status = (
-                    "触发账户级单日亏损熔断；今日不再开新仓"
-                )
-                return
-            drawdown_ratio = (
-                (self._peak_equity - equity) / self._peak_equity
-                if self._peak_equity > 0
-                else Decimal("0")
-            )
-            if drawdown_ratio >= account_limits.drawdown_halt_pct:
-                self.status = (
-                    "触发账户级回撤熔断；今日不再开新仓"
-                )
-                return
+        """Scan the candidates and submit the first one risk will allow.
+
+        What is deliberately absent: the account daily-loss and drawdown
+        halts, per-symbol permission, the account and symbol position
+        ceilings, the gross ceiling and the cash affordability check.  Each
+        has exactly one implementation now, in ``RiskApplication``.  What
+        stays is session and strategy policy -- when the session may trade,
+        and what the strategy would like to hold.
+        """
+
+        session_overrides = self.risk.session_overrides
         eastern = now.astimezone(NEW_YORK)
         local_time = eastern.time().replace(tzinfo=None)
         entry_start = (
@@ -878,16 +943,17 @@ class AutoQuantEngine:
             self.status = f"entry regime gate blocked: {regime_block}"
             return
         ranked: list[
-            tuple[Decimal, Decimal, str, MarketQuote]
+            tuple[Decimal, Decimal, str, MarketQuote, int, int]
         ] = []
         required = max(
             self.config.warmup_minutes,
             self.config.momentum_lookback_minutes + 1,
         )
         for symbol, quote in ready.items():
-            symbol_overrides = self._symbol_overrides(symbol)
-            if not symbol_overrides.allowed:
-                continue
+            # No ``allowed`` filter here any more.  Whether a symbol may be
+            # bought is a risk verdict, and filtering it out of the scan would
+            # also mean a blocked candidate could never *report* why it was
+            # blocked.
             history = self._histories[symbol]
             if len(history) < required:
                 continue
@@ -936,6 +1002,8 @@ class AutoQuantEngine:
                         self._scores[symbol],
                         symbol,
                         quote,
+                        positive_steps,
+                        len(step_returns),
                     )
                 )
         if not ranked:
@@ -948,101 +1016,180 @@ class AutoQuantEngine:
                 "暂无通过点差与动量门的信号"
             )
             return
-        momentum, _, symbol, quote = max(ranked)
+        blockages: list[str] = []
+        for momentum, _, symbol, quote, positive_steps, step_count in (
+            sorted(ranked, reverse=True)
+        ):
+            blockage = self._attempt_entry(
+                now=now,
+                symbol=symbol,
+                quote=quote,
+                momentum=momentum,
+                positive_steps=positive_steps,
+                step_count=step_count,
+            )
+            if blockage is None:
+                return
+            blockages.append(blockage)
+        # Every candidate was refused.  The reasons are reported rather than
+        # collapsed into "no signal", because "the account halt is active" and
+        # "nothing passed the momentum gate" call for very different operator
+        # responses -- and the scan does not stop at the strongest candidate,
+        # so a blocked leader does not hide an executable second.
+        self.status = "；".join(blockages)
+
+    def _attempt_entry(
+        self,
+        *,
+        now: datetime,
+        symbol: str,
+        quote: MarketQuote,
+        momentum: Decimal,
+        positive_steps: int,
+        step_count: int,
+    ) -> str | None:
+        """Propose one entry and let the risk layer answer.
+
+        Returns ``None`` once an order has reached the sink, or a short
+        description of why this candidate produced none.  A refusal never
+        aborts the scan: the strongest candidate can be blocked for a reason
+        that does not apply to the next one, which is the behaviour the
+        pre-migration symbol filter had.
+        """
+
         assert quote.ask is not None
-        symbol_overrides = self._symbol_overrides(symbol)
-        multiplier = (
-            symbol_overrides.exposure_multiplier
-            if symbol_overrides.exposure_multiplier != Decimal("1")
-            else self.risk_multipliers.get(symbol, Decimal("1"))
-        )
-        session_max_position_fraction = (
-            session_overrides.max_position_fraction
-            if session_overrides.max_position_fraction is not None
-            else self.config.max_position_fraction
-        )
-        max_position_fraction = session_max_position_fraction
-        if symbol_overrides.max_position_exposure_pct is not None:
-            max_position_fraction = min(
-                max_position_fraction,
-                symbol_overrides.max_position_exposure_pct,
-            )
-        account_limits = (
-            self._layered_risk_limits.account
-            if self._layered_risk_limits is not None
-            else None
-        )
-        if account_limits is not None:
-            max_position_fraction = min(
-                max_position_fraction,
-                account_limits.max_position_exposure_pct,
-            )
-        notional_cap = (
-            self.config.initial_cash
-            * max_position_fraction
-            / multiplier
-        )
-        if account_limits is not None:
-            current_risk_exposure = sum(
-                (
-                    position.average_price
-                    * position.quantity
-                    * self._effective_risk_multiplier(position.symbol)
-                    for position in self.positions.values()
-                ),
-                Decimal("0"),
-            )
-            remaining_risk_exposure = max(
-                Decimal("0"),
-                (
-                    self.config.initial_cash
-                    * account_limits.max_gross_exposure_pct
-                    - current_risk_exposure
-                ),
-            )
-            notional_cap = min(
-                notional_cap,
-                remaining_risk_exposure / multiplier,
-            )
-        if symbol in self.positions:
-            existing = self.positions[symbol]
-            notional_cap = max(Decimal("0"), notional_cap - existing.average_price * existing.quantity)
         limit_price = _limit_price(
             quote.ask, self.config.slippage_bps, buy=True
         )
-        affordable = min(notional_cap, self.estimated_cash)
-        quantity = int(
-            (
-                (
-                    affordable
-                    - self.config.commission_per_order
-                )
-                / limit_price
-            ).to_integral_value(rounding=ROUND_DOWN)
+        quantity = self._requested_entry_quantity(
+            symbol=symbol, limit_price=limit_price
         )
+        if quantity <= 0:
+            return f"{symbol} 信号通过，但整股资金不足"
+        proposal = TradeProposal(
+            strategy=self.strategy,
+            symbol=symbol,
+            action=TradeAction.BUY,
+            desired_quantity=quantity,
+            # TRANSITIONAL PRICING OWNERSHIP: see the class docstring.
+            reference_price=limit_price,
+            reason=(
+                "自动轮动入场；"
+                f"{self.config.momentum_lookback_minutes}分钟动量 "
+                f"{momentum:.2%}；"
+                f"正收益步数 {positive_steps}/{step_count}"
+            ),
+            generated_at=now,
+        )
+        decision = self._evaluate_risk(
+            proposal=proposal, symbol=symbol, now=now
+        )
+        if not decision.approved:
+            return (
+                f"{symbol} 风险阻断：{'；'.join(decision.reasons)}"
+            )
         if (
-            quantity <= 0
-            or quantity * limit_price
+            decision.approved_quantity * limit_price
             < self.config.min_order_notional
         ):
-            self.status = f"{symbol} 信号通过，但整股资金不足"
-            return
+            # Risk trimmed the order below what is worth sending.  The next
+            # candidate may still be executable, so this is not fatal.
+            return (
+                f"{symbol} 风险缩量至 {decision.approved_quantity} 股后"
+                "低于最小下单金额"
+            )
+        reason = self._entry_reason(
+            proposal=proposal, decision=decision
+        )
         self._emit(
             new_paper_order_intent(
                 session_id=self.session_id or "",
-                strategy_version_id=self.strategy_version_id,
+                strategy_version_id=self.strategy.version_id,
                 symbol=symbol,
                 side="BUY",
-                quantity=quantity,
+                quantity=decision.approved_quantity,
                 limit_price=limit_price,
-                reason=(
-                    "自动轮动入场；"
-                    f"{self.config.momentum_lookback_minutes}分钟动量 "
-                    f"{momentum:.2%}；"
-                    f"正收益步数 {positive_steps}/"
-                    f"{len(step_returns)}"
-                ),
+                reason=reason,
             )
+        )
+        return None
+
+    @staticmethod
+    def _entry_reason(
+        *,
+        proposal: TradeProposal,
+        decision: RiskDecision,
+    ) -> str:
+        """The order's reason text, with any risk reduction made visible.
+
+        A quantity that changed between proposal and order must be readable
+        from the order itself; otherwise an operator reconciling fills cannot
+        tell a trimmed order from a rejected one.
+        """
+
+        if decision.approved_quantity >= proposal.desired_quantity:
+            return proposal.reason
+        return (
+            f"风险缩量 {proposal.desired_quantity} → "
+            f"{decision.approved_quantity}；"
+            + "；".join(decision.adjustments)
+            + "；"
+            + proposal.reason
+        )
+
+    def _requested_entry_quantity(
+        self, *, symbol: str, limit_price: Decimal
+    ) -> int:
+        """How many whole shares the *strategy* would like, before risk.
+
+        This is strategy/session sizing and nothing else.  It no longer
+        divides by an exposure multiplier, no longer subtracts the account's
+        gross room, and no longer caps itself at the estimated cash -- all
+        three are risk decisions, and computing them here as well is how the
+        running system came to disagree with the risk layer about what was
+        affordable.  What remains is ``initial_cash × max_position_fraction``,
+        less whatever this symbol already holds, less the commission,
+        converted to whole shares at the limit price.
+        """
+
+        notional_cap = (
+            self.config.initial_cash
+            * self.config.max_position_fraction
+        )
+        existing = self.positions.get(symbol)
+        if existing is not None:
+            notional_cap -= (
+                existing.average_price * existing.quantity
+            )
+        affordable = max(
+            Decimal("0"),
+            notional_cap - self.config.commission_per_order,
+        )
+        return int(
+            (affordable / limit_price).to_integral_value(
+                rounding=ROUND_DOWN
+            )
+        )
+
+    def _evaluate_risk(
+        self,
+        *,
+        proposal: TradeProposal,
+        symbol: str,
+        now: datetime,
+    ) -> RiskDecision:
+        """Ask the single risk authority about one proposal."""
+
+        return self.risk.evaluate(
+            request=RiskEvaluationRequest(
+                proposal=proposal,
+                execution_symbol=symbol,
+                estimated_commission=self.config.commission_per_order,
+            ),
+            account=self._risk_account_snapshot(now=now),
+            positions=self._risk_positions(),
+            market_prices=self._risk_market_prices(),
+            allowed_symbols=self._allowed_symbols(),
         )
 
     def _check_exit(
@@ -1085,12 +1232,6 @@ class AutoQuantEngine:
                     now, quote, position.symbol, quote.bid, reason
                 )
 
-    def _effective_risk_multiplier(self, symbol: str) -> Decimal:
-        overrides = self._symbol_overrides(symbol)
-        if overrides.exposure_multiplier != Decimal("1"):
-            return overrides.exposure_multiplier
-        return self.risk_multipliers.get(symbol, Decimal("1"))
-
     def _estimated_equity(self) -> Decimal:
         """Session equity at last marks: estimated cash plus position value."""
         position_value = Decimal("0")
@@ -1114,24 +1255,57 @@ class AutoQuantEngine:
         price: Decimal,
         reason: str,
     ) -> None:
-        del now
+        """Propose a reduction and submit what the risk layer approves.
+
+        Every exit goes through risk -- stop-loss, take-profit, trailing,
+        force-flat and a user stop alike.  There is deliberately no bypass for
+        exits: "a lawful reduction is always allowed" is asserted once, in the
+        risk layer, instead of being an exemption granted here.
+
+        If risk refuses a reduction for a position this session actually
+        holds, the engine and the risk layer disagree about the book.  That is
+        not something to retry through -- a retry loop is how a disagreement
+        becomes an order storm -- so the session halts for a human.
+        """
+
         if quote is None or quote.bid is None:
             self.status = (
                 f"{reason}，但缺少 fresh bid；禁止生成无报价订单"
             )
             return
+        position = self.positions.get(symbol)
+        if position is None:
+            self.status = f"{reason}；本地无 {symbol} 持仓，已跳过"
+            return
+        limit_price = _limit_price(
+            price, self.config.slippage_bps, buy=False
+        )
+        proposal = TradeProposal(
+            strategy=self.strategy,
+            symbol=symbol,
+            action=TradeAction.SELL,
+            desired_quantity=position.quantity,
+            reference_price=limit_price,
+            reason=reason,
+            generated_at=now,
+        )
+        decision = self._evaluate_risk(
+            proposal=proposal, symbol=symbol, now=now
+        )
+        if not decision.approved:
+            self.halt_for_reconciliation(
+                "风险层拒绝了合法平仓单"
+                f"（{symbol}：{'；'.join(decision.reasons)}）"
+            )
+            return
         self._emit(
             new_paper_order_intent(
                 session_id=self.session_id or "",
-                strategy_version_id=self.strategy_version_id,
+                strategy_version_id=self.strategy.version_id,
                 symbol=symbol,
                 side="SELL",
-                quantity=self.positions[symbol].quantity,
-                limit_price=_limit_price(
-                    price,
-                    self.config.slippage_bps,
-                    buy=False,
-                ),
+                quantity=decision.approved_quantity,
+                limit_price=limit_price,
                 reason=reason,
             )
         )
@@ -1247,7 +1421,6 @@ class AutoQuantEngine:
         self.trades_today = 0
         self.estimated_realized_pnl = Decimal("0")
         self._last_evaluation_minute = None
-        self._session_risk_overrides = None
         for history in self._histories.values():
             history.clear()
         for history in self._reference_histories.values():

@@ -91,6 +91,16 @@ STRATEGY_V2_ADDED_METHODS = frozenset(
         "_sync_strategy_combo",
     }
 )
+
+# Risk v2: ``MainWindow`` no longer builds the static safety page; its text and
+# the limits the risk layer enforces live on the native v2 risk route.  Only the
+# deletion is declared here -- this round also rewrote ``_apply_theme``, which
+# Strategy v2 already lists.
+RISK_V2_REMOVED_METHODS = frozenset({"_safety_tab"})
+
+#: The one method this round adds: the window asks the composition root for
+#: its single risk authority instead of assembling one inline.
+RISK_V2_ADDED_METHODS = frozenset({"_build_auto_quant_risk"})
 # Rewritten rather than added or removed: they now talk to the strategy
 # application service and the selection service instead of a registry and a
 # combo box.
@@ -1332,10 +1342,14 @@ def test_only_the_declared_methods_changed() -> None:
     # page composer.  Asserting the delta exactly keeps this guard strict:
     # any other addition or removal still fails here.
     assert set(base_methods) - set(current_methods) == (
-        set(LATER_ROUND_REMOVED_METHODS) | set(STRATEGY_V2_REMOVED_METHODS)
+        set(LATER_ROUND_REMOVED_METHODS)
+        | set(STRATEGY_V2_REMOVED_METHODS)
+        | set(RISK_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
-        set(LATER_ROUND_ADDED_METHODS) | set(STRATEGY_V2_ADDED_METHODS)
+        set(LATER_ROUND_ADDED_METHODS)
+        | set(STRATEGY_V2_ADDED_METHODS)
+        | set(RISK_V2_ADDED_METHODS)
     )
 
     changed = []

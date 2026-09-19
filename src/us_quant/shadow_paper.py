@@ -15,7 +15,7 @@ from us_quant.trading.domain.market import (
     MarketQuote,
     MarketSnapshot,
 )
-from us_quant.risk import (
+from us_quant.trading.domain.risk import (
     LayeredRiskLimits,
     SessionRiskOverrides,
     SymbolRiskOverrides,

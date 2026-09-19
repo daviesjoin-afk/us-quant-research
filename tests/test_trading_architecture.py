@@ -115,6 +115,13 @@ CANONICAL_TYPES = {
     "OrderEvent": "orders.py",
     "ExecutionFill": "orders.py",
     "RiskDecision": "risk.py",
+    "RiskEvaluationRequest": "risk.py",
+    "RiskLimits": "risk.py",
+    "LayeredRiskLimits": "risk.py",
+    "SymbolRiskOverrides": "risk.py",
+    "SessionRiskOverrides": "risk.py",
+    "resolve_symbol_risk_overrides": "risk.py",
+    "resolve_session_risk_overrides": "risk.py",
     "TradeAction": "strategy.py",
     "StrategyIdentity": "strategy.py",
     "TradeProposal": "strategy.py",
@@ -144,6 +151,8 @@ GLOBALLY_UNIQUE_TYPES = (
     "BrokerAccountPortfolio",
     "OrderIntent",
     "RiskDecision",
+    "RiskLimits",
+    "LayeredRiskLimits",
     "Position",
     # Strategy governance is the same kind of thing: two ``StrategyVersion``
     # definitions would mean two readings of one version's status.
@@ -570,8 +579,8 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
     """The v2 package holds the shell, the route table and native pages.
 
     ``pages/account.py`` was the first genuinely native v2 page;
-    ``pages/strategy.py`` is the second, and the strategy route no longer
-    reuses a legacy builder from ``MainWindow`` either.
+    ``pages/strategy.py`` is the second and ``pages/risk.py`` the third, and
+    none of those routes reuses a legacy builder from ``MainWindow`` any more.
     """
 
     desktop_v2 = _SRC / "desktop_v2"
@@ -585,6 +594,7 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "shell.py",
         "pages/__init__.py",
         "pages/account.py",
+        "pages/risk.py",
         "pages/strategy.py",
     }
 
@@ -777,7 +787,6 @@ def test_the_strategy_and_risk_layers_do_not_import_a_market_data_adapter() -> N
         if not (
             relative.startswith("us_quant/strategy")
             or relative == "us_quant/strategy_registry.py"
-            or relative == "us_quant/risk.py"
             or relative == "us_quant/auto_quant.py"
             or relative.startswith("trading/domain/strategy")
             or relative.startswith("trading/application/strateg")
@@ -1760,3 +1769,265 @@ def test_the_strategy_page_builds_no_legacy_widget_stack() -> None:
         )
     names = _identifier_names(STRATEGY_PAGE)
     assert "Signal" in names, "the page talks back through Qt signals only"
+
+
+# -- Risk v2 --------------------------------------------------------------
+
+# The v1 risk module, retired by this migration.  Deleted outright: no
+# compatibility re-export, no shim, no "deprecated" import path.  A module
+# that is merely unreferenced can still be resurrected, so existence is
+# checked directly.
+RETIRED_RISK_MODULES = ("us_quant.risk",)
+
+#: The retired engine.  Its behaviour moved into ``RiskApplication``; the
+#: class itself must not come back under this name, because a second engine is
+#: a second set of verdicts.
+RETIRED_RISK_NAMES = ("PreTradeRiskEngine",)
+
+RISK_DOMAIN = _TRADING / "domain" / "risk.py"
+RISK_APPLICATION = _TRADING / "application" / "risk.py"
+RISK_COMPOSITION = _TRADING / "composition" / "risk.py"
+RISK_PAGE = _SRC / "desktop_v2" / "pages" / "risk.py"
+
+#: Every module the risk migration creates or rewrites.
+RISK_V2_MODULES = (
+    RISK_DOMAIN,
+    RISK_APPLICATION,
+    RISK_COMPOSITION,
+    RISK_PAGE,
+)
+
+#: Identifiers that would give the risk layer an order surface.  Risk decides
+#: *whether* and *how many whole shares*; execution creates order identity,
+#: submits, cancels and reconciles.  A risk module naming any of these has
+#: taken over a job that is not its own.
+RISK_ORDER_SURFACE_NAMES = (
+    "BrokerExecutionPort",
+    "OrderIntent",
+    "OrderRepositoryPort",
+    "PaperOrderIntent",
+    "cancelOrder",
+    "new_paper_order_intent",
+    "order_sink",
+    "placeOrder",
+)
+
+#: The account-risk identifiers AutoQuant is no longer allowed to own.  Each
+#: one was a second implementation of a verdict that now has exactly one home.
+AUTO_QUANT_RETIRED_RISK_NAMES = (
+    "LayeredRiskLimits",
+    "PreTradeRiskEngine",
+    "SessionRiskOverrides",
+    "SymbolRiskOverrides",
+    "_effective_risk_multiplier",
+    "allow_margin_borrowing",
+    "current_risk_exposure",
+    "daily_loss_halt_pct",
+    "drawdown_halt_pct",
+    "max_gross_exposure_pct",
+    "max_position_exposure_pct",
+    "remaining_risk_exposure",
+    "resolve_session_risk_overrides",
+    "resolve_symbol_risk_overrides",
+    "risk_multipliers",
+)
+
+#: The two account-halt ratios, and the only modules whose *code* may name
+#: them.  ``config.py`` reads them as TOML keys -- string literals, which this
+#: scan does not see -- and the risk page displays them; every decision built
+#: on them lives in the application.  A new file appearing in this set is what
+#: a second pre-trade risk implementation would look like on its first commit.
+RISK_HALT_RATIO_NAMES = ("daily_loss_halt_pct", "drawdown_halt_pct")
+RISK_HALT_RATIO_MODULES = {
+    "desktop_v2/pages/risk.py",
+    "trading/application/risk.py",
+    "trading/domain/risk.py",
+}
+
+AUTO_QUANT_PATH = _SRC / "auto_quant.py"
+
+
+def test_the_retired_risk_module_is_gone() -> None:
+    """The v1 module is deleted, not merely unreferenced."""
+
+    for module in RETIRED_RISK_MODULES:
+        path = _SRC / f"{module.removeprefix('us_quant.')}.py"
+        assert not path.exists(), (
+            f"{path.relative_to(_SRC).as_posix()} must not exist; the risk "
+            "migration moved its behaviour to trading/"
+        )
+
+
+def test_no_module_imports_the_retired_risk_module() -> None:
+    offenders: list[str] = []
+    for path in _all_source_files():
+        modules = _imports(path)
+        for retired in RETIRED_RISK_MODULES:
+            if retired in modules:
+                offenders.append(
+                    f"{path.relative_to(_SRC)} imports {retired}"
+                )
+    assert not offenders, offenders
+
+
+def test_no_module_redefines_the_retired_risk_engine() -> None:
+    offenders: list[str] = []
+    for name in RETIRED_RISK_NAMES:
+        for path in _definitions(name):
+            offenders.append(f"{path.relative_to(_SRC)} defines {name}")
+    assert not offenders, offenders
+
+
+def test_the_risk_domain_is_pure() -> None:
+    """Risk policy must be assertable without a running system."""
+
+    offending = _matches(
+        _imports(RISK_DOMAIN),
+        (
+            "PySide6",
+            "ibapi",
+            "sqlite3",
+            "us_quant.sqlite_support",
+            "us_quant.trading.adapters",
+            "us_quant.trading.application",
+            "us_quant.trading.composition",
+            "us_quant.paper",
+            "us_quant.ibkr_paper_orders",
+            "us_quant.auto_quant",
+            "us_quant.desktop",
+            "us_quant.risk",
+        ),
+    )
+    assert not offending, sorted(offending)
+    assert not _relative_imports(RISK_DOMAIN)
+
+
+def test_the_risk_application_is_provider_and_execution_blind() -> None:
+    """Spec 113: the application may not build, submit or store an order."""
+
+    offending = _matches(
+        _imports(RISK_APPLICATION),
+        (
+            "PySide6",
+            "ibapi",
+            "sqlite3",
+            "us_quant.sqlite_support",
+            "us_quant.trading.adapters",
+            "us_quant.trading.composition",
+            "us_quant.paper",
+            "us_quant.ibkr_paper_orders",
+            "us_quant.ibkr_paper_gateway",
+            "us_quant.paper_trading_service",
+            "us_quant.auto_quant",
+            "us_quant.desktop",
+            "us_quant.trading.ports",
+        ),
+    )
+    assert not offending, sorted(offending)
+    used = _identifier_names(RISK_APPLICATION) & set(
+        RISK_ORDER_SURFACE_NAMES
+    )
+    assert not used, sorted(used)
+
+
+def test_no_risk_v2_module_touches_paper_execution() -> None:
+    """Spec 117: the risk layer has no execution path at all."""
+
+    offenders: list[str] = []
+    for path in RISK_V2_MODULES:
+        used = _identifier_names(path) & set(RISK_ORDER_SURFACE_NAMES)
+        if used:
+            offenders.append(
+                f"{path.relative_to(_SRC).as_posix()} uses {sorted(used)}"
+            )
+    assert not offenders, offenders
+
+
+def test_only_composition_and_the_window_name_the_risk_builder() -> None:
+    """Exactly one module assembles the risk authority, and the window asks it.
+
+    The composition root is the only place that knows how a
+    ``RiskApplication`` is put together; ``desktop.py`` is the only caller.
+    A third module appearing here means a second assembly path.
+    """
+
+    wiring: list[str] = []
+    for path in _all_source_files():
+        if "build_risk_application" in _identifier_names(path):
+            wiring.append(path.relative_to(_SRC).as_posix())
+    assert wiring == [
+        "desktop.py",
+        "trading/composition/risk.py",
+    ], wiring
+
+
+def test_the_risk_page_imports_no_business_service() -> None:
+    """Spec 114: the page renders, it does not enforce or configure."""
+
+    offending = _matches(
+        _imports(RISK_PAGE),
+        (
+            "PySide6.QtNetwork",
+            "ibapi",
+            "sqlite3",
+            "us_quant.sqlite_support",
+            "us_quant.trading.adapters",
+            "us_quant.trading.application",
+            "us_quant.trading.composition",
+            "us_quant.trading.ports",
+            "us_quant.ibkr",
+            "us_quant.paper_trading_service",
+            "us_quant.paper_session",
+            "us_quant.paper_workflow",
+            "us_quant.ibkr_paper_orders",
+            "us_quant.ibkr_paper_gateway",
+            "us_quant.auto_quant",
+            "us_quant.risk",
+        ),
+    )
+    assert not offending, sorted(offending)
+    assert _matches(_imports(RISK_PAGE), ("us_quant.trading.domain",)), (
+        "the page must render domain types, not invent its own view models"
+    )
+
+
+def test_auto_quant_no_longer_owns_account_risk() -> None:
+    """Spec 89: one authority, and it is not the strategy runtime.
+
+    Each retired name below was a calculation performed inside
+    ``AutoQuantEngine`` while the same question was also answered by
+    ``RiskApplication`` -- two answers no unit test could tell apart, because
+    the tests injected the risk argument directly.
+    """
+
+    used = _identifier_names(AUTO_QUANT_PATH) & set(
+        AUTO_QUANT_RETIRED_RISK_NAMES
+    )
+    assert not used, sorted(used)
+    # And the verdict really is routed through the risk layer, so the guard
+    # above cannot pass by the whole path having been deleted.
+    names = _identifier_names(AUTO_QUANT_PATH)
+    assert "RiskApplication" in names
+    assert "RiskEvaluationRequest" in names
+
+
+def test_the_account_halt_ratios_have_one_implementation() -> None:
+    """Spec 89/130: a second implementation would show up as a new file."""
+
+    naming: set[str] = set()
+    for path in _all_source_files():
+        if _identifier_names(path) & set(RISK_HALT_RATIO_NAMES):
+            naming.add(path.relative_to(_SRC).as_posix())
+    assert naming == RISK_HALT_RATIO_MODULES, sorted(naming)
+
+
+def test_the_risk_application_consumes_the_risk_snapshot_not_broker_truth() -> (
+    None
+):
+    """The application evaluates estimates; the adapter reports facts."""
+
+    names = _identifier_names(RISK_APPLICATION)
+    assert "RiskAccountSnapshot" in names
+    assert "BrokerAccountSnapshot" not in names
+    assert "BrokerConnectionState" not in names
+    assert "BrokerPositionSnapshot" not in names

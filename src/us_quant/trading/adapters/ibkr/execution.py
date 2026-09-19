@@ -56,7 +56,7 @@ from us_quant.trading.adapters.ibkr.support import (
     INFORMATIONAL_ERROR_CODES,
     mask_account_id,
 )
-from us_quant.extended_hours import paper_order_routing
+from us_quant.extended_hours import PaperOrderRouting, paper_order_routing
 from us_quant.paper_order_models import (
     PaperBrokerOrder,
     PaperBrokerPosition,
@@ -1163,42 +1163,35 @@ class IBKRExecutionAdapter:
         )
 
     def submit(self, reservation: BrokerOrderReservation) -> None:
-        """Send one reserved order to IBKR.
+        """Send one reserved order to IBKR, re-checking every volatile gate.
 
         The caller must already have written the durable correlation: this
         method exists after that write, and it places the order with the id the
         correlation names.  If the place call fails the outcome is genuinely
         unknown, so the order is reported as uncertain and the caller halts for
         reconciliation instead of retrying.
+
+        The gates are re-checked *because* ``reserve`` already checked them.
+        The two calls are separated by a durable store write, and inside that
+        gap the session can be disarmed, an asynchronous ``managedAccounts``
+        callback can rebind the account, the allowlist can change, the hard
+        notional ceiling can move and the sellable book can shrink.  A gate
+        that only ran at reserve time would be answering a question about a
+        session that no longer exists by the time the order actually leaves.
+        The durable row is allowed to stand; the broker send is not.
         """
 
         with self._correlation_lock:
             intent = self._intent_by_order.get(reservation.broker_order_id)
-        if intent is None:
+        if intent is None or intent.order_id != reservation.order_id:
+            # The reservation must name the intent it was made for: a
+            # reservation swapped for another order is not this order.
             raise IBKRPaperOrderError(
                 "订单意图未处于已预留状态；拒绝提交"
             )
-        with self._state_lock:
-            account = self._account
-            snapshot_complete = self._snapshot_complete
-        if not snapshot_complete:
-            raise IBKRPaperOrderError(
-                "Paper 连接快照尚未完成；拒绝提交订单"
-            )
-        routing = paper_order_routing(
-            extended_hours_enabled=self.extended_hours_enabled
+        client, account, routing = self._revalidate_for_send(
+            reservation, intent
         )
-        if not routing.allowed:
-            raise IBKRPaperOrderError(
-                "当前时段禁止提交 Paper 订单：" + routing.reason
-            )
-        client = self._client
-        if (
-            client is None
-            or not self.connection_snapshot().connected
-            or not account
-        ):
-            raise IBKRPaperOrderError("Paper 订单通道已断开")
         try:
             from ibapi.contract import Contract
             from ibapi.order import Order
@@ -1265,7 +1258,76 @@ class IBKRExecutionAdapter:
             broker_order_id=order_id,
         ) from submit_error
 
-    def cancel_intent(self, order_id: str) -> bool:
+    def _revalidate_for_send(
+        self,
+        reservation: BrokerOrderReservation,
+        intent: OrderIntent,
+    ) -> tuple[Any, str, PaperOrderRouting]:
+        """Re-run every volatile execution hard gate immediately before send.
+
+        One snapshot of the mutable safety state is taken under the state lock
+        and then checked, so the gates are evaluated against a single reading
+        rather than a set of reads taken at different instants.  Only execution
+        hard gates are here: risk's position, gross, cash, drawdown and daily
+        loss ceilings are not recomputed, because those belong to
+        ``RiskApplication`` and a second copy is how two layers come to
+        disagree about what is affordable.
+        """
+
+        with self._state_lock:
+            armed_session_id = self._armed_session_id
+            account = self._account
+            binding_is_valid = self._armed_account_binding_is_valid_locked()
+            allowed_symbols = self._allowed_symbols
+            max_order_notional = self._max_order_notional
+            sellable_quantities = dict(self._sellable_quantities)
+            snapshot_complete = self._snapshot_complete
+        if armed_session_id is None:
+            # Disarmed between reserve and submit: the session that authorised
+            # this order no longer exists.
+            raise IBKRPaperOrderError("Paper 会话已解除武装；拒绝提交订单")
+        if intent.session_id != armed_session_id:
+            raise IBKRPaperOrderError(
+                "订单不属于当前已武装会话；拒绝提交订单"
+            )
+        if not binding_is_valid:
+            raise IBKRPaperOrderError(
+                "Paper 会话账户已变化；拒绝提交订单"
+            )
+        if not account:
+            raise IBKRPaperOrderError("Paper 账户未就绪；拒绝提交订单")
+        if mask_account_id(account) != reservation.account_alias:
+            # The reserved correlation names a different account than the one
+            # the order would now be sent on.  The human reconciling this later
+            # would be reading a row that points at the wrong book.
+            raise IBKRPaperOrderError(
+                "预留账户与当前账户不一致；拒绝提交订单"
+            )
+        if not snapshot_complete:
+            # H-6: never submit while the connection snapshot is not complete
+            # (e.g. during the recovery window of a reconnect).
+            raise IBKRPaperOrderError(
+                "Paper 连接快照尚未完成；拒绝提交订单"
+            )
+        validate_paper_order_intent(
+            intent,
+            allowed_symbols=allowed_symbols,
+            max_order_notional=max_order_notional,
+            sellable_quantities=sellable_quantities,
+        )
+        routing = paper_order_routing(
+            extended_hours_enabled=self.extended_hours_enabled
+        )
+        if not routing.allowed:
+            raise IBKRPaperOrderError(
+                "当前时段禁止提交 Paper 订单：" + routing.reason
+            )
+        client = self._client
+        if client is None or not self.connection_snapshot().connected:
+            raise IBKRPaperOrderError("Paper 订单通道已断开")
+        return client, account, routing
+
+    def cancel(self, order_id: str) -> bool:
         """Cancel one exact order created by this service.
 
         This intentionally exposes no global-cancel surface. Repeated calls

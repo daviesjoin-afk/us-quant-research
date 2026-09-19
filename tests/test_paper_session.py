@@ -177,7 +177,7 @@ class FakeOrders:
         self._record("events")
         return self.updates
 
-    def cancel_intent(self, order_id):
+    def cancel(self, order_id):
         self._record(f"cancel:{order_id}")
         if self.cancel_error:
             raise self.cancel_error

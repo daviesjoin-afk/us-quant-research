@@ -857,7 +857,6 @@ def test_module_exposes_no_real_order_entry_point() -> None:
         "replace_order",
         "place_order",
         "reqGlobalCancel",
-        "cancel_intent",
         "resubmit_pending_intent",
         "arm",
     ):

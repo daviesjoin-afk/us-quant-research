@@ -26,12 +26,23 @@ from us_quant.trading.adapters.ibkr.execution_gateway import (
 from us_quant.trading.adapters.sqlite.order_repository import (
     SQLiteOrderRepository,
 )
+from us_quant.trading.composition.execution import (
+    build_execution_application,
+    build_execution_candidate,
+    build_order_repository,
+)
 from us_quant.trading.domain.orders import (
     ExecutionFill,
     OrderEvent,
     OrderIntent,
     OrderStatus,
     Side,
+)
+from us_quant.trading.domain.risk import RiskDecision
+from us_quant.trading.domain.strategy import (
+    StrategyIdentity,
+    TradeAction,
+    TradeProposal,
 )
 from us_quant.trading.ports.broker_execution import (
     BrokerOrderReservation,
@@ -124,20 +135,39 @@ class _ConnectedClient:
 
 
 def _ibapi_stub_modules() -> dict[str, ModuleType]:
-    """The minimum ``ibapi`` surface the gateway factory needs."""
+    """The minimum ``ibapi`` surface the gateway factory and submit need.
+
+    CI installs no real IBKR API, and skipping the tests that need one would
+    stop testing the interface the adapter actually uses.  ``Contract`` and
+    ``Order`` are attribute holders: ``submit`` still builds a real order object
+    out of an intent and still reaches ``client.placeOrder``, which is the
+    behaviour under test.  Nothing here may make a refusal look like success.
+    """
 
     class StubEClient:
         def __init__(self, wrapper=None) -> None:
             self.wrapper = wrapper
 
+    class StubContract:
+        pass
+
+    class StubOrder:
+        pass
+
     client_module = ModuleType("ibapi.client")
     client_module.EClient = StubEClient
     wrapper_module = ModuleType("ibapi.wrapper")
     wrapper_module.EWrapper = type("StubEWrapper", (), {})
+    contract_module = ModuleType("ibapi.contract")
+    contract_module.Contract = StubContract
+    order_module = ModuleType("ibapi.order")
+    order_module.Order = StubOrder
     return {
         "ibapi": ModuleType("ibapi"),
         "ibapi.client": client_module,
         "ibapi.wrapper": wrapper_module,
+        "ibapi.contract": contract_module,
+        "ibapi.order": order_module,
     }
 
 
@@ -670,7 +700,7 @@ class IBKRPaperOrderTests(unittest.TestCase):
             self.assertEqual(row.reported_remaining, Decimal("2"))
             self.assertEqual(row.executed_quantity, Decimal("2"))
 
-    def test_exact_intent_cancel_is_idempotent(self) -> None:
+    def test_exact_order_cancel_is_idempotent(self) -> None:
         with TemporaryDirectory() as directory:
             service = IBKRExecutionAdapter(
                 _config(), repository=_repository(directory)
@@ -683,11 +713,11 @@ class IBKRPaperOrderTests(unittest.TestCase):
             with service._correlation_lock:
                 service._intent_by_order[10] = intent
                 service._order_by_intent[intent.order_id] = 10
-            self.assertTrue(service.cancel_intent(intent.order_id))
-            self.assertFalse(service.cancel_intent(intent.order_id))
+            self.assertTrue(service.cancel(intent.order_id))
+            self.assertFalse(service.cancel(intent.order_id))
             self.assertEqual(client.cancelled, [(10, "")])
 
-    def test_concurrent_exact_intent_cancel_is_idempotent(self) -> None:
+    def test_concurrent_exact_order_cancel_is_idempotent(self) -> None:
         with TemporaryDirectory() as directory:
             service = IBKRExecutionAdapter(
                 _config(), repository=_repository(directory)
@@ -705,7 +735,7 @@ class IBKRPaperOrderTests(unittest.TestCase):
 
             def cancel() -> None:
                 barrier.wait()
-                results.append(service.cancel_intent(intent.order_id))
+                results.append(service.cancel(intent.order_id))
 
             threads = [Thread(target=cancel) for _ in range(8)]
             for thread in threads:
@@ -716,6 +746,84 @@ class IBKRPaperOrderTests(unittest.TestCase):
             self.assertEqual(results.count(True), 1)
             self.assertEqual(results.count(False), 7)
             self.assertEqual(client.cancelled, [(10, "")])
+
+    def test_the_adapter_exposes_exactly_one_cancel_spelling(self) -> None:
+        """One production API: a second spelling is how the two drifted apart.
+
+        The port declared ``cancel`` while this adapter implemented
+        ``cancel_intent``, so production wiring raised ``AttributeError`` on the
+        first cancel.  Both names existing at once is the shape of the bug, so
+        the old spelling must be gone rather than merely unused.
+        """
+
+        self.assertTrue(callable(getattr(IBKRExecutionAdapter, "cancel", None)))
+        self.assertFalse(hasattr(IBKRExecutionAdapter, "cancel_intent"))
+
+    def test_the_production_wiring_cancels_through_to_the_broker_client(
+        self,
+    ) -> None:
+        """Application -> adapter -> ``client.cancelOrder``, built as in prod.
+
+        Every fake in the suite implemented the port's own spelling, which is
+        why the mismatch survived: this test builds the real application over
+        the real adapter over the real store and drives an order through the
+        whole chain.  The second cancel is the idempotency contract: the broker
+        must be told once while the confirmation is still outstanding.
+        """
+
+        strategy = StrategyIdentity(
+            strategy_id="intraday-auto-rotation",
+            version_id="version",
+            parameter_hash="hash",
+        )
+        proposal = TradeProposal(
+            strategy=strategy,
+            symbol="AAPL",
+            action=TradeAction.BUY,
+            desired_quantity=1,
+            reference_price=Decimal("200"),
+            reason="production cancel wiring",
+            generated_at=datetime.fromisoformat("2026-07-26T12:00:00+00:00"),
+        )
+
+        with TemporaryDirectory() as directory:
+            client = _ConnectedClient()
+            repository = build_order_repository(
+                Path(directory) / "orders.sqlite3"
+            )
+            adapter = build_execution_candidate(_config(), repository=repository)
+            adapter._connected = True
+            adapter._client = client
+            adapter._account = "DU1234567"
+            adapter._snapshot_complete = True
+            adapter._next_order_id = 100
+            adapter.arm(
+                session_id="session",
+                allowed_symbols=("AAPL",),
+                max_order_notional=Decimal("1000"),
+            )
+            application = build_execution_application(
+                repository=repository, broker=adapter
+            )
+
+            with patch.dict(sys.modules, _ibapi_stub_modules()), patch(
+                _ROUTING_TARGET, _allow_routing
+            ):
+                result = application.submit_approved(
+                    proposal=proposal,
+                    decision=RiskDecision.approve(requested_quantity=1),
+                    execution_symbol="AAPL",
+                    session_id="session",
+                    reason="production cancel wiring",
+                )
+                first = application.cancel(result.intent.order_id)
+                second = application.cancel(result.intent.order_id)
+
+        self.assertEqual(len(client.placed), 1)
+        self.assertEqual(result.broker_order_id, 100)
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(client.cancelled, [(100, "")])
 
     def test_sessions_delegates_to_the_journal_without_touching_sqlite(
         self,
@@ -1270,10 +1378,16 @@ class IBKRPaperOrderTests(unittest.TestCase):
             self.assertEqual(client.placed, [])
 
     def test_submit_uncertain_queues_an_unknown_event(self) -> None:
-        """A failed place call is UNKNOWN, never FILLED, and names the order."""
+        """A failed place call is UNKNOWN, never FILLED, and names the order.
+
+        The place call really happens: the fake records it and then raises, so
+        the UNKNOWN event below is evidence that the uncertain path ran, not
+        evidence that the order was refused earlier by some other gate.
+        """
 
         class FailingClient(_ConnectedClient):
             def placeOrder(self, order_id, contract, order) -> None:
+                self.placed.append((order_id, contract, order))
                 raise RuntimeError("socket gone")
 
         with TemporaryDirectory() as directory:
@@ -1281,7 +1395,9 @@ class IBKRPaperOrderTests(unittest.TestCase):
             service, repository = self._armed_service(directory, client)
             intent = _intent()
 
-            with patch(_ROUTING_TARGET, _allow_routing):
+            with patch.dict(sys.modules, _ibapi_stub_modules()), patch(
+                _ROUTING_TARGET, _allow_routing
+            ):
                 reservation = service.reserve(intent)
                 # The application writes the durable correlation between the
                 # two phases; the adapter does not.
@@ -1299,6 +1415,12 @@ class IBKRPaperOrderTests(unittest.TestCase):
             self.assertIsInstance(error, ExecutionSubmissionUncertain)
             self.assertEqual(error.order_id, intent.order_id)
             self.assertEqual(error.broker_order_id, reservation.broker_order_id)
+            # The order reached the broker client, built from the intent.
+            self.assertEqual(len(client.placed), 1)
+            placed_id, contract, order = client.placed[0]
+            self.assertEqual(placed_id, reservation.broker_order_id)
+            self.assertEqual(contract.symbol, intent.execution_symbol)
+            self.assertEqual(order.account, "DU1234567")
 
             events = service.events()
             self.assertEqual(len(events), 1)
@@ -1355,6 +1477,195 @@ class IBKRPaperOrderTests(unittest.TestCase):
                 [(event.broker_status, event.status) for event in events],
                 list(expected),
             )
+
+    # ------------------------------------------------------------------
+    # Submit-time revalidation.  reserve() runs every hard gate, but the
+    # durable write sits between the two calls, and inside that gap the
+    # session can be disarmed, the account rebound, the allowlist replaced,
+    # the notional ceiling lowered and the sellable book shrunk.  Each test
+    # below mutates exactly one of those and requires the send to be refused
+    # with placeOrder never called; the durable row is allowed to stand.
+    # ------------------------------------------------------------------
+
+    def _reserve_and_record(
+        self,
+        service: IBKRExecutionAdapter,
+        repository: SQLiteOrderRepository,
+        intent: OrderIntent,
+    ) -> BrokerOrderReservation:
+        """Reserve, then write the correlation the way the application does."""
+
+        with patch(_ROUTING_TARGET, _allow_routing):
+            reservation = service.reserve(intent)
+        repository.record_intent(
+            intent,
+            broker_order_id=reservation.broker_order_id,
+            account_alias=reservation.account_alias,
+        )
+        return reservation
+
+    def _submit_expecting_refusal(
+        self,
+        service: IBKRExecutionAdapter,
+        reservation: BrokerOrderReservation,
+        pattern: str,
+    ) -> None:
+        with patch.dict(sys.modules, _ibapi_stub_modules()), patch(
+            _ROUTING_TARGET, _allow_routing
+        ):
+            with self.assertRaisesRegex(IBKRPaperOrderError, pattern):
+                service.submit(reservation)
+
+    def test_submit_refuses_after_the_bound_account_changes(self) -> None:
+        """The managedAccounts race: reserve on one DU account, send on none."""
+
+        with TemporaryDirectory() as directory:
+            client = _ConnectedClient()
+            service, repository = self._armed_service(directory, client)
+            intent = _intent(reason="account race")
+            reservation = self._reserve_and_record(
+                service, repository, intent
+            )
+            self.assertEqual(client.placed, [])
+
+            service._account = "DU7654321"
+            self._submit_expecting_refusal(
+                service, reservation, "账户已变化"
+            )
+
+            self.assertEqual(client.placed, [])
+            # The row stays: the order is nameable, it simply never went out.
+            self.assertIsNotNone(repository.intent(intent.order_id))
+
+            # Re-arming on the new account makes the binding valid again, so
+            # the reservation's own alias is then the only thing standing
+            # between a correlation written for one book and a send on another.
+            service.arm(
+                session_id="session",
+                allowed_symbols=("AAPL",),
+                max_order_notional=Decimal("1000"),
+            )
+            self.assertTrue(service.armed_account_binding_is_valid())
+            self._submit_expecting_refusal(
+                service, reservation, "预留账户与当前账户不一致"
+            )
+            self.assertEqual(client.placed, [])
+
+    def test_submit_refuses_after_the_session_is_disarmed(self) -> None:
+        """disarm between reserve and submit must stop the send.
+
+        Nothing else can catch this one: an unarmed service has no binding to
+        invalidate and ``disarm`` leaves the account untouched, so only the
+        armed-session gate stands between a disarmed session and a live order.
+        """
+
+        with TemporaryDirectory() as directory:
+            client = _ConnectedClient()
+            service, repository = self._armed_service(directory, client)
+            intent = _intent(reason="disarm race")
+            reservation = self._reserve_and_record(
+                service, repository, intent
+            )
+            self.assertEqual(client.placed, [])
+
+            service.disarm()
+            self.assertTrue(service.armed_account_binding_is_valid())
+            self._submit_expecting_refusal(
+                service, reservation, "已解除武装"
+            )
+
+            self.assertEqual(client.placed, [])
+            self.assertIsNotNone(repository.intent(intent.order_id))
+
+    def test_submit_refuses_after_the_symbol_leaves_the_allowlist(self) -> None:
+        """A re-armed session with a different candidate set must not send."""
+
+        with TemporaryDirectory() as directory:
+            client = _ConnectedClient()
+            service, repository = self._armed_service(directory, client)
+            intent = _intent(reason="allowlist race")
+            reservation = self._reserve_and_record(
+                service, repository, intent
+            )
+
+            service.disarm()
+            service.arm(
+                session_id="session",
+                allowed_symbols=("MSFT",),
+                max_order_notional=Decimal("1000"),
+            )
+            self._submit_expecting_refusal(
+                service, reservation, "候选集"
+            )
+
+            self.assertEqual(client.placed, [])
+
+    def test_submit_refuses_after_the_notional_ceiling_drops(self) -> None:
+        """A lowered hard ceiling applies to already-reserved orders too."""
+
+        with TemporaryDirectory() as directory:
+            client = _ConnectedClient()
+            service, repository = self._armed_service(directory, client)
+            intent = _intent(reason="notional race")
+            reservation = self._reserve_and_record(
+                service, repository, intent
+            )
+
+            service.disarm()
+            service.arm(
+                session_id="session",
+                allowed_symbols=("AAPL",),
+                max_order_notional=Decimal("100"),
+            )
+            self._submit_expecting_refusal(
+                service, reservation, "名义金额上限"
+            )
+
+            self.assertEqual(client.placed, [])
+
+    def test_submit_refuses_after_the_sellable_quantity_drops(self) -> None:
+        """A SELL sized at reserve time must fit the book at send time."""
+
+        with TemporaryDirectory() as directory:
+            client = _ConnectedClient()
+            service, repository = self._armed_service(
+                directory, client, sellable={"AAPL": 10}
+            )
+            intent = _intent(
+                side=Side.SELL,
+                quantity=10,
+                limit_price=Decimal("50"),
+                reason="sellable race",
+            )
+            reservation = self._reserve_and_record(
+                service, repository, intent
+            )
+
+            service._sellable_quantities["AAPL"] = 4
+            self._submit_expecting_refusal(
+                service, reservation, "可卖整股"
+            )
+
+            self.assertEqual(client.placed, [])
+
+    def test_submit_refuses_a_reservation_that_names_another_order(self) -> None:
+        """A swapped reservation is not the order the session authorised."""
+
+        with TemporaryDirectory() as directory:
+            client = _ConnectedClient()
+            service, repository = self._armed_service(directory, client)
+            intent = _intent(reason="reservation mismatch")
+            reservation = self._reserve_and_record(
+                service, repository, intent
+            )
+
+            swapped = BrokerOrderReservation(
+                order_id="some-other-order",
+                broker_order_id=reservation.broker_order_id,
+                account_alias=reservation.account_alias,
+            )
+            self._submit_expecting_refusal(service, swapped, "已预留状态")
+            self.assertEqual(client.placed, [])
 
     def test_a_fractional_execution_is_not_truncated(self) -> None:
         """A 1.5-share fill is delivered as 1.5 and never rounds the book."""

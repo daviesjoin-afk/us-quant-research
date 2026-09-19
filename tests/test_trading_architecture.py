@@ -24,6 +24,7 @@ from __future__ import annotations
 import ast
 import pathlib
 import subprocess
+import sys
 
 import pytest
 
@@ -2335,3 +2336,115 @@ def test_the_adapters_record_time_in_one_place() -> None:
         if "def now_iso" in source:
             formatters.add(path.relative_to(_SRC).as_posix())
     assert formatters == {"trading/adapters/clock.py"}, sorted(formatters)
+
+
+# -- scripts/ -------------------------------------------------------------
+#
+# The scripts are the one directory pytest never imports, and that is exactly
+# why a stale import can live there through a whole migration:
+# ``scripts/check_paper_order_channel.py`` kept importing the Paper order
+# journal after the journal was deleted, so ``--help`` raised
+# ``ModuleNotFoundError`` and nothing noticed.  These guards scan that
+# directory directly.
+
+SCRIPTS_DIR = _REPO_ROOT / "scripts"
+
+#: Union of every retired-module tuple above.  A script naming any of them is
+#: broken at import time, because none of these modules exists any more.
+ALL_RETIRED_MODULES = (
+    *RETIRED_MARKET_DATA_MODULES,
+    *RETIRED_ACCOUNT_MODULES,
+    *RETIRED_STRATEGY_MODULES,
+    *RETIRED_EXECUTION_MODULES,
+)
+
+
+def _us_quant_module_exists(module: str) -> bool:
+    """Whether ``us_quant.<...>`` resolves to a file in ``src/us_quant``."""
+
+    head, *rest = module.split(".")
+    if head != "us_quant":
+        return True
+    base = _SRC.joinpath(*rest)
+    return base.with_suffix(".py").is_file() or (base / "__init__.py").is_file()
+
+
+def test_no_script_imports_a_retired_module() -> None:
+    """Deleting a module must not leave an import behind under ``scripts/``."""
+
+    offenders: list[str] = []
+    for path in _python_files(SCRIPTS_DIR):
+        used = _matches(_imports(path), ALL_RETIRED_MODULES)
+        if used:
+            offenders.append(
+                f"{path.relative_to(_REPO_ROOT).as_posix()} -> "
+                f"{sorted(used)}"
+            )
+    assert not offenders, offenders
+
+
+def test_every_module_a_script_imports_exists() -> None:
+    """The general form of the guard above, so the next deletion is caught too.
+
+    A named retired module is caught by the list; this test catches the rest,
+    including a module deleted in a migration whose list nobody extended.
+    """
+
+    missing: list[str] = []
+    for path in _python_files(SCRIPTS_DIR):
+        for module in sorted(_imports(path)):
+            if not _us_quant_module_exists(module):
+                missing.append(
+                    f"{path.relative_to(_REPO_ROOT).as_posix()} imports "
+                    f"{module}, which does not exist"
+                )
+    assert not missing, missing
+
+
+def test_the_paper_order_channel_diagnostic_still_runs() -> None:
+    """The script's own entry point must work: ``--help`` exits 0.
+
+    A diagnostic that cannot print its help text is not a diagnostic, and the
+    failure it had was invisible to a suite that only ever imports ``src``.
+    """
+
+    script = SCRIPTS_DIR / "check_paper_order_channel.py"
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "Read-only diagnostic" in completed.stdout
+
+
+def test_the_paper_order_channel_diagnostic_cannot_submit() -> None:
+    """Diagnostic only: it never arms the session, so it can never send.
+
+    ``arm`` is the gate every send path sits behind -- ``reserve`` refuses for
+    an unarmed session, and ``submit`` re-refuses -- so a script that does not
+    arm cannot place an order even by accident.
+    """
+
+    source = (SCRIPTS_DIR / "check_paper_order_channel.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            assert node.func.attr not in {
+                "arm",
+                "reserve",
+                "submit",
+                "placeOrder",
+                "cancel",
+                "cancelOrder",
+            }, f"the diagnostic must not call {node.func.attr}"
+    assert '"orders_submitted": 0' in source
+    assert "build_execution_candidate" in source
+    assert "build_order_repository" in source
+    # The real order store must not be touched: the run writes to a temporary
+    # directory and opens nothing else.
+    assert "TemporaryDirectory" in source

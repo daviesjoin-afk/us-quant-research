@@ -1,3 +1,19 @@
+"""Read-only diagnostic for the IBKR Paper order channel.
+
+Connects to a locally running IB Gateway, reads the account and the broker's
+open-order count, prints one JSON object and disconnects.  It is a *diagnostic*
+and stays one:
+
+* it never arms the session, so ``reserve`` and ``submit`` are unreachable and
+  ``orders_submitted`` is always ``0``;
+* it writes to a temporary order store, so a run cannot touch the real one;
+* it connects, reads and disconnects -- nothing else.
+
+The channel is built through the execution composition root, which is the same
+assembly production uses, so what this script observes is the channel the app
+actually runs rather than a second copy of it.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -6,9 +22,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from us_quant.ibkr import IBKRConnectionConfig
-from us_quant.ibkr_paper_orders import (
-    IBKRPaperOrderService,
-    PaperOrderJournal,
+from us_quant.trading.composition.execution import (
+    build_execution_candidate,
+    build_order_repository,
 )
 
 
@@ -28,12 +44,10 @@ def main() -> int:
         connection_timeout_seconds=args.timeout,
     )
     with TemporaryDirectory() as directory:
-        service = IBKRPaperOrderService(
-            config,
-            journal=PaperOrderJournal(
-                Path(directory) / "paper_channel_check.sqlite3"
-            ),
+        repository = build_order_repository(
+            Path(directory) / "paper_channel_check.sqlite3"
         )
+        service = build_execution_candidate(config, repository=repository)
         try:
             connection = service.connect()
             state = service.broker_state()

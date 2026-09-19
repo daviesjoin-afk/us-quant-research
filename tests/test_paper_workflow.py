@@ -134,7 +134,7 @@ class Orders:
         self.calls.append("events")
         return ()
 
-    def cancel_intent(self, order_id):
+    def cancel(self, order_id):
         self.calls.append("cancel")
         return True
 

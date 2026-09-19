@@ -633,9 +633,14 @@ def test_a_transition_updates_the_timestamp_and_audits(
         version.version_id, StrategyStatus.STOPPED, reason="operator"
     )
     assert moved.created_at == before
-    assert moved.updated_at > before
+    # Windows clock resolution can return the same aware timestamp for two
+    # immediate datetime.now() calls.  The contract is that a transition never
+    # moves the deployment clock backwards, not that every transition must
+    # manufacture a strictly later microsecond.
+    assert moved.updated_at >= before
     assert repository.audits[-1].event == "transition"
     assert repository.audits[-1].detail == "research->stopped: operator"
+    assert repository.audits[-1].occurred_at == moved.updated_at
 
 
 def test_a_transition_to_an_unknown_status_is_refused(application) -> None:

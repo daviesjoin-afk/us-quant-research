@@ -5,7 +5,7 @@ import sys
 from tempfile import TemporaryDirectory
 from threading import Barrier, Event, Thread
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 import unittest
 from unittest.mock import patch
 
@@ -132,6 +132,26 @@ class _ConnectedClient:
 
     def cancelOrder(self, order_id: int, manual_time: str) -> None:
         self.cancelled.append((order_id, manual_time))
+
+
+class _BlockingClient(_ConnectedClient):
+    """A client that parks inside ``placeOrder``.
+
+    Holding the send open is the only way to observe the submission critical
+    section from outside: another thread can then try to change the state and
+    the test can tell whether the change was ordered before the send, after
+    it, or inserted into the middle of it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.send_started = Event()
+        self.send_release = Event()
+
+    def placeOrder(self, order_id, contract, order) -> None:
+        self.placed.append((order_id, contract, order))
+        self.send_started.set()
+        self.send_release.wait(5)
 
 
 def _ibapi_stub_modules() -> dict[str, ModuleType]:
@@ -1666,6 +1686,250 @@ class IBKRPaperOrderTests(unittest.TestCase):
             )
             self._submit_expecting_refusal(service, swapped, "已预留状态")
             self.assertEqual(client.placed, [])
+
+    # ------------------------------------------------------------------
+    # The window between the last safety read and the send.  Everything
+    # above mutates the state *before* submit is called, which is the case a
+    # plain re-check already covers.  These tests occupy the window itself:
+    # every gate has passed, the order object does not exist yet, and a
+    # mutation lands from another thread.
+    # ------------------------------------------------------------------
+
+    def _submit_with_a_pause_after_the_last_check(
+        self,
+        service: IBKRExecutionAdapter,
+        reservation: BrokerOrderReservation,
+        mutate: Callable[[], None],
+    ) -> list[Exception]:
+        """Submit with ``mutate`` landing after the gates passed, before the send.
+
+        The pause sits exactly on the boundary ``submit`` defines: after
+        ``_revalidate_for_send`` has answered yes and before the send section
+        runs, so the order has not been built and nothing has been sent.
+        ``mutate`` then runs on this thread while the submitter waits -- the
+        state really does change underneath it, which is what makes this a
+        race and not another pre-submit setup.  Returning the failures instead
+        of asserting inside lets the caller check the refusal and the send
+        count together.
+        """
+
+        checked = Event()
+        release = Event()
+        failures: list[Exception] = []
+        original = IBKRExecutionAdapter._revalidate_for_send
+
+        def paused(self, res, order_intent):
+            authorization = original(self, res, order_intent)
+            checked.set()
+            release.wait(5)
+            return authorization
+
+        def run() -> None:
+            try:
+                service.submit(reservation)
+            except Exception as error:
+                failures.append(error)
+
+        with patch.dict(sys.modules, _ibapi_stub_modules()), patch(
+            _ROUTING_TARGET, _allow_routing
+        ), patch.object(
+            IBKRExecutionAdapter, "_revalidate_for_send", paused
+        ):
+            thread = Thread(target=run)
+            thread.start()
+            try:
+                self.assertTrue(
+                    checked.wait(5), "submit never passed its gates"
+                )
+                mutate()
+            finally:
+                release.set()
+                thread.join(5)
+        self.assertFalse(thread.is_alive(), "submit never finished")
+        return failures
+
+    def test_a_disarm_after_the_last_check_and_before_the_send_stops_it(
+        self,
+    ) -> None:
+        """A disarm inside the window must reach the sender, not the broker."""
+
+        with TemporaryDirectory() as directory:
+            client = _ConnectedClient()
+            service, repository = self._armed_service(directory, client)
+            intent = _intent(reason="disarm inside the window")
+            reservation = self._reserve_and_record(
+                service, repository, intent
+            )
+
+            failures = self._submit_with_a_pause_after_the_last_check(
+                service, reservation, service.disarm
+            )
+
+            self.assertIsNone(service._armed_session_id)
+            # The order never left, and the refusal has to name the change
+            # rather than some unrelated gate.
+            self.assertEqual(client.placed, [])
+            self.assertEqual(len(failures), 1)
+            self.assertIsInstance(failures[0], IBKRPaperOrderError)
+            self.assertIn("会话武装状态已变化", str(failures[0]))
+            # The durable row predates the send and is allowed to stand: the
+            # order stays nameable for reconciliation.
+            self.assertIsNotNone(repository.intent(intent.order_id))
+
+    def test_an_account_rebind_after_the_last_check_and_before_the_send_stops_it(
+        self,
+    ) -> None:
+        """The managedAccounts race: authorised on one book, sent on none."""
+
+        with TemporaryDirectory() as directory:
+            client = _ConnectedClient()
+            service, repository = self._armed_service(directory, client)
+            intent = _intent(reason="account rebind inside the window")
+            reservation = self._reserve_and_record(
+                service, repository, intent
+            )
+
+            def rebind() -> None:
+                service.gateway_managed_accounts(
+                    service._client, 1, "DU7654321"
+                )
+
+            failures = self._submit_with_a_pause_after_the_last_check(
+                service, reservation, rebind
+            )
+
+            # The rebind really happened -- otherwise this proves nothing.
+            self.assertEqual(service._account, "DU7654321")
+            self.assertFalse(service.armed_account_binding_is_valid())
+            self.assertEqual(client.placed, [])
+            self.assertEqual(len(failures), 1)
+            self.assertIsInstance(failures[0], IBKRPaperOrderError)
+            self.assertIn("账户已变化", str(failures[0]))
+
+    def test_a_disarm_during_the_send_is_ordered_after_it(self) -> None:
+        """The section spans the send, so a mutation cannot be inserted into it.
+
+        ``placeOrder`` is held open here while another thread disarms.  If the
+        submitter really owns the state lock, the disarm cannot complete until
+        the order has left -- so the order goes out authorised by the state it
+        was sent under, and the disarm is ordered after it.  That linearisation
+        is the whole point: "no insertion" means the mutation waits, and the
+        only alternative would be a send that never observed the mutation
+        either way.
+        """
+
+        with TemporaryDirectory() as directory:
+            client = _BlockingClient()
+            service, repository = self._armed_service(directory, client)
+            intent = _intent(reason="disarm during the send")
+            reservation = self._reserve_and_record(
+                service, repository, intent
+            )
+
+            failures: list[Exception] = []
+
+            def run() -> None:
+                try:
+                    service.submit(reservation)
+                except Exception as error:
+                    failures.append(error)
+
+            with patch.dict(sys.modules, _ibapi_stub_modules()), patch(
+                _ROUTING_TARGET, _allow_routing
+            ):
+                thread = Thread(target=run)
+                thread.start()
+                self.assertTrue(client.send_started.wait(5))
+
+                attempted = Event()
+                disarmed = Event()
+
+                def disarm() -> None:
+                    attempted.set()
+                    service.disarm()
+                    disarmed.set()
+
+                other = Thread(target=disarm)
+                other.start()
+                self.assertTrue(attempted.wait(5))
+                try:
+                    self.assertFalse(
+                        disarmed.wait(0.3),
+                        "disarm landed inside the send section",
+                    )
+                    self.assertIsNotNone(service._armed_session_id)
+                finally:
+                    client.send_release.set()
+                    thread.join(5)
+                    other.join(5)
+
+            self.assertEqual(failures, [])
+            self.assertEqual(len(client.placed), 1)
+            self.assertTrue(disarmed.is_set())
+            self.assertIsNone(service._armed_session_id)
+
+    def test_an_account_rebind_during_the_send_waits_for_the_send(self) -> None:
+        """The account write is a lock participant, and this is why it has to be.
+
+        An asynchronous ``managedAccounts`` that landed between the last check
+        and the send would put the order on an account the session never
+        authorised.  It therefore waits -- and the account it changes to is
+        visible immediately afterwards, so nothing is silently dropped.
+        """
+
+        with TemporaryDirectory() as directory:
+            client = _BlockingClient()
+            service, repository = self._armed_service(directory, client)
+            intent = _intent(reason="account rebind during the send")
+            reservation = self._reserve_and_record(
+                service, repository, intent
+            )
+
+            failures: list[Exception] = []
+
+            def run() -> None:
+                try:
+                    service.submit(reservation)
+                except Exception as error:
+                    failures.append(error)
+
+            with patch.dict(sys.modules, _ibapi_stub_modules()), patch(
+                _ROUTING_TARGET, _allow_routing
+            ):
+                thread = Thread(target=run)
+                thread.start()
+                self.assertTrue(client.send_started.wait(5))
+
+                attempted = Event()
+                rebound = Event()
+
+                def rebind() -> None:
+                    attempted.set()
+                    service.gateway_managed_accounts(
+                        service._client, 1, "DU7654321"
+                    )
+                    rebound.set()
+
+                other = Thread(target=rebind)
+                other.start()
+                self.assertTrue(attempted.wait(5))
+                try:
+                    self.assertFalse(
+                        rebound.wait(0.3),
+                        "the account rebind landed inside the send section",
+                    )
+                    self.assertEqual(service._account, "DU1234567")
+                finally:
+                    client.send_release.set()
+                    thread.join(5)
+                    other.join(5)
+
+            self.assertEqual(failures, [])
+            self.assertEqual(len(client.placed), 1)
+            # The order went out on the account the session was armed on.
+            self.assertEqual(client.placed[0][2].account, "DU1234567")
+            self.assertTrue(rebound.is_set())
+            self.assertEqual(service._account, "DU7654321")
 
     def test_a_fractional_execution_is_not_truncated(self) -> None:
         """A 1.5-share fill is delivered as 1.5 and never rounds the book."""

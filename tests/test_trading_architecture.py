@@ -578,7 +578,8 @@ def test_shell_does_not_import_application_runtime_or_adapters() -> None:
 
 
 def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
-    """The v2 package holds the shell, the route table and native pages.
+    """The v2 package holds the shell, the route table, native pages and the
+    desktop's workflow aggregate.
 
     ``pages/account.py`` was the first genuinely native v2 page;
     ``pages/strategy.py`` is the second, ``pages/risk.py`` the third, and
@@ -587,6 +588,11 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
     the detail tables and the page), and one module holding all four would be the
     400-line page this migration exists to avoid.  None of those routes reuses a
     legacy builder from ``MainWindow`` any more.
+
+    ``workflows.py`` arrived with Trading Framework Closure v2C: the aggregate
+    that composes the four workflow controllers behind one execution lease is
+    desktop/application orchestration, so its home is here rather than in a root
+    module beside the trading core.
     """
 
     desktop_v2 = _SRC / "desktop_v2"
@@ -598,6 +604,7 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "__init__.py",
         "navigation.py",
         "shell.py",
+        "workflows.py",
         "pages/__init__.py",
         "pages/account.py",
         "pages/risk.py",
@@ -1467,8 +1474,13 @@ def _strategy_related_files() -> list[pathlib.Path]:
             or relative == "trading/ports/strategy_repository.py"
             or relative == "desktop_v2/pages/strategy.py"
             or relative == "auto_quant.py"
-            or relative == "auto_intraday.py"
-            or relative == "targeted_intraday.py"
+            # Trading Framework Closure v2C moved the two session-config
+            # builders out of the deleted ``auto_intraday``/``targeted_intraday``
+            # root modules.  The names are re-pointed rather than dropped: a
+            # guard left holding a path that no longer exists silently judges
+            # nothing.
+            or relative == "trading/composition/session_config.py"
+            or relative == "shadow/config.py"
         ):
             judged.append(path)
     return judged
@@ -2376,6 +2388,8 @@ FORBIDDEN_RUNTIME_TYPE_NAMES = (
 )
 
 RUNTIME_DIR = _TRADING / "runtime"
+RUNTIME_CONFIG = RUNTIME_DIR / "config.py"
+RUNTIME_HEALTH = RUNTIME_DIR / "health.py"
 RUNTIME_MODELS = RUNTIME_DIR / "models.py"
 RUNTIME_ARTIFACTS = RUNTIME_DIR / "artifacts.py"
 RUNTIME_PREFLIGHT = RUNTIME_DIR / "preflight.py"
@@ -2399,6 +2413,8 @@ PAPER_WORKFLOW = RUNTIME_DIR / "workflow.py"
 #: Every production module of the runtime package.  ``__init__`` is excluded:
 #: it is a package marker, not a module with a responsibility.
 RUNTIME_MODULES = (
+    RUNTIME_CONFIG,
+    RUNTIME_HEALTH,
     RUNTIME_MODELS,
     RUNTIME_ARTIFACTS,
     RUNTIME_PREFLIGHT,
@@ -2985,7 +3001,11 @@ def test_the_paper_workflow_owns_lifecycle_and_no_broker() -> None:
 
     offending = _matches(
         _imports(PAPER_WORKFLOW),
-        PAPER_FORBIDDEN_BELOW + ("us_quant.paper_trading_service",),
+        PAPER_FORBIDDEN_BELOW
+        + (
+            "us_quant.paper_trading_service",
+            "us_quant.trading.application.paper",
+        ),
     )
     assert not offending, sorted(offending)
 

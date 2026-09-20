@@ -23,7 +23,7 @@ from typing import Mapping, Protocol, Sequence
 
 from us_quant.trading.domain.orders import OrderIntent
 from us_quant.trading.domain.strategy import StrategyIdentity
-from us_quant.shadow_paper import ShadowConfig
+from us_quant.trading.runtime.config import TradingSessionConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +99,7 @@ def build_snapshot(
     *,
     session,
     book: BookView,
-    config: ShadowConfig,
+    config: TradingSessionConfig,
     identity: StrategyIdentity,
     candidate_count: int,
     observed_at: datetime,

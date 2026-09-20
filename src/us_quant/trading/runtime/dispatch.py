@@ -31,9 +31,9 @@ from us_quant.trading.domain.strategy import TradeProposal
 from us_quant.trading.ports.broker_execution import (
     ExecutionSubmissionUncertain,
 )
+from us_quant.trading.runtime.config import TradingSessionConfig
 from us_quant.trading.runtime.models import StrategySessionPolicy
 from us_quant.trading.runtime.portfolio import SessionBook
-from us_quant.shadow_paper import ShadowConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +62,7 @@ class OrderDispatch:
     def __init__(
         self,
         *,
-        config: ShadowConfig,
+        config: TradingSessionConfig,
         risk: RiskApplication,
         execution: ExecutionApplication,
     ) -> None:

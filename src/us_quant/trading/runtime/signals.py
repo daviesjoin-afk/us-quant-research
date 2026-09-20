@@ -23,15 +23,15 @@ from datetime import datetime
 from decimal import Decimal
 
 from us_quant.trading.domain.market import MarketQuote
+from us_quant.trading.runtime.config import TradingSessionConfig
 from us_quant.trading.runtime.models import AutoQuantCandidate
-from us_quant.shadow_paper import ShadowConfig
 
 
 class SignalScanner:
     def __init__(
         self,
         *,
-        config: ShadowConfig,
+        config: TradingSessionConfig,
         candidates: tuple[AutoQuantCandidate, ...],
         market_reference_symbols: tuple[str, ...],
     ) -> None:

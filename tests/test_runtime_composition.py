@@ -14,7 +14,7 @@ from decimal import Decimal
 import pytest
 
 from us_quant.trading.runtime.paper_contracts import PaperEngine
-from us_quant.shadow_paper import ShadowConfig
+from us_quant.trading.runtime.config import TradingSessionConfig
 from us_quant.trading.application.execution import ExecutionApplication
 from us_quant.trading.application.risk import RiskApplication
 from us_quant.trading.composition.runtime import (
@@ -57,8 +57,8 @@ _CANDIDATES = (
 )
 
 
-def _config() -> ShadowConfig:
-    return ShadowConfig(
+def _config() -> TradingSessionConfig:
+    return TradingSessionConfig(
         initial_cash=Decimal("10000"), capital_source="test"
     )
 

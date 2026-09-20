@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from us_quant.workflow_controller import (
+from us_quant.desktop_v2.workflows import (
     MarketAccountController,
     ResearchWorkflowController,
     ShadowWorkflowController,

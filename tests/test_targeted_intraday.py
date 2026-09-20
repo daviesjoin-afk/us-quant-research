@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from us_quant.shadow_paper import ShadowPaperEngine, ShadowPaperStore
-from us_quant.targeted_intraday import build_targeted_shadow_config
+from us_quant.shadow.config import build_targeted_shadow_config
 
 
 PARAMETERS = {

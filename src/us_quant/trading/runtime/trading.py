@@ -52,11 +52,11 @@ from us_quant.trading.runtime.artifacts import (
     AutoQuantSnapshot,
     build_snapshot,
 )
+from us_quant.trading.runtime.config import TradingSessionConfig
 from us_quant.trading.runtime.models import StrategyPositionView
 from us_quant.trading.runtime.portfolio import SessionBook
 from us_quant.trading.runtime.session import SessionState
 from us_quant.trading.runtime.strategy import StrategyRuntime
-from us_quant.shadow_paper import ShadowConfig
 
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -73,7 +73,7 @@ class TradingRuntime:
     def __init__(
         self,
         *,
-        config: ShadowConfig,
+        config: TradingSessionConfig,
         strategy: StrategyRuntime,
         risk: RiskApplication,
         execution: ExecutionApplication,

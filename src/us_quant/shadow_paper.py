@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from collections import deque
 from contextlib import closing
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, time, timezone
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 import sqlite3
-from typing import Iterable, Mapping
+from typing import Iterable
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -16,50 +16,16 @@ from us_quant.trading.domain.market import (
     MarketSnapshot,
 )
 from us_quant.trading.domain.risk import (
-    LayeredRiskLimits,
     SessionRiskOverrides,
     SymbolRiskOverrides,
     resolve_session_risk_overrides,
     resolve_symbol_risk_overrides,
 )
+from us_quant.shadow.config import ShadowSimulationConfig
 from us_quant.sqlite_support import connect_sqlite
 
 
 NEW_YORK = ZoneInfo("America/New_York")
-
-
-@dataclass(frozen=True, slots=True)
-class ShadowConfig:
-    initial_cash: Decimal
-    capital_source: str
-    max_position_fraction: Decimal = Decimal("0.10")
-    symbol_risk_multipliers: Mapping[str, Decimal] = field(
-        default_factory=dict
-    )
-    min_order_notional: Decimal = Decimal("50")
-    commission_per_order: Decimal = Decimal("0.35")
-    slippage_bps: Decimal = Decimal("2")
-    maximum_spread_fraction: Decimal = Decimal("0.002")
-    momentum_lookback_minutes: int = 5
-    warmup_minutes: int = 10
-    minimum_momentum: Decimal = Decimal("0.0035")
-    maximum_momentum: Decimal = Decimal("0.025")
-    minimum_positive_steps: int = 0
-    maximum_one_minute_move: Decimal = Decimal("1")
-    profit_target: Decimal = Decimal("0.012")
-    stop_loss: Decimal = Decimal("0.007")
-    trailing_stop: Decimal = Decimal("0.006")
-    maximum_hold_minutes: int = 45
-    maximum_trades_per_day: int = 4
-    entry_order_timeout_seconds: int = 90
-    daily_loss_limit: Decimal = Decimal("15")
-    entry_start: time = time(10, 0)
-    last_entry: time = time(15, 30)
-    force_flat: time = time(15, 45)
-    max_open_symbols: int = 1
-    layered_risk_limits: LayeredRiskLimits | None = field(
-        default=None, repr=False
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,7 +311,7 @@ class ShadowPaperEngine:
         *,
         store: ShadowPaperStore,
         allowed_symbols: Iterable[str],
-        config: ShadowConfig,
+        config: ShadowSimulationConfig,
         strategy_version_id: str = "unversioned",
         parameter_hash: str = "unverified",
         target_symbol: str | None = None,

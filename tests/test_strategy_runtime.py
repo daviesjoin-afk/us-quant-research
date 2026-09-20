@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, time, timezone
 from decimal import Decimal
 import unittest
 
-from us_quant.shadow_paper import ShadowConfig
+from us_quant.trading.runtime.config import TradingSessionConfig
 from us_quant.trading.domain.market import MarketDataMode, MarketQuote
 from us_quant.trading.domain.strategy import (
     StrategyIdentity,
@@ -64,7 +64,7 @@ def _quote(symbol: str, price: Decimal, *, spread: Decimal = Decimal("0.02")):
     )
 
 
-def _config(**overrides) -> ShadowConfig:
+def _config(**overrides) -> TradingSessionConfig:
     """A permissive configuration: one gate under test refuses at a time."""
 
     settings = {
@@ -86,7 +86,7 @@ def _config(**overrides) -> ShadowConfig:
         "maximum_hold_minutes": 45,
     }
     settings.update(overrides)
-    return ShadowConfig(**settings)
+    return TradingSessionConfig(**settings)
 
 
 def _candidate(symbol: str, score: str = "80") -> AutoQuantCandidate:
@@ -103,7 +103,7 @@ def _candidate(symbol: str, score: str = "80") -> AutoQuantCandidate:
 def _strategy(
     *,
     candidates: tuple[AutoQuantCandidate, ...] = (_candidate("AAA"),),
-    config: ShadowConfig | None = None,
+    config: TradingSessionConfig | None = None,
     references: tuple[str, ...] = (),
 ) -> StrategyRuntime:
     return StrategyRuntime(

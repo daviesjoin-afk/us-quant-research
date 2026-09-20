@@ -8,7 +8,7 @@ from us_quant.trading.composition.runtime import build_trading_runtime
 from us_quant.trading.runtime.artifacts import AutoQuantPosition
 from us_quant.trading.runtime.models import AutoQuantCandidate
 from us_quant.trading.runtime.trading import TradingRuntime
-from us_quant.auto_intraday import resolve_paper_session_capital
+from us_quant.trading.composition.session_config import resolve_paper_session_capital
 from us_quant.trading.application.execution import ExecutionApplication
 from us_quant.trading.domain.market import (
     MarketDataMode,
@@ -40,7 +40,7 @@ from us_quant.trading.ports.broker_execution import (
     ExecutionRefused,
     ExecutionSubmissionUncertain,
 )
-from us_quant.shadow_paper import ShadowConfig
+from us_quant.trading.runtime.config import TradingSessionConfig
 
 
 #: The identity the engine binds.  AutoQuantSnapshot still reports
@@ -85,7 +85,7 @@ def _risk(
 def _runtime(
     *,
     candidates: tuple[AutoQuantCandidate, ...],
-    config: ShadowConfig,
+    config: TradingSessionConfig,
     strategy: StrategyIdentity,
     risk: RiskApplication | None,
     execution: ExecutionApplication | None,
@@ -738,7 +738,7 @@ class AutoQuantTests(unittest.TestCase):
                     "AAA", "A", "T", 1, Decimal("80"), "趋势候选"
                 ),
             ),
-            config=ShadowConfig(
+            config=TradingSessionConfig(
                 initial_cash=Decimal("10000"),
                 capital_source="test",
                 max_position_fraction=Decimal("0.5"),
@@ -837,7 +837,7 @@ class AutoQuantTests(unittest.TestCase):
                     Decimal("90"), "趋势候选",
                 ),
             ),
-            config=ShadowConfig(
+            config=TradingSessionConfig(
                 initial_cash=Decimal("10000"),
                 capital_source="IBKR Paper",
                 max_position_fraction=Decimal("0.10"),
@@ -878,7 +878,7 @@ class AutoQuantTests(unittest.TestCase):
                     Decimal("90"), "趋势候选",
                 ),
             ),
-            config=ShadowConfig(
+            config=TradingSessionConfig(
                 initial_cash=Decimal("10000"),
                 capital_source="IBKR Paper",
                 max_position_fraction=Decimal("0.10"),
@@ -1002,7 +1002,7 @@ def _engine(
                 Decimal("88"), "趋势候选",
             ),
         ),
-        config=ShadowConfig(
+        config=TradingSessionConfig(
             initial_cash=Decimal("10000"),
             capital_source="IBKR Paper",
             max_position_fraction=Decimal("0.10"),
@@ -1078,7 +1078,7 @@ class MultiSymbolTests(unittest.TestCase):
         intents: list[OrderIntent] = []
         engine = _runtime(
             candidates=candidates,
-            config=ShadowConfig(
+            config=TradingSessionConfig(
                 initial_cash=Decimal("10000"),
                 capital_source="test",
                 max_open_symbols=2,
@@ -1136,7 +1136,7 @@ class MultiSymbolTests(unittest.TestCase):
                     Decimal("88"), "趋势候选",
                 ),
             ),
-            config=ShadowConfig(
+            config=TradingSessionConfig(
                 initial_cash=Decimal("10000"),
                 capital_source="IBKR Paper",
                 max_position_fraction=Decimal("0.10"),
@@ -1229,7 +1229,7 @@ class MultiSymbolTests(unittest.TestCase):
                     Decimal("88"), "趋势候选",
                 ),
             ),
-            config=ShadowConfig(
+            config=TradingSessionConfig(
                 initial_cash=Decimal("10000"),
                 capital_source="IBKR Paper",
                 max_position_fraction=Decimal("0.10"),
@@ -1376,7 +1376,7 @@ class MultiSymbolTests(unittest.TestCase):
         intents: list[OrderIntent] = []
         engine = _runtime(
             candidates=candidates,
-            config=ShadowConfig(
+            config=TradingSessionConfig(
                 initial_cash=Decimal("10000"),
                 capital_source="test",
                 max_open_symbols=2,
@@ -1437,7 +1437,7 @@ def _single_candidate_engine(
     risk: RiskApplication,
     submitted: list,
     *,
-    config: ShadowConfig | None = None,
+    config: TradingSessionConfig | None = None,
 ) -> TradingRuntime:
     """One candidate, warmed up, with a permissive risk application."""
 
@@ -1448,7 +1448,7 @@ def _single_candidate_engine(
             ),
         ),
         config=config
-        or ShadowConfig(
+        or TradingSessionConfig(
             initial_cash=Decimal("10000"),
             capital_source="test",
             max_position_fraction=Decimal("0.5"),
@@ -1512,7 +1512,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
                         "AAA", "A", "T", 1, Decimal("80"), "UP"
                     ),
                 ),
-                config=ShadowConfig(
+                config=TradingSessionConfig(
                     initial_cash=Decimal("1000"), capital_source="test"
                 ),
                 strategy=_STRATEGY,
@@ -1526,7 +1526,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
                         "AAA", "A", "T", 1, Decimal("80"), "UP"
                     ),
                 ),
-                config=ShadowConfig(
+                config=TradingSessionConfig(
                     initial_cash=Decimal("1000"), capital_source="test"
                 ),
                 strategy="version",
@@ -1588,7 +1588,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
         intents: list[OrderIntent] = []
         engine = _runtime(
             candidates=candidates,
-            config=ShadowConfig(
+            config=TradingSessionConfig(
                 initial_cash=Decimal("10000"),
                 capital_source="test",
                 max_open_symbols=1,
@@ -1658,7 +1658,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
         intents: list[OrderIntent] = []
         engine = _runtime(
             candidates=candidates,
-            config=ShadowConfig(
+            config=TradingSessionConfig(
                 initial_cash=Decimal("10000"),
                 capital_source="test",
                 max_open_symbols=1,

@@ -20,10 +20,10 @@ layer permits" cannot be assembled from two different lists.
 
 from __future__ import annotations
 
-from us_quant.shadow_paper import ShadowConfig
 from us_quant.trading.application.execution import ExecutionApplication
 from us_quant.trading.application.risk import RiskApplication
 from us_quant.trading.domain.strategy import StrategyIdentity
+from us_quant.trading.runtime.config import TradingSessionConfig
 from us_quant.trading.runtime.models import AutoQuantCandidate
 from us_quant.trading.runtime.strategy import StrategyRuntime
 from us_quant.trading.runtime.trading import TradingRuntime
@@ -31,7 +31,7 @@ from us_quant.trading.runtime.trading import TradingRuntime
 
 def build_strategy_runtime(
     *,
-    config: ShadowConfig,
+    config: TradingSessionConfig,
     candidates: tuple[AutoQuantCandidate, ...],
     identity: StrategyIdentity,
     market_reference_symbols: tuple[str, ...] = (),
@@ -48,7 +48,7 @@ def build_strategy_runtime(
 
 def build_trading_runtime(
     *,
-    config: ShadowConfig,
+    config: TradingSessionConfig,
     candidates: tuple[AutoQuantCandidate, ...],
     identity: StrategyIdentity,
     risk: RiskApplication,

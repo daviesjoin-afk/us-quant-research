@@ -1,155 +1,48 @@
-"""The Paper trading application boundary: order-service ownership and reads.
+"""``PaperTradingService``: the owner of the Paper order-service lifecycle.
 
-``MainWindow`` reaches the Paper execution stack only through this service.  It
-owns the order-service lifecycle end to end: it constructs and connects
-*candidate* order services, promotes exactly one of them into the single
-*active* slot once a launch has been validated and armed, reconnects that
-active service for manual reconciliation, disconnects it for the zero-state
-finalization proof, and clears the slot only after the workflow itself reports
-the session finalized.
-
-It deliberately does **not** own the trading semantics.  Submitting, cancelling,
-replacing, arming rules, broker/account validation, capital resolution,
-reconciliation algorithms, the finalization decision, phase transitions, and the
-execution lease all stay exactly where they were.  This class decides only *who
-currently holds the broker connection* and hands out the reads and lifecycle
-calls the window is allowed to make.
-
-Two ownership slots, never one:
-
-* ``_candidates`` holds services that are connected but not yet trusted.  A
-  broker connection succeeding is *not* permission to become the active
-  session: the launch still has to survive the preflight, strategy, and capital
-  re-checks, so an expired asynchronous callback must be able to dispose of its
-  own candidate without ever touching the active slot.
-* ``_order_service`` holds the one service that a validated, armed launch
-  published.  Promotion refuses to overwrite it, and it is never disconnected
-  implicitly by a newer candidate arriving.
-
-Candidate keys are opaque strings supplied by the caller.  This module never
-imports the launch-plan or workflow types -- the service must not learn the
-shape of a strategy launch.
-
-Construction takes a getter rather than the workflow object.  ``MainWindow``
-still replaces ``paper_workflow`` in the safety tests that drive the halted and
-refused-close paths; reading through a getter keeps this boundary honest about
-which controller is live.
-
-Locking is minimal and never wraps a network call: ownership state is read or
-committed under ``RLock``, while ``connect``/``disconnect`` always run outside
-it.
+Moved here from the ``paper_trading_service`` root module as a package-boundary
+change, not a redesign: every method below is the one that ran before.  It owns
+*who currently holds the broker order connection* and nothing else -- submitting,
+cancelling, arming rules, capital resolution, reconciliation algorithms,
+finalization, phase transitions and the execution lease all stay where they were.
+``docs/TRADING_ARCHITECTURE_V2.md`` carries the full ownership argument.
 """
 
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
-from typing import Callable, Protocol, Sequence
+from typing import Sequence
 
-from .trading.composition.execution import build_execution_candidate
-from .trading.runtime.workflow_state import PaperWorkflowPhase
-
-
-class PaperTradingLifecycleError(RuntimeError):
-    """A Paper order-service ownership transition was refused.
-
-    Raised when a caller asks for a transition that would lose control of a
-    broker connection or silently replace an owner: promoting over a live
-    active service, clearing an owner that still reports connected, discarding
-    an unknown candidate, or reusing a candidate id.  Every one of these is
-    fail-closed -- nothing is mutated and the existing state is left intact.
-    """
-
-
-class PaperConnectionPort(Protocol):
-    """The connection fact this service reads; order detail stays in the service."""
-
-    connected: bool
-
-
-class PaperOrderServicePort(Protocol):
-    """The read/lifecycle slice of ``IBKRPaperOrderService`` used here."""
-
-    def connect(self) -> object: ...
-    def connection_snapshot(self) -> PaperConnectionPort: ...
-    def broker_state(self) -> object: ...
-    def disconnect(self) -> None: ...
-    def reconciliation_rows_with_latency(
-        self, *, session_id: str | None = None, limit: int = 1000
-    ) -> Sequence[dict]: ...
-
-
-class PaperOrderServiceFactory(Protocol):
-    """How this service builds an execution channel; injectable for tests.
-
-    The default is the execution composition root, so the window never names
-    the concrete IBKR adapter or the concrete order store.
-    """
-
-    def __call__(
-        self,
-        config: object,
-        *,
-        repository: object,
-        extended_hours_enabled: bool,
-    ) -> PaperOrderServicePort: ...
-
-
-class PaperSessionStatePort(Protocol):
-    """The finalized flag carried by a coordinator result."""
-
-    finalized: bool
-
-
-class PaperSessionResultPort(Protocol):
-    """The coordinator result slice this service reads."""
-
-    state: PaperSessionStatePort
-
-
-class PaperWorkflowPort(Protocol):
-    """The workflow controller slice this service reads."""
-
-    @property
-    def phase(self) -> PaperWorkflowPhase: ...
-    @property
-    def result(self) -> PaperSessionResultPort | None: ...
-    @property
-    def reconciliation_evidence(self) -> object | None: ...
-
-
-WorkflowGetter = Callable[[], PaperWorkflowPort]
-
-
-@dataclass(frozen=True, slots=True)
-class PaperTradingSnapshot:
-    """One immutable reading of the Paper *application lifecycle*.
-
-    Order truth deliberately stays in the existing service and journal: this
-    snapshot never carries positions, orders, fills, or reconciliation rows.
-    """
-
-    phase: str
-    connected: bool
-    finalized: bool
-    last_error: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class PaperReconciliationStatus:
-    """Whether a one-shot reconciliation proof waits for human confirmation."""
-
-    awaiting_confirmation: bool
+from us_quant.trading.application.paper.contracts import (
+    PaperOrderServiceFactory,
+    PaperOrderServicePort,
+    WorkflowGetter,
+)
+from us_quant.trading.application.paper.models import (
+    PaperReconciliationStatus,
+    PaperTradingLifecycleError,
+    PaperTradingSnapshot,
+)
+from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
 
 class PaperTradingService:
-    """Owner of the Paper order-service lifecycle, plus the window's reads."""
+    """Owner of the Paper order-service lifecycle, plus the window's reads.
+
+    Two ownership slots, never one.  ``_candidates`` holds services that are
+    connected but not yet trusted -- a successful connect is not permission to
+    become the session -- and ``_order_service`` holds the single service a
+    validated, armed launch published; promotion refuses to overwrite it and it
+    is never disconnected implicitly.  Phase and evidence are read through an
+    injected workflow *getter*, because ``MainWindow`` replaces that controller
+    in the safety tests and this boundary must read whichever one is live.
+    """
 
     def __init__(
         self,
         *,
         workflow_getter: WorkflowGetter,
-        order_service_factory: PaperOrderServiceFactory = build_execution_candidate,
+        order_service_factory: PaperOrderServiceFactory,
     ) -> None:
         self._workflow_getter = workflow_getter
         self._order_service_factory = order_service_factory
@@ -169,13 +62,7 @@ class PaperTradingService:
         return self._workflow_getter().phase
 
     def is_finalized(self) -> bool:
-        """Whether no Paper session is still awaiting finalization.
-
-        The truth comes from the controller's own result, never from a guess
-        here.  A window that has not started a session yet also answers ``True``
-        -- nothing is outstanding -- which is exactly the close gate's meaning:
-        it refuses to close while an unfinalized session still exists.
-        """
+        """Whether no Paper session still awaits finalization (the close gate)."""
 
         result = self._workflow_getter().result
         return result is None or bool(result.state.finalized)
@@ -187,12 +74,7 @@ class PaperTradingService:
             return self._order_service is not None
 
     def is_connected(self) -> bool:
-        """Whether the *active* order service reports a live broker connection.
-
-        Candidates are deliberately excluded: an unarmed candidate is not the
-        session, and asking about it here would let a stale connection look
-        like the live one.
-        """
+        """Whether the *active* service reports a live connection (not a candidate)."""
 
         service = self._active_service()
         if service is None:
@@ -206,12 +88,7 @@ class PaperTradingService:
         return PaperReconciliationStatus(awaiting_confirmation=evidence is not None)
 
     def snapshot(self) -> PaperTradingSnapshot:
-        """Derive one immutable lifecycle reading from the live components.
-
-        This is an explicit status query, not a cheap accessor: ``is_connected``
-        asks the order service for its connection fact, so do not call it on a
-        per-tick render path.
-        """
+        """One immutable lifecycle reading; asks the broker, so not per tick."""
 
         return PaperTradingSnapshot(
             phase=self.phase().value,
@@ -245,7 +122,7 @@ class PaperTradingService:
     # -- candidate lifecycle -------------------------------------------
 
     def has_candidate(self, candidate_id: object) -> bool:
-        """Whether this id is currently registered (or reserved by a connect)."""
+        """Whether this id is registered, or reserved by an in-flight connect."""
 
         if not isinstance(candidate_id, str) or not candidate_id.strip():
             return False
@@ -260,15 +137,7 @@ class PaperTradingService:
         repository: object,
         extended_hours_enabled: bool,
     ) -> object:
-        """Build and connect one *candidate* order service; never the owner.
-
-        Returns whatever the underlying ``connect()`` returns.  The candidate is
-        registered only on success, so a caller that sees an exception knows
-        nothing is tracked.  On failure the created service is disconnected on a
-        best-effort basis; if even that fails the reference is kept registered
-        rather than dropped, because losing it would mean losing control of a
-        possibly-live broker connection.
-        """
+        """Build and connect one *candidate* order service; never the owner."""
 
         key = self._candidate_key(candidate_id)
         with self._lock:
@@ -302,25 +171,14 @@ class PaperTradingService:
         return connection
 
     def candidate_service(self, candidate_id: str) -> PaperOrderServicePort:
-        """Borrow a registered candidate service for pre-promotion wiring.
-
-        This is a *borrowed* reference, not new ownership: the caller must not
-        store it, assign it to a member, or keep it past the call stack that
-        consumed it.  It exists only so the existing ``arm``/``submit``/
-        ``publish_armed`` wiring can run before promotion.
-        """
+        """Borrow a registered candidate for pre-promotion wiring; do not store it."""
 
         key = self._candidate_key(candidate_id)
         service = self._candidate_or_raise(key)
         return service
 
     def ensure_candidate_can_promote(self, candidate_id: str) -> None:
-        """Pure check that promotion would be legal; mutates nothing.
-
-        Call it before the irreversible ``publish_armed`` step so that the
-        promotion which follows cannot fail for a reason that was already
-        knowable.
-        """
+        """Pure check that promotion would be legal; mutates nothing."""
 
         key = self._candidate_key(candidate_id)
         self._candidate_or_raise(key)
@@ -332,12 +190,7 @@ class PaperTradingService:
                 )
 
     def promote_candidate(self, candidate_id: str) -> None:
-        """Move a validated candidate into the single active slot.
-
-        Refuses to overwrite an existing active service and never disconnects
-        one implicitly -- deciding that an old session is over is the
-        finalization path's job, not a side effect of a new launch.
-        """
+        """Move a validated candidate into the single active slot."""
 
         key = self._candidate_key(candidate_id)
         service = self._candidate_or_raise(key)
@@ -352,14 +205,7 @@ class PaperTradingService:
         self._record_error(None)
 
     def discard_candidate(self, candidate_id: str) -> None:
-        """Disconnect and forget one stale candidate, and nothing else.
-
-        Only the named candidate is touched: the active service and every other
-        candidate are left exactly as they were.  The registration is removed
-        only after a successful disconnect, so a failed teardown keeps the
-        candidate tracked (and its error recorded) instead of losing the
-        reference.
-        """
+        """Disconnect and forget one stale candidate, and nothing else."""
 
         key = self._candidate_key(candidate_id)
         service = self._candidate_or_raise(key)
@@ -382,12 +228,7 @@ class PaperTradingService:
     # -- active lifecycle ----------------------------------------------
 
     def connect_active(self) -> object:
-        """Reconnect the active service; never creates one.
-
-        Manual reconciliation runs against the session that already exists, so
-        an unowned slot is a programming error rather than a reason to connect
-        something new.
-        """
+        """Reconnect the active service; never creates one."""
 
         service = self._active_service()
         if service is None:
@@ -397,15 +238,7 @@ class PaperTradingService:
         return service.connect()
 
     def disconnect(self) -> None:
-        """Run the existing ``disconnect`` semantics once and record any failure.
-
-        This is the same teardown the window performed inline: no submit, no
-        cancel, no reconciliation, no resume, and no lease change.  It does
-        **not** clear ownership -- a successful disconnect proves the socket is
-        gone, not that the session may be released.  A failure is recorded in
-        ``last_error`` and re-raised unchanged, so the caller keeps seeing
-        exactly the exception it saw before and nothing is swallowed.
-        """
+        """Run the existing ``disconnect`` semantics once; never clears ownership."""
 
         service = self._active_service()
         if service is None:
@@ -420,11 +253,9 @@ class PaperTradingService:
     def clear_active(self, *, expected_service: object | None = None) -> None:
         """Release ownership -- only ever after the session is truly finalized.
 
-        Fail-closed in both directions: an active service that still reports a
-        live connection is refused (dropping the reference would abandon a
-        socket nobody can reach), and ``expected_service`` lets a late caller
-        prove it is clearing the service it actually means rather than a newer
-        one that replaced it in the meantime.
+        Fail-closed both ways: a service still reporting a live connection is
+        refused (dropping it would abandon a socket nobody can reach), and
+        ``expected_service`` lets a late caller prove which service it means.
         """
 
         with self._lock:
@@ -460,11 +291,7 @@ class PaperTradingService:
         repository: object,
         extended_hours_enabled: bool,
     ) -> tuple[object, object]:
-        """Connect, read, and disconnect an order channel that is never owned.
-
-        This is the operator's "is the order channel reachable" check: it must
-        not register a candidate and must not disturb the active slot.
-        """
+        """Connect, read, and disconnect an order channel that is never owned."""
 
         service: PaperOrderServicePort | None = None
         try:
@@ -535,3 +362,6 @@ class PaperTradingService:
     def _record_error(self, message: str | None) -> None:
         with self._lock:
             self._last_error = message
+
+
+__all__ = ["PaperTradingService"]

@@ -11,8 +11,8 @@ from us_quant.trading.domain.market import (
     MarketQuote,
     MarketSnapshot,
 )
+from us_quant.shadow.config import ShadowSimulationConfig
 from us_quant.shadow_paper import (
-    ShadowConfig,
     ShadowFill,
     ShadowPaperEngine,
     ShadowPaperStore,
@@ -73,7 +73,7 @@ class ShadowPaperTests(unittest.TestCase):
                     Path(directory) / "shadow.sqlite3"
                 ),
                 allowed_symbols=("BAC",),
-                config=ShadowConfig(
+                config=ShadowSimulationConfig(
                     initial_cash=Decimal("1500"),
                     capital_source="unit_test",
                     warmup_minutes=2,
@@ -133,7 +133,7 @@ class ShadowPaperTests(unittest.TestCase):
             engine = ShadowPaperEngine(
                 store=ShadowPaperStore(Path(directory) / "shadow.sqlite3"),
                 allowed_symbols=("BAC",),
-                config=ShadowConfig(
+                config=ShadowSimulationConfig(
                     initial_cash=Decimal("1500"),
                     capital_source="unit_test",
                     warmup_minutes=2,
@@ -165,7 +165,7 @@ class ShadowPaperTests(unittest.TestCase):
             engine = ShadowPaperEngine(
                 store=store,
                 allowed_symbols=("BAC",),
-                config=ShadowConfig(
+                config=ShadowSimulationConfig(
                     initial_cash=Decimal("1500"),
                     capital_source="unit_test",
                     warmup_minutes=3,
@@ -219,7 +219,7 @@ class ShadowPaperTests(unittest.TestCase):
             engine = ShadowPaperEngine(
                 store=ShadowPaperStore(Path(directory) / "shadow.sqlite3"),
                 allowed_symbols=("TQQQ",),
-                config=ShadowConfig(
+                config=ShadowSimulationConfig(
                     initial_cash=Decimal("1500"),
                     capital_source="unit_test",
                     symbol_risk_multipliers={
@@ -253,7 +253,7 @@ class ShadowPaperTests(unittest.TestCase):
             engine = ShadowPaperEngine(
                 store=ShadowPaperStore(Path(directory) / "shadow.sqlite3"),
                 allowed_symbols=("BAC",),
-                config=ShadowConfig(
+                config=ShadowSimulationConfig(
                     initial_cash=Decimal("1500"),
                     capital_source="unit_test",
                     warmup_minutes=3,

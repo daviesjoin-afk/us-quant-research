@@ -9,7 +9,7 @@ from us_quant.paper_order_models import (
     PaperOrderReconciliation,
     ReconciliationSummary,
 )
-from us_quant.paper_execution_health import (
+from us_quant.trading.runtime.health import (
     evaluate_paper_execution_health,
 )
 from us_quant.trading.runtime.artifacts import (

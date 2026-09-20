@@ -518,7 +518,7 @@ def _install_order_service_spy(window: MainWindow, spy: object) -> None:
     window really holds an order service when the close path runs.
     """
 
-    from us_quant.paper_trading_service import PaperTradingService
+    from us_quant.trading.application.paper import PaperTradingService
 
     window.paper_trading = PaperTradingService(
         workflow_getter=lambda: window.paper_workflow,

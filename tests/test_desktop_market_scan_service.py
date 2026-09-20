@@ -201,7 +201,6 @@ STRATEGY_V2_METHODS = frozenset(
         "_refresh_backtest_strategy_combo",
         "_selected_auto_strategy_record",
         "_selected_shadow_strategy_record",
-        "_simulation_tab",
     }
 )
 
@@ -254,6 +253,45 @@ DESKTOP_MARKET_V2_METHODS = (
     "_stream_symbols_from_input",
     "_switch_to_settings_provider",
     "_sync_targeted_symbol_to_stream",
+)
+
+TARGETED_RESEARCH_V2_REMOVED_METHODS = (
+    "_simulation_tab",
+    "_populate_targeted_replay_results",
+    "_populate_targeted_robustness_results",
+    "_populate_robustness_scenarios",
+    "_populate_targeted_walk_forward_results",
+    "_populate_targeted_overfit_results",
+    "_populate_targeted_data_quality_results",
+    "_populate_targeted_execution_stress_results",
+    "_populate_targeted_review_results",
+    "_populate_targeted_review_gates",
+    "_populate_shadow_snapshot",
+    "_robustness_selection_changed",
+    "_targeted_review_selection_changed",
+)
+
+TARGETED_RESEARCH_V2_ADDED_METHODS = (
+    "_connect_targeted_validation_page",
+    "_publish_targeted_view",
+    "_targeted_controls",
+    "_target_symbol_requested",
+    "_target_subscribe_requested",
+    "_robustness_run_selected",
+    "_review_run_selected",
+)
+
+TARGETED_RESEARCH_V2_METHODS = (
+    "_load_local_state",
+    "_current_target_symbol",
+    "_apply_target_symbol",
+    "_sync_targeted_symbol_to_stream",
+    "_refresh_minute_data_status",
+    "_refresh_target_preflight",
+    "_start_shadow",
+    "_stop_shadow",
+    "_targeted_replay_finished",
+    "_targeted_robustness_finished",
 )
 
 DESKTOP_EXECUTION_V2_REMOVED_METHODS = (
@@ -1279,6 +1317,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(RISK_V2_REMOVED_METHODS)
         | set(DESKTOP_EXECUTION_V2_REMOVED_METHODS)
         | set(DESKTOP_MARKET_V2_REMOVED_METHODS)
+        | set(TARGETED_RESEARCH_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1286,6 +1325,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(RISK_V2_ADDED_METHODS)
         | set(DESKTOP_EXECUTION_V2_ADDED_METHODS)
         | set(DESKTOP_MARKET_V2_ADDED_METHODS)
+        | set(TARGETED_RESEARCH_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1312,6 +1352,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(RUNTIME_V2A_METHODS)
         | set(DESKTOP_EXECUTION_V2_METHODS)
         | set(DESKTOP_MARKET_V2_METHODS)
+        | set(TARGETED_RESEARCH_V2_METHODS)
     )
     assert set(changed) <= allowed
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)
@@ -1321,6 +1362,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(RUNTIME_V2A_METHODS) <= set(changed)
     assert set(DESKTOP_EXECUTION_V2_METHODS) <= set(changed)
     assert set(DESKTOP_MARKET_V2_METHODS) <= set(changed)
+    assert set(TARGETED_RESEARCH_V2_METHODS) <= set(changed)
     assert "_run_scan" in changed
 
 

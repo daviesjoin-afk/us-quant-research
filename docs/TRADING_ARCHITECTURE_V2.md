@@ -51,6 +51,12 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 >
 > **进度更新（Market Data v2）**：Market 链已完成迁移，见 §4 Market 与
 > §10 roadmap。
+>
+> **进度更新（Desktop Research v2A）**：Research 的“针对性验证”二级页已迁成
+> 原生 `TargetedValidationPage`，旧 `MainWindow._simulation_tab()` 已删除。
+> 页面位于 `desktop_v2/pages/research/targeted/`，presenter 是 Qt-free 纯投影；
+> Research aggregate 仍是 transitional，其他五个二级页保持 legacy。一级 native
+> 计数仍为 **5 / 8**，v2R-F aggregate 完成后才会变成 6 / 8。见 §8.4。
 
 ## 迁移状态一览
 
@@ -67,8 +73,9 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Desktop RiskPage | MIGRATED |
 | Desktop ExecutionPage | MIGRATED |
 | Desktop MarketPage | MIGRATED |
+| Desktop TargetedValidationPage | MIGRATED |
 | Desktop Dashboard | TRANSITIONAL |
-| Desktop Research | TRANSITIONAL |
+| Desktop Research aggregate | TRANSITIONAL |
 | Desktop System | TRANSITIONAL |
 | AutoQuant Risk Integration | MIGRATED |
 | Execution Domain | MIGRATED |
@@ -566,12 +573,13 @@ account    → desktop_v2/pages/account.py            ✅ native v2
 strategy   → desktop_v2/pages/strategy.py           ✅ native v2
 risk       → desktop_v2/pages/risk.py               ✅ native v2
 execution  → desktop_v2/pages/execution/            ✅ native v2
-research   → QTabWidget（针对性验证 / 广域标的池 / 历史数据 / 市场扫描 / 回测 / 横截面研究）
+research   → QTabWidget（TargetedValidationPage / 广域标的池 / 历史数据 / 市场扫描 / 回测 / 横截面研究）
 system     → QTabWidget（运行事件 / 系统设置）
 ```
 
-前端进度：**5 / 8 native v2**。剩余 Dashboard、Research、System 仍是
-transitional，`Market` 已于 Desktop Market v2 迁完。
+前端进度：**5 / 8 native v2**。Research 的第一个二级页已 native v2，
+但一级 Research aggregate 仍算 transitional；剩余 Dashboard、Research、System
+仍是 transitional，`Market` 已于 Desktop Market v2 迁完。
 
 ### 8.2 execution 页已完成（Desktop Execution v2）
 
@@ -771,6 +779,63 @@ application、没有 repository、没有 `sqlite3`，只 import domain 类型、
 `AccountPage` 也不显示任何行情状态：没有 quote type、没有 mark source、没有
 STALE/FRESH 列。唯一的类价格数字 `Broker Mark` 来自
 `market_value / quantity`，即券商自己的估值。缺失值显示 `—`，不是 `$0`。
+
+### 8.4 targeted validation 页已完成（Desktop Research v2A）
+
+`MainWindow._simulation_tab()`（legacy Research 第一个二级页 builder）已删除，
+没有 compatibility shim。新的 native page 位于：
+
+```text
+desktop_v2/pages/research/targeted/
+  __init__.py            9 行   只导出 TargetedValidationPage
+  models.py            175 行   不可变展示模型（Qt-free）
+  rows.py              285 行   研究结果 → 表格行 / 显示字符串（Qt-free）
+  session_presenter.py 185 行   ShadowSnapshot / preflight / controls → session view
+  evidence_presenter.py 198 行  replay / robustness / review 等 → evidence view
+  controls.py          181 行   strategy / target / Shadow / evidence 控件
+  tables.py            121 行   稳定 run-id selection、排序、tone 渲染
+  session_panel.py     129 行   5 个卡片 + controls + position / fill 面板
+  evidence_panel.py    220 行   7 个证据 tab
+  page.py              168 行   render + intent signal 转发
+```
+
+职责边界：
+
+```text
+MainWindow                 取数、Shadow engine ownership、research pipeline、result caches
+presenters / rows          facts → immutable presentation view（Qt-free）
+TargetedValidationPage     只 render + emit intent
+```
+
+- **Research aggregate 仍 transitional。** 本轮只替换第一个二级页；Universe、
+  History、Scanner、Backtest、Cross Section 仍由 legacy builder 提供。
+- **页面不持有业务对象。** `ShadowPaperEngine` / `ShadowPaperStore` /
+  `run_targeted_*` / `MarketPage` / `MarketDataApplication` 都不在 targeted UI
+  package 里；目标订阅由页面 signal 交回 `MainWindow`，再由窗口调用
+  `MarketPage.set_subscription_symbols(...)`。
+- **preflight / Shadow safety / Paper capital 全部留在窗口。** 页面只显示窗口
+  提供的 boolean control state 和 immutable facts，不自行判断 research
+  eligibility、fresh quote、Paper 资金或 Shadow 启动合法性。
+- **结果选择按 run_id。** robustness history 与 review history 通过
+  `robustness_run_selected(run_id)` / `review_run_selected(run_id)` 交回窗口，
+  不依赖 table row index；刷新时保留当前 run_id selection。
+- **表格行为保持。** 列数、列顺序、标题、排序能力和 warning/success 着色列按
+  旧 UI 迁移；review gate 明细表继续禁用排序。
+- **主题与行数守卫。** `MainWindow._apply_theme()` 通知页面刷新 palette；新文件
+  使用 §6 的 per-file budgets，`page.py <= 320`，所有 production file <= 400。
+
+新增守卫位于 `tests/test_desktop_v2_targeted_architecture.py`，覆盖：
+
+```text
+_simulation_tab retired
+MainWindow no longer owns targeted widgets
+targeted package imports no business/runtime/executor modules
+presenter modules are Qt-free
+page does not construct Shadow engine or run_targeted_*
+MainWindow reaches the page only through its public API
+per-file line budgets
+no new order capability
+```
 
 ## 9. 已删除的旧架构
 
@@ -1392,7 +1457,8 @@ Desktop Market v2 已完成（§8.3）：
 
 ```text
 Desktop Market v2        ✅（§8.3）
-Desktop Research v2A-F
+Desktop Research v2A     ✅（§8.4）
+Desktop Research v2B-F
 Desktop System v2
 Desktop Dashboard v2
 ```
@@ -1560,11 +1626,12 @@ Framework v2C runtime 脱离 shadow_paper，五个 root module 归位并删除�
 Shadow v2     shadow_paper.py 拆成 shadow package 并删除（§10.7）
 ```
 
-**Desktop Market v2 已完成**（§8.3），market route 变成原生 v2 page。阶段 2
-剩余：
+**Desktop Market v2 已完成**（§8.3），market route 变成原生 v2 page。
+**Desktop Research v2A 已完成**（§8.4），Research 的“针对性验证”二级页已 native
+v2；Research aggregate 仍 transitional。阶段 2 剩余：
 
 ```text
-Desktop Research v2A-F   （必须拆多个 PR，禁止一次搬成一个巨大 ResearchPage）
+Desktop Research v2B-F   （必须继续拆多个 PR，禁止一次搬成一个巨大 ResearchPage）
 Desktop System v2
 Desktop Dashboard v2
 ```

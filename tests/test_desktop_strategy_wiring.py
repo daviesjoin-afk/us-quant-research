@@ -210,7 +210,7 @@ def test_the_auto_rotation_combo_is_populated_at_startup(window) -> None:
 
 
 def test_the_targeted_shadow_combo_is_populated_at_startup(window) -> None:
-    assert window.shadow_strategy_combo.count() >= 1
+    assert window.targeted_validation_page.session_panel.controls.strategy_combo.count() >= 1
     selected = window.strategy_selection.selected(
         StrategySelectionPurpose.TARGETED_SHADOW
     )

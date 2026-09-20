@@ -54,7 +54,11 @@ class TargetedSessionPanel(QWidget):
         self.console_panel = self._build_console()
         self.position_table = TargetedTable(POSITION_HEADERS, palette=self._palette)
         self.position_panel = self._build_position()
-        self.fill_table = TargetedTable(FILL_HEADERS, palette=self._palette)
+        self.fill_table = TargetedTable(
+            FILL_HEADERS,
+            tone_columns=(1, 2),
+            palette=self._palette,
+        )
         self.fill_explanation = QLabel(
             "状态：未启动。该工具只验证行情→信号→成本后模拟成交→"
             "持仓→盈亏→平仓链路，不以单晚收益证明策略有效。"

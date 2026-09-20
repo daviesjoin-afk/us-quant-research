@@ -154,6 +154,16 @@ def _matches(modules: set[str], prefixes: tuple[str, ...]) -> set[str]:
     }
 
 
+def _top_level_imports(path: pathlib.Path) -> set[str]:
+    modules: set[str] = set()
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module)
+    return modules
+
+
 def _main_window(path: pathlib.Path) -> ast.ClassDef:
     for node in ast.parse(path.read_text(encoding="utf-8")).body:
         if isinstance(node, ast.ClassDef) and node.name == "MainWindow":
@@ -257,6 +267,18 @@ def test_the_targeted_projection_modules_import_without_a_widget(name: str) -> N
         f"us_quant.desktop_v2.pages.research.targeted.{name[:-3]}"
     )
     assert module is not None
+
+
+def test_the_targeted_package_initializer_is_lazy_and_qt_free() -> None:
+    modules = _top_level_imports(_TARGETED_DIR / "__init__.py")
+    assert not any(
+        module == "PySide6" or module.startswith("PySide6.")
+        for module in modules
+    ), sorted(modules)
+    assert not any(
+        module.endswith(".page") or module.endswith("targeted.page")
+        for module in modules
+    ), sorted(modules)
 
 
 # -- Guard F: the window reaches the page only through its public API ----

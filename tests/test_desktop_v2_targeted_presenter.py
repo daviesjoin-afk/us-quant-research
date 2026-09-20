@@ -186,7 +186,9 @@ def _replay_result():
     )
 
 
-def _robustness_result():
+def _robustness_result(
+    run_id: str = "robustness-run", symbol: str = "AAPL"
+):
     scenario = SimpleNamespace(
         scenario="base",
         session_count=20,
@@ -200,8 +202,8 @@ def _robustness_result():
         commission_cost=Decimal("3.50"),
     )
     return SimpleNamespace(
-        run_id="robustness-run",
-        symbol="AAPL",
+        run_id=run_id,
+        symbol=symbol,
         strategy_semver="1.0.0",
         provider="IBKR",
         first_session="2026-09-01",
@@ -381,3 +383,14 @@ def test_evidence_view_projects_every_result_family() -> None:
     assert view.review_gate_rows[0].values[1] == "通过"
     assert view.selected_robustness_run_id == "robustness-run"
     assert view.selected_review_run_id == "review-run"
+
+
+def test_robustness_summary_tracks_the_selected_run() -> None:
+    first = _robustness_result("run-a", "AAPL")
+    second = _robustness_result("run-b", "MSFT")
+    view = evidence_view(
+        robustness_results=(first, second),
+        selected_robustness_run_id="run-b",
+    )
+    assert "MSFT" in view.robustness_summary
+    assert "AAPL" not in view.robustness_summary

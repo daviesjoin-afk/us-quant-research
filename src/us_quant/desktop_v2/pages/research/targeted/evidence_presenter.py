@@ -22,10 +22,9 @@ from us_quant.targeted_robustness import TargetedRobustnessResult
 from us_quant.targeted_validation import TargetedWalkForwardResult
 
 
-def _robustness_summary(results: Sequence[TargetedRobustnessResult]) -> str:
-    if not results:
+def _robustness_summary(result: TargetedRobustnessResult | None) -> str:
+    if result is None:
         return "尚未运行多日稳健性评估；结果不会自动晋级策略。"
-    result = results[0]
     readiness = (
         "达到参数稳健性门；仍需时间隔离验证"
         if result.review_ready
@@ -172,7 +171,7 @@ def evidence_view(
     )
     return TargetedEvidenceView(
         replay_rows=rows.replay_rows(replay_results),
-        robustness_summary=_robustness_summary(robustness_results),
+        robustness_summary=_robustness_summary(selected_robustness),
         robustness_rows=rows.robustness_rows(robustness_results),
         robustness_scenario_rows=rows.robustness_scenario_rows(
             selected_robustness

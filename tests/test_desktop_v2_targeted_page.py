@@ -236,6 +236,7 @@ def test_render_updates_cards_tables_and_preflight(page: TargetedValidationPage)
             TargetedFillRow(
                 "s1",
                 ("09:31", "AAPL", "BUY", "1", "100", "0.35", "—", "信号", "IBKR", "Type 1", "s1"),
+                tone=TargetedRowTone.SUCCESS,
             ),
         ),
         target_status="AAPL · 已设置",
@@ -246,11 +247,15 @@ def test_render_updates_cards_tables_and_preflight(page: TargetedValidationPage)
         ),
     )
     page.render(_view(session=session))
+    assert page.layout().indexOf(page.session_panel) >= 0
     assert page.session_panel.status_card.value_label.text() == "运行中"
     assert page.session_panel.position_table.rowCount() == 1
     assert page.session_panel.fill_table.rowCount() == 1
     assert page.preflight_table.rowCount() == 1
     assert page.preflight_summary.text().startswith("可启动")
+    assert page.session_panel.fill_table.item(0, 1).foreground().color().name() == QColor(
+        theme_palette("dark").success
+    ).name()
 
 
 def test_render_updates_all_seven_evidence_tabs(page: TargetedValidationPage) -> None:

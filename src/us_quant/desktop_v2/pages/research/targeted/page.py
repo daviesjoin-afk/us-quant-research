@@ -68,6 +68,7 @@ class TargetedValidationPage(QWidget):
         self.workspace_tabs.addTab(self.session_panel.fill_panel, "委托")
         self.workspace_tabs.addTab(self.evidence_panel, "档案")
         self.workspace_tabs.addTab(self._preflight_panel(), "风控")
+        layout.addWidget(self.session_panel)
         layout.addWidget(self.workspace_tabs)
 
     def _header(self) -> QFrame:

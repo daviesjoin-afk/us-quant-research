@@ -4037,6 +4037,8 @@ class MainWindow(QMainWindow):
             0, execution_stress
         )
         self.targeted_review_results.insert(0, review)
+        self._selected_robustness_run_id = robustness.run_id
+        self._selected_review_run_id = review.run_id
         # Bring the finished robustness evidence into view: the targeted
         # workspace lives on the research route, and its own detail tabs are
         # what actually hold the result.

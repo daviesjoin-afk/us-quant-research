@@ -7,6 +7,12 @@
 Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只记录它们的
 归宿，不声称已完成。
 
+> **进度更新（Desktop Execution v2）**：execution route 已成为原生 v2 page。
+> `MainWindow._auto_quant_tab` 已删除，页面位于
+> `desktop_v2/pages/execution/`（models / rows / presenter / tables /
+> controls / page），presenter 是 Qt-free 的纯投影，`MainWindow` 只保留
+> `self.execution_page` 这一个属性，取数与编排仍在窗口。见 §8.2 与 §14。
+>
 > **进度更新（Runtime v2B）**：`paper_session.py` / `paper_workflow.py` /
 > `workflow_state.py` 三个过渡 root module 已删除，Paper session 协调、
 > workflow 生命周期与 `ExecutionLease` 语义已迁入
@@ -51,6 +57,7 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Risk Domain | MIGRATED |
 | Risk Application | MIGRATED |
 | Desktop RiskPage | MIGRATED |
+| Desktop ExecutionPage | MIGRATED |
 | AutoQuant Risk Integration | MIGRATED |
 | Execution Domain | MIGRATED |
 | Execution Application | MIGRATED |
@@ -528,13 +535,85 @@ submit order。`tests/test_desktop_v2_shell.py` 以结构守卫强制这一点�
 ```text
 dashboard  → _dashboard_tab()
 market     → _quotes_tab()
-account    → desktop_v2/pages/account.py   ✅ native v2
-strategy   → desktop_v2/pages/strategy.py  ✅ native v2
-risk       → desktop_v2/pages/risk.py      ✅ native v2
-execution  → _auto_quant_tab()
+account    → desktop_v2/pages/account.py            ✅ native v2
+strategy   → desktop_v2/pages/strategy.py           ✅ native v2
+risk       → desktop_v2/pages/risk.py               ✅ native v2
+execution  → desktop_v2/pages/execution/            ✅ native v2
 research   → QTabWidget（针对性验证 / 广域标的池 / 历史数据 / 市场扫描 / 回测 / 横截面研究）
 system     → QTabWidget（运行事件 / 系统设置）
 ```
+
+### 8.2 execution 页已完成（Desktop Execution v2）
+
+`MainWindow._auto_quant_tab()`（416 行 builder）与它自己拥有的两个表格填充器
+`_populate_auto_shadow_table` / `_populate_auto_latency_table` 已**删除**，
+execution route 现在是一个原生 v2 page。`_auto_quant_tab` 不存在，也没有
+compatibility shim 返回 page。
+
+```text
+desktop_v2/pages/execution/
+  __init__.py   19 行   只导出 ExecutionPage
+  models.py    188 行   不可变展示模型（含 Tone 语义色）
+  rows.py      332 行   表格行投影 + 显示格式化（money / price）
+  presenter.py 193 行   cards、control state、view 组装
+  tables.py    279 行   ExecutionDetailTabs：五个 detail tab
+  controls.py  354 行   ExecutionControls：输入与按钮
+  page.py      214 行   ExecutionPage：组合、render、signal 转发
+```
+
+职责边界：
+
+```text
+MainWindow            取数 + 编排（workflow / service / lease 仍在这里）
+presenter / rows      纯投影：facts → strings + tone（Qt-free）
+ExecutionPage         只 render + emit intent
+```
+
+- **Page 只渲染、只报告意图。** 它不持有 `PaperTradingService`、
+  `PaperWorkflowController`、`TradingRuntime`、repository 或 broker；每个按钮只
+  emit 一个 signal。`set_arm_confirmed` 存在的意义是让窗口的确认弹窗把结果写进
+  页面，而不是让页面自己去问。
+- **Page 不能改 workflow phase。** 它收到的是
+  `ExecutionControlState`（一组布尔），不是 `PaperWorkflowPhase`，因此它没有
+  生命周期词汇可以据以行动。`HALTED` 无法自动恢复、finalization 两阶段、lease
+  语义全部仍由窗口与 workflow 拥有。
+- **Presenter Qt-free。** `models.py` / `presenter.py` / `rows.py` 不 import
+  PySide6，所以投影可以不用 widget 测试（`tests/test_desktop_v2_execution_presenter.py`
+  就是纯 Python）。tone 只表达 success / warning / error / neutral，具体颜色由
+  page 与 table 决定。
+- **MainWindow 只知道 `self.execution_page`。** 它不再持有
+  `auto_pause_button` / `auto_order_table` / `auto_status_card` 一类 widget；由
+  AST 守卫 `test_the_window_no_longer_names_an_execution_widget` 钉住。业务状态
+  `auto_quant_candidates` / `auto_quant_snapshot` 仍然保留在窗口。
+- **strategy combo 仍然只是 selection service 的 view。** 页面 emit
+  `strategy_selected(version_id)`，窗口调用
+  `StrategySelectionService.select(...)`；`_selected_auto_strategy_record()`
+  继续从 service 读取。combo 没有重新变成 runtime truth。
+- **preflight / 启动确认 / finalization 编排仍在窗口。**
+  `calculate_quote_readiness_breakdown`、`evaluate_auto_quant_preflight`、
+  启动弹窗、`_schedule_paper_finalization_refresh` 等一律不迁 UI。
+
+同一轮新增的守卫（`tests/test_trading_architecture.py` 的 Desktop Execution v2 段）：
+
+- execution route 只有一个入口：`_auto_quant_tab` 不存在，
+  `pages["execution"] is self.execution_page`；
+- 页面包不得 import application / composition / adapters / runtime / ports /
+  `PaperTradingService` / `workflow_controller` / IBKR / sqlite / desktop，也不得
+  出现 `PaperWorkflowPhase`、`ExecutionLease`、`begin_connecting`、
+  `publish_armed`、`finalize_if_safe`、`placeOrder`、`cancelOrder` 等名字；
+- presenter / rows / models 不得 import PySide6；
+- 每个页面文件有自己的行数上限（`page.py <= 400`、`controls.py <= 360`、
+  `rows.py <= 350`、`tables.py` / `presenter.py <= 320`、
+  `models.py <= 220`、`__init__.py <= 40`），不共用 runtime 的 500 行上限。
+
+两处刻意的合并（行为一致化，不是行为变更）：
+
+1. `stop_stream` 的可用性现在由「行情在跑 **且** 没有会话占用」推导。旧代码在
+   会话武装时禁用、在行情重启时又启用，是同一个按钮的两个 writer；新规则取两者
+   中更安全的一个，并且只在一个地方计算。
+2. 暂停 / 恢复 / 停止按钮过去有两个 writer（snapshot 标志与 workflow phase）。
+   snapshot 那一份永远被紧接着的 phase 那一份覆盖，所以现在是单一来源：phase。
+
 
 研究功能不是交易 runtime 主导航，因此收在 `research` 的二级页签里。
 每个 v2 页面重写完成后，直接删除对应旧 builder。
@@ -1106,10 +1185,12 @@ AutoQuant layered_risk_limits 构造参数  ✅ 已删除（Risk v2）
 旧 paper_session.py                    ✅ 已删除（Runtime v2B）
 旧 paper_workflow.py                   ✅ 已删除（Runtime v2B）
 旧 workflow_state.py（root）           ✅ 已删除（Runtime v2B）
+MainWindow._auto_quant_tab             ✅ 已删除（Desktop Execution v2）
+旧 execution widget 直写               ✅ 已删除（Desktop Execution v2）
 旧 MainWindow stream lifecycle         ⏭ 后续
 旧 Paper-specific orchestration glue   ⏭ 后续
 旧 workflow duplicate state            ⏭ 后续
-旧页面 builder（execution / …）         ⏭ 后续
+旧页面 builder（其余 route）            ⏭ 后续
 旧 desktop service                     ⏭ 后续
 ```
 
@@ -1160,36 +1241,44 @@ HALTED
 
 ## 14. 下一轮
 
-**Runtime v2B 已完成。** Runtime v2A 删掉了 `AutoQuantEngine` 并把信号与会话
-拆成 `StrategyRuntime` / `TradingRuntime`（见 §10.3）；Runtime v2B 删掉了最后
-三个过渡态 `paper_session.py` / `paper_workflow.py` / `workflow_state.py`，
-把会话协调（`coordinator.py`）、阶段机与租约（`workflow_state.py`）、人工恢复
-（`recovery.py`）、生命周期（`workflow.py`）与证明（`reconciliation.py`）
-模块化（见 §10.4）。**没有 compatibility shim，没有第二入口。**
+**Desktop Execution v2 已完成。** execution route 现在是原生 v2 page：旧
+`MainWindow._auto_quant_tab` 已删除，页面在
+`desktop_v2/pages/execution/`，presenter 是 Qt-free 纯投影，窗口只保留
+`self.execution_page` 并继续拥有取数与编排（见 §8.2）。
+
+三个已完成轮次的顺序：
+
+```text
+Runtime v2A   AutoQuantEngine 拆成 StrategyRuntime / TradingRuntime（§10.3）
+Runtime v2B   paper_session / paper_workflow / workflow_state 模块化（§10.4）
+Desktop Exec  execution route 变成原生 v2 page（§8.2）
+```
 
 下一轮（本轮不做）：
 
 ```text
-Desktop execution page decomposition
 ShadowConfig naming / config separation
 PaperExecutionHealth location cleanup
 PaperTradingService location cleanup
 workflow_controller broader cleanup
 ```
 
-Runtime v2A / v2B 刻意没有做的事，留给更后面：
+Runtime v2A / v2B / Desktop Execution v2 刻意没有做的事，留给更后面：
 
 - 没有把 `PaperWorkflowPhase` / `ExecutionLease` 改成 trading 层类型之外的东西
   （迁移只改 import 路径，转换表与租约语义未动）；
-- 没有重写 Desktop execution 路由页（`_auto_quant_tab` 仍然按原样渲染，
-  只是数据来自域类型）；
+- 没有重写其余 route 的页面 builder（`dashboard` / `market` / `research` /
+  `system` 仍由旧 builder 提供）；
+- 没有把 `PaperTradingService`、`paper_execution_health.py` 或
+  `workflow_controller.py` 搬家（本轮只改 import 与调用点）；
 - 没有合并 Account socket 与 Execution socket；
 - 没有改 pricing ownership：`_limit_price` 仍产出
   `TradeProposal.reference_price`，Risk 按同一价格定量，Execution 按同一价格
   发单——三者一致，本轮不拆开；
 - 没有重做 `ShadowConfig` 配置模型（名字仍然是历史包袱，先拆职责）；
 - 没有新增任何真实交易能力：仍然 Paper only、整股、限价、无做空、无保证金，
-  submission 默认关闭，live 永久关闭。
+  submission 默认关闭，live 永久关闭。ExecutionPage 也没有新增市价单、手工下单、
+  全局撤单、live 开关、做空或数量/风险覆盖入口。
 
 同样刻意不创建 `TradingManager`、`TradingGodService`、`GlobalAppState`、
 `ServiceLocator` 或 `ApplicationContext`：runtime 由 composition root 显式

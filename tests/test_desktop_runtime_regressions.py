@@ -53,10 +53,12 @@ def test_default_desktop_builds_every_v2_route() -> None:
     try:
         assert window.shell.routes == ROUTES
         assert window.shell.current_route == DEFAULT_ROUTE
-        assert window.auto_detail_tabs.count() == 5
+        # The execution route is a native v2 page now: the window holds the page
+        # and the page holds its own controls and detail sections.
+        assert window.execution_page.details.tabs.count() == 5
         assert window.targeted_workspace_tabs.count() == 5
-        assert window.auto_prepare_button is not None
-        assert window.auto_start_button is not None
+        assert window.execution_page.controls.prepare_button is not None
+        assert window.execution_page.controls.start_button is not None
         assert window.shadow_start_button is not None
         assert window.targeted_review_history_table is not None
     finally:

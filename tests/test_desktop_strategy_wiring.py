@@ -187,10 +187,21 @@ def test_starting_again_over_the_same_store_does_not_duplicate(
 # -- the combos are views of the service ---------------------------------
 
 
-def test_the_auto_rotation_combo_is_populated_at_startup(window) -> None:
-    """The retired handler could not do this, so the combo started empty."""
+def _auto_combo(window):
+    """The auto-rotation combo, which now lives on the execution page."""
 
-    assert window.auto_strategy_combo.count() >= 1
+    return window.execution_page.controls.strategy_combo
+
+
+
+def test_the_auto_rotation_combo_is_populated_at_startup(window) -> None:
+    """The retired handler could not do this, so the combo started empty.
+
+    The combo now lives on the execution page; the window points it at the
+    service through the page rather than reaching for the widget.
+    """
+
+    assert _auto_combo(window).count() >= 1
     selected = window.strategy_selection.selected(
         StrategySelectionPurpose.AUTO_ROTATION
     )
@@ -214,9 +225,9 @@ def test_the_auto_combo_only_offers_rotation_versions(window) -> None:
         ).strategy_id
     }
     assert offered == {"intraday-auto-rotation"}
+    combo = _auto_combo(window)
     version_ids = {
-        window.auto_strategy_combo.itemData(index)
-        for index in range(window.auto_strategy_combo.count())
+        combo.itemData(index) for index in range(combo.count())
     }
     rotation_ids = {
         version.version_id
@@ -230,7 +241,7 @@ def test_the_auto_combo_only_offers_rotation_versions(window) -> None:
 def test_choosing_a_combo_entry_records_it_as_the_runtime_selection(
     window,
 ) -> None:
-    combo = window.auto_strategy_combo
+    combo = _auto_combo(window)
     assert combo.count() >= 2
     target = combo.itemData(combo.count() - 1)
 
@@ -248,17 +259,18 @@ def test_a_stopped_version_drops_out_of_the_combo(window) -> None:
     selected = window.strategy_selection.selected(
         StrategySelectionPurpose.AUTO_ROTATION
     )
-    before = window.auto_strategy_combo.count()
+    combo = _auto_combo(window)
+    before = combo.count()
 
     window.strategies.transition(
         selected.version_id, StrategyStatus.STOPPED, reason="test"
     )
     window._refresh_strategy_page()
 
-    assert window.auto_strategy_combo.count() == before - 1
+    combo = _auto_combo(window)
+    assert combo.count() == before - 1
     version_ids = {
-        window.auto_strategy_combo.itemData(index)
-        for index in range(window.auto_strategy_combo.count())
+        combo.itemData(index) for index in range(combo.count())
     }
     assert selected.version_id not in version_ids
     replacement = window.strategy_selection.selected(

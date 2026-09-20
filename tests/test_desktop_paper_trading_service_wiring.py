@@ -194,8 +194,7 @@ def test_migrated_reads_no_longer_touch_the_order_service_directly() -> None:
     """The UI stops reading the order service for status."""
 
     for name in (
-        "_populate_auto_quant_snapshot",
-        "_populate_auto_latency_table",
+        "_render_auto_quant_snapshot",
         "_check_auto_order_channel",
         "_finish_auto_quant_session_if_safe",
     ):
@@ -203,9 +202,16 @@ def test_migrated_reads_no_longer_touch_the_order_service_directly() -> None:
 
 
 def test_migrated_reads_no_longer_touch_the_workflow_directly() -> None:
+    """Phase reads go through the service, never the controller.
+
+    The one place that turns the phase into control state is the publisher; the
+    handlers that used to read it themselves now call that instead, so the
+    assertion moved with the read rather than being dropped.
+    """
+
     for name in (
         "_apply_paper_workflow_result",
-        "_apply_paper_workflow_button_state",
+        "_publish_execution_controls",
         "_paper_needs_manual_recovery",
         "_poll_auto_quant_orders",
         "_stream_snapshot_received",
@@ -214,6 +220,12 @@ def test_migrated_reads_no_longer_touch_the_workflow_directly() -> None:
         source = _source(name)
         assert "self.paper_workflow.phase" not in source, name
         assert "self.paper_trading.phase()" in source, name
+
+    # And the render path still reaches the controls through the publisher
+    # rather than by writing them itself.
+    assert "self._publish_execution_controls()" in _source(
+        "_apply_paper_workflow_button_state"
+    )
 
 
 # -- ownership wiring ----------------------------------------------------

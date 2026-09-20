@@ -581,8 +581,12 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
     """The v2 package holds the shell, the route table and native pages.
 
     ``pages/account.py`` was the first genuinely native v2 page;
-    ``pages/strategy.py`` is the second and ``pages/risk.py`` the third, and
-    none of those routes reuses a legacy builder from ``MainWindow`` any more.
+    ``pages/strategy.py`` is the second, ``pages/risk.py`` the third, and
+    ``pages/execution/`` the fourth -- that route is a package rather than a
+    module because it has four distinct jobs (view models, a Qt-free projection,
+    the detail tables and the page), and one module holding all four would be the
+    400-line page this migration exists to avoid.  None of those routes reuses a
+    legacy builder from ``MainWindow`` any more.
     """
 
     desktop_v2 = _SRC / "desktop_v2"
@@ -598,6 +602,13 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "pages/account.py",
         "pages/risk.py",
         "pages/strategy.py",
+        "pages/execution/__init__.py",
+        "pages/execution/controls.py",
+        "pages/execution/models.py",
+        "pages/execution/page.py",
+        "pages/execution/presenter.py",
+        "pages/execution/rows.py",
+        "pages/execution/tables.py",
     }
 
 
@@ -3144,3 +3155,252 @@ def test_the_paper_order_channel_diagnostic_cannot_submit() -> None:
     # The real order store must not be touched: the run writes to a temporary
     # directory and opens nothing else.
     assert "TemporaryDirectory" in source
+
+
+# -- Desktop Execution v2 -------------------------------------------------
+#
+# The execution route became a native v2 page.  The risk of a UI migration is
+# that it becomes a move of widgets rather than a move of the boundary: the
+# window keeps reaching into the page's buttons, or the page learns a service so
+# it can decide for itself.  These guards are about the boundary, not the
+# layout.
+
+EXECUTION_PAGE_DIR = _SRC / "desktop_v2" / "pages" / "execution"
+EXECUTION_PAGE = EXECUTION_PAGE_DIR / "page.py"
+EXECUTION_CONTROLS = EXECUTION_PAGE_DIR / "controls.py"
+EXECUTION_MODELS = EXECUTION_PAGE_DIR / "models.py"
+EXECUTION_PRESENTER = EXECUTION_PAGE_DIR / "presenter.py"
+EXECUTION_ROWS = EXECUTION_PAGE_DIR / "rows.py"
+EXECUTION_TABLES = EXECUTION_PAGE_DIR / "tables.py"
+
+EXECUTION_PAGE_MODULES = (
+    EXECUTION_PAGE_DIR / "__init__.py",
+    EXECUTION_MODELS,
+    EXECUTION_PRESENTER,
+    EXECUTION_ROWS,
+    EXECUTION_TABLES,
+    EXECUTION_CONTROLS,
+    EXECUTION_PAGE,
+)
+
+#: Line budgets.  A page that only bites at the shared 500-line ceiling would
+#: not have caught the 416-line builder this round replaced, so each file has
+#: its own, well under it.
+EXECUTION_MODULE_LINE_LIMITS = {
+    "__init__.py": 40,
+    "models.py": 220,
+    "presenter.py": 320,
+    "rows.py": 350,
+    "tables.py": 320,
+    "controls.py": 360,
+    "page.py": 400,
+}
+
+#: What no module of the page package may name.  Each is a capability the
+#: window owns: an application service, a workflow controller, a runtime, a
+#: store, a broker, a widget toolkit's network stack, or the legacy window.
+EXECUTION_PAGE_FORBIDDEN_IMPORTS = (
+    "us_quant.trading.application",
+    "us_quant.trading.composition",
+    "us_quant.trading.adapters",
+    "us_quant.trading.runtime",
+    "us_quant.trading.ports",
+    "us_quant.paper_trading_service",
+    "us_quant.paper_execution_health",
+    "us_quant.workflow_controller",
+    "us_quant.ibkr",
+    "us_quant.risk",
+    "us_quant.sqlite_support",
+    "us_quant.desktop",
+    "ibapi",
+    "sqlite3",
+    "PySide6.QtNetwork",
+)
+
+#: The widget names the window used to reach for by attribute.  Every one of
+#: them was a way for the window to become the page's renderer.
+RETIRED_EXECUTION_WIDGETS = (
+    "auto_prepare_button",
+    "auto_start_button",
+    "auto_pause_button",
+    "auto_resume_button",
+    "auto_stop_button",
+    "auto_stop_stream_button",
+    "auto_reconcile_button",
+    "auto_resume_from_reconciliation_button",
+    "auto_channel_check_button",
+    "auto_arm_confirm",
+    "auto_strategy_combo",
+    "auto_candidate_limit",
+    "auto_capital_limit",
+    "auto_summary_label",
+    "auto_scope_label",
+    "auto_session_label",
+    "auto_preflight_label",
+    "auto_pipeline_label",
+    "auto_status_card",
+    "auto_equity_card",
+    "auto_realized_card",
+    "auto_unrealized_card",
+    "auto_position_card",
+    "auto_health_status_card",
+    "auto_health_broker_card",
+    "auto_health_pending_card",
+    "auto_health_unreconciled_card",
+    "auto_health_latency_card",
+    "auto_detail_tabs",
+    "auto_position_table",
+    "auto_position_model",
+    "auto_recent_fill_table",
+    "auto_recent_fill_model",
+    "auto_shadow_table",
+    "auto_latency_table",
+    "auto_candidate_table",
+    "auto_order_table",
+    "auto_execution_health_label",
+)
+
+
+def test_the_execution_route_has_one_entry_point() -> None:
+    """Guard A and B: no legacy builder, and the route serves the page.
+
+    The window must hold the page and nothing inside it.  A compatibility
+    ``_auto_quant_tab`` that returned the page would keep a second control path
+    alive, which is the arrangement this round removes.
+    """
+
+    desktop = _SRC / "desktop.py"
+    names = _identifier_names(desktop)
+    assert "_auto_quant_tab" not in names, (
+        "the legacy execution builder must be deleted, not re-exported"
+    )
+
+    source = desktop.read_text(encoding="utf-8")
+    assert '"execution": self.execution_page,' in source
+    assert '"execution": self._auto_quant_tab()' not in source
+    assert "self.execution_page = ExecutionPage(" in source
+
+
+def test_the_window_no_longer_names_an_execution_widget() -> None:
+    """Guard E: one attribute -- the page -- is the whole of the window's view.
+
+    Checked as attribute *uses* rather than as text, so a comment explaining the
+    retirement does not trip it.
+    """
+
+    desktop = _SRC / "desktop.py"
+    tree = ast.parse(desktop.read_text(encoding="utf-8"))
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        if not isinstance(node.value, ast.Name) or node.value.id != "self":
+            continue
+        if node.attr in RETIRED_EXECUTION_WIDGETS:
+            offenders.append(node.attr)
+    assert not offenders, sorted(set(offenders))
+
+    # And the window still drives the page, so the guard cannot pass by the
+    # route having stopped working.
+    source = desktop.read_text(encoding="utf-8")
+    for required in (
+        "self.execution_page.render(",
+        "self.execution_page.set_control_state(",
+        "self.execution_page.set_strategy_options(",
+        "self.execution_page.render_preflight(",
+    ):
+        assert required in source, required
+
+
+def test_the_execution_page_package_knows_no_business_service() -> None:
+    """Guard C: the page renders and reports intent; it decides nothing."""
+
+    for path in EXECUTION_PAGE_MODULES:
+        offending = _matches(
+            _imports(path), EXECUTION_PAGE_FORBIDDEN_IMPORTS
+        )
+        assert not offending, (path.name, sorted(offending))
+
+    # And it is a real page, so the guard cannot pass by the package having been
+    # emptied.
+    assert "ExecutionPage" in _class_names(EXECUTION_PAGE)
+    assert "ExecutionDetailTabs" in _class_names(EXECUTION_TABLES)
+    assert "ExecutionControls" in _class_names(EXECUTION_CONTROLS)
+
+
+def test_the_execution_page_cannot_control_the_workflow() -> None:
+    """Guard C, second half: no lifecycle vocabulary, no lifecycle action."""
+
+    for path in EXECUTION_PAGE_MODULES:
+        names = _identifier_names(path)
+        for forbidden in (
+            "PaperWorkflowPhase",
+            "ExecutionLease",
+            "CoordinatorReconciliationEvidence",
+            "CoordinatorFinalizationEvidence",
+            "PaperSessionCoordinator",
+            "PaperWorkflowController",
+            "PaperTradingService",
+            "TradingRuntime",
+            "begin_connecting",
+            "publish_armed",
+            "request_stop",
+            "finalize_if_safe",
+            "release_paper",
+            "placeOrder",
+            "cancelOrder",
+            "submit_approved",
+        ):
+            assert forbidden not in names, (path.name, forbidden)
+
+
+def test_the_execution_presenter_is_qt_free() -> None:
+    """Guard D: a presenter that needed Qt could not be tested without it."""
+
+    for path in (EXECUTION_PRESENTER, EXECUTION_ROWS, EXECUTION_MODELS):
+        offending = {
+            module
+            for module in _imports(path)
+            if module == "PySide6" or module.startswith("PySide6.")
+        }
+        assert not offending, (path.name, sorted(offending))
+
+    # It really does project the view, so the guard cannot pass by the module
+    # having stopped working.
+    assert "build_runtime_view" in _identifier_names(EXECUTION_PRESENTER)
+    assert "control_state" in _identifier_names(EXECUTION_PRESENTER)
+
+
+def test_the_execution_page_modules_stay_small() -> None:
+    """Guard F: the split is a split, not a 400-line page in five parts."""
+
+    oversized = [
+        f"{name}: {_line_count(EXECUTION_PAGE_DIR / name)} lines (limit {limit})"
+        for name, limit in EXECUTION_MODULE_LINE_LIMITS.items()
+        if _line_count(EXECUTION_PAGE_DIR / name) > limit
+    ]
+    assert not oversized, oversized
+
+    covered = {path.name for path in EXECUTION_PAGE_MODULES}
+    actual = {
+        path.name
+        for path in _python_files(EXECUTION_PAGE_DIR)
+    }
+    assert actual == covered, sorted(actual ^ covered)
+
+
+def test_the_execution_page_adds_no_trading_capability() -> None:
+    """The Paper posture is unchanged by a UI migration."""
+
+    for path in EXECUTION_PAGE_MODULES:
+        names = _identifier_names(path)
+        for forbidden in (
+            "placeOrder",
+            "cancelOrder",
+            "reqMktData",
+            "cancelAllOrders",
+            "market_order",
+            "short_sell",
+            "allow_margin_borrowing",
+        ):
+            assert forbidden not in names, (path.name, forbidden)

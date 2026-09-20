@@ -85,8 +85,17 @@ def test_manual_resume_requires_current_evidence_and_runs_off_ui_thread() -> Non
 
 
 def test_snapshot_renderer_does_not_enable_manual_resume_from_engine_flags() -> None:
-    source = _source("_populate_auto_quant_snapshot")
-    assert "auto_resume_from_reconciliation_button.setEnabled" not in source
+    """The render path draws facts; it never decides a recovery control.
+
+    Manual resume is opened by the control publisher from the workflow phase and
+    the presence of a proof, so a renderer that also enabled it would be a second
+    writer for the same button -- the arrangement this migration removes.
+    """
+
+    source = _source("_render_auto_quant_snapshot")
+    assert "resume_reconciliation" not in source
+    assert "set_control_state" not in source
+    assert "setEnabled" not in source
 
 
 def test_finalization_proves_zero_state_before_disconnect_and_lease_release() -> None:

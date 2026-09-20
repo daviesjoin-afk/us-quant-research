@@ -225,7 +225,7 @@ def test_a_successful_refresh_stores_the_domain_portfolio(
     monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
     monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
     monkeypatch.setattr(window, "_refresh_target_preflight", lambda: None)
-    monkeypatch.setattr(window, "_populate_auto_quant_snapshot", lambda _s: None)
+    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
 
     portfolio = _portfolio()
     window._account_snapshot_finished(portfolio)
@@ -242,7 +242,7 @@ def test_a_successful_refresh_appends_to_the_ledger(
     monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
     monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
     monkeypatch.setattr(window, "_refresh_target_preflight", lambda: None)
-    monkeypatch.setattr(window, "_populate_auto_quant_snapshot", lambda _s: None)
+    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
 
     appended: list = []
     monkeypatch.setattr(
@@ -263,7 +263,7 @@ def test_a_successful_refresh_sets_the_account_badge(
     monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
     monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
     monkeypatch.setattr(window, "_refresh_target_preflight", lambda: None)
-    monkeypatch.setattr(window, "_populate_auto_quant_snapshot", lambda _s: None)
+    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
 
     window._account_snapshot_finished(_portfolio())
 
@@ -276,7 +276,7 @@ def test_a_successful_refresh_refreshes_the_preflights(
     monkeypatch.setattr(window, "_repolish_health_badges", lambda: None)
     monkeypatch.setattr(window, "_log", lambda _message: None)
     monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
-    monkeypatch.setattr(window, "_populate_auto_quant_snapshot", lambda _s: None)
+    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
 
     calls: list[str] = []
     monkeypatch.setattr(
@@ -315,7 +315,7 @@ def test_a_successful_refresh_does_not_touch_the_market_badge(
     monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
     monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
     monkeypatch.setattr(window, "_refresh_target_preflight", lambda: None)
-    monkeypatch.setattr(window, "_populate_auto_quant_snapshot", lambda _s: None)
+    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
 
     before_text = window.market_badge.text()
     before_state = window.market_badge.property("state")

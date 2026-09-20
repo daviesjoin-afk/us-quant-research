@@ -28,7 +28,6 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QCheckBox,
     QComboBox,
     QDateEdit,
     QDoubleSpinBox,
@@ -175,7 +174,6 @@ from us_quant.shadow_paper import (
     ShadowPaperEngine,
     ShadowPaperStore,
     ShadowSnapshot,
-    _with_slippage,
 )
 from us_quant.targeted_intraday import build_targeted_shadow_config
 from us_quant.auto_intraday import (
@@ -217,6 +215,11 @@ from us_quant.trading.runtime.workflow_state import (
     PaperWorkflowPhase,
     WorkflowStateError,
 )
+from us_quant.desktop_v2.pages.execution import ExecutionPage
+from us_quant.desktop_v2.pages.execution.presenter import (
+    build_runtime_view,
+    control_state,
+)
 from us_quant.desktop_tasks import DesktopTaskController
 from us_quant.desktop_workers import (
     StreamWorker,
@@ -230,8 +233,9 @@ from us_quant.desktop_widgets import (
     QuoteTableModel,
     _price,
     _sortable_number,
+    configure_combo_width,
+    configure_table,
 )
-from us_quant.table_models import ImmutableRowsTableModel
 from us_quant.workflow_controller import WorkflowController
 from us_quant.minute_data import MinuteQuoteStore
 from us_quant.targeted_preflight import (
@@ -469,9 +473,11 @@ class MainWindow(QMainWindow):
         self._last_paper_finalization_started: float | None = None
         self._last_runtime_events_refresh = 0.0
         self._runtime_events_refresh_pending = False
-        self._last_candidates_static_key: tuple[
-            tuple[str, str, str, int, str, str], ...
-        ] | None = None
+        # Two local in-flight facts the execution route's control state reads.
+        # They live here because only the window knows a local step is running;
+        # the page is told the resulting booleans, never these flags.
+        self._launch_busy = False
+        self._stream_stop_pending = False
         self._quotes_scroll_active = False
         self._pending_stream_snapshot: MarketSnapshot | None = None
         self.account_portfolio: BrokerAccountPortfolio | None = None
@@ -729,13 +735,19 @@ class MainWindow(QMainWindow):
             self._strategy_transition_requested
         )
 
+        # The execution page renders and reports intent; every decision it
+        # reports is executed here.  It holds no service and cannot arm, connect
+        # or start anything, so the launch confirmation below stays the window's.
+        self.execution_page = ExecutionPage(palette=self.theme)
+        self._connect_execution_page()
+
         pages: dict[str, QWidget] = {
             "dashboard": self._dashboard_tab(),
             "market": self._quotes_tab(),
             "account": self.account_page,
             "strategy": self.strategy_page,
             "risk": self.risk_page,
-            "execution": self._auto_quant_tab(),
+            "execution": self.execution_page,
             "research": research,
             "system": system,
         }
@@ -748,6 +760,30 @@ class MainWindow(QMainWindow):
         # empty: it had not been created yet.
         self._refresh_strategy_page()
         return pages
+
+    def _connect_execution_page(self) -> None:
+        """Wire the execution page's intents to the handlers that act on them.
+
+        Every entry is a page signal and an existing window handler: the page
+        reports what the operator asked for, and the orchestration that decides
+        whether it may happen lives here, where the workflow and the services
+        are.
+        """
+
+        page = self.execution_page
+        page.strategy_selected.connect(self._auto_strategy_selected)
+        page.preflight_inputs_changed.connect(self._refresh_auto_quant_preflight)
+        page.prepare_requested.connect(self._prepare_auto_quant_candidates)
+        page.channel_check_requested.connect(self._check_auto_order_channel)
+        page.start_requested.connect(self._confirm_and_start_auto_quant)
+        page.stop_stream_requested.connect(self._stop_auto_market_data)
+        page.pause_requested.connect(self._pause_auto_quant_entries)
+        page.resume_requested.connect(self._resume_auto_quant_entries)
+        page.stop_requested.connect(self._stop_auto_quant)
+        page.reconcile_requested.connect(self._reconnect_auto_order_service)
+        page.resume_reconciliation_requested.connect(
+            self._resume_auto_quant_from_reconciliation
+        )
 
     @staticmethod
     def _field_label(text: str) -> QLabel:
@@ -762,17 +798,13 @@ class MainWindow(QMainWindow):
         minimum_width: int,
         minimum_contents: int,
     ) -> None:
-        combo.setMinimumWidth(minimum_width)
-        combo.setMinimumContentsLength(minimum_contents)
-        combo.setSizeAdjustPolicy(
-            QComboBox.AdjustToMinimumContentsLengthWithIcon
+        """Size a selection combo the way every combo in the workbench is."""
+
+        configure_combo_width(
+            combo,
+            minimum_width=minimum_width,
+            minimum_contents=minimum_contents,
         )
-        combo.setSizePolicy(
-            QSizePolicy.Expanding,
-            QSizePolicy.Fixed,
-        )
-        combo.currentTextChanged.connect(combo.setToolTip)
-        combo.setToolTip(combo.currentText())
 
     def _finalize_layout_behavior(self) -> None:
         for splitter in self.findChildren(QSplitter):
@@ -786,422 +818,6 @@ class MainWindow(QMainWindow):
                 "metricNote",
             }:
                 label.setWordWrap(True)
-
-    def _auto_quant_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-
-        cards = QHBoxLayout()
-        self.auto_status_card = MetricCard(
-            "自动量化", "未启动", "IBKR Paper 订单"
-        )
-        self.auto_equity_card = MetricCard(
-            "模拟账户净值", "—", "以 IBKR Paper 为准"
-        )
-        self.auto_realized_card = MetricCard(
-            "当日已实现", "—", "券商 P&L 优先"
-        )
-        self.auto_unrealized_card = MetricCard(
-            "未实现盈亏", "—", "券商 P&L 优先"
-        )
-        self.auto_position_card = MetricCard(
-            "当前持仓", "0", "当前研究版最多一只"
-        )
-        for card in (
-            self.auto_status_card,
-            self.auto_equity_card,
-            self.auto_realized_card,
-            self.auto_unrealized_card,
-            self.auto_position_card,
-        ):
-            cards.addWidget(card)
-        layout.addLayout(cards)
-
-        health_cards = QHBoxLayout()
-        self.auto_health_status_card = MetricCard(
-            "执行健康", "未评估", "HEALTHY / WAITING / HALT"
-        )
-        self.auto_health_broker_card = MetricCard(
-            "券商持仓/本地持仓", "0/0", "以 IBKR Paper 为准"
-        )
-        self.auto_health_pending_card = MetricCard(
-            "在途订单", "0", "本地 pending + 券商开放订单"
-        )
-        self.auto_health_unreconciled_card = MetricCard(
-            "未对账订单", "0", "终态但成交未对齐或仍缺状态"
-        )
-        self.auto_health_latency_card = MetricCard(
-            "提交延迟", "—", "intent 生成 → placeOrder 耗时"
-        )
-        for card in (
-            self.auto_health_status_card,
-            self.auto_health_broker_card,
-            self.auto_health_pending_card,
-            self.auto_health_unreconciled_card,
-            self.auto_health_latency_card,
-        ):
-            health_cards.addWidget(card)
-        layout.addLayout(health_cards)
-
-        action_panel = QFrame()
-        action_panel.setObjectName("panel")
-        action_panel.setMinimumHeight(230)
-        action_layout = QVBoxLayout(action_panel)
-        self.auto_pipeline_label = QLabel(
-            "自动 Paper：① 全市场扫描→实时短名单　② 确认启动　"
-            "③ 可暂停新开仓或停止并平仓"
-        )
-        self.auto_pipeline_label.setObjectName("sectionTitle")
-        self.auto_pipeline_label.setWordWrap(True)
-        self.auto_pipeline_label.setToolTip(
-            "完整保护链：广域扫描 → 非中概与龙头门 → 实时信号 → 风控 → "
-            "IBKR Paper DAY 限价单 → 券商成交与持仓对账。"
-        )
-        self.auto_session_label = QLabel()
-        self.auto_session_label.setObjectName("subtitle")
-        self.auto_session_label.setWordWrap(True)
-        self.auto_scope_label = QLabel(
-            "市场范围：等待载入官方标的池和最近扫描。"
-        )
-        self.auto_scope_label.setObjectName("subtitle")
-        self.auto_scope_label.setWordWrap(True)
-        controls = QGridLayout()
-        controls.setHorizontalSpacing(10)
-        controls.setVerticalSpacing(6)
-        self.auto_strategy_combo = QComboBox()
-        self._configure_combo_width(
-            self.auto_strategy_combo,
-            minimum_width=485,
-            minimum_contents=30,
-        )
-        # Record the choice into the selection service *before* the preflight
-        # reads it: the combo is a view, and the preflight must judge the
-        # version the runtime would actually use.
-        self.auto_strategy_combo.currentIndexChanged.connect(
-            self._auto_strategy_selection_changed
-        )
-        self.auto_strategy_combo.currentIndexChanged.connect(
-            self._refresh_auto_quant_preflight
-        )
-        self.auto_candidate_limit = QSpinBox()
-        self.auto_candidate_limit.setRange(3, 30)
-        self.auto_candidate_limit.setValue(30)
-        self.auto_candidate_limit.setMinimumWidth(115)
-        self.auto_candidate_limit.valueChanged.connect(
-            self._refresh_auto_quant_preflight
-        )
-        self.auto_capital_limit = QSpinBox()
-        self.auto_capital_limit.setRange(0, 100_000_000)
-        self.auto_capital_limit.setSpecialValueText(
-            "使用 Paper 可用现金"
-        )
-        self.auto_capital_limit.setPrefix("$")
-        self.auto_capital_limit.setValue(0)
-        self.auto_capital_limit.setMinimumWidth(250)
-        self.auto_capital_limit.setToolTip(
-            "0 表示使用 IBKR Paper 净值与现金中的较小值；"
-            "填写金额可限制本次策略使用的模拟资金，不修改券商账户。"
-        )
-        self.auto_capital_limit.valueChanged.connect(
-            self._refresh_auto_quant_preflight
-        )
-        self.auto_prepare_button = QPushButton(
-            "第 1 步：准备并检查"
-        )
-        self.auto_prepare_button.clicked.connect(
-            self._prepare_auto_quant_candidates
-        )
-        self.auto_arm_confirm = QCheckBox(
-            "仅供启动弹窗写入的 Paper 确认"
-        )
-        self.auto_arm_confirm.setVisible(False)
-        self.auto_arm_confirm.toggled.connect(
-            self._refresh_auto_quant_preflight
-        )
-        self.auto_channel_check_button = QPushButton(
-            "可选：测试 Paper 通道（不下单）"
-        )
-        self.auto_channel_check_button.clicked.connect(
-            self._check_auto_order_channel
-        )
-        self.auto_channel_check_button.setVisible(False)
-        self.auto_start_button = QPushButton(
-            "第 2 步：确认并启动 Paper 会话"
-        )
-        self.auto_start_button.clicked.connect(
-            self._confirm_and_start_auto_quant
-        )
-        self.auto_stop_stream_button = QPushButton("停止当前行情")
-        self.auto_stop_stream_button.setToolTip(
-            "停止当前只读行情。第 1 步切换候选时会自动安全停止旧行情，通常不需要手动点击。"
-        )
-        self.auto_stop_stream_button.clicked.connect(
-            self._stop_auto_market_data
-        )
-        self.auto_stop_stream_button.setEnabled(False)
-        self.auto_pause_button = QPushButton("暂停新开仓（保留持仓）")
-        self.auto_pause_button.setToolTip(
-            "禁止新的买入意图并撤销未成交买单；已有持仓继续执行止损、"
-            "止盈和时段退出。"
-        )
-        self.auto_pause_button.clicked.connect(
-            self._pause_auto_quant_entries
-        )
-        self.auto_pause_button.setEnabled(False)
-        self.auto_resume_button = QPushButton("恢复新开仓")
-        self.auto_resume_button.clicked.connect(
-            self._resume_auto_quant_entries
-        )
-        self.auto_resume_button.setEnabled(False)
-        self.auto_stop_button = QPushButton("停止会话并请求平仓")
-        self.auto_stop_button.setToolTip(
-            "撤销未成交买单，并按实时行情为已有 Paper 持仓提交限价卖出。"
-        )
-        self.auto_stop_button.clicked.connect(
-            self._stop_auto_quant
-        )
-        self.auto_stop_button.setEnabled(False)
-        self.auto_resume_from_reconciliation_button = QPushButton(
-            "恢复会话（对账后人工复核）"
-        )
-        self.auto_resume_from_reconciliation_button.setToolTip(
-            "仅用于对账完成后恢复已停机会话；"
-            "不会自动重新下单，需要人工确认当前持仓与订单状态。"
-        )
-        self.auto_resume_from_reconciliation_button.clicked.connect(
-            self._resume_auto_quant_from_reconciliation
-        )
-        self.auto_resume_from_reconciliation_button.setEnabled(False)
-        controls.addWidget(
-            self._field_label("策略版本"),
-            0,
-            0,
-        )
-        controls.addWidget(
-            self._field_label("实时轮动候选上限"),
-            0,
-            1,
-        )
-        controls.addWidget(
-            self._field_label("会话资金上限"),
-            0,
-            2,
-        )
-        controls.addWidget(
-            self._field_label("候选与行情"),
-            0,
-            3,
-        )
-        controls.addWidget(self.auto_strategy_combo, 1, 0)
-        controls.addWidget(self.auto_candidate_limit, 1, 1)
-        controls.addWidget(self.auto_capital_limit, 1, 2)
-        controls.addWidget(self.auto_prepare_button, 1, 3)
-        controls.setColumnStretch(0, 4)
-        controls.setColumnStretch(1, 1)
-        controls.setColumnStretch(2, 2)
-        controls.setColumnStretch(3, 2)
-
-        session_actions = QHBoxLayout()
-        session_actions.setSpacing(10)
-        session_actions.addWidget(self.auto_start_button)
-        risk_actions = QHBoxLayout()
-        risk_actions.setSpacing(10)
-        risk_actions.addWidget(self.auto_stop_stream_button)
-        risk_actions.addWidget(self.auto_pause_button)
-        risk_actions.addWidget(self.auto_resume_button)
-        risk_actions.addWidget(self.auto_resume_from_reconciliation_button)
-        risk_actions.addWidget(self.auto_stop_button)
-        self.auto_summary_label = QLabel(
-            "第 1 步会重新扫描全部非中概研究池，再从有合格历史数据的标的中"
-            "选出最多 30 个实时候选；第 2 步弹窗确认后启动 Paper 会话。运行中可只暂停新开仓，"
-            "不会强制卖出现有持仓。"
-        )
-        self.auto_summary_label.setObjectName("subtitle")
-        self.auto_summary_label.setWordWrap(True)
-        self.auto_preflight_label = QLabel()
-        self.auto_preflight_label.setObjectName("emptyState")
-        self.auto_preflight_label.setWordWrap(True)
-        action_layout.addWidget(self.auto_pipeline_label)
-        action_layout.addWidget(self.auto_session_label)
-        action_layout.addWidget(self.auto_scope_label)
-        action_layout.addLayout(controls)
-        action_layout.addLayout(session_actions)
-        action_layout.addLayout(risk_actions)
-        action_layout.addWidget(self.auto_summary_label)
-        action_layout.addWidget(self.auto_preflight_label)
-        layout.addWidget(action_panel)
-
-        self.auto_detail_tabs = QTabWidget()
-        self.auto_detail_tabs.setDocumentMode(True)
-        self.auto_detail_tabs.setMinimumHeight(130)
-
-        portfolio_page = QWidget()
-        portfolio_layout = QVBoxLayout(portfolio_page)
-        self.auto_position_table = QTableWidget(0, 7)
-        self.auto_position_table.setHorizontalHeaderLabels(
-            [
-                "代码",
-                "整股",
-                "成交均价",
-                "最新估值",
-                "未实现P&L",
-                "持仓时间",
-                "来源",
-            ]
-        )
-        self._configure_table(self.auto_position_table)
-        position_headers = tuple(
-            self.auto_position_table.horizontalHeaderItem(index).text()
-            for index in range(self.auto_position_table.columnCount())
-        )
-        self.auto_position_table.deleteLater()
-        self.auto_position_model = ImmutableRowsTableModel(position_headers)
-        self.auto_position_table = QTableView()
-        self.auto_position_table.setModel(self.auto_position_model)
-        self._configure_table_view(self.auto_position_table)
-        self.auto_recent_fill_table = QTableWidget(0, 7)
-        self.auto_recent_fill_table.setHorizontalHeaderLabels(
-            [
-                "时间",
-                "代码",
-                "方向",
-                "整股",
-                "Paper成交价",
-                "估算费用",
-                "本笔已实现",
-            ]
-        )
-        self._configure_table(self.auto_recent_fill_table)
-        fill_headers = tuple(
-            self.auto_recent_fill_table.horizontalHeaderItem(index).text()
-            for index in range(self.auto_recent_fill_table.columnCount())
-        )
-        self.auto_recent_fill_table.deleteLater()
-        self.auto_recent_fill_model = ImmutableRowsTableModel(fill_headers)
-        self.auto_recent_fill_table = QTableView()
-        self.auto_recent_fill_table.setModel(self.auto_recent_fill_model)
-        self._configure_table_view(self.auto_recent_fill_table)
-        portfolio_layout.addWidget(QLabel("当前组合"))
-        portfolio_layout.addWidget(self.auto_position_table)
-        portfolio_layout.addWidget(QLabel("最近成交"))
-        portfolio_layout.addWidget(self.auto_recent_fill_table)
-        self.auto_detail_tabs.addTab(portfolio_page, "组合与盈亏")
-
-        shadow_page = QWidget()
-        shadow_layout = QVBoxLayout(shadow_page)
-        shadow_title = QLabel("影子执行带")
-        shadow_title.setObjectName("sectionTitle")
-        shadow_layout.addWidget(shadow_title)
-        shadow_note = QLabel(
-            "这里只展示研究态影子限价带：ask+slippage、bid−slippage 与当前 "
-            "策略 limit_price 的相对位置。Paper 真实订单仍以本地 intent 与券商 "
-            "逐笔成交对账为准。"
-        )
-        shadow_note.setObjectName("subtitle")
-        shadow_note.setWordWrap(True)
-        shadow_layout.addWidget(shadow_note)
-        self.auto_shadow_table = QTableWidget(0, 7)
-        self.auto_shadow_table.setHorizontalHeaderLabels(
-            [
-                "代码",
-                "Bid",
-                "Ask",
-                "影子买价",
-                "影子卖价",
-                "策略限价",
-                "状态",
-            ]
-        )
-        self._configure_table(self.auto_shadow_table)
-        shadow_layout.addWidget(self.auto_shadow_table)
-        self.auto_detail_tabs.addTab(shadow_page, "影子执行带")
-
-        latency_page = QWidget()
-        latency_layout = QVBoxLayout(latency_page)
-        latency_title = QLabel("提交延迟观测")
-        latency_title.setObjectName("sectionTitle")
-        latency_layout.addWidget(latency_title)
-        latency_note = QLabel(
-            "展示最近订单从本地生成到 IBKR Paper placeOrder 的延迟分布；"
-            "用于识别网络/API 抖动与重试策略效果。"
-        )
-        latency_note.setObjectName("subtitle")
-        latency_note.setWordWrap(True)
-        latency_layout.addWidget(latency_note)
-        self.auto_latency_table = QTableWidget(0, 5)
-        self.auto_latency_table.setHorizontalHeaderLabels(
-            [
-                "intent_id",
-                "symbol",
-                "side",
-                "提交延迟 ms",
-                "生成时间",
-            ]
-        )
-        self._configure_table(self.auto_latency_table)
-        latency_layout.addWidget(self.auto_latency_table)
-        self.auto_detail_tabs.addTab(latency_page, "提交延迟")
-
-        candidates_page = QWidget()
-        candidates_layout = QVBoxLayout(candidates_page)
-        self.auto_candidate_table = QTableWidget(0, 7)
-        self.auto_candidate_table.setHorizontalHeaderLabels(
-            [
-                "代码",
-                "名称",
-                "板块",
-                "层级",
-                "扫描分",
-                "日线信号",
-                "实时状态",
-            ]
-        )
-        self._configure_table(self.auto_candidate_table)
-        candidates_layout.addWidget(self.auto_candidate_table)
-        self.auto_detail_tabs.addTab(candidates_page, "候选与信号")
-
-        orders_page = QWidget()
-        orders_layout = QVBoxLayout(orders_page)
-        order_note = QLabel(
-            "这里只显示整理后的会话订单。原始 IBKR 回调写入本地审计库，"
-            "Live、市场单、碎股、做空、全局撤单和期权接口均不存在。"
-        )
-        order_note.setObjectName("subtitle")
-        self.auto_execution_health_label = QLabel(
-            "执行对账：未连接。券商状态、逐笔成交和本地持仓将在这里汇总。"
-        )
-        self.auto_execution_health_label.setObjectName("subtitle")
-        self.auto_execution_health_label.setWordWrap(True)
-        self.auto_reconcile_button = QPushButton(
-            "断线后重新连接对账"
-        )
-        self.auto_reconcile_button.setEnabled(False)
-        self.auto_reconcile_button.clicked.connect(
-            self._reconnect_auto_order_service
-        )
-        self.auto_order_table = QTableWidget(0, 7)
-        self.auto_order_table.setHorizontalHeaderLabels(
-            [
-                "状态",
-                "代码",
-                "方向",
-                "订单/成交",
-                "限价",
-                "对账说明",
-                "Order",
-            ]
-        )
-        self._configure_table(self.auto_order_table)
-        orders_layout.addWidget(order_note)
-        orders_layout.addWidget(self.auto_execution_health_label)
-        orders_layout.addWidget(
-            self.auto_reconcile_button,
-            alignment=Qt.AlignLeft,
-        )
-        orders_layout.addWidget(self.auto_order_table)
-        self.auto_detail_tabs.addTab(orders_page, "Paper订单")
-        layout.addWidget(self.auto_detail_tabs)
-        return page
 
     def _quotes_tab(self) -> QWidget:
         page = QWidget()
@@ -2551,44 +2167,14 @@ class MainWindow(QMainWindow):
         return panel
 
     def _configure_table(self, table: QTableWidget) -> None:
-        table.setAlternatingRowColors(True)
-        table.setSelectionBehavior(QTableWidget.SelectRows)
-        table.setSelectionMode(QTableWidget.SingleSelection)
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
-        table.setWordWrap(False)
-        table.setTextElideMode(Qt.ElideRight)
-        table.setHorizontalScrollMode(
-            QAbstractItemView.ScrollPerPixel
-        )
-        table.setVerticalScrollMode(
-            QAbstractItemView.ScrollPerPixel
-        )
-        table.verticalHeader().setVisible(False)
-        header = table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Interactive)
-        header.setMinimumSectionSize(72)
-        header.setDefaultSectionSize(128)
-        header.setStretchLastSection(True)
-        table.setSortingEnabled(True)
+        """Apply the workbench's shared read-only table behaviour."""
+
+        configure_table(table)
 
     def _configure_table_view(self, table: QTableView) -> None:
         """Apply shared behavior to model-backed high-frequency tables."""
 
-        table.setAlternatingRowColors(True)
-        table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        table.setSelectionMode(QAbstractItemView.SingleSelection)
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        table.setWordWrap(False)
-        table.setTextElideMode(Qt.ElideRight)
-        table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
-        table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
-        table.verticalHeader().setVisible(False)
-        header = table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Interactive)
-        header.setMinimumSectionSize(72)
-        header.setDefaultSectionSize(128)
-        header.setStretchLastSection(True)
-        table.setSortingEnabled(True)
+        configure_table(table)
 
     def _load_local_state(self) -> None:
         if self.universe_path.exists():
@@ -3395,7 +2981,7 @@ class MainWindow(QMainWindow):
             capability_enabled=(
                 self.preferences.paper_order_capability_enabled
             ),
-            paper_confirmed=self.auto_arm_confirm.isChecked(),
+            paper_confirmed=self.execution_page.arm_confirmed(),
             strategy_eligible=strategy_eligible,
             strategy_detail=strategy_detail,
             candidate_count=readiness.candidate_count,
@@ -3422,7 +3008,7 @@ class MainWindow(QMainWindow):
     def _refresh_auto_quant_preflight(
         self, *_args: object
     ) -> None:
-        if not hasattr(self, "auto_preflight_label"):
+        if not hasattr(self, "execution_page"):
             return
         result = self._auto_quant_preflight()
         displayed_checks = [
@@ -3435,10 +3021,8 @@ class MainWindow(QMainWindow):
             f"{'✓' if row.passed else '✕'} {row.name}：{row.detail}"
             for row in displayed_checks
         )
-        self.auto_preflight_label.setText(
-            f"准备检查 {ready_count}/{len(displayed_checks)}"
-            " · 第 2 步会弹窗确认仅使用 DU 模拟账户。\n"
-            f"{details}"
+        self.execution_page.render_preflight(
+            ready_count, len(displayed_checks), details
         )
 
     def _check_auto_order_channel(self) -> None:
@@ -3452,7 +3036,8 @@ class MainWindow(QMainWindow):
                 "当前自动量化会话已占用订单通道，无需重复检查。",
             )
             return
-        self.auto_channel_check_button.setEnabled(False)
+        self._channel_check_inflight = True
+        self._apply_paper_workflow_button_state()
         order_config = IBKRConnectionConfig(
             host=self.preferences.ibkr_host,
             port=4002,
@@ -3486,7 +3071,8 @@ class MainWindow(QMainWindow):
             resource_group="broker",
         )
         if not started:
-            self.auto_channel_check_button.setEnabled(True)
+            self._channel_check_inflight = False
+            self._apply_paper_workflow_button_state()
 
     def _auto_order_channel_checked(self, result: object) -> None:
         try:
@@ -3501,13 +3087,14 @@ class MainWindow(QMainWindow):
             raise TypeError(
                 "unexpected Paper channel check result"
             ) from error
-        self.auto_channel_check_button.setEnabled(True)
+        self._channel_check_inflight = False
+        self._apply_paper_workflow_button_state()
         detail = (
             f"{account_alias} · 净值 {_money(net_liquidation)} · "
             f"现金 {_money(cash)} · 持仓 {positions} · "
             f"开放 API 订单 {open_orders} · 本地待对账 {unresolved}"
         )
-        self.auto_execution_health_label.setText(
+        self.execution_page.render_execution_health(
             f"执行对账：订单通道检查通过（未下单） · {detail}"
         )
         self._log(f"IBKR Paper 订单通道检查通过（未下单）：{detail}")
@@ -3535,10 +3122,12 @@ class MainWindow(QMainWindow):
         except WorkflowStateError as error:
             QMessageBox.information(self, "Paper 会话不可准备", str(error))
             return
-        self.auto_prepare_button.setEnabled(False)
-        self.auto_summary_label.setText(
-            "正在扫描全部非中概研究池；只有历史数据质量达标的标的"
-            "才会进入实时轮动候选。"
+        self._set_launch_busy(True)
+        self.execution_page.render_context(
+            summary=(
+                "正在扫描全部非中概研究池；只有历史数据质量达标的标的"
+                "才会进入实时轮动候选。"
+            )
         )
         research_capital = self._research_scenario_capital()
 
@@ -3568,14 +3157,14 @@ class MainWindow(QMainWindow):
         )
         if not started:
             self.paper_workflow.cancel_preparing()
-            self.auto_prepare_button.setEnabled(True)
+            self._set_launch_busy(False)
 
     def _auto_candidate_preparation_failed(self, _message: str) -> None:
         """Release PREPARING after an asynchronous scan failure."""
 
         if self.paper_trading.phase() is PaperWorkflowPhase.PREPARING:
             self.paper_workflow.cancel_preparing()
-        self.auto_prepare_button.setEnabled(True)
+        self._set_launch_busy(False)
 
     def _auto_market_scan_finished(self, result: object) -> None:
         if not isinstance(result, MarketScan):
@@ -3601,14 +3190,14 @@ class MainWindow(QMainWindow):
         if self.scan is None or self.universe is None:
             if self.paper_trading.phase() is PaperWorkflowPhase.PREPARING:
                 self.paper_workflow.cancel_preparing()
-            self.auto_prepare_button.setEnabled(True)
+            self._set_launch_busy(False)
             return
-        limit = self.auto_candidate_limit.value()
+        limit = self.execution_page.candidate_limit()
         paper_capital = self._paper_simulation_capital()
         if paper_capital is None:
             if self.paper_trading.phase() is PaperWorkflowPhase.PREPARING:
                 self.paper_workflow.cancel_preparing()
-            self.auto_prepare_button.setEnabled(True)
+            self._set_launch_busy(False)
             QMessageBox.information(
                 self,
                 "需要新鲜的 Paper 资金",
@@ -3617,7 +3206,7 @@ class MainWindow(QMainWindow):
                 "历史研究情景。",
             )
             return
-        requested_limit = Decimal(self.auto_capital_limit.value())
+        requested_limit = self.execution_page.capital_limit()
         if requested_limit > 0:
             paper_capital = min(paper_capital, requested_limit)
         multipliers = self._configured_exposure_multipliers()
@@ -3679,36 +3268,38 @@ class MainWindow(QMainWindow):
                     "至少需要 3 个才启动自动轮动。"
                 ),
             )
-            self.auto_prepare_button.setEnabled(True)
+            self._set_launch_busy(False)
             return
         self.auto_quant_candidates = tuple(candidates)
         if self.paper_trading.phase() is PaperWorkflowPhase.PREPARING:
             self.paper_workflow.mark_ready()
-        self._populate_auto_quant_candidates()
         symbols = tuple(row.symbol for row in candidates)
         research_count = int(
             self.universe.summary()["research_eligible"]
         )
-        self.auto_scope_label.setText(
-            f"全市场入口：非中概研究池 {research_count:,} · "
-            f"本轮有合格日 K 并完成评分 {len(self.scan.results):,} · "
-            f"缺数据/不足200根 {len(self.scan.skipped):,} · "
-            f"Paper 实时轮动候选 {len(symbols)}。"
-        )
-        self.auto_summary_label.setText(
-            f"已从全市场扫描中整理 {len(symbols)} 个实时轮动候选。"
-            "行情订阅只承担分钟信号，不代表扫描范围只有这些代码；"
-            "全部订单仍未武装。"
+        self.execution_page.render_context(
+            scope=(
+                f"全市场入口：非中概研究池 {research_count:,} · "
+                f"本轮有合格日 K 并完成评分 {len(self.scan.results):,} · "
+                f"缺数据/不足200根 {len(self.scan.skipped):,} · "
+                f"Paper 实时轮动候选 {len(symbols)}。"
+            ),
+            summary=(
+                f"已从全市场扫描中整理 {len(symbols)} 个实时轮动候选。"
+                "行情订阅只承担分钟信号，不代表扫描范围只有这些代码；"
+                "全部订单仍未武装。"
+            ),
         )
         stream_symbols = tuple(dict.fromkeys(symbols + market_references))
         self.stream_symbols.setText(",".join(stream_symbols))
-        self.auto_prepare_button.setEnabled(True)
+        self._set_launch_busy(False)
+        self._populate_auto_quant_candidates()
         if (
             self.stream_worker is not None
             and self.stream_worker.isRunning()
         ):
-            self.auto_summary_label.setText(
-                f"已整理 {len(symbols)} 个候选，正在安全停止旧行情并切换。"
+            self.execution_page.render_context(
+                summary=f"已整理 {len(symbols)} 个候选，正在安全停止旧行情并切换。"
             )
             self._request_stream_switch(
                 str(self.stream_mode.currentData() or "finnhub_trades")
@@ -3734,8 +3325,8 @@ class MainWindow(QMainWindow):
             )
             return
         if self._stop_stream():
-            self.auto_summary_label.setText(
-                "当前行情已停止。可重新点击第 1 步准备新的候选。"
+            self.execution_page.render_context(
+                summary="当前行情已停止。可重新点击第 1 步准备新的候选。"
             )
 
     def _confirm_and_start_auto_quant(self) -> None:
@@ -3757,9 +3348,9 @@ class MainWindow(QMainWindow):
             QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
-            self.auto_arm_confirm.setChecked(False)
+            self.execution_page.set_arm_confirmed(False)
             return
-        self.auto_arm_confirm.setChecked(True)
+        self.execution_page.set_arm_confirmed(True)
         self._start_auto_quant()
 
     def _reset_auto_launch_controls(
@@ -3771,16 +3362,8 @@ class MainWindow(QMainWindow):
         if active is None or active.attempt_id != plan.attempt_id:
             return False
         self._active_auto_launch_plan = None
-        self.auto_arm_confirm.setChecked(False)
-        if (
-            not self.paper_trading.has_order_service()
-            and self.trading_runtime is None
-        ):
-            self.auto_start_button.setEnabled(True)
-            self.auto_prepare_button.setEnabled(True)
-            self.auto_strategy_combo.setEnabled(True)
-            self.auto_candidate_limit.setEnabled(True)
-            self.auto_capital_limit.setEnabled(True)
+        self.execution_page.set_arm_confirmed(False)
+        self._apply_paper_workflow_button_state()
         return True
 
     def _current_auto_launch_matches(
@@ -3794,9 +3377,7 @@ class MainWindow(QMainWindow):
             candidate_symbols=(
                 row.symbol for row in self.auto_quant_candidates
             ),
-            requested_capital_limit=Decimal(
-                self.auto_capital_limit.value()
-            ),
+            requested_capital_limit=self.execution_page.capital_limit(),
         )
 
     def _reject_unpublished_auto_candidate(
@@ -3839,72 +3420,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Paper 会话未启动", message)
 
     def _populate_auto_quant_candidates(self) -> None:
-        quotes = {
-            quote.symbol: quote
-            for quote in (
-                self.stream_snapshot.quotes
-                if self.stream_snapshot is not None
-                else ()
-            )
-        }
-        candidates = self.auto_quant_candidates
-        static_key = tuple(
-            (
-                candidate.symbol,
-                candidate.name,
-                candidate.sector,
-                candidate.leader_tier,
-                str(candidate.scan_score),
-                candidate.signal,
-            )
-            for candidate in candidates
-        )
-        if static_key != getattr(
-            self, "_last_candidates_static_key", None
-        ):
-            # M-5 optimization: rebuild static columns only when the
-            # candidate set changes; the realtime column updates below.
-            self._last_candidates_static_key = static_key
-            self.auto_candidate_table.setSortingEnabled(False)
-            self.auto_candidate_table.setRowCount(len(candidates))
-            for row_index, candidate in enumerate(candidates):
-                values = (
-                    candidate.symbol,
-                    candidate.name,
-                    candidate.sector,
-                    (
-                        "龙头"
-                        if candidate.leader_tier == 1
-                        else "优质二线"
-                        if candidate.leader_tier == 2
-                        else f"层级{candidate.leader_tier}"
-                    ),
-                    f"{candidate.scan_score:.1f}",
-                    candidate.signal,
-                )
-                for column, value in enumerate(values):
-                    item = QTableWidgetItem(value)
-                    item.setToolTip(value)
-                    self.auto_candidate_table.setItem(
-                        row_index, column, item
-                    )
-        for row_index, candidate in enumerate(candidates):
-            quote = quotes.get(candidate.symbol)
-            realtime = (
-                "当前 fresh"
-                if quote is not None and quote.realtime_ready
-                else "近30秒有实时成交"
-                if self._quote_was_recently_ready(candidate.symbol)
-                else "等待"
-            )
-            item = QTableWidgetItem(realtime)
-            item.setToolTip(realtime)
-            if realtime == "等待":
-                item.setForeground(QColor(self.theme.warning))
-            self.auto_candidate_table.setItem(
-                row_index, 6, item
-            )
-        self.auto_candidate_table.setSortingEnabled(True)
+        """Re-render the candidate and context surfaces from current facts.
+
+        The page owns the candidate table's static-key optimisation; the window
+        only supplies the candidates and the stream facts, and re-runs the two
+        context lines that are not session state.
+        """
+
+        self._render_auto_quant_snapshot()
         self._refresh_auto_quant_preflight()
         self._refresh_extended_hours_status()
 
@@ -3920,7 +3443,7 @@ class MainWindow(QMainWindow):
             self.shadow_engine is not None
             and self.shadow_engine.active
         ):
-            self.auto_arm_confirm.setChecked(False)
+            self.execution_page.set_arm_confirmed(False)
             QMessageBox.warning(
                 self,
                 "内部仿真仍在运行",
@@ -3929,7 +3452,7 @@ class MainWindow(QMainWindow):
             return
         preflight = self._auto_quant_preflight()
         if not preflight.ready:
-            self.auto_arm_confirm.setChecked(False)
+            self.execution_page.set_arm_confirmed(False)
             failures = "\n".join(
                 f"• {row.name}：{row.detail}"
                 for row in preflight.checks
@@ -3943,9 +3466,7 @@ class MainWindow(QMainWindow):
             return
         strategy = self._selected_auto_strategy_record()
         assert strategy is not None
-        requested_capital_limit = Decimal(
-            self.auto_capital_limit.value()
-        )
+        requested_capital_limit = self.execution_page.capital_limit()
         self._next_auto_launch_attempt += 1
         plan = build_auto_launch_plan(
             attempt_id=self._next_auto_launch_attempt,
@@ -3957,17 +3478,15 @@ class MainWindow(QMainWindow):
             requested_capital_limit=requested_capital_limit,
         )
         self._active_auto_launch_plan = plan
-        self.auto_start_button.setEnabled(False)
         try:
             self.paper_workflow.begin_connecting(plan)
         except WorkflowStateError as error:
             self._active_auto_launch_plan = None
             QMessageBox.information(self, "Paper 会话不可启动", str(error))
             return
-        self.auto_prepare_button.setEnabled(False)
-        self.auto_channel_check_button.setEnabled(False)
-        self.auto_summary_label.setText(
-            "正在连接独立 IBKR Paper 订单会话并核验唯一 DU 账户…"
+        self._apply_paper_workflow_button_state()
+        self.execution_page.render_context(
+            summary="正在连接独立 IBKR Paper 订单会话并核验唯一 DU 账户…"
         )
         order_config = IBKRConnectionConfig(
             host=self.preferences.ibkr_host,
@@ -4178,15 +3697,6 @@ class MainWindow(QMainWindow):
         self.trading_runtime = runtime
         self.auto_quant_snapshot = workflow_result.engine_snapshot
         self._active_auto_launch_plan = None
-        self.auto_stop_button.setEnabled(True)
-        self.auto_pause_button.setEnabled(True)
-        self.auto_resume_button.setEnabled(False)
-        self.auto_stop_stream_button.setEnabled(False)
-        self.auto_strategy_combo.setEnabled(False)
-        self.auto_candidate_limit.setEnabled(False)
-        self.auto_capital_limit.setEnabled(False)
-        self.auto_channel_check_button.setEnabled(False)
-        self.auto_arm_confirm.setEnabled(False)
         self._apply_paper_workflow_result(workflow_result)
         self._record_runtime_event(
             severity="warning",
@@ -4221,16 +3731,12 @@ class MainWindow(QMainWindow):
         """Render one controller result; desktop never replays its ingress."""
         self.auto_quant_snapshot = result.engine_snapshot  # type: ignore[assignment]
         self.paper_execution_health = result.health  # type: ignore[assignment]
-        if self.auto_quant_snapshot is not None:
-            self._populate_auto_quant_snapshot(self.auto_quant_snapshot)
+        self._render_auto_quant_snapshot()
         for event in result.events:
             self._record_runtime_event(severity=event.severity, component="paper_execution", code=event.code, message=event.message)
-        phase = self.paper_trading.phase()
-        self.auto_pause_button.setEnabled(phase is PaperWorkflowPhase.RUNNING)
-        self.auto_resume_button.setEnabled(phase is PaperWorkflowPhase.PAUSED)
-        self.auto_stop_button.setEnabled(phase in {PaperWorkflowPhase.RUNNING, PaperWorkflowPhase.PAUSED})
-        # Reconciliation buttons *and* the refused-close recovery hook.
+        # Reconciliation controls *and* the refused-close recovery hook.
         self._apply_paper_workflow_button_state()
+        phase = self.paper_trading.phase()
         if (
             phase is PaperWorkflowPhase.STOPPING
             and not result.state.finalized
@@ -4407,8 +3913,8 @@ class MainWindow(QMainWindow):
         except WorkflowStateError as error:
             self._log(str(error))
             return
-        self.auto_reconcile_button.setEnabled(False)
-        self.auto_execution_health_label.setText(
+        self._publish_execution_controls()
+        self.execution_page.render_execution_health(
             "执行对账：正在重新连接 IBKR Paper 并读取开放订单、"
             "当日成交和当前持仓；不会自动恢复交易。"
         )
@@ -4452,7 +3958,7 @@ class MainWindow(QMainWindow):
         self._apply_paper_workflow_result(result)  # type: ignore[arg-type]
 
     def _apply_paper_workflow_button_state(self) -> None:
-        """Render reconciliation actions only from controller truth.
+        """Render every execution control from controller truth.
 
         This is the one place every route into ``HALTED``/``RECONCILING*``
         passes through -- the automatic ``STOPPING`` -> ``HALTED``
@@ -4461,12 +3967,7 @@ class MainWindow(QMainWindow):
         at each call site.
         """
 
-        phase = self.paper_trading.phase()
-        self.auto_reconcile_button.setEnabled(phase is PaperWorkflowPhase.HALTED)
-        self.auto_resume_from_reconciliation_button.setEnabled(
-            phase is PaperWorkflowPhase.RECONCILING_READY
-            and self.paper_trading.reconciliation_status().awaiting_confirmation
-        )
+        self._publish_execution_controls()
         self._release_close_drain_if_recovery_required()
 
     def _finish_auto_quant_session_if_safe(self) -> None:
@@ -4493,29 +3994,25 @@ class MainWindow(QMainWindow):
         self.paper_trading.clear_active()
         self.trading_runtime = None
         self.paper_execution_health = None
-        self.auto_execution_health_label.setText(
+        self.execution_page.render_execution_health(
             "执行对账：会话已安全结束，券商持仓和订单均已核对。"
         )
-        self.auto_reconcile_button.setEnabled(False)
-        self.auto_stop_button.setEnabled(False)
-        self.auto_pause_button.setEnabled(False)
-        self.auto_resume_button.setEnabled(False)
-        self.auto_start_button.setEnabled(True)
-        self.auto_prepare_button.setEnabled(True)
-        self.auto_strategy_combo.setEnabled(True)
-        self.auto_candidate_limit.setEnabled(True)
-        self.auto_capital_limit.setEnabled(True)
-        self.auto_channel_check_button.setEnabled(True)
-        self.auto_arm_confirm.setEnabled(True)
-        self.auto_arm_confirm.setChecked(False)
-        self.auto_stop_stream_button.setEnabled(
-            self.stream_worker is not None
-            and self.stream_worker.isRunning()
-        )
+        self.execution_page.set_arm_confirmed(False)
+        self._apply_paper_workflow_button_state()
 
-    def _populate_auto_shadow_table(
-        self, snapshot: AutoQuantSnapshot
-    ) -> None:
+    def _render_auto_quant_snapshot(self) -> None:
+        """Gather the session facts and hand them to the page as one view.
+
+        This is the whole of the window's part in the execution route's
+        rendering: fetch, project, draw.  The projection lives in the page
+        package's presenter, which is Qt-free, and the drawing lives in the page,
+        so neither of them can reach a service and neither of them is reached
+        into by name from here.
+        """
+
+        snapshot = self.auto_quant_snapshot
+        if snapshot is None or not hasattr(self, "execution_page"):
+            return
         quotes = {
             quote.symbol: quote
             for quote in (
@@ -4524,99 +4021,9 @@ class MainWindow(QMainWindow):
                 else ()
             )
         }
-        pending_by_symbol = {
-            intent.execution_symbol: intent
-            for intent in snapshot.pending_orders
-        }
-        rows: list[tuple[str, str, str, str, str, str, str]] = []
-        for candidate in self.auto_quant_candidates:
-            quote = quotes.get(candidate.symbol)
-            bid = quote.bid if quote is not None else None
-            ask = quote.ask if quote is not None else None
-            shadow_buy = (
-                _price(_with_slippage(ask, Decimal("5"), side="BUY"))
-                if ask is not None
-                else "—"
-            )
-            shadow_sell = (
-                _price(_with_slippage(bid, Decimal("5"), side="SELL"))
-                if bid is not None
-                else "—"
-            )
-            intent = pending_by_symbol.get(candidate.symbol)
-            limit_price = _price(intent.limit_price) if intent is not None else "—"
-            if bid is None or ask is None:
-                status = "等待行情"
-            elif intent is None:
-                status = "无待挂单"
-            else:
-                status = "策略限价已挂"
-            rows.append(
-                (candidate.symbol, _price(bid), _price(ask), shadow_buy, shadow_sell, limit_price, status)
-            )
-        self.auto_shadow_table.setRowCount(len(rows))
-        for row_index, row in enumerate(rows):
-            for column, value in enumerate(row):
-                item = QTableWidgetItem(value)
-                item.setToolTip(value)
-                if column == 6 and value == "策略限价已挂":
-                    item.setForeground(QColor(self.theme.success))
-                elif column == 6 and value == "等待行情":
-                    item.setForeground(QColor(self.theme.warning))
-                self.auto_shadow_table.setItem(row_index, column, item)
-
-    def _populate_auto_latency_table(
-        self, snapshot: AutoQuantSnapshot
-    ) -> None:
-        rows: list[tuple[str, str, str, str, str]] = []
-        reconciliations = self.paper_trading.reconciliation_rows_with_latency(
-            session_id=snapshot.session_id,
-            limit=100,
-        )
-        for row in reconciliations:
-            latency_ms = row.get("submit_latency_ms")
-            if latency_ms is None:
-                continue
-            rows.append(
-                (
-                    str(row.get("intent_id", "")),
-                    str(row.get("symbol", "")),
-                    str(row.get("side", "")),
-                    f"{int(latency_ms)} ms",
-                    str(row.get("observed_at", ""))[:19].replace("T", " "),
-                )
-            )
-        self.auto_latency_table.setRowCount(len(rows))
-        for row_index, row in enumerate(rows):
-            for column, value in enumerate(row):
-                item = QTableWidgetItem(value)
-                item.setToolTip(value)
-                if column == 3:
-                    latency_value = value.replace(" ms", "")
-                    try:
-                        latency_int = int(latency_value)
-                        if latency_int <= 120:
-                            item.setForeground(QColor(self.theme.success))
-                        elif latency_int <= 500:
-                            item.setForeground(QColor(self.theme.warning))
-                        else:
-                            item.setForeground(QColor(self.theme.error))
-                    except ValueError:
-                        pass
-                self.auto_latency_table.setItem(row_index, column, item)
-
-    def _populate_auto_quant_snapshot(
-        self, snapshot: AutoQuantSnapshot
-    ) -> None:
-        account = (
-            self.account_portfolio.account
-            if self.account_portfolio is not None
-            else None
-        )
+        candidates = self.auto_quant_candidates
+        candidate_symbols = {row.symbol for row in candidates}
         broker_state = self.paper_trading.broker_state()
-        candidate_symbols = {
-            row.symbol for row in self.auto_quant_candidates
-        }
         broker_positions = (
             tuple(
                 row
@@ -4626,237 +4033,110 @@ class MainWindow(QMainWindow):
             if broker_state is not None
             else ()
         )
-        self.auto_status_card.set_value(
-            (
-                "停止处理中"
-                if snapshot.stop_requested and snapshot.active
-                else "仅管理持仓"
-                if snapshot.entries_paused and snapshot.active
-                else "运行中"
-                if snapshot.active
-                else "已停止"
-            ),
-            snapshot.status,
-        )
-        self.auto_pause_button.setEnabled(
-            snapshot.active
-            and not snapshot.entries_paused
-            and not snapshot.stop_requested
-        )
-        self.auto_resume_button.setEnabled(
-            snapshot.active
-            and snapshot.entries_paused
-            and not snapshot.stop_requested
-        )
-        self.auto_equity_card.set_value(
-            _money(
-                broker_state.net_liquidation
-                if (
-                    broker_state is not None
-                    and broker_state.net_liquidation is not None
-                )
-                else account.net_liquidation
-                if account is not None
-                else snapshot.estimated_equity
-            ),
-            (
-                "IBKR Paper 订单会话实时账户摘要"
-                if (
-                    broker_state is not None
-                    and broker_state.net_liquidation is not None
-                )
-                else "IBKR Paper 只读快照"
-                if account is not None
-                else "等待券商刷新；显示本地估算"
-            ),
-        )
-        self.auto_realized_card.set_value(
-            _money(
-                broker_state.realized_pnl
-                if (
-                    broker_state is not None
-                    and broker_state.realized_pnl is not None
-                )
-                else account.realized_pnl
-                if account is not None
-                else snapshot.estimated_realized_pnl,
-                signed=True,
-            ),
-            (
-                "IBKR reqPnL（订单会话）"
-                if (
-                    broker_state is not None
-                    and broker_state.realized_pnl is not None
-                )
-                else account.pnl_source
-                if account is not None
-                else "本地估算"
-            ),
-        )
-        self.auto_unrealized_card.set_value(
-            _money(
-                broker_state.unrealized_pnl
-                if (
-                    broker_state is not None
-                    and broker_state.unrealized_pnl is not None
-                )
-                else account.unrealized_pnl
-                if account is not None
-                else snapshot.estimated_unrealized_pnl,
-                signed=True,
-            ),
-            "IBKR Paper 优先",
-        )
-        self.auto_position_card.set_value(
-            str(
-                len(broker_positions)
-                if broker_positions
-                else len(snapshot.positions)
-            ),
-            (
-                f"在途 {len(snapshot.pending_orders)} · "
-                f"完成交易 {snapshot.trades_today}"
-            ),
-        )
-        self.auto_summary_label.setText(
-            f"{snapshot.status} · 候选 {snapshot.candidate_count} · "
-            f"会话风险资金 {_money(snapshot.initial_equity)} · "
-            f"会话 {snapshot.session_id[:8] if snapshot.session_id else '无'} · "
-            "券商订单与持仓必须以 IBKR Paper 回报为准"
-        )
-        self._populate_auto_shadow_table(snapshot)
-        self._populate_auto_latency_table(snapshot)
-        quote_map = {
-            quote.symbol: quote
-            for quote in (
-                self.stream_snapshot.quotes
-                if self.stream_snapshot is not None
-                else ()
+        session_id = snapshot.session_id
+        reconciliations = (
+            self.order_repository.reconciliation_rows(
+                session_id=session_id,
+                limit=50,
             )
-        }
-        displayed_positions = (
-            tuple(
-                (
-                    row.symbol,
-                    int(row.quantity),
-                    row.average_cost,
-                    "—",
-                    "IBKR Paper position",
-                )
-                for row in broker_positions
-                if (
-                    row.quantity > 0
-                    and row.quantity == int(row.quantity)
-                )
-            )
-            if broker_positions
-            else tuple(
-                (
-                    row.symbol,
-                    row.quantity,
-                    row.average_price,
-                    row.opened_at,
-                    row.provider,
-                )
-                for row in snapshot.positions
-            )
+            if session_id
+            else ()
         )
-        position_rows = []
-        for row_index, position in enumerate(displayed_positions):
-            symbol, quantity, average_price, opened_at, provider = (
-                position
-            )
-            quote = quote_map.get(symbol)
-            mark = (
-                (quote.bid + quote.ask) / Decimal("2")
-                if (
-                    quote is not None
-                    and quote.bid is not None
-                    and quote.ask is not None
-                )
-                else average_price
-            )
-            unrealized = (
-                mark - average_price
-            ) * quantity
-            values = (
-                symbol,
-                str(quantity),
-                _price(average_price),
-                _price(mark),
-                _money(unrealized, signed=True),
-                opened_at,
-                provider,
-            )
-            position_rows.append(values)
-        self.auto_position_model.set_rows(position_rows)
-        recent_fills = tuple(reversed(snapshot.fills[-20:]))
-        fill_rows = []
-        for row_index, fill in enumerate(recent_fills):
-            values = (
-                fill.occurred_at,
-                fill.symbol,
-                fill.side,
-                str(fill.quantity),
-                _price(fill.price),
-                _money(fill.estimated_commission),
-                _money(fill.realized_pnl, signed=True),
-            )
-            fill_rows.append(values)
-        self.auto_recent_fill_model.set_rows(fill_rows)
         audit_by_intent = {
             str(row["intent_id"]): row
             for row in self.order_repository.audit_rows(limit=1000)
-            if row.get("session_id") == snapshot.session_id
+            if row.get("session_id") == session_id
         }
-        reconciliations = (
-            self.order_repository.reconciliation_rows(
-                session_id=snapshot.session_id,
-                limit=50,
+        self.execution_page.render(
+            build_runtime_view(
+                snapshot=snapshot,
+                account=(
+                    self.account_portfolio.account
+                    if self.account_portfolio is not None
+                    else None
+                ),
+                broker_state=broker_state,
+                broker_positions=broker_positions,
+                quotes=quotes,
+                pending_by_symbol={
+                    intent.execution_symbol: intent
+                    for intent in snapshot.pending_orders
+                },
+                latency=self.paper_trading.reconciliation_rows_with_latency(
+                    session_id=session_id,
+                    limit=100,
+                ),
+                reconciliations=reconciliations,
+                audit_by_intent=audit_by_intent,
+                candidates=candidates,
+                recently_ready=self._quote_was_recently_ready,
             )
-            if snapshot.session_id
-            else ()
         )
-        self.auto_order_table.setRowCount(len(reconciliations))
-        for row_index, row in enumerate(reconciliations):
-            audit = audit_by_intent.get(row.intent_id, {})
-            status = (
-                "已核对"
-                if row.reconciled
-                else row.latest_status or "等待首次状态"
-            )
-            values = (
-                status,
-                row.symbol,
-                row.side,
-                (
-                    f"{row.intended_quantity}/"
-                    f"{row.executed_quantity}"
+
+    def _publish_execution_controls(self) -> None:
+        """Publish the route's control state from the workflow truth.
+
+        One writer, one source.  The phase decides the session controls, the
+        launch facts decide the launch controls, and the page is handed booleans
+        rather than a phase so it cannot act on a lifecycle vocabulary it does
+        not own.
+
+        ``stop_stream_enabled`` is deliberately tied to the launch lock as well
+        as to the stream: stopping the feed under a live Paper session would
+        starve the strategy of the quotes its exit gates read, which is why the
+        legacy builder disabled it when a session was armed.
+        """
+
+        if not hasattr(self, "execution_page"):
+            return
+        phase = self.paper_trading.phase()
+        launch_locked = self._launch_locked()
+        self.execution_page.set_control_state(
+            control_state(
+                launch_locked=launch_locked,
+                session_running=phase is PaperWorkflowPhase.RUNNING,
+                session_paused=phase is PaperWorkflowPhase.PAUSED,
+                reconcile_available=phase is PaperWorkflowPhase.HALTED,
+                resume_ready=(
+                    phase is PaperWorkflowPhase.RECONCILING_READY
+                    and self.paper_trading.reconciliation_status().awaiting_confirmation
                 ),
-                _price(
-                    Decimal(str(audit.get("limit_price", "0")))
-                ),
-                (
-                    f"{row.reason} · "
-                    f"{str(audit.get('reason') or '')}"
-                ).strip(" ·"),
-                str(row.broker_order_id),
+                stream_running=self._stream_is_live(),
             )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setToolTip(value)
-                if column == 0:
-                    item.setForeground(
-                        QColor(
-                            self.theme.success
-                            if row.reconciled
-                            else self.theme.error
-                            if row.terminal
-                            else self.theme.warning
-                        )
-                    )
-                self.auto_order_table.setItem(row_index, column, item)
-        self._populate_auto_quant_candidates()
+        )
+
+    def _stream_is_live(self) -> bool:
+        """Whether a usable feed is owned: running, and not stuck stopping."""
+
+        worker = self.stream_worker
+        return (
+            not self._stream_stop_pending
+            and worker is not None
+            and worker.isRunning()
+        )
+
+    def _launch_locked(self) -> bool:
+        """Whether a launch attempt currently owns the route's inputs.
+
+        True while a local preflight or channel probe is in flight, while a
+        connection attempt is pending, and while a session owns an order service
+        or a runtime.  Each of those is a reason the operator must not be offered
+        a second launch from the same route.
+        """
+
+        return bool(
+            self._launch_busy
+            or self._active_auto_launch_plan is not None
+            or self.paper_trading.has_order_service()
+            or self.trading_runtime is not None
+        )
+
+    def _set_launch_busy(self, busy: bool) -> None:
+        """Mark a local launch step in flight and republish the controls."""
+
+        self._launch_busy = busy
+        self._publish_execution_controls()
+
 
     def _current_target_symbol(self) -> str:
         return self.target_symbol_input.text().strip().upper()
@@ -6079,10 +5359,18 @@ class MainWindow(QMainWindow):
                 StrategySelectionPurpose.TARGETED_SHADOW,
                 self.shadow_strategy_combo,
             )
-        if hasattr(self, "auto_strategy_combo"):
-            self._sync_strategy_combo(
-                StrategySelectionPurpose.AUTO_ROTATION,
-                self.auto_strategy_combo,
+        if hasattr(self, "execution_page"):
+            purpose = StrategySelectionPurpose.AUTO_ROTATION
+            # The combo is a view: it is refilled from the service's options and
+            # aimed at the service's selection, so it can never keep displaying
+            # a version the runtime will not use.
+            selected = self.strategy_selection.restore_or_default(purpose)
+            self.execution_page.set_strategy_options(
+                [
+                    (strategy_option_label(version), version.version_id)
+                    for version in self.strategy_selection.options(purpose)
+                ],
+                selected.version_id if selected else None,
             )
             self._refresh_auto_quant_preflight()
 
@@ -6240,12 +5528,17 @@ class MainWindow(QMainWindow):
                 f"{version.gate_reason}"
             )
 
-    def _auto_strategy_selection_changed(self, *_args: object) -> None:
-        """Adopt the auto-rotation combo's choice as the runtime selection."""
+    def _auto_strategy_selected(self, version_id: object) -> None:
+        """Adopt the execution page's choice as the runtime selection.
+
+        The page reports which version the operator chose; the seat of truth is
+        the selection service, so selecting here is what records it -- never the
+        combo on screen.
+        """
 
         self._record_runtime_strategy_selection(
             StrategySelectionPurpose.AUTO_ROTATION,
-            self.auto_strategy_combo.currentData(),
+            version_id,
         )
 
     def _shadow_strategy_selection_changed(self, *_args: object) -> None:
@@ -6572,7 +5865,7 @@ class MainWindow(QMainWindow):
         )
 
     def _refresh_extended_hours_status(self) -> None:
-        if not hasattr(self, "auto_session_label"):
+        if not hasattr(self, "execution_page"):
             return
         routing = paper_order_routing(
             extended_hours_enabled=(
@@ -6583,9 +5876,11 @@ class MainWindow(QMainWindow):
             status = "已启用" if routing.allowed else "当前不可交易"
         else:
             status = "未启用（仅常规时段）"
-        self.auto_session_label.setText(
-            f"当前美东时段：{routing.label} · 5×24 Paper：{status} · "
-            f"{routing.reason}"
+        self.execution_page.render_context(
+            session=(
+                f"当前美东时段：{routing.label} · 5×24 Paper：{status} · "
+                f"{routing.reason}"
+            )
         )
 
     def _start_stream(self) -> None:
@@ -6652,8 +5947,7 @@ class MainWindow(QMainWindow):
         self.stream_start_button.setEnabled(True)
         self.stream_start_button.setText("切换 / 重连行情")
         self.stream_stop_button.setEnabled(True)
-        if hasattr(self, "auto_stop_stream_button"):
-            self.auto_stop_stream_button.setEnabled(True)
+        self._publish_execution_controls()
         self.stream_symbols.setEnabled(False)
         self.stream_mode.setEnabled(True)
         self.stream_scan_watchlist_button.setEnabled(False)
@@ -6725,8 +6019,8 @@ class MainWindow(QMainWindow):
                 "停止中", "网络线程尚未确认退出；禁止重复启动"
             )
             self.stream_stop_button.setEnabled(False)
-            if hasattr(self, "auto_stop_stream_button"):
-                self.auto_stop_stream_button.setEnabled(False)
+            self._stream_stop_pending = True
+            self._publish_execution_controls()
             self._record_runtime_event(
                 severity="warning",
                 component="market_data",
@@ -6743,8 +6037,8 @@ class MainWindow(QMainWindow):
         self.stream_start_button.setEnabled(True)
         self.stream_start_button.setText("启动只读流行情")
         self.stream_stop_button.setEnabled(False)
-        if hasattr(self, "auto_stop_stream_button"):
-            self.auto_stop_stream_button.setEnabled(False)
+        self._stream_stop_pending = False
+        self._publish_execution_controls()
         self.stream_symbols.setEnabled(True)
         self.stream_mode.setEnabled(True)
         self.stream_scan_watchlist_button.setEnabled(True)
@@ -7429,8 +6723,8 @@ class MainWindow(QMainWindow):
         self.stream_start_button.setEnabled(True)
         self.stream_start_button.setText("启动只读流行情")
         self.stream_stop_button.setEnabled(False)
-        if hasattr(self, "auto_stop_stream_button"):
-            self.auto_stop_stream_button.setEnabled(False)
+        self._stream_stop_pending = False
+        self._publish_execution_controls()
         self.stream_symbols.setEnabled(True)
         self.stream_mode.setEnabled(True)
         self.stream_scan_watchlist_button.setEnabled(True)
@@ -7961,13 +7255,15 @@ class MainWindow(QMainWindow):
             )
             + " · 上方实时订阅最多 30，只是行情窗口。"
         )
-        if hasattr(self, "auto_scope_label"):
-            self.auto_scope_label.setText(
-                f"全市场入口：官方美股/ETF {total_count:,} · "
-                f"非中概研究池 {research_count:,} · "
-                f"本地已有日 K {history_count:,} · "
-                f"最近完成评分 {scanned_count:,} · "
-                f"当前实时候选 {len(self.auto_quant_candidates)}。"
+        if hasattr(self, "execution_page"):
+            self.execution_page.render_context(
+                scope=(
+                    f"全市场入口：官方美股/ETF {total_count:,} · "
+                    f"非中概研究池 {research_count:,} · "
+                    f"本地已有日 K {history_count:,} · "
+                    f"最近完成评分 {scanned_count:,} · "
+                    f"当前实时候选 {len(self.auto_quant_candidates)}。"
+                )
             )
 
     def _refresh_cards(self) -> None:
@@ -8050,27 +7346,18 @@ class MainWindow(QMainWindow):
         if hasattr(self, "backtest_run_button"):
             self.backtest_run_button.setEnabled(True)
             self.backtest_compare_button.setEnabled(True)
-        if (
-            hasattr(self, "auto_channel_check_button")
-            and not self.paper_trading.has_order_service()
-        ):
-            self.auto_channel_check_button.setEnabled(True)
+        self._publish_execution_controls()
 
     def _task_cancelled(self) -> None:
         self._log("任务已取消；已保留上一次完整可用的研究结果。")
 
     def _task_failed(self, message: str) -> None:
         self.queue_progress.setValue(0)
-        if (
-            hasattr(self, "auto_start_button")
-            and not self.paper_trading.has_order_service()
-            and self.trading_runtime is None
-        ):
-            self.auto_arm_confirm.setChecked(False)
-            self.auto_start_button.setEnabled(True)
-            self.auto_prepare_button.setEnabled(True)
-            self.auto_capital_limit.setEnabled(True)
-            self.auto_channel_check_button.setEnabled(True)
+        # A failed task releases any launch step it was holding; the publish
+        # then restores exactly the controls that step had locked.
+        self._launch_busy = False
+        self.execution_page.set_arm_confirmed(False)
+        self._publish_execution_controls()
         self._log(f"任务失败：{message}")
         self._record_runtime_event(
             severity="error",

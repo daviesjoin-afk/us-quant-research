@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import ast
 import importlib
+import os
 import pathlib
+import subprocess
+import sys
 
 import pytest
 
@@ -75,6 +78,16 @@ def _python_files(directory: pathlib.Path) -> list[pathlib.Path]:
         for path in directory.rglob("*.py")
         if "__pycache__" not in path.parts
     )
+
+
+def _top_level_imports(path: pathlib.Path) -> set[str]:
+    modules: set[str] = set()
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module)
+    return modules
 
 
 def _imports(path: pathlib.Path) -> set[str]:
@@ -234,6 +247,56 @@ def test_projection_modules_import_without_a_widget(
         f"us_quant.desktop_v2.pages.research.{package}.{name[:-3]}"
     )
     assert module is not None
+
+
+@pytest.mark.parametrize("directory", (_UNIVERSE_DIR, _HISTORY_DIR))
+def test_initializers_are_lazy_and_do_not_import_page_or_qt(
+    directory: pathlib.Path,
+) -> None:
+    modules = _top_level_imports(directory / "__init__.py")
+    assert not any(
+        module == "PySide6" or module.startswith("PySide6.")
+        for module in modules
+    ), sorted(modules)
+    assert not any(module.endswith(".page") for module in modules), sorted(modules)
+
+
+def test_projection_imports_work_without_a_desktop_environment() -> None:
+    code = '''
+import importlib
+import sys
+
+sys.modules["PySide6"] = None
+for name in (
+    "us_quant.desktop_v2.pages.research.universe",
+    "us_quant.desktop_v2.pages.research.universe.models",
+    "us_quant.desktop_v2.pages.research.universe.presenter",
+    "us_quant.desktop_v2.pages.research.history",
+    "us_quant.desktop_v2.pages.research.history.models",
+    "us_quant.desktop_v2.pages.research.history.presenter",
+):
+    importlib.import_module(name)
+assert "us_quant.desktop_v2.pages.research.universe.page" not in sys.modules
+assert "us_quant.desktop_v2.pages.research.history.page" not in sys.modules
+'''
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(_REPO_ROOT / "src")
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=_REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_lazy_exports_still_resolve_for_desktop() -> None:
+    from us_quant.desktop_v2.pages.research.universe import UniversePage
+    from us_quant.desktop_v2.pages.research.history import HistoryPage
+
+    assert UniversePage.__name__ == "UniversePage"
+    assert HistoryPage.__name__ == "HistoryPage"
 
 
 def test_window_uses_only_universe_page_public_api() -> None:

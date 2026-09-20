@@ -1,13 +1,13 @@
 """Presentation widgets for the desktop shell.
 
-These four widgets and two formatting helpers are pure presentation: they
-render a value they are handed and own no application state.  They live
-apart from :mod:`us_quant.desktop` so the rendering rules can be read and
-tested without importing the 9k-line window module.
+These widgets and formatting helpers are pure presentation: they render a value
+they are handed and own no application state.  They live apart from
+:mod:`us_quant.desktop` so the rendering rules can be read and tested without
+importing the 9k-line window module.
 
-Everything here is re-exported from :mod:`us_quant.desktop`, so
-``from us_quant.desktop import QuoteTableModel`` keeps working and yields
-the *same object* defined here.
+``QuoteTableModel`` used to live here and has moved to
+``desktop_v2/pages/market/tables.py``: it was only ever the market route's table,
+and leaving it behind would have kept two table models alive for one route.
 
 ``QTableWidgetItem`` deliberately stays in ``desktop.py``: it is a table
 cell used throughout ``MainWindow``, not a standalone widget.  It imports
@@ -21,8 +21,6 @@ from datetime import date
 from decimal import Decimal
 
 from PySide6.QtCore import (
-    QAbstractTableModel,
-    QModelIndex,
     QPointF,
     QRectF,
     Qt,
@@ -48,22 +46,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-from us_quant.trading.domain.market import (
-    MarketDataMode,
-    MarketSnapshot,
-)
-
-# Presentation labels for the market data mode.  These live here, not in the
-# domain enum: the domain carries the semantic mode, and the UI decides how to
-# spell it for the operator.
-MARKET_DATA_MODE_LABELS = {
-    MarketDataMode.REALTIME: "实时",
-    MarketDataMode.FROZEN: "冻结",
-    MarketDataMode.DELAYED: "延迟",
-    MarketDataMode.DELAYED_FROZEN: "延迟冻结",
-    MarketDataMode.UNKNOWN: "未知",
-}
 
 from us_quant.ui_theme import theme_palette
 
@@ -142,185 +124,6 @@ def _price(value: Decimal | None) -> str:
     if value is None:
         return "—"
     return f"{float(value):,.4f}".rstrip("0").rstrip(".")
-
-
-class QuoteTableModel(QAbstractTableModel):
-    """Small incremental model for the live quote grid."""
-
-    HEADERS = (
-        "代码",
-        "Bid",
-        "Ask",
-        "Last",
-        "Close",
-        "点差",
-        "有效类型",
-        "更新时间",
-        "Age(s)",
-        "代次",
-        "来源",
-        "覆盖",
-        "状态",
-        "原因",
-    )
-
-    def __init__(self, theme_name: str = "dark") -> None:
-        super().__init__()
-        self._rows: list[tuple[str, ...]] = []
-        self._states: list[tuple[bool, bool]] = []
-        self._theme = theme_palette(theme_name)
-        self._sort_column = -1
-        self._sort_order = Qt.AscendingOrder
-        self.reset_count = 0
-        self.changed_row_count = 0
-
-    def rowCount(
-        self, parent: QModelIndex = QModelIndex()
-    ) -> int:
-        return 0 if parent.isValid() else len(self._rows)
-
-    def columnCount(
-        self, parent: QModelIndex = QModelIndex()
-    ) -> int:
-        return 0 if parent.isValid() else len(self.HEADERS)
-
-    def headerData(
-        self,
-        section: int,
-        orientation: Qt.Orientation,
-        role: int = Qt.DisplayRole,
-    ):
-        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
-            return self.HEADERS[section]
-        return None
-
-    def data(
-        self, index: QModelIndex, role: int = Qt.DisplayRole
-    ):
-        if not index.isValid():
-            return None
-        value = self._rows[index.row()][index.column()]
-        if role in {Qt.DisplayRole, Qt.ToolTipRole}:
-            return value
-        if role == Qt.ForegroundRole:
-            realtime_ready, stale = self._states[index.row()]
-            if stale and index.column() in {0, 6, 10, 12, 13}:
-                return QColor(self._theme.error)
-            if realtime_ready and index.column() in {0, 6, 10, 12}:
-                return QColor(self._theme.success)
-        return None
-
-    def sort(
-        self, column: int, order: Qt.SortOrder = Qt.AscendingOrder
-    ) -> None:
-        self._sort_column = column
-        self._sort_order = order
-        self._resort()
-
-    def set_theme(self, theme_name: str) -> None:
-        self._theme = theme_palette(theme_name)
-        if self._rows:
-            self.dataChanged.emit(
-                self.index(0, 0),
-                self.index(
-                    len(self._rows) - 1,
-                    len(self.HEADERS) - 1,
-                ),
-                [Qt.ForegroundRole],
-            )
-
-    def update_snapshot(self, snapshot: MarketSnapshot) -> None:
-        materialized: list[
-            tuple[tuple[str, ...], tuple[bool, bool]]
-        ] = []
-        for quote in snapshot.quotes:
-            values = (
-                quote.symbol,
-                _price(quote.bid),
-                _price(quote.ask),
-                _price(quote.last),
-                _price(quote.close),
-                _price(quote.spread),
-                MARKET_DATA_MODE_LABELS.get(quote.mode, "未知"),
-                (
-                    quote.updated_at.isoformat()
-                    if quote.updated_at is not None
-                    else "未收到"
-                ),
-                (
-                    f"{quote.age_seconds:.1f}"
-                    if quote.age_seconds is not None
-                    else "—"
-                ),
-                str(quote.generation),
-                quote.source_label,
-                quote.coverage,
-                "READY" if quote.realtime_ready else "STALE",
-                quote.stale_reason or "可用于日内观察",
-            )
-            materialized.append(
-                (values, (quote.realtime_ready, quote.stale))
-            )
-        current_symbols = tuple(row[0] for row in self._rows)
-        incoming_symbols = tuple(row[0][0] for row in materialized)
-        if set(current_symbols) != set(incoming_symbols):
-            self.beginResetModel()
-            self._rows = [row for row, _ in materialized]
-            self._states = [state for _, state in materialized]
-            self.endResetModel()
-            self.reset_count += 1
-            if self._sort_column >= 0:
-                self._resort()
-            return
-        incoming_by_symbol = {
-            row[0]: (row, state) for row, state in materialized
-        }
-        materialized = [
-            incoming_by_symbol[symbol] for symbol in current_symbols
-        ]
-
-        changed: list[int] = []
-        for index, (row, state) in enumerate(materialized):
-            if row != self._rows[index] or state != self._states[index]:
-                self._rows[index] = row
-                self._states[index] = state
-                changed.append(index)
-        self.changed_row_count += len(changed)
-        for row_index in changed:
-            self.dataChanged.emit(
-                self.index(row_index, 0),
-                self.index(row_index, len(self.HEADERS) - 1),
-                [
-                    Qt.DisplayRole,
-                    Qt.ToolTipRole,
-                    Qt.ForegroundRole,
-                ],
-            )
-        if changed and self._sort_column >= 0:
-            self._resort()
-
-    def _resort(self) -> None:
-        if self._sort_column < 0 or len(self._rows) < 2:
-            return
-        combined = list(zip(self._rows, self._states))
-        column = self._sort_column
-
-        def key(item):  # type: ignore[no-untyped-def]
-            value = item[0][column]
-            numeric = _sortable_number(value)
-            return (
-                numeric is None,
-                numeric if numeric is not None else value.casefold(),
-            )
-
-        self.layoutAboutToBeChanged.emit()
-        combined.sort(
-            key=key,
-            reverse=self._sort_order == Qt.DescendingOrder,
-        )
-        self._rows = [row for row, _ in combined]
-        self._states = [state for _, state in combined]
-        self.layoutChanged.emit()
 
 
 class MetricCard(QFrame):

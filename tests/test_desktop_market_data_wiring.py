@@ -33,6 +33,7 @@ from us_quant.desktop_credentials import (
     DesktopCredentialService,
     StreamCredentials,
 )
+from us_quant.desktop_v2.pages.market.controls import VALID_MARKET_SOURCES
 from us_quant.ibkr import IBKRConnectionConfig
 from us_quant.trading.application.market_data import (
     SOURCE_ALPACA_IEX,
@@ -400,10 +401,9 @@ def test_session_rotation_fires_when_the_venue_moves_on(monkeypatch) -> None:
             factories={SOURCE_IBKR_EXTENDED: factory},
             exchange_resolver=resolver,
         )
-        index = window.stream_mode.findData(SOURCE_IBKR_EXTENDED)
-        assert index >= 0
-        window.stream_mode.setCurrentIndex(index)
-        window.stream_symbols.setText("SPY")
+        assert SOURCE_IBKR_EXTENDED in VALID_MARKET_SOURCES
+        window.market_page.set_selected_provider(SOURCE_IBKR_EXTENDED)
+        window.market_page.set_subscription_symbols(("SPY",))
 
         window._start_stream()
 
@@ -460,9 +460,8 @@ def test_no_rotation_when_the_venue_is_unchanged(monkeypatch) -> None:
             factories={SOURCE_IBKR_EXTENDED: factory},
             exchange_resolver=lambda: "SMART",
         )
-        index = window.stream_mode.findData(SOURCE_IBKR_EXTENDED)
-        window.stream_mode.setCurrentIndex(index)
-        window.stream_symbols.setText("SPY")
+        window.market_page.set_selected_provider(SOURCE_IBKR_EXTENDED)
+        window.market_page.set_subscription_symbols(("SPY",))
         window._start_stream()
 
         switches: list[tuple] = []
@@ -630,10 +629,8 @@ def test_saving_settings_reaches_the_service_before_the_next_stream(
         assert window.config.ibkr.client_id == new_client_id
         assert window.broker_account.config == window.config.ibkr
 
-        index = window.stream_mode.findData(SOURCE_IBKR)
-        assert index >= 0
-        window.stream_mode.setCurrentIndex(index)
-        window.stream_symbols.setText("SPY")
+        window.market_page.set_selected_provider(SOURCE_IBKR)
+        window.market_page.set_subscription_symbols(("SPY",))
         window._start_stream()
 
         assert len(created) == 1
@@ -802,10 +799,8 @@ def test_starting_the_stream_uses_the_service_built_adapter(
     created = _install(monkeypatch, "IBKRReadOnlyStream")
     window = _window()
     try:
-        index = window.stream_mode.findData(SOURCE_IBKR)
-        assert index >= 0
-        window.stream_mode.setCurrentIndex(index)
-        window.stream_symbols.setText("SPY,QQQ")
+        window.market_page.set_selected_provider(SOURCE_IBKR)
+        window.market_page.set_subscription_symbols(("SPY", "QQQ"))
 
         window._start_stream()
 
@@ -844,10 +839,8 @@ def test_a_refused_build_is_reported_instead_of_escaping(
         window.market_data.prepare(
             MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("SPY",))
         )
-        index = window.stream_mode.findData(SOURCE_IBKR)
-        assert index >= 0
-        window.stream_mode.setCurrentIndex(index)
-        window.stream_symbols.setText("SPY")
+        window.market_page.set_selected_provider(SOURCE_IBKR)
+        window.market_page.set_subscription_symbols(("SPY",))
 
         window._start_stream()  # must not raise
 
@@ -876,12 +869,8 @@ def test_the_desktop_hands_the_adapter_the_queued_signal(
     created = _install(monkeypatch, "AlpacaIEXStream")
     window = _window()
     try:
-        index = window.stream_mode.findData(
-            SOURCE_ALPACA_IEX
-        )
-        assert index >= 0
-        window.stream_mode.setCurrentIndex(index)
-        window.stream_symbols.setText("AAPL")
+        window.market_page.set_selected_provider(SOURCE_ALPACA_IEX)
+        window.market_page.set_subscription_symbols(("AAPL",))
         monkeypatch.setattr(
             window.credential_service,
             "resolve_stream_credentials",
@@ -922,9 +911,11 @@ def test_starting_an_unknown_provider_fails_closed(
         failures: list[str] = []
         monkeypatch.setattr(window, "_task_failed", failures.append)
         monkeypatch.setattr(
-            window.stream_mode, "currentData", lambda: "ibkr_extened"
+            window.market_page,
+            "selected_provider",
+            lambda: "ibkr_extened",
         )
-        window.stream_symbols.setText("SPY")
+        window.market_page.set_subscription_symbols(("SPY",))
 
         window._start_stream()
 
@@ -1025,10 +1016,8 @@ def test_the_stream_request_carries_the_services_credentials(
 
     window = _window()
     try:
-        index = window.stream_mode.findData(SOURCE_ALPACA_IEX)
-        assert index >= 0
-        window.stream_mode.setCurrentIndex(index)
-        window.stream_symbols.setText("AAPL")
+        window.market_page.set_selected_provider(SOURCE_ALPACA_IEX)
+        window.market_page.set_subscription_symbols(("AAPL",))
         monkeypatch.setattr(
             window.credential_service,
             "resolve_stream_credentials",

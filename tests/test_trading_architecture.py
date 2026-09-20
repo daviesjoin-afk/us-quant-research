@@ -582,12 +582,13 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
     desktop's workflow aggregate.
 
     ``pages/account.py`` was the first genuinely native v2 page;
-    ``pages/strategy.py`` is the second, ``pages/risk.py`` the third, and
-    ``pages/execution/`` the fourth -- that route is a package rather than a
-    module because it has four distinct jobs (view models, a Qt-free projection,
-    the detail tables and the page), and one module holding all four would be the
-    400-line page this migration exists to avoid.  None of those routes reuses a
-    legacy builder from ``MainWindow`` any more.
+    ``pages/strategy.py`` is the second, ``pages/risk.py`` the third,
+    ``pages/execution/`` the fourth and ``pages/market/`` the fifth -- the last
+    two are packages rather than modules because each has several distinct jobs
+    (view models, a Qt-free projection, the tables, the controls and the page),
+    and one module holding all of them would be the 400-line page this migration
+    exists to avoid.  None of those routes reuses a legacy builder from
+    ``MainWindow`` any more.
 
     ``workflows.py`` arrived with Trading Framework Closure v2C: the aggregate
     that composes the four workflow controllers behind one execution lease is
@@ -616,6 +617,13 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "pages/execution/presenter.py",
         "pages/execution/rows.py",
         "pages/execution/tables.py",
+        "pages/market/__init__.py",
+        "pages/market/controls.py",
+        "pages/market/models.py",
+        "pages/market/page.py",
+        "pages/market/presenter.py",
+        "pages/market/rows.py",
+        "pages/market/tables.py",
     }
 
 

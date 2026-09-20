@@ -66,6 +66,10 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Risk Application | MIGRATED |
 | Desktop RiskPage | MIGRATED |
 | Desktop ExecutionPage | MIGRATED |
+| Desktop MarketPage | MIGRATED |
+| Desktop Dashboard | TRANSITIONAL |
+| Desktop Research | TRANSITIONAL |
+| Desktop System | TRANSITIONAL |
 | AutoQuant Risk Integration | MIGRATED |
 | Execution Domain | MIGRATED |
 | Execution Application | MIGRATED |
@@ -557,7 +561,7 @@ submit order。`tests/test_desktop_v2_shell.py` 以结构守卫强制这一点�
 
 ```text
 dashboard  → _dashboard_tab()
-market     → _quotes_tab()
+market     → desktop_v2/pages/market/               ✅ native v2
 account    → desktop_v2/pages/account.py            ✅ native v2
 strategy   → desktop_v2/pages/strategy.py           ✅ native v2
 risk       → desktop_v2/pages/risk.py               ✅ native v2
@@ -565,6 +569,9 @@ execution  → desktop_v2/pages/execution/            ✅ native v2
 research   → QTabWidget（针对性验证 / 广域标的池 / 历史数据 / 市场扫描 / 回测 / 横截面研究）
 system     → QTabWidget（运行事件 / 系统设置）
 ```
+
+前端进度：**5 / 8 native v2**。剩余 Dashboard、Research、System 仍是
+transitional，`Market` 已于 Desktop Market v2 迁完。
 
 ### 8.2 execution 页已完成（Desktop Execution v2）
 
@@ -636,6 +643,87 @@ ExecutionPage         只 render + emit intent
    中更安全的一个，并且只在一个地方计算。
 2. 暂停 / 恢复 / 停止按钮过去有两个 writer（snapshot 标志与 workflow phase）。
    snapshot 那一份永远被紧接着的 phase 那一份覆盖，所以现在是单一来源：phase。
+
+### 8.3 market 页已完成（Desktop Market v2）
+
+`MainWindow._quotes_tab()`（188 行 builder）与它拥有的两个滚动处理器
+`_quotes_scroll_started` / `_quotes_scroll_finished`，以及
+`_populate_stream_snapshot`，已**删除**。market route 现在是一个原生 v2 page，
+`_quotes_tab` 不存在，也没有 compatibility shim。
+
+```text
+desktop_v2/pages/market/
+  __init__.py   ≤ 40 行   只导出 MarketPage
+  models.py    ≤ 180 行   不可变展示模型（MarketQuoteRow / MarketPageView / …）
+  rows.py      ≤ 260 行   行情行投影 + 显示格式化（price / symbol_text / feed_label）
+  presenter.py ≤ 300 行   cards、readiness、health、control state、view 组装
+  tables.py    ≤ 320 行   QuoteTableModel / QuoteTable（增量更新 + 排序 + 调色）
+  controls.py  ≤ 280 行   MarketControls：订阅 / provider / 三个按钮
+  page.py      ≤ 380 行   MarketPage：组合、render、signal 转发、滚动冻结
+```
+
+职责边界：
+
+```text
+MainWindow            取数 + 编排（credentials / StreamWorker / 安全门仍在这里）
+presenter / rows      纯投影：facts → strings + tone（Qt-free）
+MarketPage            只 render + emit intent；拥有 widgets 与滚动重绘状态
+```
+
+- **Page 只渲染、只报告意图。** 它不持有 `MarketDataApplication`、
+  `StreamWorker`、credential store、adapter 或 broker；四个按钮只 emit signal。
+  provider combo 的**程序化** setter 刻意静默，否则设置页与行情页两个 combo
+  会互相驱动成环。
+- **Page 不能决定 start / stop / switch 是否合法。** 它收到的是
+  `MarketControlView`（一组布尔），因此它没有 Paper / Shadow 会话词汇可以据以
+  行动。`worker.start()` 之后才 publish execution controls 的顺序（Execution v2
+  修过的那条）保持不变，并有 characterization test 钉住；反之会让
+  stop-stream 控件在刚启动的瞬间误禁用。
+- **凭证与请求仍由窗口构造。** `MarketDataCredentials` /
+  `MarketDataStartRequest` / `StreamWorker(MarketDataApplication, request)`
+  一律留在 `MainWindow`；页面只提供 `subscription_draft()` 这个**输入快照**。
+  `symbols` 的 split / strip / upper / dedupe 属展示边界，但「至少 1 个 / 最多
+  30 个 / 运行期可否切换」仍是业务 gate，不靠 `QLineEdit` 实现。
+- **Presenter / rows Qt-free。** `models.py` / `rows.py` / `presenter.py` 不
+  import PySide6，投影可以不用 widget 测试
+  （`tests/test_desktop_v2_market_presenter.py` 就是纯 Python）。表格不再解释
+  `MarketDataMode` / `realtime_ready` / `stale`，只吃 `MarketQuoteRow`。
+- **readiness 与 scope 仍由窗口计算。** `calculate_quote_readiness_breakdown`
+  依赖 auto quant candidates、market reference symbols、universe 与 scan，
+  这些不是页面业务；窗口算完转成 `MarketReadinessFacts` 与一行 scope 文本再交给
+  页面。
+- **滚动冻结搬进页面。** `_quotes_scroll_active` / `_pending_stream_snapshot`
+  已从 `MainWindow` 删除，改为页面私有的 `_scroll_active` / `_pending_view`：
+  拖动滚动条时暂缓 render，释放时只画最新一帧。
+- **旧 `QuoteTableModel` 退休。** 它从 `desktop_widgets.py` 删除，行情 route
+  只有 `desktop_v2/pages/market/tables.py` 一个 table model；保留了原来的
+  增量行为（symbol set 变化 reset，同 symbols 更新 `dataChanged`）、排序、数值
+  排序与主题重着色。数值排序键仍复用 `desktop_widgets._sortable_number`，避免
+  两个实现漂移。
+- **shell 全局 badge 不属于页面。** `market_badge` / `handshake_badge` /
+  `signal_card` 与节流 status log 继续由窗口更新，页面不拿 shell 或导航。
+
+守卫（`tests/test_desktop_v2_market_architecture.py`，A–H）：
+
+- `_quotes_tab` 与两个滚动处理器必须不存在；
+- 15 个旧 market widget 名不得成为 `MainWindow` 属性；
+- market 包不得 import `desktop` / `trading.application` / `composition` /
+  `adapters` / `credential_store` / `desktop_credentials` / `ibkr` / `shadow` /
+  `paper` / `auto_quant` / `ibapi`；
+- 也不得**构造** `MarketDataStartRequest` / `MarketDataCredentials` /
+  `StreamWorker` / `build_market_data_application` / `probe_ibkr_socket`；
+- `models.py` / `rows.py` / `presenter.py` 不得 import PySide6；
+- `QuoteTableModel` 全树只有一个定义，且只在 market `tables.py`；
+- 每个文件有独立行数预算（见上表），并不共用 400 行硬上限；
+- 不得出现 manual order / market order / cancel / quantity input / risk
+  override 一类新交易能力。
+
+行为不变的冻结项：provider 语义（Alpaca IEX 单交易所实时；Finnhub 实时成交
+±5bps 模拟带，非 NBBO；IBKR 以 marketDataType 回调为准，Type 2/3/4 只可观察）、
+readiness 语义（fresh AND realtime AND bid exists AND ask exists AND bid > 0
+AND ask >= bid）、30-symbol 上限、stop 安全门（Paper active / 持仓 / 在途订单
+拒绝普通停止；Shadow active 先停 Shadow；允许的自动会话切换例外路径保留）、
+provider switch 与 IBKR 5×24 rotation、以及表格 14 列与列宽。
 
 
 研究功能不是交易 runtime 主导航，因此收在 `research` 的二级页签里。
@@ -1299,10 +1387,11 @@ repository abstraction 或 generic `DatabaseManager`。
 
 #### 10.7.4 下一阶段
 
-阶段 1（框架闭环）至此 **COMPLETE**。下一阶段是前端全部 native v2：
+阶段 1（框架闭环）至此 **COMPLETE**。阶段 2（前端全部 native v2）进行中，
+Desktop Market v2 已完成（§8.3）：
 
 ```text
-Desktop Market v2
+Desktop Market v2        ✅（§8.3）
 Desktop Research v2A-F
 Desktop System v2
 Desktop Dashboard v2
@@ -1471,11 +1560,11 @@ Framework v2C runtime 脱离 shadow_paper，五个 root module 归位并删除�
 Shadow v2     shadow_paper.py 拆成 shadow package 并删除（§10.7）
 ```
 
-下一阶段是**阶段 2：前端全部 native v2**：
+**Desktop Market v2 已完成**（§8.3），market route 变成原生 v2 page。阶段 2
+剩余：
 
 ```text
-Desktop Market v2
-Desktop Research v2A-F
+Desktop Research v2A-F   （必须拆多个 PR，禁止一次搬成一个巨大 ResearchPage）
 Desktop System v2
 Desktop Dashboard v2
 ```
@@ -1486,8 +1575,20 @@ Shadow Framework v2 刻意没有做的事，留给更后面：
   或任何 `ShadowManager` / `ShadowService` / `ShadowApplication`；
 - 没有改 SQLite schema，也没有引入 migration framework；
 - 没有重命名 `ShadowPaperEngine`（命名细修后置）；
-- 没有提前做 `MarketPage` / `ResearchPage` / `SystemPage` / `DashboardPage`
+- 没有提前做 `ResearchPage` / `SystemPage` / `DashboardPage`
   或 `MainWindow` decomposition。
+
+Desktop Market v2 刻意没有做的事，留给更后面：
+
+- 没有提前拆 stream orchestration：没有 `MarketController` / `MarketWorkflow` /
+  `MarketOrchestrator` / `StreamManager`。既定路线是先全部页面 native v2，
+  再统一拆 `MainWindow` orchestration，否则会边迁页面边反复拆 controller；
+- 没有碰 Research / System / Dashboard 三个 transitional route；settings
+  provider combo 仍在旧 System route，只做必要的双向 wiring（§63）；
+- 没有碰 `ExecutionPage`，只让 `_publish_execution_controls()` 因为 stream
+  state 继续工作；
+- 没有改 `MarketDataApplication` / provider lifecycle / push-poll 划分 /
+  IBKR venue resolver / stale 阈值。
 
 Framework v2C 刻意没有做的事，留给更后面：
 

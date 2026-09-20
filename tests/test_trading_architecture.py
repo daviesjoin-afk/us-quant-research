@@ -2591,6 +2591,31 @@ def test_the_desktop_builds_the_runtimes_through_composition() -> None:
     assert not offending, sorted(offending)
 
 
+def test_no_runtime_class_defines_a_method_twice() -> None:
+    """A second definition of the same method is silently the only one.
+
+    Python keeps the last one, so a stale copy left behind by a rename is dead
+    code that no linter here reports and no test can see -- it just sits there,
+    calling helpers that may no longer exist, until the day the order of the two
+    definitions changes.  That is what happened to ``TradingRuntime._flatten``.
+    """
+
+    duplicated: list[str] = []
+    for path in RUNTIME_MODULES:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            definitions: dict[str, int] = {}
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    definitions[item.name] = definitions.get(item.name, 0) + 1
+            for name, count in sorted(definitions.items()):
+                if count > 1:
+                    duplicated.append(f"{path.name}: {node.name}.{name} x{count}")
+    assert not duplicated, duplicated
+
+
 def test_the_runtime_modules_stay_small() -> None:
     """Guard F: the split is a split, not a rename of one big class."""
 

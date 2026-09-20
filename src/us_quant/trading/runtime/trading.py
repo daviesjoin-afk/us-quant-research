@@ -203,36 +203,6 @@ class TradingRuntime:
             self.session.status = "等待 fresh 实时 bid/ask"
         return self.snapshot(observed_at=now)
 
-    def _flatten(
-        self,
-        now: datetime,
-        ready: dict[str, MarketQuote],
-        *,
-        reason: str | None = None,
-        skip: frozenset[str] | set[str] = frozenset(),
-    ) -> None:
-        """Walk the holdings and dispatch whatever exit each one justifies.
-
-        One driver for all three reasons a position is reduced -- a gate firing,
-        the close-of-session flatten and a user stop -- because the difference
-        is the reason text and whether already-exiting symbols are skipped, not
-        the arithmetic.  A dispatch that halts the session ends the walk: an
-        refused reduction means the runtime and risk disagree about the book,
-        and emitting more orders after that would contradict the halt.
-        """
-
-        for position in list(self.book.positions.values()):
-            if not self.session.active:
-                break
-            if position.symbol in skip:
-                continue
-            self._exit_position(
-                now=now,
-                symbol=position.symbol,
-                quote=ready.get(position.symbol),
-                reason=reason,
-            )
-
     def request_stop(self) -> AutoQuantSnapshot:
         if not self.session.active:
             return self.snapshot()
@@ -429,8 +399,18 @@ class TradingRuntime:
         dispatch that halts ends the walk: a refused reduction means the runtime
         and risk disagree about the book, and emitting more orders after that
         would contradict the halt.
+
+        The first line is the other half of that rule, and it is load-bearing.
+        A session can be stopped *inside* a tick -- the cross-day rollover halts
+        one that still holds a position -- after ``on_stream`` has already
+        decided this tick may do work.  An inactive session must never reach
+        risk or execution: the marks above may still be updated, because that is
+        local bookkeeping, but nothing here may send.  The old engine had the
+        same test at the top of each of its exit loops.
         """
 
+        if not self.session.active:
+            return
         evaluation = self.strategy.exit_evaluation(
             now=now,
             positions=self._strategy_views(),

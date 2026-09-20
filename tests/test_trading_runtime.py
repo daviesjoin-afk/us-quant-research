@@ -709,6 +709,87 @@ class AutoQuantTests(unittest.TestCase):
         self.assertEqual(len(halted.pending_orders), 1)
         self.assertEqual(engine.book.cash, engine.config.initial_cash)
 
+    def test_a_cross_day_halt_reaches_no_risk_and_no_execution(self) -> None:
+        """A halt taken inside a tick must not let that tick send anything.
+
+        The rollover halts a session that still holds something, and it does so
+        *inside* ``on_stream``, after the tick has already decided it may do
+        work.  So the exits that follow are the dangerous part: a fresh quote on
+        the new day can breach a stop-loss gate, and without a check that the
+        session is still active that reduction would go through risk and reach
+        the broker on a session that has just stopped for a human.  The local
+        marks may still move -- that is bookkeeping, not trading.
+        """
+
+        submitted: list[OrderIntent] = []
+        risk = _RecordingRisk(
+            LayeredRiskLimits(
+                account=RiskLimits(
+                    max_gross_exposure_pct=Decimal("1"),
+                    max_position_exposure_pct=Decimal("1"),
+                    daily_loss_halt_pct=Decimal("1"),
+                    drawdown_halt_pct=Decimal("1"),
+                )
+            )
+        )
+        engine = _runtime(
+            candidates=(
+                AutoQuantCandidate(
+                    "AAA", "A", "T", 1, Decimal("80"), "趋势候选"
+                ),
+            ),
+            config=ShadowConfig(
+                initial_cash=Decimal("10000"),
+                capital_source="test",
+                max_position_fraction=Decimal("0.5"),
+                stop_loss=Decimal("0.01"),
+                profit_target=Decimal("0.01"),
+                warmup_minutes=0,
+                momentum_lookback_minutes=1,
+            ),
+            strategy=_STRATEGY,
+            risk=risk,
+            execution=_execution_app(submitted=submitted),
+        )
+        engine.start()
+        engine.book.positions = {
+            "AAA": AutoQuantPosition(
+                symbol="AAA",
+                quantity=10,
+                average_price=Decimal("10"),
+                opened_at=datetime(
+                    2024, 1, 2, 19, 30, tzinfo=timezone.utc
+                ).isoformat(),
+                high_water=Decimal("10"),
+                provider="test",
+            )
+        }
+        day_one = datetime(2024, 1, 2, 20, 0, tzinfo=timezone.utc)
+        engine.on_stream(
+            _snapshot(day_one, {"AAA": Decimal("10")}),
+            observed_at=day_one,
+        )
+        # Flat on the day, so nothing was proposed before the rollover.
+        self.assertEqual(risk.requests, [])
+        self.assertEqual(submitted, [])
+
+        day_two = datetime(2024, 1, 3, 14, 0, tzinfo=timezone.utc)
+        halted = engine.on_stream(
+            _snapshot(day_two, {"AAA": Decimal("9")}),
+            observed_at=day_two,
+        )
+
+        self.assertFalse(halted.active)
+        self.assertIn("跨交易日", halted.status)
+        self.assertIn("人工对账", halted.status)
+        self.assertEqual(len(halted.pending_orders), 0)
+        # Nothing asked risk, and nothing was submitted: the stop-loss gate
+        # below the halt was never evaluated.
+        self.assertEqual(risk.requests, [])
+        self.assertEqual(submitted, [])
+        # The mark still moved: a halt stops orders, not local bookkeeping.
+        self.assertEqual(engine.book.marks["AAA"], Decimal("9.01"))
+
     def test_rejection_halts_instead_of_retrying_each_minute(self) -> None:
         submitted = []
         engine = _engine(submitted)
@@ -1309,6 +1390,7 @@ class MultiSymbolTests(unittest.TestCase):
             risk=_risk(),
             execution=_execution_app(submitted=intents),
         )
+        engine.start()
         engine.book.positions = {
             "AAA": AutoQuantPosition(symbol="AAA", quantity=10, average_price=Decimal("10"), opened_at=datetime(2024, 1, 2, 10, 0, tzinfo=timezone.utc).isoformat(), high_water=Decimal("10.5"), provider="test"),
             "BBB": AutoQuantPosition(symbol="BBB", quantity=5, average_price=Decimal("20"), opened_at=datetime(2024, 1, 2, 10, 0, tzinfo=timezone.utc).isoformat(), high_water=Decimal("20.5"), provider="test"),

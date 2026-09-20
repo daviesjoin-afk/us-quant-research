@@ -10,7 +10,7 @@ from us_quant.workflow_controller import (
     ShadowWorkflowController,
     WorkflowController,
 )
-from us_quant.workflow_state import ExecutionLease, ExecutionLeaseManager, WorkflowStateError
+from us_quant.trading.runtime.workflow_state import ExecutionLease, ExecutionLeaseManager, WorkflowStateError
 
 
 def test_research_transitions_are_explicit_and_snapshot_is_read_only() -> None:

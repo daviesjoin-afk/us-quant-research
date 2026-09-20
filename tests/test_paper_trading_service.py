@@ -23,7 +23,7 @@ from us_quant.paper_trading_service import (
     PaperTradingService,
     PaperTradingSnapshot,
 )
-from us_quant.workflow_state import PaperWorkflowPhase
+from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
 
 # -- fakes ---------------------------------------------------------------

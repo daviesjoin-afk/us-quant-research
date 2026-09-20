@@ -2,7 +2,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from us_quant.workflow_state import (
+from us_quant.trading.runtime.workflow_state import (
     ExecutionLease,
     ExecutionLeaseManager,
     PaperWorkflowPhase,

@@ -211,9 +211,9 @@ from us_quant.paper_execution_health import (
     PaperExecutionIssue,
     evaluate_paper_execution_health,
 )
-from us_quant.paper_session import PaperSessionResult
+from us_quant.trading.runtime.paper_models import PaperSessionResult
 from us_quant.paper_trading_service import PaperTradingService
-from us_quant.workflow_state import (
+from us_quant.trading.runtime.workflow_state import (
     PaperWorkflowPhase,
     WorkflowStateError,
 )

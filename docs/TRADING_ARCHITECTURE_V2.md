@@ -7,12 +7,19 @@
 Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只记录它们的
 归宿，不声称已完成。
 
+> **进度更新（Runtime v2B）**：`paper_session.py` / `paper_workflow.py` /
+> `workflow_state.py` 三个过渡 root module 已删除，Paper session 协调、
+> workflow 生命周期与 `ExecutionLease` 语义已迁入
+> `trading/runtime/`（`paper_contracts.py` / `paper_models.py` /
+> `reconciliation.py` / `recovery.py` / `coordinator.py` /
+> `workflow_state.py` / `workflow.py`），没有任何 compatibility re-export。
+> 见 §2、§4 与 §10.4。
+>
 > **进度更新（Runtime v2A）**：`AutoQuantEngine` 已删除。信号与运行时状态
 > 已拆成 `trading/runtime/strategy.py`（StrategyRuntime）与
 > `trading/runtime/trading.py`（TradingRuntime），
 > `src/us_quant/auto_quant.py` **不存在**且没有任何 import 指向它。
-> 见 §2、§4 与 §10.3。**Paper Session Coordination / Paper Workflow / Lease
-> 仍是 TRANSITIONAL**，留给 Runtime v2B。
+> 见 §2、§4 与 §10.3。
 >
 > **进度更新（Execution v2）**：Execution 链已完成迁移。
 > `PaperOrderIntent` / `new_paper_order_intent` / `order_sink` 与
@@ -52,8 +59,8 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | AutoQuant Execution Integration | MIGRATED |
 | Strategy Runtime | MIGRATED |
 | Trading Runtime Core | MIGRATED |
-| Paper Session Coordination | **TRANSITIONAL** |
-| Paper Workflow / Lease | **TRANSITIONAL** |
+| Paper Session Coordination | MIGRATED |
+| Paper Workflow / Lease | MIGRATED |
 
 真实链路现在是：
 
@@ -71,10 +78,25 @@ ExecutionApplication
 OrderRepositoryPort / BrokerExecutionPort
 ```
 
-**这不是"全部完成"。** 策略与交易会话已经各自只有一个职责，风控与执行也各自
-只有一个权威，但 `paper_session.py` / `paper_workflow.py` /
-`workflow_state.py` 仍然在三者之上：会话协调、阶段机与执行租约还没有模块化。
-那是 Runtime v2B，见 §14。
+而 **PaperSessionCoordinator 不在发单 pipeline 的"下游之后"**。它是外层的
+runtime sequencer：券商事实与行情流先经过它，再由它决定能否让
+TradingRuntime 看这一笔行情。
+
+```text
+broker facts (fills / events) + market stream
+    ↓
+PaperSessionCoordinator       会话顺序、超时、健康、halt
+    ↓
+TradingRuntime                策略 → Risk → Execution（发单仍在这里）
+    ↓
+PaperWorkflowController       生命周期、人工恢复、finalization、lease
+```
+
+**这不是"全部完成"。** 但 `paper_session.py` / `paper_workflow.py` /
+`workflow_state.py` 已经不存在：会话协调、阶段机与执行租约都已模块化，
+没有任何 compatibility shim 保留第二个入口。剩余的是
+`PaperTradingService`、`paper_execution_health.py` 与 `workflow_controller.py`
+的定位清理，见 §14。
 
 ## 1. 核心依赖方向
 
@@ -778,11 +800,14 @@ risk.py                   → trading/domain/risk.py + trading/application/risk.
 paper_order_journal.py    → trading/adapters/sqlite/order_repository.py ✅ 已迁移
 ibkr_paper_orders.py      → trading/adapters/ibkr/execution.py   ✅ 已迁移
 ibkr_paper_gateway.py     → trading/adapters/ibkr/execution_gateway.py ✅ 已迁移
-paper_workflow.py         → trading/runtime/session.py           ⏭ 下一轮
+paper_workflow.py         → trading/runtime/workflow.py           ✅ 已迁移
+workflow_state.py         → trading/runtime/workflow_state.py     ✅ 已迁移
+paper_session.py          → trading/runtime/coordinator.py        ✅ 已迁移
 ```
 
-**下一轮：Strategy Runtime / Trading Runtime**（把 `AutoQuantEngine` 拆成
-信号与运行时两半，并给 workflow / lease 找到归宿）。Execution v2 已完成：
+**下一轮：Strategy Runtime / Trading Runtime / Paper Session。** 三者已完成，
+至此 `AutoQuantEngine`、`paper_session.py`、`paper_workflow.py` 与
+`workflow_state.py` 都不存在。Execution v2 已完成：
 
 ```text
 TradeProposal
@@ -888,18 +913,122 @@ Market Data → StrategyRuntime → TradeProposal（按排名）
   `manager.py` / `ServiceLocator` 一类垃圾桶模块由
   `test_the_runtime_has_no_god_objects_or_junk_drawers` 禁止。
 
-**仍然冻结**：`paper_session.py` / `paper_workflow.py` / `workflow_state.py`
-与全部 `PaperWorkflowPhase` 转换、`ExecutionLease` 语义本轮未动。
-`TradingRuntime` 只是满足 `PaperEngine` protocol，coordinator 侧几乎没有改动。
+**当时冻结、现已迁移**：`paper_session.py` / `paper_workflow.py` /
+`workflow_state.py` 与全部 `PaperWorkflowPhase` 转换、`ExecutionLease` 语义
+在 v2A 轮次未动，Runtime v2B 只做模块化与 import 路径迁移，转换表与租约语义
+一个字节都没有重新设计。`TradingRuntime` 满足 `PaperEngine` protocol，
+coordinator 侧保留了原有的 `PaperEngine` / `PaperOrderPort` 契约。
 
-### 10.4 下一轮：Runtime v2B
+### 10.4 Paper Session / Workflow / Lease 已完成（Runtime v2B）
 
-`paper_session.py` / `paper_workflow.py` / `workflow_state.py` 三个模块本轮
-刻意冻结，下一轮把它们拆成模块化的 session / workflow / state /
-reconciliation 模块。**v2B 同样受 production file <= 500 行的约束**：不能把
-三个旧文件合并成一个超大的 `session.py`。
+三个过渡 root module 已删除（`paper_session.py` 712 行、
+`paper_workflow.py` 477 行、`workflow_state.py` 174 行），职责按
+contracts / models / proofs / sequencing / recovery / lifecycle 拆开：
 
-### 10.5 已关闭的风险接线缺陷（Risk v2 修复）
+```text
+trading/runtime/
+  paper_contracts.py    92 行  PendingOrder / EngineSnapshot / PaperEngine /
+                               PaperOrderPort / PaperHealth / HealthEvaluator
+  paper_models.py       53 行  PaperSessionEvent/State/Result（不可变）
+  reconciliation.py    294 行  evidence 数据、identity/TTL/one-shot 校验、
+                               engine digest、broker proof 比较
+  recovery.py          347 行  SessionRecovery / ManualReconciliation：
+                               人工驱动的恢复流程（被下面两个类 mixin）
+  coordinator.py       389 行  PaperSessionCoordinator：会话顺序、超时、
+                               health、halt、result 发布
+  workflow_state.py    174 行  ExecutionLease / PaperWorkflowPhase /
+                               WorkflowSnapshot / transition table
+  workflow.py          364 行  PaperWorkflowController：生命周期、publish、
+                               stop、finalization、lease 释放
+```
+
+职责边界：
+
+```text
+TradingRuntime            交易会话与策略/Risk/Execution
+PaperSessionCoordinator   broker events、health、cancel/intervention、
+                          reconciliation sequencing
+PaperWorkflowController   Paper 生命周期、人工恢复、finalization、lease
+PaperTradingService       execution channel / service lifecycle owner
+```
+
+四者互不吞并。Coordinator 不是 TradingRuntime 的一部分：它决定
+*何时*让 TradingRuntime 看到一笔行情，并拥有 BUY 超时与 SELL 干预策略；
+发单仍然只发生在 TradingRuntime → Risk → Execution。
+
+必须保持的安全语义（v2B 期间逐条冻结，并有 characterization 测试与
+non-vacuity 变异验证）：
+
+- **顺序**：`fills()` → `on_execution()` → `events()` → `on_order_event()`。
+  terminal broker status 可能先于本地 fill queue 被消费，反过来会让
+  pending/fill 对账看到假冲突。
+- **BUY 与 SELL 不同**：BUY 超过 `entry_order_timeout_seconds` 会被精确
+  cancel（pause/stop 时强制 cancel）；SELL 超过
+  `exit_order_intervention_seconds` 只 HALT 等人工处理，**绝不自动 cancel
+  保护性 SELL**，也没有全局 cancel。
+- **cancel 不确定性**：`ExecutionSubmissionUncertain` → `PAPER_CANCEL_UNCERTAIN`
+  → HALT；普通失败 → `PAPER_CANCEL_BLOCKED` → HALT。不重试、不补单。
+- **engine self-stop**：engine 未 active 且未 `stop_requested` →
+  `PAPER_ENGINE_STOPPED` → HALT，避免 workflow 仍 RUNNING 的 zombie session。
+- **health**：仍是注入的 `health_evaluator`，coordinator 不复制
+  `PaperExecutionHealth` 的算法。
+- **evidence**：绑定 runtime / service / session / account fingerprint /
+  armed fingerprint / connection generation / reconciliation generation /
+  state version / broker digest / engine digest；TTL 30 秒；same
+  `evidence_id` 只能消费一次；confirmation 必须重新 refresh broker truth
+  并逐字段比对，account binding 变化一律拒绝。
+- **finalization 两阶段**：先 capture zero-state evidence（broker 仍连接），
+  再 disconnect，再 drain 最后一轮本地回调/日志，最后
+  `confirm_finalization_after_disconnect(evidence)`。任何 late fill / late
+  event 都会让 finalization 失败并 HALT。
+- **lease**：`begin_connecting` 时 acquire（不是连上之后，防止 async
+  race）；只有 `release_paper(finalized=True)` 才释放。HALTED /
+  RECONCILING / RECONCILING_READY / STOPPING 全部继续持有 PAPER lease。
+- **HALTED → RUNNING 无直达路径**：只能
+  `HALTED → explicit RECONCILING → RECONCILING_READY → explicit confirmation
+  → RUNNING`。
+
+同一轮新增的守卫（`tests/test_trading_architecture.py` 的 Runtime v2B 段）：
+
+- 三个旧 root module **不存在**，且 production / scripts / tests 都不 import；
+- 每个新模块有自己的行数预算（`coordinator.py <= 420`、
+  `workflow.py <= 400`、`reconciliation.py <= 300`、
+  `paper_contracts.py` / `paper_models.py <= 150`、
+  `workflow_state.py <= 250`），由 `test_the_migrated_paper_modules_stay_small`
+  钉住，不用统一的 500 行上限；
+- `paper_contracts.py` / `paper_models.py` 不得 import IBKR / sqlite / Qt /
+  desktop / adapters；
+- `reconciliation.py` 是纯证明：不得 import adapter、application、strategy /
+  trading / coordinator / workflow，也不得出现 `PaperWorkflowPhase`、
+  `placeOrder`、`cancelOrder`；
+- `coordinator.py` 不得出现 `RiskApplication` / `ExecutionApplication` /
+  `StrategyRuntime` / `OrderIntent` / `TradeProposal` 等决策与发单名字；
+- `workflow.py` 里 `PaperSessionCoordinator(` 只出现一次（publish_armed），
+  且不得 import `paper_trading_service`；
+- `desktop.py` 不得构造 `PaperSessionCoordinator` / evidence / lease manager，
+  也不得直接 `release_paper` / `validate_paper_transition`；
+- 两个被拆到 `recovery.py` 的类（`SessionRecovery` /
+  `ManualReconciliation`）必须由拥有状态的类提供它声明依赖的属性与
+  primitive，且任何 runtime 子类**不得重定义**基类方法：
+  `test_no_runtime_class_defines_a_method_twice` 与
+  `test_a_split_runtime_class_provides_what_its_other_half_relies_on` 钉住。
+  后者正是 v2A `_flatten` 死代码教训的上一层版本。
+
+### 10.5 下一阶段（Runtime v2B 之后，本轮不做）
+
+```text
+Desktop execution page decomposition
+ShadowConfig naming / config separation
+PaperExecutionHealth location cleanup
+PaperTradingService location cleanup
+workflow_controller broader cleanup
+```
+
+`PaperTradingService` 本轮只改了 type import：它仍然只负责 candidate / active
+execution service 的拥有与生命周期，不负责 workflow phase、人工对账决策、
+finalization proof 或 TradingRuntime 信号逻辑。
+
+### 10.6 已关闭的风险接线缺陷（Risk v2 修复）
 
 旧 Desktop 把风险限额放进了错误的地方：
 
@@ -973,6 +1102,10 @@ AutoQuant layered_risk_limits 构造参数  ✅ 已删除（Risk v2）
 旧 ibkr_paper_orders.py                ✅ 已删除（Execution v2）
 旧 ibkr_paper_gateway.py               ✅ 已删除（Execution v2）
 旧 PaperOrderUpdate / PaperExecution   ✅ 已删除（Execution v2）
+旧 auto_quant.py / AutoQuantEngine      ✅ 已删除（Runtime v2A）
+旧 paper_session.py                    ✅ 已删除（Runtime v2B）
+旧 paper_workflow.py                   ✅ 已删除（Runtime v2B）
+旧 workflow_state.py（root）           ✅ 已删除（Runtime v2B）
 旧 MainWindow stream lifecycle         ⏭ 后续
 旧 Paper-specific orchestration glue   ⏭ 后续
 旧 workflow duplicate state            ⏭ 后续
@@ -1027,18 +1160,27 @@ HALTED
 
 ## 14. 下一轮
 
-**Runtime v2B** —— Runtime v2A 已经删掉 `AutoQuantEngine`，把信号与会话拆成
-`StrategyRuntime` / `TradingRuntime`（见 §10.3）。剩下唯一的过渡态在
-`paper_session.py` / `paper_workflow.py` / `workflow_state.py`：会话协调、
-`PaperWorkflowPhase` 阶段机与 `ExecutionLease` 还没有模块化。
+**Runtime v2B 已完成。** Runtime v2A 删掉了 `AutoQuantEngine` 并把信号与会话
+拆成 `StrategyRuntime` / `TradingRuntime`（见 §10.3）；Runtime v2B 删掉了最后
+三个过渡态 `paper_session.py` / `paper_workflow.py` / `workflow_state.py`，
+把会话协调（`coordinator.py`）、阶段机与租约（`workflow_state.py`）、人工恢复
+（`recovery.py`）、生命周期（`workflow.py`）与证明（`reconciliation.py`）
+模块化（见 §10.4）。**没有 compatibility shim，没有第二入口。**
 
-下一轮把它们拆成模块化的 session / workflow / state / reconciliation 模块，
-**同样受 production file <= 500 行约束**——不能把三个旧文件合并成一个超大的
-`session.py`。
+下一轮（本轮不做）：
 
-Runtime v2A 刻意没有做的事，留给那一轮或更后面：
+```text
+Desktop execution page decomposition
+ShadowConfig naming / config separation
+PaperExecutionHealth location cleanup
+PaperTradingService location cleanup
+workflow_controller broader cleanup
+```
 
-- 没有把 `PaperWorkflowPhase` / `ExecutionLease` 改成 trading 层类型；
+Runtime v2A / v2B 刻意没有做的事，留给更后面：
+
+- 没有把 `PaperWorkflowPhase` / `ExecutionLease` 改成 trading 层类型之外的东西
+  （迁移只改 import 路径，转换表与租约语义未动）；
 - 没有重写 Desktop execution 路由页（`_auto_quant_tab` 仍然按原样渲染，
   只是数据来自域类型）；
 - 没有合并 Account socket 与 Execution socket；
@@ -1046,7 +1188,8 @@ Runtime v2A 刻意没有做的事，留给那一轮或更后面：
   `TradeProposal.reference_price`，Risk 按同一价格定量，Execution 按同一价格
   发单——三者一致，本轮不拆开；
 - 没有重做 `ShadowConfig` 配置模型（名字仍然是历史包袱，先拆职责）；
-- 没有新增任何真实交易能力：仍然 Paper only、整股、限价、无做空、无保证金。
+- 没有新增任何真实交易能力：仍然 Paper only、整股、限价、无做空、无保证金，
+  submission 默认关闭，live 永久关闭。
 
 同样刻意不创建 `TradingManager`、`TradingGodService`、`GlobalAppState`、
 `ServiceLocator` 或 `ApplicationContext`：runtime 由 composition root 显式

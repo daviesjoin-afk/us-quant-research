@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from us_quant.paper_session import PaperSessionCoordinator
+from us_quant.trading.runtime.coordinator import PaperSessionCoordinator
 from us_quant.trading.domain.orders import Side
 from us_quant.trading.ports.broker_execution import (
     ExecutionSubmissionUncertain,

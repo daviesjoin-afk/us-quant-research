@@ -313,7 +313,12 @@ def test_the_session_coordinator_reads_domain_events(window) -> None:
     """The coordinator's order port speaks ``fills``/``events``, not Paper DTOs."""
 
     source = (
-        _REPO_ROOT / "src" / "us_quant" / "paper_session.py"
+        _REPO_ROOT
+        / "src"
+        / "us_quant"
+        / "trading"
+        / "runtime"
+        / "paper_contracts.py"
     ).read_text(encoding="utf-8")
     for forbidden in ("poll_executions", "poll_updates"):
         assert forbidden not in source, forbidden

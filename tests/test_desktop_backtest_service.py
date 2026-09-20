@@ -55,6 +55,14 @@ EXECUTION_V2_CHANGED_MODULES = (
     "src/us_quant/paper_order_journal.py",
 )
 
+# Runtime v2B: the Paper workflow and the lease/phase guards moved into
+# ``trading/runtime/``; the root copies are deleted.  Declared so the guard can
+# still assert the delta exactly.
+RUNTIME_V2B_CHANGED_MODULES = (
+    "src/us_quant/paper_workflow.py",
+    "src/us_quant/workflow_state.py",
+)
+
 SERVICE_MODULE = "src/us_quant/desktop_backtest_service.py"
 SERVICE_PATH = _REPO_ROOT / SERVICE_MODULE
 
@@ -1617,6 +1625,7 @@ def test_the_other_frozen_modules_are_untouched() -> None:
         set(MARKET_DATA_V2_CHANGED_MODULES)
         | set(BROKER_ACCOUNT_V2_CHANGED_MODULES)
         | set(EXECUTION_V2_CHANGED_MODULES)
+        | set(RUNTIME_V2B_CHANGED_MODULES)
     )
 
 

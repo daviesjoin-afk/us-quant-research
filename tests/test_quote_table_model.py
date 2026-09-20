@@ -6,7 +6,8 @@ from decimal import Decimal
 from time import perf_counter
 import unittest
 
-from us_quant.desktop import QuoteTableModel
+from us_quant.desktop_v2.pages.market.rows import quote_rows
+from us_quant.desktop_v2.pages.market.tables import QuoteTableModel
 from us_quant.trading.domain.market import (
     MarketDataMode,
     MarketQuote,
@@ -55,13 +56,13 @@ class QuoteTableModelTests(unittest.TestCase):
     def test_repeated_updates_do_not_reset_or_rebuild_rows(self) -> None:
         model = QuoteTableModel()
         first = _snapshot()
-        model.update_snapshot(first)
+        model.update_rows(quote_rows(first))
         self.assertEqual(model.reset_count, 1)
-        model.update_snapshot(first)
+        model.update_rows(quote_rows(first))
         self.assertEqual(model.reset_count, 1)
         self.assertEqual(model.changed_row_count, 0)
 
-        model.update_snapshot(_snapshot(age=0.6))
+        model.update_rows(quote_rows(_snapshot(age=0.6)))
         self.assertEqual(model.reset_count, 1)
         self.assertEqual(model.changed_row_count, 30)
         self.assertEqual(model.rowCount(), 30)
@@ -69,10 +70,10 @@ class QuoteTableModelTests(unittest.TestCase):
 
     def test_thousand_incremental_snapshots_stay_bounded(self) -> None:
         model = QuoteTableModel()
-        model.update_snapshot(_snapshot())
+        model.update_rows(quote_rows(_snapshot()))
         started = perf_counter()
         for index in range(1000):
-            model.update_snapshot(_snapshot(age=index / 10))
+            model.update_rows(quote_rows(_snapshot(age=index / 10)))
         elapsed = perf_counter() - started
         self.assertEqual(model.reset_count, 1)
         self.assertLess(elapsed, 5.0)

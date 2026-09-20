@@ -26,7 +26,6 @@ from PySide6.QtGui import (
     QPixmap,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QApplication,
     QComboBox,
     QDateEdit,
@@ -34,7 +33,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -98,7 +96,6 @@ from us_quant.ibkr import IBKRConnectionConfig, probe_ibkr_socket
 from us_quant.trading.application.market_data import (
     PUSH_LISTENER_SOURCES,
     SOURCE_ALPACA_IEX,
-    SOURCE_FINNHUB_TRADES,
     SOURCE_IBKR_EXTENDED,
     MarketDataCredentials,
     MarketDataStartRequest,
@@ -220,17 +217,23 @@ from us_quant.desktop_v2.pages.execution.presenter import (
     build_runtime_view,
     control_state,
 )
+from us_quant.desktop_v2.pages.market import MarketPage
+from us_quant.desktop_v2.pages.market.controls import VALID_MARKET_SOURCES
+from us_quant.desktop_v2.pages.market.models import MarketReadinessFacts
+from us_quant.desktop_v2.pages.market.presenter import (
+    build_market_view,
+    control_view,
+)
+from us_quant.desktop_v2.pages.market.rows import quote_rows
 from us_quant.desktop_tasks import DesktopTaskController
 from us_quant.desktop_workers import (
     StreamWorker,
     TaskThread,
 )
 from us_quant.desktop_widgets import (
-    MARKET_DATA_MODE_LABELS,
     EquityComparisonChart,
     MetricCard,
     PriceChart,
-    QuoteTableModel,
     _price,
     _sortable_number,
     configure_combo_width,
@@ -483,8 +486,11 @@ class MainWindow(QMainWindow):
         # group serializes it, so an unrelated task finishing must not be able
         # to release the route on the probe's behalf.
         self._channel_check_inflight = False
-        self._quotes_scroll_active = False
-        self._pending_stream_snapshot: MarketSnapshot | None = None
+        # The market route's scope line and watchlist note are computed here --
+        # the scope needs the universe and the scan, the note records which
+        # workflow last set the subscription -- and handed to the page as text.
+        self._market_scope = ""
+        self._market_watchlist_note: str | None = None
         self.account_portfolio: BrokerAccountPortfolio | None = None
         self.stream_worker: StreamWorker | None = None
         self._pending_stream_switch: (
@@ -747,9 +753,19 @@ class MainWindow(QMainWindow):
         self.execution_page = ExecutionPage(palette=self.theme)
         self._connect_execution_page()
 
+        # The market page owns its widgets and reports intent; the stream
+        # lifecycle, the credentials and the safety gates stay here.  It is told
+        # which controls are open rather than deciding that itself.
+        self.market_page = MarketPage(
+            palette=self.theme,
+            theme_name=self.current_theme_name,
+            selected_provider=self.preferences.market_provider,
+        )
+        self._connect_market_page()
+
         pages: dict[str, QWidget] = {
             "dashboard": self._dashboard_tab(),
-            "market": self._quotes_tab(),
+            "market": self.market_page,
             "account": self.account_page,
             "strategy": self.strategy_page,
             "risk": self.risk_page,
@@ -791,6 +807,21 @@ class MainWindow(QMainWindow):
             self._resume_auto_quant_from_reconciliation
         )
 
+    def _connect_market_page(self) -> None:
+        """Wire the market page's intents to the handlers that act on them.
+
+        The provider signal is the one entry that fires for an *operator* change
+        only: the programmatic setter used to restore a saved preference and to
+        sync the settings panel is deliberately silent, so the two combos cannot
+        drive each other.
+        """
+
+        page = self.market_page
+        page.provider_selected.connect(self._stream_provider_selected)
+        page.start_requested.connect(self._start_stream)
+        page.stop_requested.connect(self._stop_stream)
+        page.load_scan_watchlist_requested.connect(self._apply_intraday_watchlist)
+
     @staticmethod
     def _field_label(text: str) -> QLabel:
         label = QLabel(text)
@@ -824,194 +855,6 @@ class MainWindow(QMainWindow):
                 "metricNote",
             }:
                 label.setWordWrap(True)
-
-    def _quotes_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        cards = QHBoxLayout()
-        self.stream_connection_card = MetricCard(
-            "行情流连接", "未启动", "外部或 IBKR 独立只读 client"
-        )
-        self.stream_feed_card = MetricCard(
-            "行情类型", "未知", "以 marketDataType 回调为准"
-        )
-        self.stream_ready_card = MetricCard(
-            "日内可用", "否", "必须 fresh Type 1 + bid/ask"
-        )
-        self.stream_watch_card = MetricCard(
-            "实时订阅子集", "0", "最多 30；不等于全市场研究池"
-        )
-        for card in (
-            self.stream_connection_card,
-            self.stream_feed_card,
-            self.stream_ready_card,
-            self.stream_watch_card,
-        ):
-            cards.addWidget(card)
-        layout.addLayout(cards)
-
-        controls = QGridLayout()
-        controls.setHorizontalSpacing(10)
-        controls.setVerticalSpacing(8)
-        self.stream_symbols = QLineEdit()
-        self.stream_symbols.setPlaceholderText(
-            "实时订阅子集（最多 30；不是研究池或交易白名单）"
-        )
-        self.stream_symbols.setClearButtonEnabled(True)
-        self.stream_mode = QComboBox()
-        self.stream_mode.addItem(
-            "Alpaca IEX 免费实时（单交易所）",
-            "alpaca_iex",
-        )
-        self.stream_mode.addItem(
-            "Finnhub 实时成交（模拟执行带）",
-            "finnhub_trades",
-        )
-        self.stream_mode.addItem(
-            "IBKR 实时优先 / 延迟回退",
-            "ibkr",
-        )
-        self.stream_mode.addItem(
-            "IBKR 5×24（盘前 / 盘后 / 隔夜）",
-            "ibkr_extended",
-        )
-        preferred_mode = self.stream_mode.findData(
-            self.preferences.market_provider
-        )
-        self.stream_mode.setCurrentIndex(max(0, preferred_mode))
-        self.stream_mode.currentIndexChanged.connect(
-            self._stream_provider_selected
-        )
-        self._configure_combo_width(
-            self.stream_mode,
-            minimum_width=320,
-            minimum_contents=24,
-        )
-        self.stream_start_button = QPushButton("启动只读流行情")
-        self.stream_start_button.clicked.connect(self._start_stream)
-        self.stream_stop_button = QPushButton("停止")
-        self.stream_stop_button.clicked.connect(self._stop_stream)
-        self.stream_stop_button.setEnabled(False)
-        self.stream_scan_watchlist_button = QPushButton(
-            "载入扫描候选（最多 30）"
-        )
-        self.stream_scan_watchlist_button.clicked.connect(
-            self._apply_intraday_watchlist
-        )
-        controls.addWidget(
-            self._field_label("实时行情订阅子集"),
-            0,
-            0,
-            1,
-            4,
-        )
-        controls.addWidget(self.stream_symbols, 1, 0, 1, 4)
-        controls.addWidget(
-            self._field_label("行情数据源"),
-            2,
-            0,
-        )
-        controls.addWidget(self.stream_mode, 3, 0)
-        controls.addWidget(self.stream_scan_watchlist_button, 3, 1)
-        controls.addWidget(self.stream_start_button, 3, 2)
-        controls.addWidget(self.stream_stop_button, 3, 3)
-        controls.setRowMinimumHeight(3, 40)
-        controls.setColumnStretch(0, 4)
-        controls.setColumnStretch(1, 2)
-        controls.setColumnStretch(2, 2)
-        controls.setColumnStretch(3, 1)
-        layout.addLayout(controls)
-
-        self.stream_scope_label = QLabel()
-        self.stream_scope_label.setObjectName("emptyState")
-        self.stream_scope_label.setWordWrap(True)
-        self.stream_scope_label.setMinimumHeight(40)
-        layout.addWidget(self.stream_scope_label)
-
-        credential_note = QLabel(
-            "研究池、历史扫描和实时订阅是三层范围：上方代码只控制本次"
-            " Level I 行情连接，不会限制广域研究或自动候选生成。"
-            "API 凭据与默认连接参数已移至“系统·设置”；"
-            "Alpaca=IEX盘口，Finnhub=实时成交+明确模拟带，均非SIP/NBBO。"
-        )
-        credential_note.setObjectName("subtitle")
-        credential_note.setWordWrap(True)
-        layout.addWidget(credential_note)
-
-        self.stream_empty_label = QLabel(
-            "尚未启动行情。选择数据源并在设置页保存凭据后启动；"
-            "表格会明确区分 READY、STALE、延迟和模拟执行带。"
-        )
-        self.stream_empty_label.setObjectName("emptyState")
-        self.stream_empty_label.setAlignment(Qt.AlignCenter)
-        self.stream_empty_label.setMinimumHeight(48)
-        layout.addWidget(self.stream_empty_label)
-
-        splitter = QSplitter(Qt.Vertical)
-        self.quotes_model = QuoteTableModel(self.current_theme_name)
-        self.quotes_table = QTableView()
-        self.quotes_table.setModel(self.quotes_model)
-        self.quotes_table.setAlternatingRowColors(True)
-        self.quotes_table.setSelectionBehavior(
-            QAbstractItemView.SelectRows
-        )
-        self.quotes_table.setSelectionMode(
-            QAbstractItemView.SingleSelection
-        )
-        self.quotes_table.setEditTriggers(
-            QAbstractItemView.NoEditTriggers
-        )
-        self.quotes_table.verticalHeader().setVisible(False)
-        self.quotes_table.setSortingEnabled(True)
-        self.quotes_table.setHorizontalScrollMode(
-            QAbstractItemView.ScrollPerPixel
-        )
-        self.quotes_table.setVerticalScrollMode(
-            QAbstractItemView.ScrollPerPixel
-        )
-        header = self.quotes_table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Interactive)
-        header.setStretchLastSection(False)
-        widths = (
-            82, 96, 96, 96, 96, 96, 112,
-            168, 78, 70, 96, 420, 92, 360,
-        )
-        for column, width in enumerate(widths):
-            self.quotes_table.setColumnWidth(column, width)
-        for scrollbar in (
-            self.quotes_table.horizontalScrollBar(),
-            self.quotes_table.verticalScrollBar(),
-        ):
-            scrollbar.sliderPressed.connect(
-                self._quotes_scroll_started
-            )
-            scrollbar.sliderReleased.connect(
-                self._quotes_scroll_finished
-            )
-        splitter.addWidget(self.quotes_table)
-
-        health_panel = QFrame()
-        health_panel.setObjectName("panel")
-        health_layout = QVBoxLayout(health_panel)
-        health_title = QLabel("运行健康与安全门")
-        health_title.setObjectName("sectionTitle")
-        self.stream_health_text = QTextEdit()
-        self.stream_health_text.setReadOnly(True)
-        self.stream_health_text.setPlainText(
-            "• 行情类型只相信 IBKR marketDataType 回调\n"
-            "• 外部首选 Alpaca IEX 免费实时，明确标注单交易所覆盖\n"
-            "• Finnhub 是实时成交；±5bps 影子带不是市场 bid/ask\n"
-            "• Type 2/3/4 只可观察，不进入日内信号\n"
-            "• 10197、1100、1300、缺 bid/ask、超时均硬性 stale\n"
-            "• 客户端硬禁下单、撤单、全撤、行权和 FA 修改\n"
-            "• 当前未启动流服务"
-        )
-        health_layout.addWidget(health_title)
-        health_layout.addWidget(self.stream_health_text)
-        splitter.addWidget(health_panel)
-        splitter.setSizes([480, 180])
-        layout.addWidget(splitter)
-        return page
 
     def _simulation_tab(self) -> QWidget:
         page = QWidget()
@@ -2933,11 +2776,9 @@ class MainWindow(QMainWindow):
             capital=selection_capital,
         )
         if symbols:
-            self.stream_symbols.setText(",".join(symbols))
-            self.stream_watch_card.set_value(
-                str(len(symbols)),
-                "实时订阅子集；不限制研究或交易范围",
-            )
+            self.market_page.set_subscription_symbols(symbols)
+            self._market_watchlist_note = "实时订阅子集；不限制研究或交易范围"
+            self._publish_market_controls()
             self._log(
                 f"已从 {len(self.scan.results):,} 个最近扫描结果中选出 "
                 f"{len(symbols)} 个实时订阅代码；"
@@ -3312,7 +3153,7 @@ class MainWindow(QMainWindow):
             ),
         )
         stream_symbols = tuple(dict.fromkeys(symbols + market_references))
-        self.stream_symbols.setText(",".join(stream_symbols))
+        self.market_page.set_subscription_symbols(stream_symbols)
         self._set_launch_busy(False)
         self._populate_auto_quant_candidates()
         if (
@@ -3323,7 +3164,7 @@ class MainWindow(QMainWindow):
                 summary=f"已整理 {len(symbols)} 个候选，正在安全停止旧行情并切换。"
             )
             self._request_stream_switch(
-                str(self.stream_mode.currentData() or "finnhub_trades")
+                str(self.market_page.selected_provider() or "finnhub_trades")
             )
             return
         self._start_stream()
@@ -4221,7 +4062,7 @@ class MainWindow(QMainWindow):
             self.stream_worker is None
             or not self.stream_worker.isRunning()
         ):
-            self.stream_symbols.setText(symbol)
+            self.market_page.set_subscription_symbols((symbol,))
         self._refresh_minute_data_status(symbol)
         self._refresh_target_preflight()
         self._log(
@@ -4249,10 +4090,9 @@ class MainWindow(QMainWindow):
             )
             return
         self.target_symbol_input.setText(symbol)
-        self.stream_symbols.setText(symbol)
-        self.stream_watch_card.set_value(
-            "1", f"针对性日内 T：{symbol}"
-        )
+        self.market_page.set_subscription_symbols((symbol,))
+        self._market_watchlist_note = f"针对性日内 T：{symbol}"
+        self._publish_market_controls()
         self._log(
             f"本次针对性日内 T 标的设为 {symbol}；"
             "启动行情后仍需通过实时性与中概排除门。"
@@ -5734,13 +5574,9 @@ class MainWindow(QMainWindow):
             badge.style().polish(badge)
 
     def _stream_symbols_from_input(self) -> tuple[str, ...]:
-        return tuple(
-            dict.fromkeys(
-                item.strip().upper()
-                for item in self.stream_symbols.text().split(",")
-                if item.strip()
-            )
-        )
+        """The operator's subscription input, parsed at the page's boundary."""
+
+        return self.market_page.subscription_symbols()
 
     def _settings_provider_selected(
         self, *_args: object
@@ -5749,14 +5585,10 @@ class MainWindow(QMainWindow):
             self.settings_provider_combo.currentData()
             or "finnhub_trades"
         )
-        stream_index = self.stream_mode.findData(provider)
-        if (
-            stream_index >= 0
-            and self.stream_mode.currentIndex() != stream_index
-        ):
-            self.stream_mode.blockSignals(True)
-            self.stream_mode.setCurrentIndex(stream_index)
-            self.stream_mode.blockSignals(False)
+        # Programmatic: the settings combo is not the operator choosing on this
+        # route, and the setter is silent so the two combos cannot drive each
+        # other.
+        self.market_page.set_selected_provider(provider)
         api_provider = (
             "ibkr" if provider == "ibkr_extended" else provider
         )
@@ -5768,7 +5600,7 @@ class MainWindow(QMainWindow):
         self, *_args: object
     ) -> None:
         provider = str(
-            self.stream_mode.currentData() or "finnhub_trades"
+            self.market_page.selected_provider() or "finnhub_trades"
         )
         settings_index = self.settings_provider_combo.findData(
             provider
@@ -5791,11 +5623,7 @@ class MainWindow(QMainWindow):
         )
         self._save_user_preferences()
         if not self._stream_symbols_from_input():
-            target_index = self.stream_mode.findData(provider)
-            if target_index >= 0:
-                self.stream_mode.blockSignals(True)
-                self.stream_mode.setCurrentIndex(target_index)
-                self.stream_mode.blockSignals(False)
+            self.market_page.set_selected_provider(provider)
             self._pending_stream_switch = None
             self._log(
                 "默认行情源已切换；当前没有订阅代码。"
@@ -5840,15 +5668,12 @@ class MainWindow(QMainWindow):
                 "请先停止自动量化并完成券商对账。",
             )
             return
-        target_index = self.stream_mode.findData(provider)
-        if target_index < 0:
+        if provider not in VALID_MARKET_SOURCES:
             QMessageBox.warning(
                 self, "无法切换行情", f"不支持的数据源：{provider}"
             )
             return
-        self.stream_mode.blockSignals(True)
-        self.stream_mode.setCurrentIndex(target_index)
-        self.stream_mode.blockSignals(False)
+        self.market_page.set_selected_provider(provider)
         self._pending_stream_switch = (provider, symbols)
         worker = self.stream_worker
         if worker is not None and worker.isRunning():
@@ -5873,12 +5698,8 @@ class MainWindow(QMainWindow):
             return
         provider, symbols = pending
         self._pending_stream_switch = None
-        index = self.stream_mode.findData(provider)
-        if index >= 0:
-            self.stream_mode.blockSignals(True)
-            self.stream_mode.setCurrentIndex(index)
-            self.stream_mode.blockSignals(False)
-        self.stream_symbols.setText(",".join(symbols))
+        self.market_page.set_selected_provider(provider)
+        self.market_page.set_subscription_symbols(symbols)
         self._start_stream()
 
     def _maybe_rotate_extended_ibkr_session(self) -> None:
@@ -5931,7 +5752,7 @@ class MainWindow(QMainWindow):
         ):
             self._request_stream_switch(
                 str(
-                    self.stream_mode.currentData()
+                    self.market_page.selected_provider()
                     or "finnhub_trades"
                 )
             )
@@ -5947,7 +5768,7 @@ class MainWindow(QMainWindow):
                 self, "无法启动", "首期最多订阅 30 个代码"
             )
             return
-        provider = str(self.stream_mode.currentData() or "ibkr")
+        provider = str(self.market_page.selected_provider() or "ibkr")
         try:
             credentials = (
                 self.credential_service.resolve_stream_credentials()
@@ -5985,23 +5806,27 @@ class MainWindow(QMainWindow):
         worker.snapshot_ready.connect(self._stream_snapshot_pushed)
         worker.failed.connect(self._stream_failed)
         worker.finished.connect(self._stream_finished)
-        self.stream_start_button.setEnabled(True)
-        self.stream_start_button.setText("切换 / 重连行情")
-        self.stream_stop_button.setEnabled(True)
-        self.stream_symbols.setEnabled(False)
-        self.stream_mode.setEnabled(True)
-        self.stream_scan_watchlist_button.setEnabled(False)
         self._set_connection_settings_enabled(False)
-        self.stream_watch_card.set_value(
-            str(len(symbols)), "Level I 持续订阅"
+        self._publish_market_controls()
+        # The cards are drawn from the page's own render, so the "connecting"
+        # state is published as a view rather than by writing widgets here.
+        self.market_page.render(
+            build_market_view(
+                snapshot=None,
+                readiness=None,
+                scope=self._market_scope,
+                rows=(),
+                controls=self._market_controls(),
+                watchlist_note="Level I 持续订阅",
+            )
         )
-        self.stream_connection_card.set_value(
-            "连接中",
-            (
+        self.market_page.render_health(
+            "连接中："
+            + (
                 "等待 nextValidId 协议握手"
                 if provider in {"ibkr", "ibkr_extended"}
                 else "等待 WebSocket 认证/首个事件"
-            ),
+            )
         )
         worker.start()
         self.stream_timer.start()
@@ -6059,11 +5884,11 @@ class MainWindow(QMainWindow):
         if not worker.wait(3000):
             self._log("流服务正在退出；等待网络线程关闭…")
             self.stream_timer.stop()
-            self.stream_connection_card.set_value(
-                "停止中", "网络线程尚未确认退出；禁止重复启动"
-            )
-            self.stream_stop_button.setEnabled(False)
             self._stream_stop_pending = True
+            self._publish_market_controls()
+            self.market_page.render_health(
+                "停止中：网络线程尚未确认退出；禁止重复启动"
+            )
             self._publish_execution_controls()
             self._record_runtime_event(
                 severity="warning",
@@ -6075,17 +5900,10 @@ class MainWindow(QMainWindow):
         self.stream_timer.stop()
         if self.stream_worker is worker:
             self.stream_worker = None
-        self.stream_connection_card.set_value(
-            "已停止", "最后行情保留为 stale"
-        )
-        self.stream_start_button.setEnabled(True)
-        self.stream_start_button.setText("启动只读流行情")
-        self.stream_stop_button.setEnabled(False)
         self._stream_stop_pending = False
+        self._publish_market_controls()
+        self.market_page.render_health("已停止：最后行情保留为 stale")
         self._publish_execution_controls()
-        self.stream_symbols.setEnabled(True)
-        self.stream_mode.setEnabled(True)
-        self.stream_scan_watchlist_button.setEnabled(True)
         self._set_connection_settings_enabled(True)
         self._record_runtime_event(
             severity="info",
@@ -6115,7 +5933,7 @@ class MainWindow(QMainWindow):
                 observed_at=datetime.now(timezone.utc),
             )
             self.stream_snapshot = snapshot
-            self._populate_stream_snapshot(snapshot)
+            self._publish_market_view(snapshot)
         self.market_badge.setText("行情 · 已停止")
         self.market_badge.setProperty("state", "warn")
         self.signal_card.set_value("不可用", reason)
@@ -6159,7 +5977,7 @@ class MainWindow(QMainWindow):
             # Recovered: allow the next outage of the same kind to be
             # recorded again instead of being swallowed by the old key.
             self._last_stream_event_key = None
-        self._populate_stream_snapshot(result)
+        self._publish_market_view(result)
         self._populate_auto_quant_candidates()
         self._refresh_target_preflight()
         if (
@@ -6235,13 +6053,21 @@ class MainWindow(QMainWindow):
             return
         self._stream_snapshot_received(self.market_data.snapshot())
 
-    def _populate_stream_snapshot(
-        self, snapshot: MarketSnapshot
-    ) -> None:
-        if self._quotes_scroll_active:
-            self._pending_stream_snapshot = snapshot
+    def _publish_market_view(self, snapshot: MarketSnapshot) -> None:
+        """Gather the market facts and hand them to the page as one view.
+
+        This is the window's whole part in the market route's rendering: fetch,
+        project, draw, and then update the pieces that are *not* the page's --
+        the shell's global badges, the signal card and the throttled status log.
+
+        The readiness counts and the scope line are computed here rather than on
+        the page because they depend on subsystems this route does not own: auto
+        quant candidates, market reference symbols, the universe and the scan.
+        The page is handed the finished numbers and the finished line.
+        """
+
+        if not hasattr(self, "market_page"):
             return
-        self.stream_empty_label.setVisible(not snapshot.quotes)
         self._update_quote_readiness(snapshot)
         readiness = calculate_quote_readiness_breakdown(
             snapshot,
@@ -6251,93 +6077,75 @@ class MainWindow(QMainWindow):
             reference_symbols=self._auto_quant_market_reference_symbols(),
             recently_ready_symbols=self._quote_last_ready_monotonic,
         )
-        connection_text = (
-            "已握手"
-            if snapshot.ready
-            else "端口已连"
-            if snapshot.connected
-            else "已断开"
-        )
-        self.stream_connection_card.set_value(
-            connection_text,
-            f"连接代次 {snapshot.generation} · "
-            f"尝试 {snapshot.reconnect_attempt}",
-        )
-        modes = {
-            quote.mode
-            for quote in snapshot.quotes
-        }
-        if snapshot.source_id == SOURCE_ALPACA_IEX:
-            feed_text = "IEX 实时"
-        elif snapshot.source_id == SOURCE_FINNHUB_TRADES:
-            feed_text = "实时成交"
-        elif modes:
-            feed_text = " / ".join(
-                MARKET_DATA_MODE_LABELS.get(mode, "未知")
-                for mode in sorted(modes, key=lambda item: item.value)
+        self.market_page.render(
+            build_market_view(
+                snapshot=snapshot,
+                readiness=MarketReadinessFacts(
+                    candidate_count=readiness.candidate_count,
+                    candidate_current_count=(
+                        readiness.candidate_current_count
+                    ),
+                    candidate_recent_count=(
+                        readiness.candidate_recent_count
+                    ),
+                    reference_count=readiness.reference_count,
+                    reference_current_count=(
+                        readiness.reference_current_count
+                    ),
+                    reference_recent_count=(
+                        readiness.reference_recent_count
+                    ),
+                    subscription_count=readiness.subscription_count,
+                    subscription_current_count=(
+                        readiness.subscription_current_count
+                    ),
+                    subscription_recent_count=(
+                        readiness.subscription_recent_count
+                    ),
+                ),
+                scope=self._market_scope,
+                rows=quote_rows(snapshot),
+                controls=self._market_controls(),
+                watchlist_note=self._market_watchlist_note,
             )
-        else:
-            feed_text = "等待回调"
-        self.stream_feed_card.set_value(
-            feed_text,
-            snapshot.coverage,
         )
-        if readiness.candidate_count:
-            self.stream_ready_card.set_value(
-                (
-                    f"可下单候选 {readiness.candidate_current_count}/"
-                    f"{readiness.candidate_count} · 市场参考 "
-                    f"{readiness.reference_current_count}/"
-                    f"{readiness.reference_count}"
-                ),
-                (
-                    f"近30秒候选 {readiness.candidate_recent_count}/"
-                    f"{readiness.candidate_count} · 参考 "
-                    f"{readiness.reference_recent_count}/"
-                    f"{readiness.reference_count} · 订阅合计 "
-                    f"{readiness.subscription_current_count}/"
-                    f"{readiness.subscription_count}"
-                ),
-            )
-        else:
-            self.stream_ready_card.set_value(
-                (
-                    f"订阅合计 {readiness.subscription_current_count}/"
-                    f"{readiness.subscription_count}"
-                ),
-                (
-                    f"当前 fresh；近30秒 "
-                    f"{readiness.subscription_recent_count}/"
-                    f"{readiness.subscription_count}"
-                ),
-            )
+        self._publish_market_health(snapshot, readiness)
 
-        self.quotes_model.update_snapshot(snapshot)
+    def _market_controls(self):
+        """The control state the page may offer, from the window's own facts."""
 
-        error_line = (
-            f"最近错误：{snapshot.source_label} {snapshot.error_code}"
-            if snapshot.error_code is not None
-            else "最近错误：无"
+        live = self._stream_is_live()
+        return control_view(
+            worker_running=live,
+            stop_pending=self._stream_stop_pending,
+            symbols_enabled=not live,
+            provider_enabled=True,
         )
-        gate_explanation = (
-            "门控：Finnhub 只把 fresh 实时成交用于信号；"
-            "显示的 bid/ask 是 ±5bps 影子执行带，不是市场盘口。"
-            if snapshot.source_id == SOURCE_FINNHUB_TRADES
-            else (
-                "门控：只有 fresh Type 1 且 bid/ask 完整的行情，"
-                "才可被标记为日内可用。Type 2/3/4 不会静默升级。"
-            )
+
+    def _publish_market_controls(self) -> None:
+        """Publish just the control state and the watchlist card.
+
+        Used by the start/stop and subscription paths, which change what the
+        route may offer without having a snapshot to render.  The watchlist card
+        is included because its note records *why* the subscription is what it
+        is, and that is a view fact.
+        """
+
+        if not hasattr(self, "market_page"):
+            return
+        self.market_page.render_controls(
+            self._market_controls(),
+            watchlist=self._market_watchlist_note,
         )
-        self.stream_health_text.setPlainText(
-            f"连接代次：{snapshot.generation}\n"
-            f"来源：{snapshot.source_label}\n"
-            f"覆盖：{snapshot.coverage}\n"
-            f"Socket：{'连接' if snapshot.connected else '断开'}\n"
-            f"协议握手：{'完成' if snapshot.ready else '未完成'}\n"
-            f"{error_line}\n"
-            f"最近事件：{snapshot.message}\n\n"
-            f"{gate_explanation}"
-        )
+
+    def _publish_market_health(self, snapshot: MarketSnapshot, readiness) -> None:
+        """Update the badges, the signal card and the throttled status log.
+
+        These belong to the shell and the window rather than to the page: the
+        market and handshake badges speak for the whole workbench, and the status
+        log is a runtime concern the page must not own.
+        """
+
         if snapshot.ready:
             self.handshake_badge.setText(
                 (
@@ -6740,9 +6548,7 @@ class MainWindow(QMainWindow):
                 )
 
     def _stream_failed(self, message: str) -> None:
-        self.stream_health_text.setPlainText(
-            f"流服务失败：{message}\n\n可继续离线研究。"
-        )
+        self.market_page.render_failure(message)
         self.market_badge.setText("行情 · 流服务失败")
         self.market_badge.setProperty("state", "error")
         self._repolish_health_badges()
@@ -6764,14 +6570,9 @@ class MainWindow(QMainWindow):
         self.stream_worker = None
         self._invalidate_stream_snapshot("行情流已停止")
         self.stream_timer.stop()
-        self.stream_start_button.setEnabled(True)
-        self.stream_start_button.setText("启动只读流行情")
-        self.stream_stop_button.setEnabled(False)
         self._stream_stop_pending = False
+        self._publish_market_controls()
         self._publish_execution_controls()
-        self.stream_symbols.setEnabled(True)
-        self.stream_mode.setEnabled(True)
-        self.stream_scan_watchlist_button.setEnabled(True)
         self._set_connection_settings_enabled(True)
         self._activate_pending_stream_switch()
 
@@ -7269,7 +7070,7 @@ class MainWindow(QMainWindow):
         return len(symbols)
 
     def _refresh_market_scope_summary(self) -> None:
-        if not hasattr(self, "stream_scope_label"):
+        if not hasattr(self, "market_page"):
             return
         universe_summary = (
             self.universe.summary()
@@ -7287,7 +7088,7 @@ class MainWindow(QMainWindow):
         missing_count = (
             len(self.scan.skipped) if self.scan is not None else 0
         )
-        self.stream_scope_label.setText(
+        self._market_scope = (
             f"范围分层 · 官方美股/ETF {total_count:,} · "
             f"排除中概后的研究池 {research_count:,} · "
             f"已有日 K {history_count:,} · 最近扫描 "
@@ -7299,6 +7100,7 @@ class MainWindow(QMainWindow):
             )
             + " · 上方实时订阅最多 30，只是行情窗口。"
         )
+        self.market_page.render_scope(self._market_scope)
         if hasattr(self, "execution_page"):
             self.execution_page.render_context(
                 scope=(
@@ -7663,9 +7465,9 @@ class MainWindow(QMainWindow):
         self.config = commit.config
         self.preferences = saved
         self._apply_theme(saved.theme)
-        index = self.stream_mode.findData(saved.market_provider)
-        if index >= 0:
-            self.stream_mode.setCurrentIndex(index)
+        # Silent: restoring a saved preference is not an operator intent on the
+        # market route, so this must not re-publish a provider selection.
+        self.market_page.set_selected_provider(saved.market_provider)
         self._log(
             "设置已保存；主题已生效，连接参数在下一次连接时使用"
         )
@@ -7876,16 +7678,6 @@ class MainWindow(QMainWindow):
         self.settings_alpaca_secret.setEnabled(True)
         self._api_provider_changed()
 
-    def _quotes_scroll_started(self) -> None:
-        self._quotes_scroll_active = True
-
-    def _quotes_scroll_finished(self) -> None:
-        self._quotes_scroll_active = False
-        pending = self._pending_stream_snapshot
-        self._pending_stream_snapshot = None
-        if pending is not None:
-            self._populate_stream_snapshot(pending)
-
     def _apply_theme(self, theme_name: str) -> None:
         self.current_theme_name = (
             "light" if theme_name == "light" else "dark"
@@ -7895,8 +7687,8 @@ class MainWindow(QMainWindow):
         )
         self.setProperty("uiTheme", self.current_theme_name)
         self.setStyleSheet(build_stylesheet(self.theme))
-        if hasattr(self, "quotes_model"):
-            self.quotes_model.set_theme(self.current_theme_name)
+        if hasattr(self, "market_page"):
+            self.market_page.set_palette(self.theme)
         # The strategy page colours gate-blocked rows from the palette, so it
         # has to be told when the palette changes.  It re-renders its own rows.
         if hasattr(self, "strategy_page"):

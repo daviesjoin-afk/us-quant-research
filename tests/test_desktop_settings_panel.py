@@ -197,7 +197,6 @@ MARKET_DATA_V2_METHODS = (
     "_stream_snapshot_pushed",
     "_stream_snapshot_received",
     "_poll_stream_snapshot",
-    "_populate_stream_snapshot",
     "_invalidate_stream_snapshot",
     "_record_minute_snapshot",
     "_update_quote_readiness",
@@ -260,6 +259,38 @@ RUNTIME_V2A_METHODS = (
 # owned are deleted, and the page plus its control publisher take their place.
 # Declared as a delta so the guard can assert the surface exactly, in both
 # directions.
+# Desktop Market v2: the market route became a native v2 page.  The legacy
+# builder, its two scroll handlers and the snapshot populator are deleted, the
+# page and its publishers are the new surface, and every handler that used to
+# write a market widget by attribute now writes through the page.  Declared so
+# the guard can assert the delta exactly, in both directions.
+DESKTOP_MARKET_V2_REMOVED_METHODS = (
+    "_quotes_tab",
+    "_quotes_scroll_started",
+    "_quotes_scroll_finished",
+    "_populate_stream_snapshot",
+)
+
+DESKTOP_MARKET_V2_ADDED_METHODS = (
+    "_connect_market_page",
+    "_market_controls",
+    "_publish_market_controls",
+    "_publish_market_health",
+    "_publish_market_view",
+)
+
+DESKTOP_MARKET_V2_METHODS = (
+    "_activate_pending_stream_switch",
+    "_apply_intraday_watchlist",
+    "_apply_target_symbol",
+    "_settings_provider_selected",
+    "_stream_failed",
+    "_stream_provider_selected",
+    "_stream_symbols_from_input",
+    "_switch_to_settings_provider",
+    "_sync_targeted_symbol_to_stream",
+)
+
 DESKTOP_EXECUTION_V2_REMOVED_METHODS = (
     "_auto_quant_tab",
     "_populate_auto_latency_table",
@@ -327,6 +358,17 @@ MARKET_DATA_V2_FROZEN_HANDLERS = (
     "_save_user_preferences",
     "_clear_selected_api_credentials",
     "_api_provider_changed",
+)
+
+# Desktop Market v2: these three frozen handlers now sync the provider combo
+# through ``market_page.set_selected_provider`` instead of reaching into the
+# market route's widget, and the switch reads the draft off the page.  Declared
+# for the same reason the three above are: the exemption cannot swallow an
+# unrelated edit, because a fourth frozen handler changing still fails.
+DESKTOP_MARKET_V2_FROZEN_HANDLERS = (
+    "_settings_provider_selected",
+    "_stream_provider_selected",
+    "_switch_to_settings_provider",
 )
 
 # Spec 4: the seventeen controls the window keeps exposing.
@@ -1496,10 +1538,11 @@ def test_the_settings_handler_is_unchanged(name: str) -> None:
     """Spec 23/41: the handlers must be byte-identical to the base commit.
 
     Market Data v2 rewrote three of them because the save path now hands
-    credentials to the application request.  Those three are declared in
-    ``MARKET_DATA_V2_FROZEN_HANDLERS`` and are asserted to have changed --
-    so the exemption cannot silently swallow an unrelated edit, and a
-    fourth frozen handler changing still fails here.
+    credentials to the application request; Desktop Market v2 rewrote three
+    more because they sync the provider through the market page rather than
+    through its widget.  Both sets are declared and asserted to have changed
+    -- so an exemption cannot silently swallow an unrelated edit, and a
+    frozen handler that is not declared changing still fails here.
     """
 
     base = _base_source("src/us_quant/desktop.py")
@@ -1527,6 +1570,9 @@ def test_the_settings_handler_is_unchanged(name: str) -> None:
     if name in MARKET_DATA_V2_FROZEN_HANDLERS:
         # Declared as changed: assert it really did change, so the
         # declaration cannot mask an untouched (or reverted) method.
+        assert current_body != base_body, name
+        return
+    if name in DESKTOP_MARKET_V2_FROZEN_HANDLERS:
         assert current_body != base_body, name
         return
 
@@ -1575,12 +1621,14 @@ def test_only_the_settings_tab_was_rewritten() -> None:
         | set(STRATEGY_V2_REMOVED_METHODS)
         | set(RISK_V2_REMOVED_METHODS)
         | set(DESKTOP_EXECUTION_V2_REMOVED_METHODS)
+        | set(DESKTOP_MARKET_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
         | set(STRATEGY_V2_ADDED_METHODS)
         | set(RISK_V2_ADDED_METHODS)
         | set(DESKTOP_EXECUTION_V2_ADDED_METHODS)
+        | set(DESKTOP_MARKET_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1603,6 +1651,7 @@ def test_only_the_settings_tab_was_rewritten() -> None:
         | set(EXECUTION_V2_METHODS)
         | set(RUNTIME_V2A_METHODS)
         | set(DESKTOP_EXECUTION_V2_METHODS)
+        | set(DESKTOP_MARKET_V2_METHODS)
     )
     # Exact, not a subset: every changed method must be declared, and
     # every declared method must actually have changed.
@@ -1613,6 +1662,7 @@ def test_only_the_settings_tab_was_rewritten() -> None:
     assert set(EXECUTION_V2_METHODS) <= set(changed)
     assert set(RUNTIME_V2A_METHODS) <= set(changed)
     assert set(DESKTOP_EXECUTION_V2_METHODS) <= set(changed)
+    assert set(DESKTOP_MARKET_V2_METHODS) <= set(changed)
     assert "_settings_tab" in changed
 
 

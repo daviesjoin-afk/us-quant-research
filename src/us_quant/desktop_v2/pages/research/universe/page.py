@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QTableWidget,
-    QTableWidgetItem,
+    QTableWidgetItem as _QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -26,8 +26,19 @@ from us_quant.desktop_v2.pages.research.universe.presenter import (
     filter_universe_rows,
     universe_count_text,
 )
-from us_quant.desktop_widgets import configure_table
+from us_quant.desktop_widgets import _sortable_number, configure_table
 from us_quant.ui_theme import ThemePalette, theme_palette
+
+
+class _NumericTableWidgetItem(_QTableWidgetItem):
+    """Keep display text stable while sorting numeric cells numerically."""
+
+    def __lt__(self, other: _QTableWidgetItem) -> bool:
+        left = _sortable_number(self.text())
+        right = _sortable_number(other.text())
+        if left is not None and right is not None:
+            return left < right
+        return self.text().casefold() < other.text().casefold()
 
 
 UNIVERSE_HEADERS = (
@@ -132,7 +143,7 @@ class UniversePage(QWidget):
                 row.note,
             )
             for column, value in enumerate(values):
-                self.table.setItem(index, column, QTableWidgetItem(value))
+                self.table.setItem(index, column, _NumericTableWidgetItem(value))
         self.table.setSortingEnabled(True)
 
     def set_palette(self, palette: ThemePalette) -> None:

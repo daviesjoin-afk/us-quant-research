@@ -7,6 +7,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from us_quant.desktop_history_service import HistoryQueueSnapshot
@@ -132,3 +133,17 @@ def test_history_page_render_updates_summary_rows_and_progress(page: HistoryPage
 def test_history_page_has_frozen_headers(page: HistoryPage) -> None:
     assert page.table.columnCount() == len(HISTORY_HEADERS)
     assert tuple(page.table.horizontalHeaderItem(i).text() for i in range(7)) == HISTORY_HEADERS
+
+
+def test_history_priority_sorts_numerically(page: HistoryPage) -> None:
+    page.render(
+        HistoryPageView(
+            summary="two rows",
+            rows=history_rows(
+                HistoryQueueSnapshot((_job(2), _job(10)), 2, 0, 0, 0)
+            ),
+            controls=HistoryControlView(progress_percent=0),
+        )
+    )
+    page.table.sortItems(2, Qt.AscendingOrder)
+    assert page.table.item(0, 2).text() == "2"

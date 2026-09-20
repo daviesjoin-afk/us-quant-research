@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -10,14 +10,25 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QTableWidget,
-    QTableWidgetItem,
+    QTableWidgetItem as _QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from us_quant.desktop_v2.pages.research.history.models import HistoryPageView
-from us_quant.desktop_widgets import configure_table
+from us_quant.desktop_widgets import _sortable_number, configure_table
 from us_quant.ui_theme import ThemePalette, theme_palette
+
+
+class _NumericTableWidgetItem(_QTableWidgetItem):
+    """Keep display text stable while sorting numeric cells numerically."""
+
+    def __lt__(self, other: _QTableWidgetItem) -> bool:
+        left = _sortable_number(self.text())
+        right = _sortable_number(other.text())
+        if left is not None and right is not None:
+            return left < right
+        return self.text().casefold() < other.text().casefold()
 
 
 HISTORY_HEADERS = ("代码", "周期", "优先级", "状态", "尝试", "K线数", "说明")
@@ -99,7 +110,7 @@ class HistoryPage(QWidget):
                 row.note,
             )
             for column, value in enumerate(values):
-                self.table.setItem(index, column, QTableWidgetItem(value))
+                self.table.setItem(index, column, _NumericTableWidgetItem(value))
         self.table.setSortingEnabled(True)
 
     def set_palette(self, palette: ThemePalette) -> None:

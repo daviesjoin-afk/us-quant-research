@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from us_quant.desktop_v2.pages.research.universe.models import (
@@ -181,6 +182,19 @@ def test_universe_page_has_frozen_headers_and_no_service_attributes(page: Univer
     assert tuple(page.table.horizontalHeaderItem(i).text() for i in range(9)) == UNIVERSE_HEADERS
     for forbidden in ("universe_service", "universe", "refresh_official_universe"):
         assert not hasattr(page, forbidden)
+
+
+def test_universe_leader_tier_sorts_numerically(page: UniversePage) -> None:
+    page.render(
+        UniversePageView(
+            rows=universe_rows(
+                _snapshot((_record("A", leader_tier=2), _record("B", leader_tier=10)))
+            ),
+            controls=UniverseControlView(True, False, "刷新官方标的", "取消刷新"),
+        )
+    )
+    page.table.sortItems(5, Qt.AscendingOrder)
+    assert page.table.item(0, 5).text() == "2"
 
 
 def test_universe_render_updates_controls(page: UniversePage) -> None:

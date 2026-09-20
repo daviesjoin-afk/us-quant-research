@@ -787,16 +787,16 @@ STALE/FRESH 列。唯一的类价格数字 `Broker Mark` 来自
 
 ```text
 desktop_v2/pages/research/targeted/
-  __init__.py            9 行   只导出 TargetedValidationPage
+  __init__.py           22 行   只导出 TargetedValidationPage
   models.py            175 行   不可变展示模型（Qt-free）
   rows.py              285 行   研究结果 → 表格行 / 显示字符串（Qt-free）
   session_presenter.py 185 行   ShadowSnapshot / preflight / controls → session view
-  evidence_presenter.py 198 行  replay / robustness / review 等 → evidence view
+  evidence_presenter.py 197 行  replay / robustness / review 等 → evidence view
   controls.py          181 行   strategy / target / Shadow / evidence 控件
   tables.py            121 行   稳定 run-id selection、排序、tone 渲染
-  session_panel.py     129 行   5 个卡片 + controls + position / fill 面板
+  session_panel.py     133 行   5 个卡片 + controls + position / fill 面板
   evidence_panel.py    220 行   7 个证据 tab
-  page.py              168 行   render + intent signal 转发
+  page.py              169 行   render + intent signal 转发
 ```
 
 职责边界：

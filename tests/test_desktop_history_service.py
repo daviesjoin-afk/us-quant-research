@@ -58,7 +58,6 @@ REFACTORED_METHODS = (
     "_run_history",
     "_run_public_history",
     "_retry_failed",
-    "_refresh_queue_table",
 )
 
 # Methods a *later* round legitimately rewrote.  Each round appends the
@@ -291,6 +290,35 @@ TARGETED_RESEARCH_V2_METHODS = (
     "_targeted_robustness_finished",
 )
 
+RESEARCH_DATA_V2_REMOVED_METHODS = (
+    "_universe_tab",
+    "_populate_universe_table",
+    "_data_tab",
+    "_refresh_queue_table",
+)
+RESEARCH_DATA_V2_ADDED_METHODS = (
+    "_connect_universe_page",
+    "_publish_universe_view",
+    "_connect_history_page",
+    "_publish_history_view",
+    "_history_task_failed",
+)
+RESEARCH_DATA_V2_METHODS = (
+    "_dashboard_tab",
+    "_load_local_state",
+    "_refresh_universe",
+    "_cancel_universe_refresh",
+    "_reset_universe_refresh_controls",
+    "_universe_refreshed",
+    "_auto_market_scan_finished",
+    "_schedule_history",
+    "_run_history",
+    "_run_public_history",
+    "_retry_failed",
+    "_history_finished",
+    "_task_failed",
+)
+
 DESKTOP_EXECUTION_V2_REMOVED_METHODS = (
     "_auto_quant_tab",
     "_populate_auto_latency_table",
@@ -344,10 +372,7 @@ DESKTOP_EXECUTION_V2_METHODS = (
 )
 
 FROZEN_METHODS = (
-    "_data_tab",
-    "_history_finished",
     "_scan_finished",
-    "_auto_market_scan_finished",
     "_start_task",
     "closeEvent",
 )
@@ -358,7 +383,7 @@ HISTORY_METHODS = (
     "_run_history",
     "_run_public_history",
     "_retry_failed",
-    "_refresh_queue_table",
+    "_publish_history_view",
 )
 
 FORBIDDEN_CALLS = (
@@ -1239,6 +1264,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_EXECUTION_V2_REMOVED_METHODS)
         | set(DESKTOP_MARKET_V2_REMOVED_METHODS)
         | set(TARGETED_RESEARCH_V2_REMOVED_METHODS)
+        | set(RESEARCH_DATA_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1247,6 +1273,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_EXECUTION_V2_ADDED_METHODS)
         | set(DESKTOP_MARKET_V2_ADDED_METHODS)
         | set(TARGETED_RESEARCH_V2_ADDED_METHODS)
+        | set(RESEARCH_DATA_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1275,6 +1302,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_EXECUTION_V2_METHODS)
         | set(DESKTOP_MARKET_V2_METHODS)
         | set(TARGETED_RESEARCH_V2_METHODS)
+        | set(RESEARCH_DATA_V2_METHODS)
     )
     assert set(changed) <= declared
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)
@@ -1285,6 +1313,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(DESKTOP_EXECUTION_V2_METHODS) <= set(changed)
     assert set(DESKTOP_MARKET_V2_METHODS) <= set(changed)
     assert set(TARGETED_RESEARCH_V2_METHODS) <= set(changed)
+    assert set(RESEARCH_DATA_V2_METHODS) <= set(changed)
     for name in REFACTORED_METHODS:
         if name != "__init__":
             assert name in changed, name
@@ -1390,8 +1419,8 @@ def test_schedule_history_hands_the_universe_to_the_service(
         )
         monkeypatch.setattr(
             window,
-            "_refresh_queue_table",
-            lambda: calls.append("refresh_queue"),
+            "_publish_history_view",
+            lambda: calls.append("publish_history"),
         )
         monkeypatch.setattr(
             window,
@@ -1406,7 +1435,7 @@ def test_schedule_history_hands_the_universe_to_the_service(
         window._schedule_history()
 
         assert calls[0] is universe
-        assert calls[1:] == ["refresh_queue", "refresh_scope"]
+        assert calls[1:] == ["publish_history", "refresh_scope"]
         assert len(logs) == 1
         assert "新增 7 个" in logs[0]
         assert "队列合计 1,234 个" in logs[0]
@@ -1455,9 +1484,6 @@ def test_run_history_wraps_the_service_as_a_task(
     seen: dict = {}
     captured: list = []
     try:
-        # Deliberately not the 25 default: a test that asserts the default
-        # cannot tell "read the spin box" from "hard-coded 25".
-        window.batch_size.setValue(37)
 
         def fake_run_ibkr(config, *, maximum_jobs, progress=None):
             seen["config"] = config
@@ -1475,9 +1501,7 @@ def test_run_history_wraps_the_service_as_a_task(
             "_start_task",
             lambda task, **kwargs: captured.append((task, kwargs)) or True,
         )
-        monkeypatch.setattr(window.queue_progress, "setValue", lambda _v: None)
-
-        window._run_history()
+        window._run_history(37)
 
         assert len(captured) == 1
         task, kwargs = captured[0]
@@ -1531,9 +1555,7 @@ def test_run_history_reads_the_live_config_not_the_stream_copy(
             "_start_task",
             lambda task, **kwargs: captured.append((task, kwargs)) or True,
         )
-        monkeypatch.setattr(window.queue_progress, "setValue", lambda _v: None)
-
-        window._run_history()
+        window._run_history(37)
         captured[0][0](lambda _message: None)
 
         assert seen["config"] is fresh_ibkr
@@ -1553,7 +1575,6 @@ def test_run_public_history_wraps_the_service_as_a_task(
     seen: dict = {}
     captured: list = []
     try:
-        window.batch_size.setValue(9)
 
         def fake_run_public(*, maximum_jobs, progress=None):
             seen["maximum_jobs"] = maximum_jobs
@@ -1578,9 +1599,7 @@ def test_run_public_history_wraps_the_service_as_a_task(
             "_start_task",
             lambda task, **kwargs: captured.append((task, kwargs)) or True,
         )
-        monkeypatch.setattr(window.queue_progress, "setValue", lambda _v: None)
-
-        window._run_public_history()
+        window._run_public_history(9)
 
         task, kwargs = captured[0]
         assert kwargs["resource_group"] == "history"
@@ -1615,7 +1634,7 @@ def test_retry_failed_reports_the_service_count(
         )
         refreshed: list = []
         monkeypatch.setattr(
-            window, "_refresh_queue_table", lambda: refreshed.append(1)
+            window, "_publish_history_view", lambda: refreshed.append(1)
         )
         logs: list[str] = []
         monkeypatch.setattr(window, "_log", logs.append)
@@ -1669,10 +1688,10 @@ def test_refresh_queue_table_caps_the_table_not_the_snapshot(
             ),
         )
 
-        window._refresh_queue_table()
+        window._publish_history_view()
 
-        assert window.queue_table.rowCount() == 2500
-        summary = window.history_queue_summary.text()
+        assert window.history_page.table.rowCount() == 2500
+        summary = window.history_page.summary_label.text()
         assert "历史队列 2,600" in summary
         assert "待处理 2,600" in summary
         assert "完成 7" in summary
@@ -1700,10 +1719,10 @@ def test_refresh_queue_table_hides_the_hint_at_exactly_the_cap(
             lambda: HistoryQueueSnapshot(jobs, 2500, 0, 0, 0),
         )
 
-        window._refresh_queue_table()
+        window._publish_history_view()
 
-        assert window.queue_table.rowCount() == 2500
-        summary = window.history_queue_summary.text()
+        assert window.history_page.table.rowCount() == 2500
+        summary = window.history_page.summary_label.text()
         assert "历史队列 2,500" in summary
         assert "表格仅显示前 2,500 条" not in summary
     finally:
@@ -1727,11 +1746,11 @@ def test_refresh_queue_table_snapshots_once(monkeypatch, tmp_path) -> None:
             window.history_service, "snapshot", counting_snapshot
         )
 
-        window._refresh_queue_table()
+        window._publish_history_view()
 
         assert len(calls) == 1
-        assert window.queue_table.rowCount() == 3
-        assert "历史队列 3" in window.history_queue_summary.text()
+        assert window.history_page.table.rowCount() == 3
+        assert "历史队列 3" in window.history_page.summary_label.text()
     finally:
         window.deleteLater()
 
@@ -1766,13 +1785,13 @@ def test_refresh_queue_table_translates_statuses(
             lambda: HistoryQueueSnapshot(jobs, 1, 1, 1, 1),
         )
 
-        window._refresh_queue_table()
+        window._publish_history_view()
 
         rendered = {
-            window.queue_table.item(row, 0).text(): window.queue_table.item(
+            window.history_page.table.item(row, 0).text(): window.history_page.table.item(
                 row, 3
             ).text()
-            for row in range(window.queue_table.rowCount())
+            for row in range(window.history_page.table.rowCount())
         }
         assert rendered == {
             "S0": "待处理",

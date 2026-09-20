@@ -57,6 +57,12 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 > 页面位于 `desktop_v2/pages/research/targeted/`，presenter 是 Qt-free 纯投影；
 > Research aggregate 仍是 transitional，其他五个二级页保持 legacy。一级 native
 > 计数仍为 **5 / 8**，v2R-F aggregate 完成后才会变成 6 / 8。见 §8.4。
+>
+> **进度更新（Desktop Research v2B）**：Research 的“广域标的池”和“历史数据”二级页
+> 已分别迁成原生 `UniversePage`、`HistoryPage`，旧 `_universe_tab()` / `_data_tab()`
+> 已删除。Universe 刷新/取消控件已从 Dashboard 搬回 UniversePage；History 队列下载、
+> 进度和失败状态仍由 MainWindow 编排。Research aggregate 仍是 transitional，一级 native
+> 计数仍为 **5 / 8**。见 §8.5。
 
 ## 迁移状态一览
 
@@ -74,6 +80,8 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Desktop ExecutionPage | MIGRATED |
 | Desktop MarketPage | MIGRATED |
 | Desktop TargetedValidationPage | MIGRATED |
+| Desktop UniversePage | MIGRATED |
+| Desktop HistoryPage | MIGRATED |
 | Desktop Dashboard | TRANSITIONAL |
 | Desktop Research aggregate | TRANSITIONAL |
 | Desktop System | TRANSITIONAL |
@@ -573,11 +581,11 @@ account    → desktop_v2/pages/account.py            ✅ native v2
 strategy   → desktop_v2/pages/strategy.py           ✅ native v2
 risk       → desktop_v2/pages/risk.py               ✅ native v2
 execution  → desktop_v2/pages/execution/            ✅ native v2
-research   → QTabWidget（TargetedValidationPage / 广域标的池 / 历史数据 / 市场扫描 / 回测 / 横截面研究）
+research   → QTabWidget（TargetedValidationPage / UniversePage / HistoryPage / 市场扫描 / 回测 / 横截面研究）
 system     → QTabWidget（运行事件 / 系统设置）
 ```
 
-前端进度：**5 / 8 native v2**。Research 的第一个二级页已 native v2，
+前端进度：**5 / 8 native v2**。Research 的前三个二级页已 native v2，
 但一级 Research aggregate 仍算 transitional；剩余 Dashboard、Research、System
 仍是 transitional，`Market` 已于 Desktop Market v2 迁完。
 
@@ -835,6 +843,65 @@ page does not construct Shadow engine or run_targeted_*
 MainWindow reaches the page only through its public API
 per-file line budgets
 no new order capability
+```
+
+### 8.5 universe / history 页已完成（Desktop Research v2B）
+
+`MainWindow._universe_tab()` 与 `MainWindow._data_tab()` 已删除，没有 compatibility
+shim。新的 native page 位于：
+
+```text
+desktop_v2/pages/research/universe/
+  __init__.py      7 行   只导出 UniversePage
+  models.py       51 行   不可变展示模型
+  presenter.py   128 行   UniverseSnapshot → immutable rows / controls（Qt-free）
+  page.py        142 行   search / filter / table / refresh intent
+
+desktop_v2/pages/research/history/
+  __init__.py      7 行   只导出 HistoryPage
+  models.py       35 行   不可变展示模型
+  presenter.py    70 行   HistoryQueueSnapshot → immutable rows / summary（Qt-free）
+  page.py        109 行   four actions / batch input / progress / queue table
+```
+
+职责边界：
+
+```text
+MainWindow                 UniverseSnapshot / service / TaskThread / cancellation
+                           HistoryService / task orchestration / progress fact
+presenters / models        facts → immutable presentation view（Qt-free）
+UniversePage               local search / filter / table + refresh/cancel intent
+HistoryPage                batch draft / buttons / progress / table
+```
+
+- **Dashboard 只删除了 Universe refresh/cancel 两个控件。** scan、Gateway、cards、
+  chart、artifact table 与 notes 继续留到后续 Dashboard v2。
+- **Universe 刷新流程冻结。** `_refresh_universe()` 继续拥有 cancellation event、
+  TaskThread 和 `DesktopUniverseService.refresh()`；页面只发出
+  `refresh_requested` / `cancel_refresh_requested`。
+- **Universe 搜索与过滤仍是纯展示。** 页面本地使用稳定 filter key
+  (`research` / `trading` / `all` / `excluded`)；`eligible_for_research`、
+  `eligible_for_trading`、国家证据与排除文案的语义保持不变，表格上限为 2,500。
+- **History 服务语义冻结。** `schedule_universe(limit=None)`、IBKR 不自动 reset failed、
+  public 路径先 reset failed、显式 retry reset failed 均未改变。
+- **History 进度状态移出 widget。** `MainWindow._history_progress_percent` 是业务
+  进度事实；`_history_finished()` / `_history_task_failed()` 统一发布
+  `_publish_history_view()`。generic `_task_failed()` 不再直接访问 History widget。
+- **表格列与排序冻结。** Universe 9 列、History 7 列、`configure_table(...)` 的
+  read-only / row selection / sorting 行为保持；2500 行只截断 UI，不截断任务队列。
+- **研究内容没有改变。** Universe service、History service、queue store、IBKR/public
+  history 执行器、Scanner、Backtest、Cross Section 与 Targeted v2A 均未被重写。
+
+新增守卫位于 `tests/test_desktop_v2_research_data_architecture.py`，覆盖：
+
+```text
+_universe_tab / _data_tab retired
+MainWindow owns no Universe/History widgets
+Dashboard owns no Universe refresh/cancel action
+page packages import no executors
+presenters are Qt-free
+MainWindow uses only render/set_palette
+per-file line budgets
 ```
 
 ## 9. 已删除的旧架构
@@ -1458,7 +1525,8 @@ Desktop Market v2 已完成（§8.3）：
 ```text
 Desktop Market v2        ✅（§8.3）
 Desktop Research v2A     ✅（§8.4）
-Desktop Research v2B-F
+Desktop Research v2B     ✅（§8.5）
+Desktop Research v2C-F
 Desktop System v2
 Desktop Dashboard v2
 ```
@@ -1628,10 +1696,11 @@ Shadow v2     shadow_paper.py 拆成 shadow package 并删除（§10.7）
 
 **Desktop Market v2 已完成**（§8.3），market route 变成原生 v2 page。
 **Desktop Research v2A 已完成**（§8.4），Research 的“针对性验证”二级页已 native
+v2。**Desktop Research v2B 已完成**（§8.5），Universe/History 两个二级页也已 native
 v2；Research aggregate 仍 transitional。阶段 2 剩余：
 
 ```text
-Desktop Research v2B-F   （必须继续拆多个 PR，禁止一次搬成一个巨大 ResearchPage）
+Desktop Research v2C-F   （必须继续拆多个 PR，禁止一次搬成一个巨大 ResearchPage）
 Desktop System v2
 Desktop Dashboard v2
 ```

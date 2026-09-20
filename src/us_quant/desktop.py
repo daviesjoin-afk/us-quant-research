@@ -219,8 +219,12 @@ from us_quant.desktop_v2.pages.execution.presenter import (
 )
 from us_quant.desktop_v2.pages.market import MarketPage
 from us_quant.desktop_v2.pages.market.controls import VALID_MARKET_SOURCES
-from us_quant.desktop_v2.pages.market.models import MarketReadinessFacts
+from us_quant.desktop_v2.pages.market.models import (
+    MarketConnectingFacts,
+    MarketReadinessFacts,
+)
 from us_quant.desktop_v2.pages.market.presenter import (
+    build_connecting_view,
     build_market_view,
     control_view,
 )
@@ -5807,25 +5811,17 @@ class MainWindow(QMainWindow):
         worker.failed.connect(self._stream_failed)
         worker.finished.connect(self._stream_finished)
         self._set_connection_settings_enabled(False)
-        self._publish_market_controls()
         # The cards are drawn from the page's own render, so the "connecting"
         # state is published as a view rather than by writing widgets here.
         self.market_page.render(
-            build_market_view(
-                snapshot=None,
-                readiness=None,
+            build_connecting_view(
+                facts=MarketConnectingFacts(
+                    source_id=provider,
+                    symbol_count=len(symbols),
+                ),
                 scope=self._market_scope,
-                rows=(),
                 controls=self._market_controls(),
                 watchlist_note="Level I 持续订阅",
-            )
-        )
-        self.market_page.render_health(
-            "连接中："
-            + (
-                "等待 nextValidId 协议握手"
-                if provider in {"ibkr", "ibkr_extended"}
-                else "等待 WebSocket 认证/首个事件"
             )
         )
         worker.start()
@@ -5833,6 +5829,7 @@ class MainWindow(QMainWindow):
         # Published *after* the thread starts: the route's stop-stream control
         # reads "is a worker running", so publishing before ``start()`` would
         # leave it disabled for every direct start from the market page.
+        self._publish_market_controls()
         self._publish_execution_controls()
         self._record_runtime_event(
             severity="info",

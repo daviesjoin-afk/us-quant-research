@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import Sequence
 
 from us_quant.desktop_v2.pages.market.models import (
+    MarketConnectingFacts,
     MarketControlView,
     MarketMetricView,
     MarketPageView,
@@ -127,6 +128,14 @@ def health_text(snapshot: object | None) -> str:
     )
 
 
+def connecting_health_text(source_id: str) -> str:
+    """The health panel's body after the worker starts and before a snapshot."""
+
+    if source_id in {"ibkr", "ibkr_extended"}:
+        return "连接中：等待 nextValidId 协议握手"
+    return "连接中：等待 WebSocket 认证/首个事件"
+
+
 def failure_text(message: str) -> str:
     """The health panel's body after the feed failed."""
 
@@ -206,6 +215,39 @@ def build_market_view(
     )
 
 
+def build_connecting_view(
+    *,
+    facts: MarketConnectingFacts,
+    scope: str,
+    controls: MarketControlView,
+    watchlist_note: str | None = None,
+) -> MarketPageView:
+    """Project the worker-started, first-snapshot-pending state.
+
+    ``snapshot=None`` means "nothing has ever started" on the idle path.  Once
+    ``worker.start()`` has returned, that is no longer true: the route is
+    connecting, so it must not keep claiming it is idle.
+    """
+
+    return MarketPageView(
+        connection=MarketMetricView(
+            "连接中",
+            f"{facts.source_id} · 等待认证 / handshake",
+        ),
+        feed=feed_metric(None),
+        readiness=readiness_metric(None),
+        watchlist=watchlist_metric(
+            symbol_count=facts.symbol_count,
+            note=watchlist_note,
+        ),
+        scope=scope,
+        empty_message=CONNECTING_EMPTY,
+        rows=(),
+        health_text=connecting_health_text(facts.source_id),
+        controls=controls,
+    )
+
+
 #: The health panel before any snapshot exists, migrated verbatim.
 IDLE_HEALTH = (
     "• 行情类型只相信 IBKR marketDataType 回调\n"
@@ -221,15 +263,19 @@ IDLE_EMPTY = (
     "尚未启动行情。选择数据源并在设置页保存凭据后启动；"
     "表格会明确区分 READY、STALE、延迟和模拟执行带。"
 )
+CONNECTING_EMPTY = "连接中：正在等待首个行情事件。"
 WAITING_EMPTY = "已连接，等待首个 fresh bid/ask。"
 
 
 __all__ = [
+    "CONNECTING_EMPTY",
     "IDLE_EMPTY",
     "IDLE_HEALTH",
     "WAITING_EMPTY",
+    "build_connecting_view",
     "build_market_view",
     "connection_metric",
+    "connecting_health_text",
     "control_view",
     "failure_text",
     "feed_metric",

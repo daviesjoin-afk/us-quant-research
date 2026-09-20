@@ -20,6 +20,7 @@ import pytest
 
 from us_quant.desktop_v2.pages.market import presenter
 from us_quant.desktop_v2.pages.market.models import (
+    MarketConnectingFacts,
     MarketReadinessFacts,
     MarketRowTone,
 )
@@ -475,6 +476,34 @@ def test_the_idle_view_shows_the_way_in_rather_than_an_empty_grid() -> None:
     assert view.empty_message == presenter.IDLE_EMPTY
     assert view.rows == ()
     assert view.scope == "范围分层 · 0"
+
+
+def test_the_connecting_view_does_not_reuse_the_idle_state() -> None:
+    """A started worker with no snapshot yet is connecting, not idle."""
+
+    view = presenter.build_connecting_view(
+        facts=MarketConnectingFacts(source_id="ibkr", symbol_count=3),
+        scope="范围分层 · 3",
+        controls=presenter.control_view(
+            worker_running=True,
+            stop_pending=False,
+            symbols_enabled=False,
+            provider_enabled=True,
+        ),
+        watchlist_note="Level I 持续订阅",
+    )
+
+    assert view.connection.value == "连接中"
+    assert "ibkr" in view.connection.note
+    assert view.watchlist.value == "3"
+    assert view.watchlist.note == "Level I 持续订阅"
+    assert view.empty_message == presenter.CONNECTING_EMPTY
+    assert "等待 nextValidId" in view.health_text
+    assert view.controls.stop_enabled
+
+
+def test_connecting_health_text_names_the_websocket_handshake() -> None:
+    assert "WebSocket" in presenter.connecting_health_text("alpaca_iex")
 
 
 def test_a_connected_view_with_no_quotes_waits_rather_than_repeating_idle() -> None:

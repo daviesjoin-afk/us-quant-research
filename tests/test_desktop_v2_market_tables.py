@@ -25,10 +25,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QAbstractItemView, QApplication
 
 from us_quant.desktop_v2.pages.market.rows import quote_rows
-from us_quant.desktop_v2.pages.market.tables import QuoteTableModel
+from us_quant.desktop_v2.pages.market.tables import (
+    QuoteTable,
+    QuoteTableModel,
+)
 from us_quant.trading.domain.market import (
     MarketDataMode,
     MarketQuote,
@@ -84,6 +87,20 @@ def _snapshot(quotes):
 
 def _rows(*quotes):
     return quote_rows(_snapshot(list(quotes)))
+
+
+def test_quote_table_restores_the_legacy_interaction_configuration() -> None:
+    """The migration must not change row selection, editing or scrolling."""
+
+    table = QuoteTable(QuoteTableModel())
+    try:
+        assert table.selectionBehavior() == QAbstractItemView.SelectRows
+        assert table.selectionMode() == QAbstractItemView.SingleSelection
+        assert table.editTriggers() == QAbstractItemView.NoEditTriggers
+        assert table.horizontalScrollMode() == QAbstractItemView.ScrollPerPixel
+        assert table.verticalScrollMode() == QAbstractItemView.ScrollPerPixel
+    finally:
+        table.deleteLater()
 
 
 def test_quote_table_headers_are_exactly_the_fourteen_columns() -> None:

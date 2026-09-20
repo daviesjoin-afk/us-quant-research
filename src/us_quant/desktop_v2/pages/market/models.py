@@ -118,6 +118,14 @@ class MarketReadinessFacts:
 
 
 @dataclass(frozen=True, slots=True)
+class MarketConnectingFacts:
+    """Facts for the worker-started, first-snapshot-pending state."""
+
+    source_id: str
+    symbol_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class MarketPageView:
     """Everything one render of the market page draws."""
 
@@ -133,6 +141,7 @@ class MarketPageView:
 
 
 __all__ = [
+    "MarketConnectingFacts",
     "MarketControlView",
     "MarketMetricView",
     "MarketPageView",

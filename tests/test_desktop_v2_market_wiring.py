@@ -29,6 +29,7 @@ from datetime import date, datetime, timezone
 from PySide6.QtWidgets import QApplication
 
 from us_quant.desktop import MainWindow
+from us_quant.desktop_v2.pages.market import presenter
 from us_quant.scanner import MarketScan, ScanResult
 
 
@@ -347,6 +348,82 @@ def test_the_execution_stop_stream_control_follows_the_started_worker(
         # Every publish happened while a worker was running.
         assert all(observed), observed
         assert window._stream_is_live()
+    finally:
+        window.stream_worker = None
+        window.stream_timer.stop()
+        window.close()
+        window.deleteLater()
+
+
+def test_the_market_stop_control_follows_the_started_worker(
+    monkeypatch,
+) -> None:
+    """The market controls must be published after the worker is live."""
+
+    window = _window()
+    try:
+        worker = _FakeWorker(running=False)
+        monkeypatch.setattr(
+            "us_quant.desktop.StreamWorker", lambda *a, **k: worker
+        )
+        monkeypatch.setattr(
+            window.credential_service,
+            "resolve_stream_credentials",
+            lambda **kwargs: _credentials(),
+        )
+
+        observed: list[bool] = []
+        real_publish = window._publish_market_controls
+
+        def record() -> None:
+            observed.append(window._stream_is_live())
+            real_publish()
+
+        monkeypatch.setattr(window, "_publish_market_controls", record)
+
+        window.market_page.set_selected_provider("ibkr")
+        window.market_page.set_subscription_symbols(("SPY",))
+        window._start_stream()
+
+        assert worker.started, "the worker was never started"
+        assert observed, "the market controls were never published"
+        assert all(observed), observed
+        assert window.market_page.controls.stop_button.isEnabled()
+    finally:
+        window.stream_worker = None
+        window.stream_timer.stop()
+        window.close()
+        window.deleteLater()
+
+
+def test_the_market_start_publishes_the_connecting_state(
+    monkeypatch,
+) -> None:
+    """A started worker with no snapshot yet must not render as idle."""
+
+    window = _window()
+    try:
+        worker = _FakeWorker(running=False)
+        monkeypatch.setattr(
+            "us_quant.desktop.StreamWorker", lambda *a, **k: worker
+        )
+        monkeypatch.setattr(
+            window.credential_service,
+            "resolve_stream_credentials",
+            lambda **kwargs: _credentials(),
+        )
+
+        window.market_page.set_selected_provider("ibkr")
+        window.market_page.set_subscription_symbols(("SPY", "QQQ"))
+        window._start_stream()
+
+        assert worker.started
+        assert window.market_page.connection_card.value_label.text() == "连接中"
+        assert (
+            window.market_page.empty_label.text()
+            == presenter.CONNECTING_EMPTY
+        )
+        assert window.market_page.watchlist_card.value_label.text() == "2"
     finally:
         window.stream_worker = None
         window.stream_timer.stop()

@@ -26,6 +26,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QHeaderView,
     QTableView,
 )
@@ -224,6 +225,11 @@ class QuoteTable(QTableView):
         self.setModel(model)
         self.setAlternatingRowColors(True)
         self.setSortingEnabled(True)
+        self.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.verticalHeader().setVisible(False)
         header = self.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)

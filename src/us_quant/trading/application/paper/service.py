@@ -23,7 +23,6 @@ from us_quant.trading.application.paper.models import (
     PaperTradingLifecycleError,
     PaperTradingSnapshot,
 )
-from us_quant.trading.composition.execution import build_execution_candidate
 from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
 
@@ -43,7 +42,7 @@ class PaperTradingService:
         self,
         *,
         workflow_getter: WorkflowGetter,
-        order_service_factory: PaperOrderServiceFactory = build_execution_candidate,
+        order_service_factory: PaperOrderServiceFactory,
     ) -> None:
         self._workflow_getter = workflow_getter
         self._order_service_factory = order_service_factory

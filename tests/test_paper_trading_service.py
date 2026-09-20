@@ -20,7 +20,6 @@ from pathlib import Path
 import pytest
 
 from us_quant.trading.application.paper import service as module
-from us_quant.trading.composition.execution import build_execution_candidate
 from us_quant.trading.application.paper import (
     PaperReconciliationStatus,
     PaperTradingLifecycleError,
@@ -777,17 +776,13 @@ def test_probe_does_not_disturb_an_active_session() -> None:
 # -- construction --------------------------------------------------------
 
 
-def test_the_default_factory_is_the_execution_composition_root() -> None:
-    """Production must build the real stack; tests inject their own.
-
-    The default is the execution composition root rather than the concrete
-    adapter, so this module never names the IBKR channel or the SQLite store.
-    """
+def test_the_order_service_factory_is_required() -> None:
+    """The application boundary receives construction from its composition root."""
 
     signature = inspect.signature(PaperTradingService.__init__)
-    default = signature.parameters["order_service_factory"].default
+    parameter = signature.parameters["order_service_factory"]
 
-    assert default is build_execution_candidate
+    assert parameter.default is inspect.Parameter.empty
 
 
 # -- structural boundary -------------------------------------------------

@@ -188,6 +188,7 @@ from us_quant.auto_launch import (
 from us_quant.trading.application.risk import RiskApplication
 from us_quant.trading.composition.execution import (
     build_execution_application,
+    build_execution_candidate,
     build_order_repository,
 )
 from us_quant.trading.composition.risk import build_risk_application
@@ -512,6 +513,7 @@ class MainWindow(QMainWindow):
         # owned *by* this service, never by the window.
         self.paper_trading = PaperTradingService(
             workflow_getter=lambda: self.paper_workflow,
+            order_service_factory=build_execution_candidate,
         )
         self.auto_quant_candidates: tuple[
             AutoQuantCandidate, ...

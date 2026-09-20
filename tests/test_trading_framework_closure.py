@@ -157,6 +157,7 @@ FRAMEWORK_FORBIDDEN_IMPORTS = (
     "us_quant.desktop",
     "us_quant.desktop_v2",
     "us_quant.trading.adapters",
+    "us_quant.trading.composition",
 )
 
 #: Guard G: what the desktop workflow aggregate may not build.  It composes

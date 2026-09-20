@@ -4,6 +4,10 @@ Nothing here touches IBKR: the order service is a local fake built by a fake
 factory, so the ownership contract -- candidate registration, promotion,
 stale-candidate disposal, and the fail-closed clearing rules -- is pinned
 without a broker, a Qt event loop, or a real order service.
+
+The service moved into the ``trading.application.paper`` package in Trading
+Framework Closure v2C, so the structural assertions below read the *service
+module* rather than a root module of the same name.
 """
 
 from __future__ import annotations
@@ -15,9 +19,9 @@ from pathlib import Path
 
 import pytest
 
-from us_quant import paper_trading_service as module
+from us_quant.trading.application.paper import service as module
 from us_quant.trading.composition.execution import build_execution_candidate
-from us_quant.paper_trading_service import (
+from us_quant.trading.application.paper import (
     PaperReconciliationStatus,
     PaperTradingLifecycleError,
     PaperTradingService,
@@ -915,7 +919,7 @@ def test_the_wrapped_implementation_is_still_far_larger_than_this_boundary() -> 
     no real reason.
     """
 
-    package = Path(module.__file__ or "").parent
+    package = Path(module.__file__ or "").parent.parent.parent.parent
     trading = package / "trading"
     implementation = sum(
         path.stat().st_size
@@ -934,5 +938,6 @@ def test_the_wrapped_implementation_is_still_far_larger_than_this_boundary() -> 
 def test_service_is_reachable_from_the_package_layout() -> None:
     path = Path(module.__file__ or "")
 
-    assert path.name == "paper_trading_service.py"
-    assert path.parent.name == "us_quant"
+    assert path.name == "service.py"
+    assert path.parent.name == "paper"
+    assert path.parent.parent.name == "application"

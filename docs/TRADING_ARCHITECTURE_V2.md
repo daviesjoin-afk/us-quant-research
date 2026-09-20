@@ -7,6 +7,10 @@
 Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只记录它们的
 归宿，不声称已完成。
 
+> **进度更新（Trading Framework Closure v2C）**：正式 Trading Runtime 已完全
+> 脱离内部 Shadow 模拟器，正式 session config 与 Shadow overlay 分离，
+> 五个过渡 root module 已删除。见 §10.6 与 §14。
+>
 > **进度更新（Desktop Execution v2）**：execution route 已成为原生 v2 page。
 > `MainWindow._auto_quant_tab` 已删除，页面位于
 > `desktop_v2/pages/execution/`（models / rows / presenter / tables /
@@ -68,6 +72,17 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Trading Runtime Core | MIGRATED |
 | Paper Session Coordination | MIGRATED |
 | Paper Workflow / Lease | MIGRATED |
+| Trading Runtime Config | MIGRATED |
+| Paper Execution Health | MIGRATED |
+| Paper Trading Service | MIGRATED |
+| Desktop Workflow Aggregate | MIGRATED |
+
+Shadow 子系统：
+
+| 组件 | 状态 |
+| --- | --- |
+| Shadow Simulation Config | MIGRATED（`shadow/config.py`） |
+| Shadow Engine / Store / Models | TRANSITIONAL（`shadow_paper.py`，下一阶段拆分） |
 
 真实链路现在是：
 
@@ -1107,7 +1122,111 @@ workflow_controller broader cleanup
 execution service 的拥有与生命周期，不负责 workflow phase、人工对账决策、
 finalization proof 或 TradingRuntime 信号逻辑。
 
-### 10.6 已关闭的风险接线缺陷（Risk v2 修复）
+### 10.6 Trading Framework Closure v2C 已完成
+
+上表 §10.5 列出的五项**全部在本轮完成**，另外把正式 runtime 与 Shadow 模拟器
+之间的反向依赖一并解决。
+
+#### 10.6.1 解决的核心架构问题
+
+迁移前：
+
+```text
+TradingRuntime
+StrategyRuntime
+composition/runtime.py
+        ↓
+import us_quant.shadow_paper.ShadowConfig
+```
+
+正式 Trading Runtime 依赖内部 Shadow 模拟器，依赖方向是倒的；而且这个
+config 类型同时携带 `layered_risk_limits` 与 `symbol_risk_multipliers`，
+即"策略携带账户风险"。迁移后：
+
+```text
+trading/runtime/config.py            TradingSessionConfig（正式 session 参数）
+          ↑
+StrategyRuntime / TradingRuntime / composition/runtime.py
+
+TradingSessionConfig
+        ↑
+shadow/config.py                     ShadowSimulationConfig（+ overlay）
+
+TradingRuntime → RiskApplication → ExecutionApplication
+```
+
+Guard A 钉住"trading core 不得 import shadow / shadow_paper"，Guard B 钉住
+"`TradingSessionConfig` 不得出现 risk overlay 字段"，Guard C 钉住继承方向只允许
+`ShadowSimulationConfig → TradingSessionConfig`。
+
+#### 10.6.2 最终目录
+
+```text
+src/us_quant/trading/
+    application/
+        paper/
+            __init__.py        (<= 50)
+            contracts.py       (<= 180)  Paper*Port 协议
+            models.py          (<= 140)  snapshot / status / lifecycle error
+            service.py         (<= 380)  PaperTradingService
+    composition/
+        runtime.py
+        session_config.py      (<= 180)  build_auto_rotation_config
+                                        resolve_paper_session_capital
+    runtime/
+        config.py              (<= 180)  TradingSessionConfig
+        health.py              (<= 240)  PaperExecutionHealth / evaluator
+
+src/us_quant/shadow/
+    __init__.py                (<= 40)
+    config.py                  (<= 180)  ShadowSimulationConfig
+                                        build_targeted_shadow_config
+
+src/us_quant/desktop_v2/
+    workflows.py               (<= 220)  WorkflowController 聚合
+```
+
+`build_auto_rotation_config` 现在返回 `TradingSessionConfig`；
+`build_targeted_shadow_config` 返回 `ShadowSimulationConfig`。字段语义与默认值
+逐字保持，只有类型和归属变了。
+
+#### 10.6.3 删除的过渡模块
+
+```text
+src/us_quant/auto_intraday.py            → trading/composition/session_config.py
+src/us_quant/targeted_intraday.py        → shadow/config.py
+src/us_quant/paper_execution_health.py   → trading/runtime/health.py
+src/us_quant/paper_trading_service.py    → trading/application/paper/
+src/us_quant/workflow_controller.py      → desktop_v2/workflows.py
+```
+
+全部**删除**，没有 compatibility re-export；`ShadowConfig` 这个名字在
+production 中不再存在（Guard D 与
+`test_no_module_defines_a_shadow_config_compatibility_alias` 钉住）。
+
+`desktop_v2/workflows.py` 仍然创建**同一个** shared `ExecutionLeaseManager` 并
+把它交给 shadow 与 paper 两个 controller，"两个 workflow 不可能同时持有执行权"
+仍是结构性的（Guard G 钉住它不得创建 broker adapter / RiskApplication /
+ExecutionApplication）。
+
+#### 10.6.4 仍然冻结
+
+```text
+shadow_paper.py（Shadow engine + store + models）  TRANSITIONAL
+```
+
+它没有被拆分、没有被重构，只把 `ShadowConfig` 换成从 `shadow/config.py`
+导入的 `ShadowSimulationConfig`。下一阶段才做
+`shadow/models.py` / `shadow/store.py` / `shadow/engine.py`，然后彻底删除
+`shadow_paper.py`。
+
+本轮同样冻结：正式交易算法（signals / ranking / risk sizing / OrderIntent /
+fill reconciliation）、Paper 安全语义（fills-before-events、BUY exact cancel、
+SELL HALT、reconciliation evidence、two-stage finalization、PAPER lease、
+HALTED 显式恢复路径）以及 `desktop_v2/pages/execution/`。后者只允许 import
+path 调整，不继续装修。
+
+### 10.7 已关闭的风险接线缺陷（Risk v2 修复）
 
 旧 Desktop 把风险限额放进了错误的地方：
 
@@ -1187,6 +1306,13 @@ AutoQuant layered_risk_limits 构造参数  ✅ 已删除（Risk v2）
 旧 workflow_state.py（root）           ✅ 已删除（Runtime v2B）
 MainWindow._auto_quant_tab             ✅ 已删除（Desktop Execution v2）
 旧 execution widget 直写               ✅ 已删除（Desktop Execution v2）
+旧 auto_intraday.py                    ✅ 已删除（Trading Framework Closure v2C）
+旧 targeted_intraday.py                ✅ 已删除（Trading Framework Closure v2C）
+旧 paper_execution_health.py           ✅ 已删除（Trading Framework Closure v2C）
+旧 paper_trading_service.py            ✅ 已删除（Trading Framework Closure v2C）
+旧 workflow_controller.py              ✅ 已删除（Trading Framework Closure v2C）
+ShadowConfig（含 compatibility alias）  ✅ 已删除（Trading Framework Closure v2C）
+shadow_paper.py                        ⏭ 下一阶段拆分后删除
 旧 MainWindow stream lifecycle         ⏭ 后续
 旧 Paper-specific orchestration glue   ⏭ 后续
 旧 workflow duplicate state            ⏭ 后续
@@ -1210,6 +1336,10 @@ workflow_state.py
 （`HALTED → RECONCILING → RECONCILING_READY → 显式确认 → RUNNING`）与
 `ExecutionLease` 互斥规则全部保持原样。`resubmit_pending_intent` 也冻结：
 它是人工对账后的原订单重挂，不是新的策略信号，因此**不**重新走一遍策略风控。
+
+> 注意：该清单是 Risk v2 轮次的历史记录。清单中的
+> `paper_trading_service.py` 已在 Trading Framework Closure v2C 迁入
+> `trading/application/paper/`；其余模块的归宿见 §10.6 与 §11。
 
 `ibkr_paper_orders.py` 本轮唯一的变化仍然只是 `mask_account_id` /
 `INFORMATIONAL_ERROR_CODES` 的 import 来源（Broker / Account v2 的遗留），
@@ -1246,22 +1376,31 @@ HALTED
 `desktop_v2/pages/execution/`，presenter 是 Qt-free 纯投影，窗口只保留
 `self.execution_page` 并继续拥有取数与编排（见 §8.2）。
 
-三个已完成轮次的顺序：
+四个已完成轮次的顺序：
 
 ```text
 Runtime v2A   AutoQuantEngine 拆成 StrategyRuntime / TradingRuntime（§10.3）
 Runtime v2B   paper_session / paper_workflow / workflow_state 模块化（§10.4）
 Desktop Exec  execution route 变成原生 v2 page（§8.2）
+Framework v2C runtime 脱离 shadow_paper，五个 root module 归位并删除（§10.6）
 ```
 
 下一轮（本轮不做）：
 
 ```text
-ShadowConfig naming / config separation
-PaperExecutionHealth location cleanup
-PaperTradingService location cleanup
-workflow_controller broader cleanup
+Shadow subsystem decomposition
+    shadow/models.py
+    shadow/store.py
+    shadow/engine.py
+拆分完成后彻底删除 shadow_paper.py
 ```
+
+Framework v2C 刻意没有做的事，留给更后面：
+
+- 没有拆分或重构 `shadow_paper.py`（Shadow engine / store / models 仍是
+  TRANSITIONAL，只换了 config 的 import）；
+- 没有继续装修 `desktop_v2/pages/execution/`（只允许 import path 调整）；
+- 没有改任何正式交易算法与 Paper 安全语义。
 
 Runtime v2A / v2B / Desktop Execution v2 刻意没有做的事，留给更后面：
 

@@ -42,8 +42,8 @@ from us_quant.trading.runtime.models import (
     StrategyPositionView,
     StrategySessionPolicy,
 )
+from us_quant.trading.runtime.config import TradingSessionConfig
 from us_quant.trading.runtime.signals import SignalScanner
-from us_quant.shadow_paper import ShadowConfig
 
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -78,7 +78,7 @@ class StrategyRuntime:
         self,
         *,
         candidates: tuple[AutoQuantCandidate, ...],
-        config: ShadowConfig,
+        config: TradingSessionConfig,
         strategy: StrategyIdentity,
         market_reference_symbols: tuple[str, ...] = (),
     ) -> None:

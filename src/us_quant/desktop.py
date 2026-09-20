@@ -175,8 +175,8 @@ from us_quant.shadow_paper import (
     ShadowPaperStore,
     ShadowSnapshot,
 )
-from us_quant.targeted_intraday import build_targeted_shadow_config
-from us_quant.auto_intraday import (
+from us_quant.shadow.config import build_targeted_shadow_config
+from us_quant.trading.composition.session_config import (
     build_auto_rotation_config,
     resolve_paper_session_capital,
 )
@@ -204,13 +204,13 @@ from us_quant.trading.runtime.trading import TradingRuntime
 from us_quant.runtime_supervisor import RuntimeSnapshot, RuntimeSupervisor
 from us_quant.paper_order_models import PaperOrderReconciliation
 from us_quant.trading.ports.broker_execution import ExecutionRefused
-from us_quant.paper_execution_health import (
+from us_quant.trading.runtime.health import (
     PaperExecutionHealth,
     PaperExecutionIssue,
     evaluate_paper_execution_health,
 )
 from us_quant.trading.runtime.paper_models import PaperSessionResult
-from us_quant.paper_trading_service import PaperTradingService
+from us_quant.trading.application.paper import PaperTradingService
 from us_quant.trading.runtime.workflow_state import (
     PaperWorkflowPhase,
     WorkflowStateError,
@@ -237,7 +237,7 @@ from us_quant.desktop_widgets import (
     configure_combo_width,
     configure_table,
 )
-from us_quant.workflow_controller import WorkflowController
+from us_quant.desktop_v2.workflows import WorkflowController
 from us_quant.minute_data import MinuteQuoteStore
 from us_quant.targeted_preflight import (
     TargetPreflightResult,

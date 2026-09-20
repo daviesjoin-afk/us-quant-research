@@ -1,3 +1,22 @@
+"""The Paper execution health verdict, mechanically moved from the root module.
+
+The evaluator answers one question -- "is this session safe to keep running, and
+if not, does it need a human or will it settle on its own" -- and it answers it
+from facts it is handed: a connection, a broker snapshot, the engine's own
+snapshot and the reconciliation rows.  It reads nothing, connects to nothing and
+decides nothing about *what to do*; the coordinator owns the reaction.
+
+That is why it lives in the runtime package and yet imports no adapter: it is a
+pure function of its arguments, kept beside the coordinator that calls it while
+staying independent of it.  The coordinator still receives it as an injected
+``HealthEvaluator``; owning the algorithm here does not give the coordinator
+permission to inline it.
+
+The thresholds and severities below are unchanged from the root module this
+replaced -- this move exists to give the algorithm a home in the runtime
+package, not to re-tune it.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -197,3 +216,10 @@ def _age_seconds(timestamp: str, now: datetime) -> float:
     except (TypeError, ValueError):
         return float("inf")
     return max(0.0, (now - _utc(parsed)).total_seconds())
+
+
+__all__ = [
+    "PaperExecutionHealth",
+    "PaperExecutionIssue",
+    "evaluate_paper_execution_health",
+]

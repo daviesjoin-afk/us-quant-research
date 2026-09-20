@@ -1,16 +1,35 @@
-"""UI-independent aggregate workflow state for the desktop workbench.
+"""The desktop's aggregate workflow surface.
 
-This module contains only explicit workflow ownership and read-only snapshots.
-Application adapters remain responsible for research, market, account, and
-broker I/O; the desktop renders these snapshots and sends commands elsewhere.
+This module composes the four independent workflow controllers behind one shared
+execution lease and one combined snapshot.  It moved here from the deleted
+``workflow_controller`` root module because that is what it is: desktop /
+application orchestration, not trading-core domain or runtime.
+
+Ownership is explicit and stays that way:
+
+``ResearchWorkflowController``
+    local research progress; performs no I/O.
+``MarketAccountController``
+    publishes readiness the market and account adapters supplied.
+``ShadowWorkflowController``
+    owns the internal-only shadow lease; it has no broker port.
+``PaperWorkflowController``
+    the real Paper lifecycle, whose implementation remains in
+    ``trading/runtime/workflow.py``.
+
+This file only *composes* them.  The shared ``ExecutionLeaseManager`` is created
+once here and handed to the two controllers that contend for the lease, so
+"shadow and Paper cannot both hold execution" is structural rather than
+checked.  It creates no broker adapter, no risk application and no execution
+application, and it performs no I/O of its own.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from .trading.runtime.workflow import PaperWorkflowController
-from .trading.runtime.workflow_state import (
+from us_quant.trading.runtime.workflow import PaperWorkflowController
+from us_quant.trading.runtime.workflow_state import (
     ExecutionLeaseManager,
     WorkflowSnapshot,
     WorkflowStateError,
@@ -142,3 +161,13 @@ class WorkflowController:
             ),
             shadow_active=self.shadow.active,
         )
+
+
+__all__ = [
+    "MarketAccountController",
+    "MarketAccountSnapshot",
+    "ResearchWorkflowController",
+    "ResearchWorkflowSnapshot",
+    "ShadowWorkflowController",
+    "WorkflowController",
+]

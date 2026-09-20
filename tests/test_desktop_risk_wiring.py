@@ -28,12 +28,12 @@ import pytest
 
 from PySide6.QtWidgets import QApplication
 
-from us_quant.auto_intraday import build_auto_rotation_config
+from us_quant.trading.composition.session_config import build_auto_rotation_config
 from us_quant.trading.composition.runtime import build_trading_runtime
 from us_quant.trading.runtime.models import AutoQuantCandidate
 from us_quant.desktop import MainWindow
 from us_quant.desktop_v2.pages.risk import RiskPage
-from us_quant.shadow_paper import ShadowConfig
+from us_quant.trading.runtime.config import TradingSessionConfig
 from us_quant.trading.application.execution import ExecutionApplication
 from us_quant.trading.application.risk import RiskApplication
 from us_quant.trading.domain.risk import LayeredRiskLimits, RiskLimits
@@ -139,7 +139,7 @@ def test_the_runtime_receives_the_application_the_window_built(window) -> None:
                 "AAA", "A", "T", 1, Decimal("80"), "趋势候选"
             ),
         ),
-        config=ShadowConfig(
+        config=TradingSessionConfig(
             initial_cash=Decimal("10000"), capital_source="test"
         ),
         strategy=StrategyIdentity(
@@ -178,7 +178,7 @@ def test_the_engine_refuses_to_run_without_a_risk_application() -> None:
                     "AAA", "A", "T", 1, Decimal("80"), "趋势候选"
                 ),
             ),
-            config=ShadowConfig(
+            config=TradingSessionConfig(
                 initial_cash=Decimal("10000"), capital_source="test"
             ),
             strategy=StrategyIdentity(
@@ -203,7 +203,7 @@ def test_the_engine_refuses_to_run_without_an_execution_service() -> None:
                     "AAA", "A", "T", 1, Decimal("80"), "趋势候选"
                 ),
             ),
-            config=ShadowConfig(
+            config=TradingSessionConfig(
                 initial_cash=Decimal("10000"), capital_source="test"
             ),
             strategy=StrategyIdentity(
@@ -240,10 +240,12 @@ def test_the_rotation_config_builder_owns_no_risk_policy() -> None:
         capital_source="test",
         daily_loss_limit=Decimal("100"),
     )
-    # ``ShadowConfig`` keeps the field because ``ShadowPaperEngine`` still
-    # uses it; the auto-rotation path must simply stop populating it.
-    assert config.layered_risk_limits is None
-    assert dict(config.symbol_risk_multipliers) == {}
+    # The auto-rotation path returns the *production* session config, which has
+    # no risk-overlay field to populate in the first place: the overlay now
+    # belongs to the shadow simulator alone.
+    assert isinstance(config, TradingSessionConfig)
+    assert not hasattr(config, "layered_risk_limits")
+    assert not hasattr(config, "symbol_risk_multipliers")
 
 
 def _rotation_parameters() -> dict[str, object]:

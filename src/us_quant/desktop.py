@@ -195,15 +195,15 @@ from us_quant.auto_launch import (
     build_auto_launch_plan,
 )
 from us_quant.trading.application.risk import RiskApplication
+from us_quant.trading.composition.execution import (
+    build_execution_application,
+    build_order_repository,
+)
 from us_quant.trading.composition.risk import build_risk_application
 from us_quant.trading.domain.risk import LayeredRiskLimits
 from us_quant.runtime_supervisor import RuntimeSnapshot, RuntimeSupervisor
-from us_quant.ibkr_paper_orders import (
-    IBKRPaperOrderError,
-    IBKRPaperOrderUncertainError,
-    PaperOrderJournal,
-    PaperOrderReconciliation,
-)
+from us_quant.paper_order_models import PaperOrderReconciliation
+from us_quant.trading.ports.broker_execution import ExecutionRefused
 from us_quant.paper_execution_health import (
     PaperExecutionHealth,
     PaperExecutionIssue,
@@ -446,7 +446,7 @@ class MainWindow(QMainWindow):
         self.shadow_store = ShadowPaperStore(
             self.paths.runtime_root / "shadow_paper.sqlite3"
         )
-        self.paper_order_journal = PaperOrderJournal(
+        self.order_repository = build_order_repository(
             self.paths.runtime_root / "ibkr_paper_orders.sqlite3"
         )
         self.minute_quote_store = MinuteQuoteStore(
@@ -3471,7 +3471,7 @@ class MainWindow(QMainWindow):
             progress("连接 IBKR Paper 订单通道并读取账户/订单；不下单…")
             return self.paper_trading.probe_order_channel(
                 config=order_config,
-                journal=self.paper_order_journal,
+                repository=self.order_repository,
                 extended_hours_enabled=(
                     self.preferences.extended_hours_paper_enabled
                 ),
@@ -3991,7 +3991,7 @@ class MainWindow(QMainWindow):
                 connection = self.paper_trading.connect_candidate(
                     candidate_id,
                     config=order_config,
-                    journal=self.paper_order_journal,
+                    repository=self.order_repository,
                     extended_hours_enabled=(
                         self.preferences.extended_hours_paper_enabled
                     ),
@@ -4063,19 +4063,19 @@ class MainWindow(QMainWindow):
                 broker_state.net_liquidation is None
                 or broker_state.net_liquidation <= 0
             ):
-                raise IBKRPaperOrderError(
+                raise ExecutionRefused(
                     "IBKR Paper 订单会话未返回有效净值"
                 )
             if broker_state.positions:
                 symbols = ", ".join(
                     row.symbol for row in broker_state.positions
                 )
-                raise IBKRPaperOrderError(
+                raise ExecutionRefused(
                     "首期自动量化要求 Paper 账户启动时空仓；"
                     f"当前持仓：{symbols}"
                 )
             if broker_state.cash is None:
-                raise IBKRPaperOrderError(
+                raise ExecutionRefused(
                     "IBKR Paper 订单会话未返回现金；"
                     "禁止使用保证金借款代替现金"
                 )
@@ -4106,12 +4106,21 @@ class MainWindow(QMainWindow):
             # never passed here, so the configured ``risk_limits`` reached a
             # field nobody read.
             risk = self._build_auto_quant_risk()
+            # The execution application is bound to the *same* channel this
+            # session is arming and will publish, and to the one order store
+            # the window opened at construction.  Binding it from the borrowed
+            # candidate means the engine cannot be handed an application that
+            # talks to a different broker session than the coordinator reads.
+            execution = build_execution_application(
+                repository=self.order_repository,
+                broker=service,
+            )
             engine = AutoQuantEngine(
                 candidates=self.auto_quant_candidates,
                 config=config,
                 strategy=strategy.identity,
                 risk=risk,
-                order_sink=service.submit,
+                execution=execution,
                 market_reference_symbols=tuple(
                     dict.fromkeys(
                         str(symbol).strip().upper()
@@ -4463,7 +4472,7 @@ class MainWindow(QMainWindow):
         if self.paper_trading.has_order_service():
             broker_state = self.paper_trading.broker_state()
             reconciliations = (
-                self.paper_order_journal.reconciliation_rows(
+                self.order_repository.reconciliation_rows(
                     session_id=snapshot.session_id
                 )
             )
@@ -4792,11 +4801,11 @@ class MainWindow(QMainWindow):
         self.auto_recent_fill_model.set_rows(fill_rows)
         audit_by_intent = {
             str(row["intent_id"]): row
-            for row in self.paper_order_journal.audit_rows(limit=1000)
+            for row in self.order_repository.audit_rows(limit=1000)
             if row.get("session_id") == snapshot.session_id
         }
         reconciliations = (
-            self.paper_order_journal.reconciliation_rows(
+            self.order_repository.reconciliation_rows(
                 session_id=snapshot.session_id,
                 limit=50,
             )
@@ -8184,10 +8193,10 @@ class MainWindow(QMainWindow):
                     self.targeted_review_results
                 ),
                 paper_order_audit=(
-                    self.paper_order_journal.audit_rows()
+                    self.order_repository.audit_rows()
                 ),
                 paper_execution_audit=(
-                    self.paper_order_journal.execution_rows()
+                    self.order_repository.execution_rows()
                 ),
             )
         except (OSError, ValueError) as error:

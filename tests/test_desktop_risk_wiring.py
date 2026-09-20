@@ -33,12 +33,26 @@ from us_quant.auto_quant import AutoQuantCandidate, AutoQuantEngine
 from us_quant.desktop import MainWindow
 from us_quant.desktop_v2.pages.risk import RiskPage
 from us_quant.shadow_paper import ShadowConfig
+from us_quant.trading.application.execution import ExecutionApplication
 from us_quant.trading.application.risk import RiskApplication
-from us_quant.trading.domain.risk import RiskLimits
+from us_quant.trading.domain.risk import LayeredRiskLimits, RiskLimits
 from us_quant.trading.domain.strategy import StrategyIdentity
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _DESKTOP = _REPO_ROOT / "src" / "us_quant" / "desktop.py"
+
+
+def _unused_execution() -> ExecutionApplication:
+    """An execution service the assertions here never drive.
+
+    These tests are about which risk authority the engine holds.  The engine
+    still requires an execution service, so one is supplied with ports that are
+    never called -- a lambda would be rejected by the constructor's type check,
+    which is itself the point.
+    """
+
+    return ExecutionApplication(repository=object(), broker=object())
+
 
 #: A limit set no configuration file would produce, so "it received the
 #: configured limits" cannot pass by coincidence.
@@ -112,7 +126,7 @@ def test_the_engine_receives_the_application_the_window_built(window) -> None:
             parameter_hash="p",
         ),
         risk=risk,
-        order_sink=lambda intent: 1,
+        execution=_unused_execution(),
     )
     assert engine.risk is risk
     assert engine.risk.limits.account == window.config.risk_limits
@@ -149,7 +163,41 @@ def test_the_engine_refuses_to_run_without_a_risk_application() -> None:
                 strategy_id="s", version_id="v", parameter_hash="p"
             ),
             risk=None,
-            order_sink=lambda intent: 1,
+            # Supplied, so the TypeError is about the missing risk authority
+            # rather than about a missing argument.
+            execution=_unused_execution(),
+        )
+
+
+def test_the_engine_refuses_to_run_without_an_execution_service() -> None:
+    """Execution v2: the engine cannot submit, so it must be handed the one
+    service that can -- a stand-in with an execution-shaped API is not enough.
+    """
+
+    with pytest.raises(TypeError):
+        AutoQuantEngine(
+            candidates=(
+                AutoQuantCandidate(
+                    "AAA", "A", "T", 1, Decimal("80"), "趋势候选"
+                ),
+            ),
+            config=ShadowConfig(
+                initial_cash=Decimal("10000"), capital_source="test"
+            ),
+            strategy=StrategyIdentity(
+                strategy_id="s", version_id="v", parameter_hash="p"
+            ),
+            risk=RiskApplication(
+                LayeredRiskLimits(
+                    account=RiskLimits(
+                        max_gross_exposure_pct=Decimal("1"),
+                        max_position_exposure_pct=Decimal("1"),
+                        daily_loss_halt_pct=Decimal("1"),
+                        drawdown_halt_pct=Decimal("1"),
+                    )
+                )
+            ),
+            execution=lambda intent: 1,
         )
 
 

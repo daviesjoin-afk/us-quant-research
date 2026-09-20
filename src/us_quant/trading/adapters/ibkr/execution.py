@@ -1,22 +1,53 @@
+"""IBKR Paper execution adapter: the broker side of ``BrokerExecutionPort``.
+
+This is the Paper order service relocated into the trading layer, with one
+boundary replaced.  The channel behaviour is deliberately *moved*, not
+rewritten: the session binding, the account fingerprint, the connection-snapshot
+(H-6) gate, the idempotency checks, the routing rules, the reconciliation
+snapshot machinery and the gateway callback bridge are the ones that have been
+running in Paper for months.  Re-inventing an order state machine here is how a
+migration quietly changes what the broker is told.
+
+What changed at the boundary:
+
+* ``reserve`` and ``submit`` replace the single ``submit``.  Reserving allocates
+  the broker order id and sends nothing; the caller writes the durable
+  correlation and only then calls ``submit``.  The two-phase split exists so the
+  "durable before the broker can see it" ordering cannot be collapsed by a
+  future caller.
+* ``OrderIntent`` / ``OrderEvent`` / ``ExecutionFill`` replace the Paper DTOs.
+  The broker's raw status text still travels with each event -- reconciliation
+  and the audit view read it -- but the mapped ``OrderStatus`` is what policy
+  reads.
+* The ``IBKR*`` error classes are subclasses of the port's provider-neutral
+  errors, so a caller can catch ``ExecutionRefused`` /
+  ``ExecutionSubmissionUncertain`` without importing anything from here.
+
+Still frozen, because they are safety rules rather than implementation detail:
+this host and port 4002 only, non-read-only config, whole-share US equity/ETF
+limit (LMT) orders only for an explicitly armed DU session, no market order, no
+short sale, no fractional share, no global cancel, no option and no
+margin-borrowing surface.
+"""
+
 from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
 from threading import Event, Lock, RLock, Thread
 from time import monotonic
-from typing import Any
-from uuid import uuid4
+from typing import Any, Protocol
 
 from us_quant.ibkr import (
     IBKRClientConnectError,
     IBKRConnectionConfig,
     connect_ibkr_client,
 )
-from us_quant.ibkr_paper_gateway import (
+from us_quant.trading.adapters.ibkr.execution_gateway import (
     IBKRPaperGatewayError,
     PaperGatewayHandshake,
     create_paper_gateway_app,
@@ -25,36 +56,52 @@ from us_quant.trading.adapters.ibkr.support import (
     INFORMATIONAL_ERROR_CODES,
     mask_account_id,
 )
-from us_quant.extended_hours import paper_order_routing
-from us_quant.paper_order_journal import PaperOrderJournal, _now_iso
+from us_quant.extended_hours import PaperOrderRouting, paper_order_routing
 from us_quant.paper_order_models import (
     PaperBrokerOrder,
     PaperBrokerPosition,
     PaperBrokerState,
-    PaperExecution,
     PaperOrderConnection,
-    PaperOrderIntent,
     PaperOrderReconciliation,
-    PaperOrderUpdate,
     PaperReconciliationSnapshot,
     ReconciliationSummary,
     TERMINAL_ORDER_STATUSES,
 )
+from us_quant.trading.adapters.clock import now_iso
+from us_quant.trading.adapters.order_status_mapping import (
+    order_status_from_text,
+)
+from us_quant.trading.domain.orders import (
+    ExecutionFill,
+    OrderEvent,
+    OrderIntent,
+    OrderStatus,
+    Side,
+)
+from us_quant.trading.ports.broker_execution import (
+    BrokerOrderReservation,
+    ExecutionRefused,
+    ExecutionSubmissionUncertain,
+)
 
 
-class IBKRPaperOrderError(RuntimeError):
-    pass
+class IBKRPaperOrderError(ExecutionRefused):
+    """The IBKR Paper execution channel refused or failed.
+
+    A subclass of the port's ``ExecutionRefused`` so callers above this module
+    catch the provider-neutral type; the IBKR name stays in this file.
+    """
 
 
-class IBKRPaperOrderUncertainError(IBKRPaperOrderError):
-    """Submission may have reached the broker and requires reconciliation."""
+class IBKRPaperOrderUncertainError(ExecutionSubmissionUncertain):
+    """Submission may have reached IBKR and requires reconciliation."""
 
     def __init__(
-        self, message: str, *, intent_id: str, broker_order_id: int
+        self, message: str, *, order_id: str, broker_order_id: int
     ) -> None:
-        super().__init__(message)
-        self.intent_id = intent_id
-        self.broker_order_id = broker_order_id
+        super().__init__(
+            message, order_id=order_id, broker_order_id=broker_order_id
+        )
 
 
 @dataclass(slots=True)
@@ -72,6 +119,34 @@ class _ReconciliationRefreshAttempt:
     open_orders: dict[int, PaperBrokerOrder]
     completed_orders: dict[int, PaperBrokerOrder]
     executions: list[tuple[Any, Any]]
+
+
+@dataclass(frozen=True, slots=True)
+class _SendAuthorization:
+    """The exact safety facts one submission was authorised against.
+
+    Recorded by ``_revalidate_for_send`` and compared against live state again
+    inside the send section, which holds ``_state_lock`` from that comparison
+    until the order has been placed.  Between the two there is no window in
+    which a ``disarm``, an ``arm`` or an asynchronous ``managedAccounts``
+    rebind could land, because all three need that same lock.
+
+    The facts are recorded rather than reduced to a version counter on purpose:
+    a counter is only as sound as the list of places that remember to bump it,
+    while comparing the values themselves cannot silently miss a writer.  Every
+    fact below is an input to one of the gates, so "no fact changed" means "no
+    gate's verdict can have changed".
+    """
+
+    client: Any
+    account: str
+    armed_session_id: str | None
+    armed_account_fingerprint: str | None
+    snapshot_complete: bool
+    allowed_symbols: frozenset[str]
+    max_order_notional: Decimal
+    sellable_quantities: tuple[tuple[str, int], ...]
+    routing: PaperOrderRouting
 
 
 def ensure_paper_order_config(config: IBKRConnectionConfig) -> None:
@@ -92,15 +167,15 @@ def ensure_paper_order_config(config: IBKRConnectionConfig) -> None:
 
 
 def validate_paper_order_intent(
-    intent: PaperOrderIntent,
+    intent: OrderIntent,
     *,
     allowed_symbols: frozenset[str],
     max_order_notional: Decimal,
     sellable_quantities: dict[str, int],
 ) -> None:
-    if intent.side not in {"BUY", "SELL"}:
+    if intent.side.order_text not in {"BUY", "SELL"}:
         raise IBKRPaperOrderError("只允许 BUY 或 SELL")
-    if intent.symbol not in allowed_symbols:
+    if intent.execution_symbol not in allowed_symbols:
         raise IBKRPaperOrderError("订单代码不在本会话候选集中")
     if (
         not isinstance(intent.quantity, int)
@@ -116,33 +191,77 @@ def validate_paper_order_intent(
     ):
         raise IBKRPaperOrderError("订单超过本会话单笔名义金额上限")
     if (
-        intent.side == "SELL"
+        intent.side is Side.SELL
         and intent.quantity
-        > sellable_quantities.get(intent.symbol, 0)
+        > sellable_quantities.get(intent.execution_symbol, 0)
     ):
         raise IBKRPaperOrderError("卖出数量超过本会话可卖整股")
 
 
-class IBKRPaperOrderService:
-    """Narrow IBKR Paper order adapter.
+class OrderStorePort(Protocol):
+    """The store slice this adapter reads and reconciles against.
+
+    Wider than ``OrderRepositoryPort`` on purpose: reconciliation compares the
+    broker's open/completed orders against the stored rows, and the per-session
+    rollup is a store query.  Declaring the slice here keeps the adapter honest
+    about what it needs instead of typing the parameter as the concrete store,
+    which would have made this module depend on a SQLite class.
+    """
+
+    def record_event(self, event: OrderEvent) -> None: ...
+
+    def record_fill(self, fill: ExecutionFill) -> bool: ...
+
+    def intent_for_broker_order(
+        self, broker_order_id: int
+    ) -> OrderIntent | None: ...
+
+    def intent_for_idempotency_key(
+        self, idempotency_key: str
+    ) -> OrderIntent | None: ...
+
+    def executed_quantity(self, order_id: str) -> Decimal: ...
+
+    def max_broker_order_id(self) -> int: ...
+
+    def reconciliation_rows(
+        self, *, session_id: str | None = None, limit: int = 1000
+    ) -> tuple[PaperOrderReconciliation, ...]: ...
+
+    def reconciliation_summary(
+        self, session_id: str | None = None
+    ) -> ReconciliationSummary: ...
+
+    def sessions(
+        self, *, limit: int = 50
+    ) -> tuple[dict[str, object], ...]: ...
+
+
+class IBKRExecutionAdapter:
+    """Narrow IBKR Paper execution adapter.
 
     Only whole-share US stock / ETF limit orders for an explicitly armed DU
-    session are exposed. Regular routing is SMART DAY; optional 5×24 Paper
+    session are exposed. Regular routing is SMART DAY; optional 5x24 Paper
     routing uses OutsideRth for pre/after-hours and direct OVERNIGHT routing
     for the IBKR overnight session. There is no Live port, market order, short
     sale, global cancel, option or margin-borrowing surface.
+
+    It satisfies ``BrokerExecutionPort`` and, beyond it, keeps the Paper
+    session surface the runtime has always used: arming and disarming, the
+    connection snapshot, the broker account read, the reconciliation snapshot
+    and its currentness proof, and the per-session rollup.
     """
 
     def __init__(
         self,
         config: IBKRConnectionConfig,
         *,
-        journal: PaperOrderJournal,
+        repository: OrderStorePort,
         extended_hours_enabled: bool = False,
     ) -> None:
         ensure_paper_order_config(config)
         self.config = config
-        self.journal = journal
+        self.repository = repository
         self.extended_hours_enabled = extended_hours_enabled
         self._client: Any | None = None
         self._thread: Thread | None = None
@@ -161,9 +280,9 @@ class IBKRPaperOrderService:
         self._state_lock = Lock()
         self._event_lock = Lock()
         self._correlation_lock = RLock()
-        self._updates: deque[PaperOrderUpdate] = deque()
-        self._executions: deque[PaperExecution] = deque()
-        self._intent_by_order: dict[int, PaperOrderIntent] = {}
+        self._updates: deque[OrderEvent] = deque()
+        self._executions: deque[ExecutionFill] = deque()
+        self._intent_by_order: dict[int, OrderIntent] = {}
         self._order_by_intent: dict[str, int] = {}
         self._cancel_requested: set[str] = set()
         self._armed_session_id: str | None = None
@@ -184,7 +303,7 @@ class IBKRPaperOrderService:
         self._daily_pnl: Decimal | None = None
         self._unrealized_pnl: Decimal | None = None
         self._realized_pnl: Decimal | None = None
-        self._broker_observed_at = _now_iso()
+        self._broker_observed_at = now_iso()
         self._submit_latency: dict[str, dict[str, str]] = {}
         self._refresh_lock = Lock()
         self._refresh_attempt: _ReconciliationRefreshAttempt | None = None
@@ -201,7 +320,7 @@ class IBKRPaperOrderService:
         # CR-4: the journal's highest ever order id bounds nextValidId below,
         # so a Gateway restart can never hand back reused ids.
         self._next_order_id_floor = (
-            self.journal.max_broker_order_id() + 1
+            self.repository.max_broker_order_id() + 1
         )
         handshake = PaperGatewayHandshake()
         self._handshake = handshake
@@ -316,7 +435,7 @@ class IBKRPaperOrderService:
             connection_generation = self._connection_generation
             snapshot_complete = self._snapshot_complete
             observed_at = self._connection_observed_at
-        reconciliation = self.journal.reconciliation_summary()
+        reconciliation = self.repository.reconciliation_summary()
         return PaperOrderConnection(
             connected=(
                 self._connected
@@ -345,7 +464,7 @@ class IBKRPaperOrderService:
     def reconciliation_summary(
         self, session_id: str
     ) -> ReconciliationSummary:
-        return self.journal.reconciliation_summary(session_id)
+        return self.repository.reconciliation_summary(session_id)
 
     def reconciliation_snapshot_is_current(
         self, snapshot: PaperReconciliationSnapshot
@@ -503,7 +622,7 @@ class IBKRPaperOrderService:
                 order_id: (order.status, order.quantity)
                 for order_id, order in attempt.completed_orders.items()
             }
-            self._broker_observed_at = _now_iso()
+            self._broker_observed_at = now_iso()
             self._reconciliation_generation += 1
             self._mark_state_changed_locked()
             connection_generation = self._connection_generation
@@ -523,7 +642,7 @@ class IBKRPaperOrderService:
                 )
             )
             self._refresh_attempt = None
-        summary = self.journal.reconciliation_summary(attempt.session_id)
+        summary = self.repository.reconciliation_summary(attempt.session_id)
         account_fingerprint = _account_fingerprint(self._account)
         digest = _reconciliation_snapshot_digest(
             account_fingerprint=account_fingerprint,
@@ -603,7 +722,7 @@ class IBKRPaperOrderService:
         with self._state_lock:
             self._connection_generation += 1
             self._snapshot_complete = True
-            self._connection_observed_at = _now_iso()
+            self._connection_observed_at = now_iso()
 
     # ------------------------------------------------------------------
     # IBKR callback handlers.
@@ -650,8 +769,14 @@ class IBKRPaperOrderService:
         elif not accounts[0].upper().startswith("DU"):
             self._handshake.errors.append("拒绝非 DU 账户：Live 永久阻断")
         else:
-            self._account = accounts[0]
-            self._mark_state_changed()
+            # The account is a submission gate, so the rebind is written under
+            # the same lock the send section holds: an asynchronous
+            # ``managedAccounts`` cannot land between the last authorisation
+            # check and the send, and if it lands before, the send section sees
+            # the changed account and refuses.
+            with self._state_lock:
+                self._account = accounts[0]
+                self._mark_state_changed_locked()
         self._handshake.accounts_ready.set()
 
     def gateway_error(
@@ -740,7 +865,7 @@ class IBKRPaperOrderService:
                 f"{order.totalQuantity} · "
                 f"{str(order_state.status)}"
             )
-            self._broker_observed_at = _now_iso()
+            self._broker_observed_at = now_iso()
             self._mark_state_changed_locked()
 
     def gateway_open_order_end(self, app: Any, epoch: int) -> None:
@@ -773,7 +898,7 @@ class IBKRPaperOrderService:
             return
         with self._state_lock:
             self._account_metrics[tag] = parsed
-            self._broker_observed_at = _now_iso()
+            self._broker_observed_at = now_iso()
             self._mark_state_changed_locked()
 
     def gateway_account_summary_end(
@@ -815,7 +940,7 @@ class IBKRPaperOrderService:
                 )
             else:
                 self._broker_positions[symbol] = row
-            self._broker_observed_at = _now_iso()
+            self._broker_observed_at = now_iso()
             self._mark_state_changed_locked()
 
     def gateway_position_end(self, app: Any, epoch: int) -> None:
@@ -844,7 +969,7 @@ class IBKRPaperOrderService:
             self._realized_pnl = _optional_decimal(
                 realized_pnl
             )
-            self._broker_observed_at = _now_iso()
+            self._broker_observed_at = now_iso()
             self._mark_state_changed_locked()
 
     def gateway_exec_details(
@@ -893,7 +1018,7 @@ class IBKRPaperOrderService:
                 str(order_state.status),
                 Decimal(str(order.totalQuantity)),
             )
-            self._broker_observed_at = _now_iso()
+            self._broker_observed_at = now_iso()
             self._mark_state_changed_locked()
 
     def gateway_completed_orders_end(
@@ -986,7 +1111,15 @@ class IBKRPaperOrderService:
             self._max_order_notional = Decimal("0")
             self._sellable_quantities.clear()
 
-    def submit(self, intent: PaperOrderIntent) -> int:
+    def reserve(self, intent: OrderIntent) -> BrokerOrderReservation:
+        """Allocate a broker order id for one intent; send nothing.
+
+        Every hard gate runs here, because reserving an id for an order this
+        session is not allowed to send would only move the refusal later and
+        leave a durable row for an order that never existed.  The caller writes
+        the returned correlation to its store and only then calls ``submit``.
+        """
+
         with self._state_lock:
             armed_session_id = self._armed_session_id
             account = self._account
@@ -1011,20 +1144,15 @@ class IBKRPaperOrderService:
             raise IBKRPaperOrderError(
                 "Paper 连接快照尚未完成；拒绝提交订单"
             )
-        with self._correlation_lock:
-            existing_order_id = self._order_by_intent.get(
-                intent.intent_id
+        if not intent.idempotency_key:
+            raise IBKRPaperOrderError("订单意图缺少幂等键")
+        existing = self.repository.intent_for_idempotency_key(
+            intent.idempotency_key
+        )
+        if existing is not None and existing.order_id != intent.order_id:
+            raise IBKRPaperOrderError(
+                "检测到重复幂等键，已拒绝重复订单"
             )
-        if existing_order_id is not None:
-            return existing_order_id
-        if intent.idempotency_key:
-            existing = self.journal.intent_for_idempotency_key(
-                intent.idempotency_key
-            )
-            if existing is not None and existing.intent_id != intent.intent_id:
-                raise IBKRPaperOrderError(
-                    "检测到重复幂等键，已拒绝重复订单"
-                )
         validate_paper_order_intent(
             intent,
             allowed_symbols=allowed_symbols,
@@ -1038,13 +1166,71 @@ class IBKRPaperOrderService:
             raise IBKRPaperOrderError(
                 "当前时段禁止提交 Paper 订单：" + routing.reason
             )
-        client = self._client
         if (
-            client is None
+            self._client is None
             or not self.connection_snapshot().connected
             or not account
         ):
             raise IBKRPaperOrderError("Paper 订单通道已断开")
+        with self._correlation_lock:
+            reserved = self._order_by_intent.get(intent.order_id)
+        if reserved is not None:
+            # The same order identity already holds a broker id: reuse it
+            # rather than burning a second one for a duplicate submission.
+            return BrokerOrderReservation(
+                order_id=intent.order_id,
+                broker_order_id=reserved,
+                account_alias=mask_account_id(account),
+            )
+        with self._id_lock:
+            if self._next_order_id is None:
+                raise IBKRPaperOrderError("尚未获得有效订单号")
+            order_id = self._next_order_id
+            self._next_order_id += 1
+        with self._correlation_lock:
+            self._intent_by_order[order_id] = intent
+            self._order_by_intent[intent.order_id] = order_id
+        return BrokerOrderReservation(
+            order_id=intent.order_id,
+            broker_order_id=order_id,
+            account_alias=mask_account_id(account),
+        )
+
+    def submit(self, reservation: BrokerOrderReservation) -> None:
+        """Send one reserved order to IBKR under an atomic safety section.
+
+        The caller must already have written the durable correlation: this
+        method exists after that write, and it places the order with the id the
+        correlation names.  If the place call fails the outcome is genuinely
+        unknown, so the order is reported as uncertain and the caller halts for
+        reconciliation instead of retrying.
+
+        Two passes over the same gates, and only the second is load-bearing.
+        The first, ``_revalidate_for_send``, re-runs every gate against live
+        state and refuses a submission that is already stale, before an order
+        object exists at all.  The second runs inside the send section: it
+        re-checks the facts that first pass authorised and calls ``placeOrder``
+        with ``_state_lock`` held the entire time.  Nothing that could change
+        one of those facts -- ``disarm``, ``arm``, an asynchronous
+        ``managedAccounts`` rebind -- can run between the last check and the
+        moment the order leaves the process, because all three need that lock.
+        A change arriving during the section is therefore ordered *after* the
+        send rather than inside it: the order either goes out authorised by the
+        state it was sent under, or it does not go out at all.
+
+        Without that section the two halves are merely close together: a
+        ``disarm`` or an account rebind landing in the gap would let an order
+        the session has already withdrawn permission for reach the broker.
+        """
+
+        with self._correlation_lock:
+            intent = self._intent_by_order.get(reservation.broker_order_id)
+        if intent is None or intent.order_id != reservation.order_id:
+            # The reservation must name the intent it was made for: a
+            # reservation swapped for another order is not this order.
+            raise IBKRPaperOrderError(
+                "订单意图未处于已预留状态；拒绝提交"
+            )
         try:
             from ibapi.contract import Contract
             from ibapi.order import Order
@@ -1053,80 +1239,222 @@ class IBKRPaperOrderService:
                 "未安装 IBKR 官方 Python API"
             ) from error
 
-        with self._id_lock:
-            if self._next_order_id is None:
-                raise IBKRPaperOrderError("尚未获得有效订单号")
-            order_id = self._next_order_id
-            self._next_order_id += 1
-        contract = Contract()
-        contract.symbol = intent.symbol
-        contract.secType = "STK"
-        contract.exchange = routing.exchange
-        contract.currency = "USD"
-        order = Order()
-        order.action = intent.side
-        order.orderType = "LMT"
-        order.totalQuantity = Decimal(intent.quantity)
-        order.lmtPrice = float(intent.limit_price)
-        order.tif = routing.tif
-        order.outsideRth = routing.outside_rth
-        order.account = account
-        order.transmit = True
-        order.orderRef = (
-            f"USQ-{intent.session_id[:8]}-{intent.intent_id[:8]}-"
-            f"{routing.session.value[:3].upper()}"
-        )
-        submitted_at = _now_iso()
+        authorization = self._revalidate_for_send(reservation, intent)
+        order_id = reservation.broker_order_id
         submit_error: Exception | None = None
-        with self._correlation_lock:
-            existing_order_id = self._order_by_intent.get(
-                intent.intent_id
+        with self._state_lock:
+            # -- the submission critical section --------------------------
+            # Held from the last safety read to the moment the order has left
+            # the process.  ``_state_lock`` is a plain (non-reentrant) lock, so
+            # nothing below it may call a helper that takes it again: the
+            # connectivity fact is read inline rather than through
+            # ``connection_snapshot()``, which would deadlock.
+            routing = self._send_locked(authorization)
+            contract = Contract()
+            contract.symbol = intent.execution_symbol
+            contract.secType = "STK"
+            contract.exchange = routing.exchange
+            contract.currency = "USD"
+            order = Order()
+            order.action = intent.side.order_text
+            order.orderType = "LMT"
+            order.totalQuantity = Decimal(intent.quantity)
+            order.lmtPrice = float(intent.limit_price)
+            order.tif = routing.tif
+            order.outsideRth = routing.outside_rth
+            order.account = authorization.account
+            order.transmit = True
+            order.orderRef = (
+                f"USQ-{intent.session_id[:8]}-{intent.order_id[:8]}-"
+                f"{routing.session.value[:3].upper()}"
             )
-            if existing_order_id is not None:
-                return existing_order_id
-            self.journal.record_intent(
-                intent,
-                broker_order_id=order_id,
-                account_alias=mask_account_id(account),
-            )
-            self._intent_by_order[order_id] = intent
-            self._order_by_intent[intent.intent_id] = order_id
-            self._submit_latency[intent.intent_id] = {
-                "intent_generated_at": intent.generated_at,
-                "submitted_at": submitted_at,
-            }
-            try:
-                client.placeOrder(order_id, contract, order)
-            except Exception as error:
-                self._submit_latency.pop(intent.intent_id, None)
-                submit_error = error
-            else:
-                return order_id
-        if submit_error is not None:
-            update = PaperOrderUpdate(
-                intent_id=intent.intent_id,
-                broker_order_id=order_id,
-                status="SubmitUncertain",
-                filled=Decimal("0"),
-                remaining=Decimal(intent.quantity),
-                average_fill_price=None,
-                last_fill_price=None,
-                message=(
-                    "本地提交调用异常；订单是否到达券商尚不确定："
-                    f"{submit_error}"
-                ),
-                observed_at=_now_iso(),
-            )
-            with self._event_lock:
-                self._updates.append(update)
-            self.journal.record_update(update)
-            raise IBKRPaperOrderUncertainError(
-                "Paper 订单提交结果不确定；会话必须停机并对账",
-                intent_id=intent.intent_id,
-                broker_order_id=order_id,
-            ) from submit_error
+            with self._correlation_lock:
+                if self._intent_by_order.get(order_id) is not intent:
+                    raise IBKRPaperOrderError(
+                        "提交期间订单意图映射已变化；拒绝提交"
+                    )
+                self._submit_latency[intent.order_id] = {
+                    "intent_generated_at": intent.created_at.isoformat(),
+                    "submitted_at": now_iso(),
+                }
+                try:
+                    authorization.client.placeOrder(order_id, contract, order)
+                except Exception as error:
+                    self._submit_latency.pop(intent.order_id, None)
+                    submit_error = error
+        if submit_error is None:
+            return
+        event = OrderEvent(
+            order_id=intent.order_id,
+            status=OrderStatus.UNKNOWN,
+            broker_order_id=order_id,
+            broker_status="SubmitUncertain",
+            filled=Decimal("0"),
+            remaining=Decimal(intent.quantity),
+            average_fill_price=None,
+            last_fill_price=None,
+            message=(
+                "本地提交调用异常；订单是否到达券商尚不确定："
+                f"{submit_error}"
+            ),
+            idempotency_key=intent.idempotency_key,
+            occurred_at=datetime.now(timezone.utc),
+        )
+        with self._event_lock:
+            self._updates.append(event)
+        self.repository.record_event(event)
+        raise IBKRPaperOrderUncertainError(
+            "Paper 订单提交结果不确定；会话必须停机并对账",
+            order_id=intent.order_id,
+            broker_order_id=order_id,
+        ) from submit_error
 
-    def cancel_intent(self, intent_id: str) -> bool:
+    def _revalidate_for_send(
+        self,
+        reservation: BrokerOrderReservation,
+        intent: OrderIntent,
+    ) -> _SendAuthorization:
+        """Run every volatile execution hard gate and record what passed.
+
+        The record it returns is what the send section re-checks, so this pass
+        is the fail-fast half of the pair: it refuses a stale submission before
+        an order object is built.  Only execution hard gates are here: risk's
+        position, gross, cash, drawdown and daily loss ceilings are not
+        recomputed, because those belong to ``RiskApplication`` and a second
+        copy is how two layers come to disagree about what is affordable.
+        """
+
+        with self._state_lock:
+            armed_session_id = self._armed_session_id
+            account = self._account
+            binding_is_valid = self._armed_account_binding_is_valid_locked()
+            allowed_symbols = self._allowed_symbols
+            max_order_notional = self._max_order_notional
+            sellable_quantities = tuple(
+                sorted(self._sellable_quantities.items())
+            )
+            snapshot_complete = self._snapshot_complete
+        if armed_session_id is None:
+            # Disarmed between reserve and submit: the session that authorised
+            # this order no longer exists.
+            raise IBKRPaperOrderError("Paper 会话已解除武装；拒绝提交订单")
+        if intent.session_id != armed_session_id:
+            raise IBKRPaperOrderError(
+                "订单不属于当前已武装会话；拒绝提交订单"
+            )
+        if not binding_is_valid:
+            raise IBKRPaperOrderError(
+                "Paper 会话账户已变化；拒绝提交订单"
+            )
+        if not account:
+            raise IBKRPaperOrderError("Paper 账户未就绪；拒绝提交订单")
+        if mask_account_id(account) != reservation.account_alias:
+            # The reserved correlation names a different account than the one
+            # the order would now be sent on.  The human reconciling this later
+            # would be reading a row that points at the wrong book.
+            raise IBKRPaperOrderError(
+                "预留账户与当前账户不一致；拒绝提交订单"
+            )
+        if not snapshot_complete:
+            # H-6: never submit while the connection snapshot is not complete
+            # (e.g. during the recovery window of a reconnect).
+            raise IBKRPaperOrderError(
+                "Paper 连接快照尚未完成；拒绝提交订单"
+            )
+        validate_paper_order_intent(
+            intent,
+            allowed_symbols=allowed_symbols,
+            max_order_notional=max_order_notional,
+            sellable_quantities=dict(sellable_quantities),
+        )
+        routing = paper_order_routing(
+            extended_hours_enabled=self.extended_hours_enabled
+        )
+        if not routing.allowed:
+            raise IBKRPaperOrderError(
+                "当前时段禁止提交 Paper 订单：" + routing.reason
+            )
+        client = self._client
+        if client is None or not self.connection_snapshot().connected:
+            raise IBKRPaperOrderError("Paper 订单通道已断开")
+        return _SendAuthorization(
+            client=client,
+            account=account,
+            armed_session_id=armed_session_id,
+            armed_account_fingerprint=self._armed_account_fingerprint,
+            snapshot_complete=snapshot_complete,
+            allowed_symbols=allowed_symbols,
+            max_order_notional=max_order_notional,
+            sellable_quantities=sellable_quantities,
+            routing=routing,
+        )
+
+    def _send_locked(
+        self, authorization: _SendAuthorization
+    ) -> PaperOrderRouting:
+        """Refuse unless every authorised fact is still exactly true.
+
+        Called with ``_state_lock`` held and nothing else done yet, so this
+        check and the ``placeOrder`` that follows it are one indivisible step:
+        a mutation either landed before it and is seen here, or it waits until
+        the order has left.  Each refusal names the fact that moved, so a halt
+        can be explained without reading the journal.
+        """
+
+        routing = paper_order_routing(
+            extended_hours_enabled=self.extended_hours_enabled
+        )
+        if routing != authorization.routing or not routing.allowed:
+            raise IBKRPaperOrderError(
+                "提交期间交易时段路由已变化；拒绝提交订单"
+            )
+        client = self._client
+        if (
+            client is not authorization.client
+            or not self._connected
+            or client is None
+            or not bool(client.isConnected())
+        ):
+            raise IBKRPaperOrderError(
+                "提交期间订单通道已变化；拒绝提交订单"
+            )
+        if self._armed_session_id != authorization.armed_session_id:
+            raise IBKRPaperOrderError(
+                "提交期间会话武装状态已变化；拒绝提交订单"
+            )
+        if (
+            self._armed_account_fingerprint
+            != authorization.armed_account_fingerprint
+        ):
+            raise IBKRPaperOrderError(
+                "提交期间账户绑定已变化；拒绝提交订单"
+            )
+        if self._account != authorization.account:
+            raise IBKRPaperOrderError(
+                "提交期间账户已变化；拒绝提交订单"
+            )
+        if self._snapshot_complete != authorization.snapshot_complete:
+            raise IBKRPaperOrderError(
+                "提交期间连接快照已变化；拒绝提交订单"
+            )
+        if self._allowed_symbols != authorization.allowed_symbols:
+            raise IBKRPaperOrderError(
+                "提交期间候选集已变化；拒绝提交订单"
+            )
+        if self._max_order_notional != authorization.max_order_notional:
+            raise IBKRPaperOrderError(
+                "提交期间名义金额上限已变化；拒绝提交订单"
+            )
+        if (
+            tuple(sorted(self._sellable_quantities.items()))
+            != authorization.sellable_quantities
+        ):
+            raise IBKRPaperOrderError(
+                "提交期间可卖数量已变化；拒绝提交订单"
+            )
+        return routing
+
+    def cancel(self, order_id: str) -> bool:
         """Cancel one exact order created by this service.
 
         This intentionally exposes no global-cancel surface. Repeated calls
@@ -1141,7 +1469,7 @@ class IBKRPaperOrderService:
                 "Paper 订单通道已断开，无法确认撤单"
             )
         with self._correlation_lock:
-            broker_order_id = self._order_by_intent.get(intent_id)
+            broker_order_id = self._order_by_intent.get(order_id)
             intent = (
                 self._intent_by_order.get(broker_order_id)
                 if broker_order_id is not None
@@ -1151,27 +1479,27 @@ class IBKRPaperOrderService:
                 raise IBKRPaperOrderError(
                     "找不到本会话对应的 Paper 订单"
                 )
-            if intent_id in self._cancel_requested:
+            if order_id in self._cancel_requested:
                 return False
-            self._cancel_requested.add(intent_id)
+            self._cancel_requested.add(order_id)
             try:
                 client.cancelOrder(broker_order_id, "")
             except Exception as error:
-                self._cancel_requested.discard(intent_id)
+                self._cancel_requested.discard(order_id)
                 raise IBKRPaperOrderUncertainError(
                     "Paper 撤单结果不确定；必须停止并对账",
-                    intent_id=intent_id,
+                    order_id=order_id,
                     broker_order_id=broker_order_id,
                 ) from error
         return True
 
-    def poll_updates(self) -> tuple[PaperOrderUpdate, ...]:
+    def events(self) -> tuple[OrderEvent, ...]:
         with self._event_lock:
             rows = tuple(self._updates)
             self._updates.clear()
         return rows
 
-    def poll_executions(self) -> tuple[PaperExecution, ...]:
+    def fills(self) -> tuple[ExecutionFill, ...]:
         with self._event_lock:
             rows = tuple(self._executions)
             self._executions.clear()
@@ -1213,7 +1541,7 @@ class IBKRPaperOrderService:
         # terminal "Cancelled filled=0" against already-recorded executions
         # and halts on a spurious mismatch.
         executed = (
-            self.journal.executed_quantity(intent.intent_id)
+            self.repository.executed_quantity(intent.order_id)
             if code == 202
             else Decimal("0")
         )
@@ -1231,18 +1559,18 @@ class IBKRPaperOrderService:
 
     def _recover_intent_mapping(
         self, broker_order_id: int
-    ) -> PaperOrderIntent | None:
+    ) -> OrderIntent | None:
         with self._correlation_lock:
             intent = self._intent_by_order.get(broker_order_id)
         if intent is None:
-            intent = self.journal.intent_for_broker_order(
+            intent = self.repository.intent_for_broker_order(
                 broker_order_id
             )
             if intent is not None:
                 with self._correlation_lock:
                     self._intent_by_order[broker_order_id] = intent
                     self._order_by_intent[
-                        intent.intent_id
+                        intent.order_id
                     ] = broker_order_id
         return intent
 
@@ -1254,8 +1582,8 @@ class IBKRPaperOrderService:
             intent = self._recover_intent_mapping(order_id)
             if intent is None:
                 continue
-            executed = self.journal.executed_quantity(
-                intent.intent_id
+            executed = self.repository.executed_quantity(
+                intent.order_id
             )
             normalized = status.casefold()
             reported_filled = (
@@ -1298,22 +1626,24 @@ class IBKRPaperOrderService:
             if intent is None:
                 return
             if status.casefold() in TERMINAL_ORDER_STATUSES:
-                self._cancel_requested.discard(intent.intent_id)
-        update = PaperOrderUpdate(
-            intent_id=intent.intent_id,
+                self._cancel_requested.discard(intent.order_id)
+        event = OrderEvent(
+            order_id=intent.order_id,
+            status=order_status_from_text(status),
             broker_order_id=broker_order_id,
-            status=status,
+            broker_status=status,
             filled=filled,
             remaining=remaining,
             average_fill_price=average_fill_price,
             last_fill_price=last_fill_price,
             message=message,
-            observed_at=_now_iso(),
+            idempotency_key=intent.idempotency_key,
+            occurred_at=datetime.now(timezone.utc),
         )
-        self.journal.record_update(update)
+        self.repository.record_event(event)
         self._mark_state_changed()
         with self._event_lock:
-            self._updates.append(update)
+            self._updates.append(event)
         if status.casefold() in TERMINAL_ORDER_STATUSES:
             with self._state_lock:
                 self._open_broker_orders.pop(
@@ -1325,58 +1655,62 @@ class IBKRPaperOrderService:
         intent = self._recover_intent_mapping(order_id)
         if intent is None:
             return
-        paper_execution = PaperExecution(
-                intent_id=intent.intent_id,
+        fill = ExecutionFill(
+                order_id=intent.order_id,
                 broker_order_id=order_id,
                 execution_id=str(execution.execId),
                 symbol=str(contract.symbol).upper(),
                 side=(
-                    "BUY"
+                    Side.BUY
                     if str(execution.side).upper() in {"BOT", "BUY"}
-                    else "SELL"
+                    else Side.SELL
                 ),
                 quantity=Decimal(str(execution.shares)),
                 price=Decimal(str(execution.price)),
-                occurred_at=str(execution.time) or _now_iso(),
+                occurred_at=_execution_time(execution.time),
         )
-        if not self.journal.record_execution(paper_execution):
+        if not self.repository.record_fill(fill):
             return
         self._mark_state_changed()
-        whole_quantity = int(paper_execution.quantity)
-        if Decimal(whole_quantity) == paper_execution.quantity:
+        whole_quantity = int(fill.quantity)
+        if Decimal(whole_quantity) == fill.quantity:
+            # The sellable count is whole-share bookkeeping, so it only moves
+            # for a whole-share fill.  A fractional execution is still recorded
+            # and still reaches the runtime, which halts on it: silently
+            # rounding here would leave the local book quietly wrong.
             with self._state_lock:
-                if paper_execution.side == "BUY":
+                if fill.side is Side.BUY:
                     self._sellable_quantities[
-                        paper_execution.symbol
+                        fill.symbol
                     ] = (
                         self._sellable_quantities.get(
-                            paper_execution.symbol, 0
+                            fill.symbol, 0
                         )
                         + whole_quantity
                     )
                 else:
                     self._sellable_quantities[
-                        paper_execution.symbol
+                        fill.symbol
                     ] = max(
                         0,
                         self._sellable_quantities.get(
-                            paper_execution.symbol, 0
+                            fill.symbol, 0
                         )
                         - whole_quantity,
                     )
         with self._event_lock:
-            self._executions.append(paper_execution)
+            self._executions.append(fill)
         with self._correlation_lock:
-            self._submit_latency.pop(intent.intent_id, None)
+            self._submit_latency.pop(intent.order_id, None)
 
-    def submit_latency(self, intent_id: str) -> dict[str, str] | None:
+    def submit_latency(self, order_id: str) -> dict[str, str] | None:
         with self._correlation_lock:
-            return self._submit_latency.get(intent_id)
+            return self._submit_latency.get(order_id)
 
     def reconciliation_rows_with_latency(
         self, *, session_id: str | None = None, limit: int = 1000
     ) -> tuple[dict, ...]:
-        rows = self.journal.reconciliation_rows(
+        rows = self.repository.reconciliation_rows(
             session_id=session_id, limit=limit
         )
         results: list[dict] = []
@@ -1415,37 +1749,40 @@ class IBKRPaperOrderService:
     def sessions(
         self, *, limit: int = 50
     ) -> tuple[dict[str, object], ...]:
-        """Compatibility delegate; the journal owns this query.
+        """Compatibility delegate; the order store owns this query.
 
-        Kept because callers outside this repository cannot be ruled out. The
+        Kept because callers outside this adapter cannot be ruled out. The
         adapter deliberately holds no SQLite handle of its own.
         """
 
-        return self.journal.sessions(limit=limit)
+        return self.repository.sessions(limit=limit)
 
 
-def new_paper_order_intent(
-    *,
-    session_id: str,
-    strategy_version_id: str,
-    symbol: str,
-    side: str,
-    quantity: int,
-    limit_price: Decimal,
-    reason: str,
-) -> PaperOrderIntent:
-    return PaperOrderIntent(
-        intent_id=uuid4().hex,
-        session_id=session_id,
-        strategy_version_id=strategy_version_id,
-        symbol=symbol.strip().upper(),
-        side=side.strip().upper(),
-        quantity=quantity,
-        limit_price=limit_price,
-        reason=reason,
-        generated_at=_now_iso(),
-        idempotency_key=uuid4().hex,
-    )
+def _execution_time(value: object) -> datetime:
+    """IBKR's execution timestamp as a ``datetime``.
+
+    IBKR reports the time as text -- either an ISO instant or its own
+    ``YYYYMMDD HH:MM:SS`` form -- so both are accepted.  A value that matches
+    neither becomes the observation time rather than being stored as unreadable
+    text: the fill is real either way, and a timestamp the store can never parse
+    back would make the row useless to reconciliation later.
+    """
+
+    text = str(value).strip()
+    for parser in (
+        lambda raw: datetime.fromisoformat(raw.replace("Z", "+00:00")),
+        lambda raw: datetime.strptime(raw, "%Y%m%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        ),
+        lambda raw: datetime.strptime(raw, "%Y%m%d  %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        ),
+    ):
+        try:
+            return parser(text)
+        except ValueError:
+            continue
+    return datetime.now(timezone.utc)
 
 
 def _optional_decimal(value: float) -> Decimal | None:

@@ -195,6 +195,16 @@ BROKER_ACCOUNT_V2_METHODS = (
     "_start_shadow",
 )
 
+# Execution v2: the Paper execution stack moved out of the root package into
+# the trading layer, so ``desktop.py`` builds its order store and execution
+# service through the composition root instead of naming ``PaperOrderJournal``
+# and ``IBKRPaperOrderService``.  Declared so the guard can assert the delta.
+EXECUTION_V2_METHODS = (
+    "_start_auto_quant",
+    "_check_auto_order_channel",
+    "_finish_auto_quant_session_if_safe",
+)
+
 FROZEN_METHODS = (
     "_data_tab",
     "_history_finished",
@@ -963,6 +973,17 @@ BROKER_ACCOUNT_V2_CHANGED_MODULES = (
     "src/us_quant/ibkr_paper_orders.py",
 )
 
+# Execution v2: the Paper execution stack moved out of the root package into
+# the trading layer, so `desktop.py` builds its order store and execution
+# service through the composition root.  Only the three modules this guard
+# actually watches are listed here.
+EXECUTION_V2_CHANGED_MODULES = (
+    # Execution v2: retyped to the domain order types and the new ports.
+    "src/us_quant/paper_trading_service.py",
+    "src/us_quant/paper_session.py",
+    "src/us_quant/ibkr_paper_gateway.py",
+)
+
 
 def test_the_frozen_sibling_modules_are_untouched() -> None:
     """Spec 35/36/37: Paper, settings, workers and widgets are frozen."""
@@ -988,7 +1009,13 @@ def test_the_frozen_sibling_modules_are_untouched() -> None:
                 f"base commit {BASE_COMMIT} is unreachable; the "
                 "byte-equivalence guard cannot run"
             )
-        current = (_REPO_ROOT / path).read_text(encoding="utf-8")
+        current_path = _REPO_ROOT / path
+        if not current_path.exists():
+            # A deleted frozen module only counts as declared if this
+            # round said so; an undeclared deletion must still fail.
+            changed.append(path)
+            continue
+        current = current_path.read_text(encoding="utf-8")
         if current != base:
             changed.append(path)
 
@@ -997,6 +1024,7 @@ def test_the_frozen_sibling_modules_are_untouched() -> None:
     assert set(changed) == (
         set(MARKET_DATA_V2_CHANGED_MODULES)
         | set(BROKER_ACCOUNT_V2_CHANGED_MODULES)
+        | set(EXECUTION_V2_CHANGED_MODULES)
     )
 
 
@@ -1093,11 +1121,13 @@ def test_only_the_declared_methods_changed() -> None:
         set(declared)
         | set(BROKER_ACCOUNT_V2_METHODS)
         | set(STRATEGY_V2_METHODS)
+        | set(EXECUTION_V2_METHODS)
     )
     assert set(changed) <= declared
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)
     assert set(BROKER_ACCOUNT_V2_METHODS) <= set(changed)
     assert set(STRATEGY_V2_METHODS) <= set(changed)
+    assert set(EXECUTION_V2_METHODS) <= set(changed)
     for name in REFACTORED_METHODS:
         if name != "__init__":
             assert name in changed, name

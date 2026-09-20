@@ -12,17 +12,18 @@ from us_quant.auto_quant import (
     evaluate_auto_quant_preflight,
 )
 from us_quant.auto_intraday import resolve_paper_session_capital
-from us_quant.ibkr_paper_orders import (
-    IBKRPaperOrderUncertainError,
-    PaperExecution,
-    PaperOrderIntent,
-    PaperOrderUpdate,
-    new_paper_order_intent,
-)
+from us_quant.trading.application.execution import ExecutionApplication
 from us_quant.trading.domain.market import (
     MarketDataMode,
     MarketQuote,
     MarketSnapshot,
+)
+from us_quant.trading.domain.orders import (
+    ExecutionFill,
+    OrderEvent,
+    OrderIntent,
+    OrderStatus,
+    Side,
 )
 from us_quant.trading.application.risk import RiskApplication
 from us_quant.trading.domain.risk import (
@@ -36,6 +37,11 @@ from us_quant.trading.domain.risk import (
 from us_quant.trading.domain.strategy import (
     StrategyIdentity,
     TradeAction,
+)
+from us_quant.trading.ports.broker_execution import (
+    BrokerOrderReservation,
+    ExecutionRefused,
+    ExecutionSubmissionUncertain,
 )
 from us_quant.shadow_paper import ShadowConfig
 
@@ -77,6 +83,229 @@ def _risk(
             symbols=symbols or {},
         ),
         exposure_multipliers=exposure_multipliers,
+    )
+
+
+#: A fixed observation time so order events and fills sort deterministically.
+_OBSERVED_AT = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
+
+
+class _FakeOrderRepository:
+    """In-memory order store for the execution application.
+
+    ``intent``, ``broker_order_id``, ``intent_for_idempotency_key`` and
+    ``record_intent`` must be genuinely consistent: the application's
+    duplicate-submit guard reads them back before it will reserve a broker id,
+    so an inconsistent fake would let the guard be bypassed silently.
+    """
+
+    def __init__(self) -> None:
+        self._intents: dict[str, OrderIntent] = {}
+        self._broker_order_ids: dict[str, int] = {}
+        self._statuses: dict[str, OrderStatus] = {}
+        self._fills: dict[str, list[ExecutionFill]] = {}
+        self._events: list[OrderEvent] = []
+        self._by_idempotency_key: dict[str, OrderIntent] = {}
+
+    @property
+    def recorded_intents(self) -> tuple[OrderIntent, ...]:
+        return tuple(self._intents.values())
+
+    @property
+    def recorded_count(self) -> int:
+        return len(self._intents)
+
+    def record_intent(
+        self,
+        intent: OrderIntent,
+        *,
+        broker_order_id: int,
+        account_alias: str,
+    ) -> None:
+        self._intents[intent.order_id] = intent
+        self._broker_order_ids[intent.order_id] = broker_order_id
+        self._statuses[intent.order_id] = OrderStatus.SUBMITTING
+        if intent.idempotency_key:
+            self._by_idempotency_key[intent.idempotency_key] = intent
+
+    def record_event(self, event: OrderEvent) -> None:
+        self._events.append(event)
+        self._statuses[event.order_id] = event.status
+
+    def record_fill(self, fill: ExecutionFill) -> bool:
+        stored = self._fills.setdefault(fill.order_id, [])
+        if any(row.execution_id == fill.execution_id for row in stored):
+            return False
+        stored.append(fill)
+        return True
+
+    def status(self, order_id: str) -> OrderStatus | None:
+        return self._statuses.get(order_id)
+
+    def intent(self, order_id: str) -> OrderIntent | None:
+        return self._intents.get(order_id)
+
+    def broker_order_id(self, order_id: str) -> int | None:
+        return self._broker_order_ids.get(order_id)
+
+    def fills(self, order_id: str) -> tuple[ExecutionFill, ...]:
+        return tuple(self._fills.get(order_id, ()))
+
+    def intent_for_idempotency_key(
+        self, idempotency_key: str
+    ) -> OrderIntent | None:
+        return self._by_idempotency_key.get(idempotency_key)
+
+    def executed_quantity(self, order_id: str) -> Decimal:
+        return sum(
+            (row.quantity for row in self._fills.get(order_id, ())),
+            Decimal("0"),
+        )
+
+    def max_broker_order_id(self) -> int:
+        return max(self._broker_order_ids.values(), default=0)
+
+
+class _RecordingBroker:
+    """A broker port that records every reserve/submit pair.
+
+    ``submitted`` collects the intents that actually reached ``submit``, in
+    send order, so a test can assert what the strategy asked for by reading the
+    intent off it.  ``refuse_reserve`` and ``uncertain_submit`` drive the two
+    failure modes the engine must react to without ever retrying.
+    """
+
+    def __init__(
+        self,
+        *,
+        submitted: list[OrderIntent] | None = None,
+        refuse_reserve: bool = False,
+        uncertain_submit: bool = False,
+    ) -> None:
+        self.submitted = submitted if submitted is not None else []
+        self.reserved: list[OrderIntent] = []
+        self._refuse_reserve = refuse_reserve
+        self._uncertain_submit = uncertain_submit
+        self._next_broker_order_id = 1000
+        self._intents_by_order_id: dict[str, OrderIntent] = {}
+
+    @property
+    def submitted_count(self) -> int:
+        return len(self.submitted)
+
+    def connect(self) -> None:
+        return None
+
+    def disconnect(self) -> None:
+        return None
+
+    def reserve(self, intent: OrderIntent) -> BrokerOrderReservation:
+        if self._refuse_reserve:
+            raise ExecutionRefused("synthetic reserve refusal")
+        self._next_broker_order_id += 1
+        self._intents_by_order_id[intent.order_id] = intent
+        self.reserved.append(intent)
+        return BrokerOrderReservation(
+            order_id=intent.order_id,
+            broker_order_id=self._next_broker_order_id,
+            account_alias="DU***TEST",
+        )
+
+    def submit(self, reservation: BrokerOrderReservation) -> None:
+        if self._uncertain_submit:
+            # The application re-raises this with the intent attached; the
+            # engine must then keep the order in its pending book.
+            raise ExecutionSubmissionUncertain(
+                "synthetic uncertain submission",
+                order_id=reservation.order_id,
+                broker_order_id=reservation.broker_order_id,
+            )
+        self.submitted.append(
+            self._intents_by_order_id[reservation.order_id]
+        )
+
+    def cancel(self, order_id: str) -> bool:
+        return True
+
+    def events(self) -> tuple[OrderEvent, ...]:
+        return ()
+
+    def fills(self) -> tuple[ExecutionFill, ...]:
+        return ()
+
+
+def _execution_app(
+    *,
+    submitted: list[OrderIntent] | None = None,
+    repository: _FakeOrderRepository | None = None,
+    refuse_reserve: bool = False,
+    uncertain_submit: bool = False,
+) -> ExecutionApplication:
+    """A real execution application over the in-memory fakes."""
+
+    return ExecutionApplication(
+        repository=repository or _FakeOrderRepository(),
+        broker=_RecordingBroker(
+            submitted=submitted,
+            refuse_reserve=refuse_reserve,
+            uncertain_submit=uncertain_submit,
+        ),
+    )
+
+
+def _intent_event(
+    intent: OrderIntent,
+    *,
+    status: OrderStatus,
+    filled: Decimal = Decimal("0"),
+    remaining: Decimal | None = None,
+    message: str = "",
+    occurred_at: datetime | None = None,
+) -> OrderEvent:
+    """A broker order-status report for one intent.
+
+    ``remaining`` defaults to the whole-share remainder so the cancel and
+    reject fixtures read naturally instead of restating the arithmetic.
+    """
+
+    return OrderEvent(
+        order_id=intent.order_id,
+        status=status,
+        broker_order_id=1,
+        broker_status=status.value,
+        filled=filled,
+        remaining=(
+            Decimal(intent.quantity) - filled
+            if remaining is None
+            else remaining
+        ),
+        average_fill_price=intent.limit_price,
+        last_fill_price=intent.limit_price,
+        message=message,
+        idempotency_key=intent.idempotency_key,
+        occurred_at=occurred_at or _OBSERVED_AT,
+    )
+
+
+def _intent_fill(
+    intent: OrderIntent,
+    *,
+    execution_id: str,
+    quantity: Decimal | int,
+    price: Decimal | None = None,
+    occurred_at: datetime | None = None,
+) -> ExecutionFill:
+    """One broker execution for one intent, reported at broker precision."""
+
+    return ExecutionFill(
+        execution_id=execution_id,
+        order_id=intent.order_id,
+        broker_order_id=1,
+        symbol=intent.execution_symbol,
+        side=intent.side,
+        quantity=Decimal(quantity),
+        price=intent.limit_price if price is None else price,
+        occurred_at=occurred_at or _OBSERVED_AT,
     )
 
 
@@ -219,8 +448,8 @@ class AutoQuantTests(unittest.TestCase):
             )
         self.assertEqual(len(submitted), 1)
         intent = submitted[0]
-        self.assertEqual(intent.symbol, "MSFT")
-        self.assertEqual(intent.side, "BUY")
+        self.assertEqual(intent.execution_symbol, "MSFT")
+        self.assertEqual(intent.side, Side.BUY)
         self.assertIsInstance(intent.quantity, int)
         self.assertEqual(intent.quantity, 2)
         self.assertGreater(intent.limit_price, Decimal("400"))
@@ -245,39 +474,32 @@ class AutoQuantTests(unittest.TestCase):
             )
         buy = submitted[0]
         engine.on_execution(
-            PaperExecution(
-                intent_id=buy.intent_id,
-                broker_order_id=1,
+            _intent_fill(
+                buy,
                 execution_id="exec-buy",
-                symbol=buy.symbol,
-                side="BUY",
-                quantity=Decimal(buy.quantity),
+                quantity=buy.quantity,
                 price=buy.limit_price,
-                occurred_at=(start + timedelta(minutes=2)).isoformat(),
+                occurred_at=start + timedelta(minutes=2),
             )
         )
-        engine.on_order_update(
-            PaperOrderUpdate(
-                intent_id=buy.intent_id,
-                broker_order_id=1,
-                status="Filled",
+        engine.on_order_event(
+            _intent_event(
+                buy,
+                status=OrderStatus.FILLED,
                 filled=Decimal(buy.quantity),
                 remaining=Decimal("0"),
-                average_fill_price=buy.limit_price,
-                last_fill_price=buy.limit_price,
-                message="",
-                observed_at=start.isoformat(),
+                occurred_at=start,
             )
         )
         self.assertEqual(len(engine.snapshot().positions), 1)
         engine.request_stop()
         at = start + timedelta(minutes=3)
         engine.on_stream(
-            _snapshot(at, {buy.symbol: buy.limit_price}),
+            _snapshot(at, {buy.execution_symbol: buy.limit_price}),
             observed_at=at,
         )
         self.assertEqual(len(submitted), 2)
-        self.assertEqual(submitted[-1].side, "SELL")
+        self.assertEqual(submitted[-1].side.order_text, "SELL")
         self.assertEqual(submitted[-1].quantity, buy.quantity)
         self.assertEqual(started.candidate_count, 2)
 
@@ -302,40 +524,36 @@ class AutoQuantTests(unittest.TestCase):
             )
         buy = submitted[0]
         engine.on_execution(
-            PaperExecution(
-                intent_id=buy.intent_id,
-                broker_order_id=1,
+            _intent_fill(
+                buy,
                 execution_id="exec-buy-stop",
-                symbol=buy.symbol,
-                side="BUY",
-                quantity=Decimal(buy.quantity),
-                price=buy.limit_price,
-                occurred_at=start.isoformat(),
+                quantity=buy.quantity,
+                occurred_at=start,
             )
         )
-        engine.on_order_update(
-            PaperOrderUpdate(
-                intent_id=buy.intent_id,
-                broker_order_id=1,
-                status="Filled",
+        engine.on_order_event(
+            _intent_event(
+                buy,
+                status=OrderStatus.FILLED,
                 filled=Decimal(buy.quantity),
                 remaining=Decimal("0"),
-                average_fill_price=buy.limit_price,
-                last_fill_price=buy.limit_price,
-                message="",
-                observed_at=start.isoformat(),
+                occurred_at=start,
             )
         )
         engine.request_stop()
         for tick in range(10):
             at = start + timedelta(minutes=3) + timedelta(seconds=tick * 30)
             engine.on_stream(
-                _snapshot(at, {buy.symbol: buy.limit_price}),
+                _snapshot(at, {buy.execution_symbol: buy.limit_price}),
                 observed_at=at,
             )
-        sells = [intent for intent in submitted if intent.side == "SELL"]
+        sells = [
+            intent
+            for intent in submitted
+            if intent.side.order_text == "SELL"
+        ]
         self.assertEqual(len(sells), 1)
-        self.assertEqual(sells[0].symbol, buy.symbol)
+        self.assertEqual(sells[0].execution_symbol, buy.execution_symbol)
         self.assertEqual(sells[0].quantity, buy.quantity)
 
     def test_delayed_quotes_never_generate_order(self) -> None:
@@ -377,7 +595,7 @@ class AutoQuantTests(unittest.TestCase):
                 observed_at=at,
             )
         self.assertEqual(len(submitted), 1)
-        self.assertEqual(submitted[0].side, "BUY")
+        self.assertEqual(submitted[0].side, Side.BUY)
 
     def test_reference_gate_blocks_buy_when_reference_is_missing_or_negative(
         self,
@@ -422,7 +640,7 @@ class AutoQuantTests(unittest.TestCase):
             _snapshot(at, {"AAPL": Decimal("199")}), observed_at=at
         )
         self.assertEqual(len(submitted), 1)
-        self.assertEqual(submitted[0].side, "SELL")
+        self.assertEqual(submitted[0].side.order_text, "SELL")
 
     def test_pause_blocks_new_entries_without_flattening_and_can_resume(
         self,
@@ -462,7 +680,7 @@ class AutoQuantTests(unittest.TestCase):
             observed_at=at,
         )
         self.assertEqual(len(submitted), 1)
-        self.assertEqual(submitted[0].side, "BUY")
+        self.assertEqual(submitted[0].side, Side.BUY)
 
     def test_filled_status_waits_for_execution_before_new_entry(
         self,
@@ -485,17 +703,13 @@ class AutoQuantTests(unittest.TestCase):
                 observed_at=at,
             )
         intent = submitted[0]
-        waiting = engine.on_order_update(
-            PaperOrderUpdate(
-                intent_id=intent.intent_id,
-                broker_order_id=1,
-                status="Filled",
+        waiting = engine.on_order_event(
+            _intent_event(
+                intent,
+                status=OrderStatus.FILLED,
                 filled=Decimal(intent.quantity),
                 remaining=Decimal("0"),
-                average_fill_price=intent.limit_price,
-                last_fill_price=intent.limit_price,
-                message="",
-                observed_at=start.isoformat(),
+                occurred_at=start,
             )
         )
         self.assertEqual(len(waiting.pending_orders), 1)
@@ -508,15 +722,11 @@ class AutoQuantTests(unittest.TestCase):
         )
         self.assertEqual(len(submitted), 1)
         reconciled = engine.on_execution(
-            PaperExecution(
-                intent_id=intent.intent_id,
-                broker_order_id=1,
+            _intent_fill(
+                intent,
                 execution_id="exec-late",
-                symbol=intent.symbol,
-                side=intent.side,
-                quantity=Decimal(intent.quantity),
-                price=intent.limit_price,
-                occurred_at=start.isoformat(),
+                quantity=intent.quantity,
+                occurred_at=start,
             )
         )
         self.assertEqual(len(reconciled.pending_orders), 0)
@@ -541,17 +751,14 @@ class AutoQuantTests(unittest.TestCase):
                 observed_at=at,
             )
         intent = submitted[0]
-        rejected = engine.on_order_update(
-            PaperOrderUpdate(
-                intent_id=intent.intent_id,
-                broker_order_id=1,
-                status="Inactive",
+        rejected = engine.on_order_event(
+            _intent_event(
+                intent,
+                status=OrderStatus.INACTIVE,
                 filled=Decimal("0"),
                 remaining=Decimal(intent.quantity),
-                average_fill_price=None,
-                last_fill_price=None,
                 message="order rejected",
-                observed_at=start.isoformat(),
+                occurred_at=start,
             )
         )
         self.assertFalse(rejected.active)
@@ -565,13 +772,6 @@ class AutoQuantTests(unittest.TestCase):
         self.assertEqual(len(submitted), 1)
 
     def test_uncertain_submission_is_retained_and_halts(self) -> None:
-        def uncertain(intent):
-            raise IBKRPaperOrderUncertainError(
-                "uncertain",
-                intent_id=intent.intent_id,
-                broker_order_id=77,
-            )
-
         engine = AutoQuantEngine(
             candidates=(
                 AutoQuantCandidate(
@@ -591,7 +791,7 @@ class AutoQuantTests(unittest.TestCase):
             ),
             strategy=_STRATEGY,
             risk=_risk(),
-            order_sink=uncertain,
+            execution=_execution_app(uncertain_submit=True),
         )
         engine.start()
         start = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
@@ -633,7 +833,7 @@ class AutoQuantTests(unittest.TestCase):
             ),
             strategy=_STRATEGY,
             risk=_risk(),
-            order_sink=lambda intent: submitted.append(intent) or 1,
+            execution=_execution_app(submitted=submitted),
         )
         engine.start()
         start = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
@@ -674,29 +874,23 @@ class AutoQuantTests(unittest.TestCase):
             )
         buy = submitted[0]
         engine.on_execution(
-            PaperExecution(
-                intent_id=buy.intent_id,
-                broker_order_id=1,
+            _intent_fill(
+                buy,
                 execution_id="partial",
-                symbol=buy.symbol,
-                side="BUY",
-                quantity=Decimal("1"),
+                quantity=1,
                 price=buy.limit_price,
-                occurred_at=start.isoformat(),
+                occurred_at=start,
             )
         )
         engine.request_stop()
-        snapshot = engine.on_order_update(
-            PaperOrderUpdate(
-                intent_id=buy.intent_id,
-                broker_order_id=1,
-                status="Cancelled",
+        snapshot = engine.on_order_event(
+            _intent_event(
+                buy,
+                status=OrderStatus.CANCELED,
                 filled=Decimal("1"),
                 remaining=Decimal(buy.quantity - 1),
-                average_fill_price=buy.limit_price,
-                last_fill_price=buy.limit_price,
                 message="remainder cancelled",
-                observed_at=start.isoformat(),
+                occurred_at=start,
             )
         )
         self.assertTrue(snapshot.active)
@@ -709,28 +903,29 @@ class AutoQuantRecoveryTests(unittest.TestCase):
         engine = _engine([])
         started = engine.start()
         assert started.session_id is not None
-        original = new_paper_order_intent(
+        original = OrderIntent.create(
             session_id=started.session_id,
             strategy_version_id="version",
-            symbol="AAPL",
-            side="BUY",
+            signal_symbol="AAPL",
+            execution_symbol="AAPL",
+            side=Side.BUY,
             quantity=1,
             limit_price=Decimal("200"),
             reason="manual recovery fixture",
         )
-        engine.pending[original.intent_id] = original
-        engine._intents[original.intent_id] = original
+        engine.pending[original.order_id] = original
+        engine._intents[original.order_id] = original
 
         replacement = engine.resubmit_pending_intent(original)
 
         self.assertIsNotNone(replacement)
         assert replacement is not None
-        self.assertNotEqual(replacement.intent_id, original.intent_id)
+        self.assertNotEqual(replacement.order_id, original.order_id)
         self.assertNotEqual(
             replacement.idempotency_key, original.idempotency_key
         )
-        self.assertNotIn(original.intent_id, engine.pending)
-        self.assertIs(engine.pending[replacement.intent_id], replacement)
+        self.assertNotIn(original.order_id, engine.pending)
+        self.assertIs(engine.pending[replacement.order_id], replacement)
 
 
 def _engine(
@@ -738,10 +933,6 @@ def _engine(
     *,
     market_reference_symbols: tuple[str, ...] = (),
 ) -> AutoQuantEngine:
-    def sink(intent):
-        submitted.append(intent)
-        return len(submitted)
-
     return AutoQuantEngine(
         candidates=(
             AutoQuantCandidate(
@@ -765,7 +956,7 @@ def _engine(
         ),
         strategy=_STRATEGY,
         risk=_risk(),
-        order_sink=sink,
+        execution=_execution_app(submitted=submitted),
         market_reference_symbols=market_reference_symbols,
     )
 
@@ -826,10 +1017,7 @@ class MultiSymbolTests(unittest.TestCase):
             AutoQuantCandidate(symbol="AAA", name="A", sector="T", leader_tier=1, scan_score=Decimal("80"), signal="UP"),
             AutoQuantCandidate(symbol="BBB", name="B", sector="T", leader_tier=1, scan_score=Decimal("75"), signal="UP"),
         )
-        intents: list[PaperOrderIntent] = []
-        def sink(intent: PaperOrderIntent) -> int:
-            intents.append(intent)
-            return 1
+        intents: list[OrderIntent] = []
         engine = AutoQuantEngine(
             candidates=candidates,
             config=ShadowConfig(
@@ -851,7 +1039,7 @@ class MultiSymbolTests(unittest.TestCase):
                     "BBB": SymbolRiskOverrides(allowed=False),
                 }
             ),
-            order_sink=sink,
+            execution=_execution_app(submitted=intents),
         )
         engine.start()
         engine._histories = {
@@ -871,7 +1059,7 @@ class MultiSymbolTests(unittest.TestCase):
         )
         snapshot = engine.on_stream(MarketSnapshot(generation=1, connected=True, ready=True, reconnect_attempt=0, quotes=quotes, error_code=None, message="test", observed_at=observed, source_id="test_feed", source_label="TestFeed", coverage="test"), observed_at=observed)
         self.assertEqual(len(intents), 1)
-        self.assertEqual(intents[0].symbol, "AAA")
+        self.assertEqual(intents[0].execution_symbol, "AAA")
         self.assertEqual(intents[0].quantity, 49)
         self.assertEqual(len(snapshot.positions), 0)
         self.assertEqual(len(snapshot.pending_orders), 1)
@@ -915,7 +1103,7 @@ class MultiSymbolTests(unittest.TestCase):
                     drawdown_halt_pct=Decimal("0.50"),
                 )
             ),
-            order_sink=lambda intent: submitted.append(intent) or len(submitted),
+            execution=_execution_app(submitted=submitted),
         )
         engine.start()
         start = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
@@ -932,32 +1120,25 @@ class MultiSymbolTests(unittest.TestCase):
                 ),
                 observed_at=at,
             )
-        buys = [i for i in submitted if i.side == "BUY"]
+        buys = [i for i in submitted if i.side.order_text == "BUY"]
         self.assertEqual(len(buys), 1)
         buy = buys[0]
         engine.on_execution(
-            PaperExecution(
-                intent_id=buy.intent_id,
-                broker_order_id=1,
+            _intent_fill(
+                buy,
                 execution_id="exec-loss-buy",
-                symbol=buy.symbol,
-                side="BUY",
-                quantity=Decimal(buy.quantity),
+                quantity=buy.quantity,
                 price=buy.limit_price,
-                occurred_at=(start + timedelta(minutes=2)).isoformat(),
+                occurred_at=start + timedelta(minutes=2),
             )
         )
-        engine.on_order_update(
-            PaperOrderUpdate(
-                intent_id=buy.intent_id,
-                broker_order_id=1,
-                status="Filled",
+        engine.on_order_event(
+            _intent_event(
+                buy,
+                status=OrderStatus.FILLED,
                 filled=Decimal(buy.quantity),
                 remaining=Decimal("0"),
-                average_fill_price=buy.limit_price,
-                last_fill_price=buy.limit_price,
-                message="",
-                observed_at=start.isoformat(),
+                occurred_at=start,
             )
         )
         # AAPL collapses 15% (below the 1% account daily-loss halt) while
@@ -973,7 +1154,7 @@ class MultiSymbolTests(unittest.TestCase):
         )
         self.assertIn("daily account loss halt is active", engine.status)
         self.assertEqual(
-            len([i for i in submitted if i.side == "BUY"]), 1
+            len([i for i in submitted if i.side.order_text == "BUY"]), 1
         )
 
     def test_account_drawdown_halts_entries_after_peak(self) -> None:
@@ -1015,7 +1196,7 @@ class MultiSymbolTests(unittest.TestCase):
                     drawdown_halt_pct=Decimal("0.05"),
                 )
             ),
-            order_sink=lambda intent: submitted.append(intent) or len(submitted),
+            execution=_execution_app(submitted=submitted),
         )
         engine.start()
         start = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
@@ -1029,32 +1210,25 @@ class MultiSymbolTests(unittest.TestCase):
                 ),
                 observed_at=at,
             )
-        buys = [i for i in submitted if i.side == "BUY"]
+        buys = [i for i in submitted if i.side.order_text == "BUY"]
         self.assertEqual(len(buys), 1)
         buy = buys[0]
         engine.on_execution(
-            PaperExecution(
-                intent_id=buy.intent_id,
-                broker_order_id=1,
+            _intent_fill(
+                buy,
                 execution_id="exec-dd-buy",
-                symbol=buy.symbol,
-                side="BUY",
-                quantity=Decimal(buy.quantity),
+                quantity=buy.quantity,
                 price=buy.limit_price,
-                occurred_at=(start + timedelta(minutes=2)).isoformat(),
+                occurred_at=start + timedelta(minutes=2),
             )
         )
-        engine.on_order_update(
-            PaperOrderUpdate(
-                intent_id=buy.intent_id,
-                broker_order_id=1,
-                status="Filled",
+        engine.on_order_event(
+            _intent_event(
+                buy,
+                status=OrderStatus.FILLED,
                 filled=Decimal(buy.quantity),
                 remaining=Decimal("0"),
-                average_fill_price=buy.limit_price,
-                last_fill_price=buy.limit_price,
-                message="",
-                observed_at=start.isoformat(),
+                occurred_at=start,
             )
         )
         # AAPL peaks near 212 then collapses to 80 (-62% from peak, far
@@ -1071,7 +1245,7 @@ class MultiSymbolTests(unittest.TestCase):
         )
         self.assertIn("account drawdown halt is active", engine.status)
         self.assertEqual(
-            len([i for i in submitted if i.side == "BUY"]), 1
+            len([i for i in submitted if i.side.order_text == "BUY"]), 1
         )
 
     def test_risk_exit_limit_prices_off_the_bid(self) -> None:
@@ -1096,28 +1270,21 @@ class MultiSymbolTests(unittest.TestCase):
             )
         buy = submitted[0]
         engine.on_execution(
-            PaperExecution(
-                intent_id=buy.intent_id,
-                broker_order_id=1,
+            _intent_fill(
+                buy,
                 execution_id="exec-bid-exit",
-                symbol=buy.symbol,
-                side="BUY",
-                quantity=Decimal(buy.quantity),
+                quantity=buy.quantity,
                 price=buy.limit_price,
-                occurred_at=(start + timedelta(minutes=2)).isoformat(),
+                occurred_at=start + timedelta(minutes=2),
             )
         )
-        engine.on_order_update(
-            PaperOrderUpdate(
-                intent_id=buy.intent_id,
-                broker_order_id=1,
-                status="Filled",
+        engine.on_order_event(
+            _intent_event(
+                buy,
+                status=OrderStatus.FILLED,
                 filled=Decimal(buy.quantity),
                 remaining=Decimal("0"),
-                average_fill_price=buy.limit_price,
-                last_fill_price=buy.limit_price,
-                message="",
-                observed_at=start.isoformat(),
+                occurred_at=start,
             )
         )
         # Wide spread: bid 195 / ask 205.  The mid (200) triggers the 0.7%
@@ -1139,7 +1306,7 @@ class MultiSymbolTests(unittest.TestCase):
             ),
         )
         engine.on_stream(snapshot, observed_at=at)
-        sells = [i for i in submitted if i.side == "SELL"]
+        sells = [i for i in submitted if i.side.order_text == "SELL"]
         self.assertEqual(len(sells), 1)
         self.assertLessEqual(sells[0].limit_price, Decimal("195"))
 
@@ -1148,10 +1315,7 @@ class MultiSymbolTests(unittest.TestCase):
             AutoQuantCandidate(symbol="AAA", name="A", sector="T", leader_tier=1, scan_score=Decimal("80"), signal="UP"),
             AutoQuantCandidate(symbol="BBB", name="B", sector="T", leader_tier=1, scan_score=Decimal("75"), signal="UP"),
         )
-        intents: list[PaperOrderIntent] = []
-        def sink(intent: PaperOrderIntent) -> int:
-            intents.append(intent)
-            return 1
+        intents: list[OrderIntent] = []
         engine = AutoQuantEngine(
             candidates=candidates,
             config=ShadowConfig(
@@ -1166,7 +1330,7 @@ class MultiSymbolTests(unittest.TestCase):
             ),
             strategy=_STRATEGY,
             risk=_risk(),
-            order_sink=sink,
+            execution=_execution_app(submitted=intents),
         )
         engine.positions = {
             "AAA": AutoQuantPosition(symbol="AAA", quantity=10, average_price=Decimal("10"), opened_at=datetime(2024, 1, 2, 10, 0, tzinfo=timezone.utc).isoformat(), high_water=Decimal("10.5"), provider="test"),
@@ -1176,7 +1340,7 @@ class MultiSymbolTests(unittest.TestCase):
         quote = MarketQuote(symbol="AAA", bid=Decimal("11.1"), ask=Decimal("11.12"), last=Decimal("11.1"), close=None, bid_size=None, ask_size=None, mode=MarketDataMode.REALTIME, updated_at=observed, age_seconds=0, stale=False, stale_reason=None, generation=1, source_id="test_feed", source_label="TestFeed", coverage="test")
         engine._check_exit(observed, quote)
         self.assertEqual(len(intents), 1)
-        self.assertEqual(intents[0].symbol, "AAA")
+        self.assertEqual(intents[0].execution_symbol, "AAA")
 
 
 class _RecordingRisk(RiskApplication):
@@ -1237,7 +1401,7 @@ def _single_candidate_engine(
         ),
         strategy=_STRATEGY,
         risk=risk,
-        order_sink=lambda intent: submitted.append(intent) or 1,
+        execution=_execution_app(submitted=submitted),
     )
     engine.start()
     engine._histories["AAA"] = deque(
@@ -1294,7 +1458,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
                 ),
                 strategy=_STRATEGY,
                 risk=None,
-                order_sink=lambda intent: 1,
+                execution=_execution_app(),
             )
         with self.assertRaises(TypeError):
             AutoQuantEngine(
@@ -1308,7 +1472,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
                 ),
                 strategy="version",
                 risk=_risk(),
-                order_sink=lambda intent: 1,
+                execution=_execution_app(),
             )
 
     def test_the_snapshot_projects_the_bound_identity(self) -> None:
@@ -1324,7 +1488,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
     def test_the_risk_layer_trims_the_quantity_the_sink_receives(self) -> None:
         """Spec 105: strategy wants half the account, risk allows 10%."""
 
-        submitted: list[PaperOrderIntent] = []
+        submitted: list[OrderIntent] = []
         risk = _RecordingRisk(
             LayeredRiskLimits(
                 account=RiskLimits(
@@ -1362,7 +1526,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
                 "BBB", "B", "T", 1, Decimal("75"), "趋势候选"
             ),
         )
-        intents: list[PaperOrderIntent] = []
+        intents: list[OrderIntent] = []
         engine = AutoQuantEngine(
             candidates=candidates,
             config=ShadowConfig(
@@ -1380,7 +1544,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
             risk=_risk(
                 symbols={"AAA": SymbolRiskOverrides(allowed=False)}
             ),
-            order_sink=lambda intent: intents.append(intent) or 1,
+            execution=_execution_app(submitted=intents),
         )
         engine.start()
         engine._histories = {
@@ -1418,7 +1582,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
             ),
             observed_at=observed,
         )
-        self.assertEqual([intent.symbol for intent in intents], ["BBB"])
+        self.assertEqual([intent.execution_symbol for intent in intents], ["BBB"])
         self.assertEqual(len(intents), 1)
 
     def test_an_account_wide_halt_leaves_no_buy_intents(self) -> None:
@@ -1432,7 +1596,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
                 "BBB", "B", "T", 1, Decimal("75"), "趋势候选"
             ),
         )
-        intents: list[PaperOrderIntent] = []
+        intents: list[OrderIntent] = []
         engine = AutoQuantEngine(
             candidates=candidates,
             config=ShadowConfig(
@@ -1455,7 +1619,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
                     drawdown_halt_pct=Decimal("1"),
                 )
             ),
-            order_sink=lambda intent: intents.append(intent) or 1,
+            execution=_execution_app(submitted=intents),
         )
         engine.start()
         # A 10% equity loss with no positions: the halt is an account fact,
@@ -1502,7 +1666,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
     def test_every_exit_is_proposed_to_the_risk_layer(self) -> None:
         """Spec 108: stop-loss, force-flat and user stops all pass risk."""
 
-        submitted: list[PaperOrderIntent] = []
+        submitted: list[OrderIntent] = []
         risk = _RecordingRisk(
             LayeredRiskLimits(
                 account=RiskLimits(
@@ -1521,28 +1685,21 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
         )
         buy = submitted[0]
         engine.on_execution(
-            PaperExecution(
-                intent_id=buy.intent_id,
-                broker_order_id=1,
+            _intent_fill(
+                buy,
                 execution_id="exec-risk-exit",
-                symbol=buy.symbol,
-                side="BUY",
-                quantity=Decimal(buy.quantity),
+                quantity=buy.quantity,
                 price=buy.limit_price,
-                occurred_at=observed.isoformat(),
+                occurred_at=observed,
             )
         )
-        engine.on_order_update(
-            PaperOrderUpdate(
-                intent_id=buy.intent_id,
-                broker_order_id=1,
-                status="Filled",
+        engine.on_order_event(
+            _intent_event(
+                buy,
+                status=OrderStatus.FILLED,
                 filled=Decimal(buy.quantity),
                 remaining=Decimal("0"),
-                average_fill_price=buy.limit_price,
-                last_fill_price=buy.limit_price,
-                message="",
-                observed_at=observed.isoformat(),
+                occurred_at=observed,
             )
         )
         # A 5% collapse trips the 0.7% stop-loss on the next tick.
@@ -1551,7 +1708,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
             _snapshot(later, {"AAA": Decimal("9.5")}),
             observed_at=later,
         )
-        sells = [intent for intent in submitted if intent.side == "SELL"]
+        sells = [intent for intent in submitted if intent.side.order_text == "SELL"]
         self.assertEqual(len(sells), 1)
         self.assertEqual(sells[0].quantity, buy.quantity)
         self.assertIn(TradeAction.SELL, risk.actions)
@@ -1564,7 +1721,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
     def test_a_refused_exit_halts_the_session_for_a_human(self) -> None:
         """Spec 77: a refusal of a lawful reduction is not retried through."""
 
-        submitted: list[PaperOrderIntent] = []
+        submitted: list[OrderIntent] = []
         risk = _RefusingExitRisk(
             LayeredRiskLimits(
                 account=RiskLimits(
@@ -1583,28 +1740,21 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
         )
         buy = submitted[0]
         engine.on_execution(
-            PaperExecution(
-                intent_id=buy.intent_id,
-                broker_order_id=1,
+            _intent_fill(
+                buy,
                 execution_id="exec-refused-exit",
-                symbol=buy.symbol,
-                side="BUY",
-                quantity=Decimal(buy.quantity),
+                quantity=buy.quantity,
                 price=buy.limit_price,
-                occurred_at=observed.isoformat(),
+                occurred_at=observed,
             )
         )
-        engine.on_order_update(
-            PaperOrderUpdate(
-                intent_id=buy.intent_id,
-                broker_order_id=1,
-                status="Filled",
+        engine.on_order_event(
+            _intent_event(
+                buy,
+                status=OrderStatus.FILLED,
                 filled=Decimal(buy.quantity),
                 remaining=Decimal("0"),
-                average_fill_price=buy.limit_price,
-                last_fill_price=buy.limit_price,
-                message="",
-                observed_at=observed.isoformat(),
+                occurred_at=observed,
             )
         )
         later = observed + timedelta(minutes=1)
@@ -1615,13 +1765,13 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
         self.assertFalse(engine.active)
         self.assertIn("人工对账", engine.status)
         self.assertEqual(
-            [intent for intent in submitted if intent.side == "SELL"], []
+            [intent for intent in submitted if intent.side.order_text == "SELL"], []
         )
 
     def test_only_one_active_sell_per_position_is_ever_open(self) -> None:
         """CR-1: a refused-then-approved exit loop must not flood the broker."""
 
-        submitted: list[PaperOrderIntent] = []
+        submitted: list[OrderIntent] = []
         engine = _single_candidate_engine(_risk(), submitted)
         observed = datetime(2024, 1, 2, 20, 0, tzinfo=timezone.utc)
         engine.on_stream(
@@ -1630,28 +1780,21 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
         )
         buy = submitted[0]
         engine.on_execution(
-            PaperExecution(
-                intent_id=buy.intent_id,
-                broker_order_id=1,
+            _intent_fill(
+                buy,
                 execution_id="exec-cr1",
-                symbol=buy.symbol,
-                side="BUY",
-                quantity=Decimal(buy.quantity),
+                quantity=buy.quantity,
                 price=buy.limit_price,
-                occurred_at=observed.isoformat(),
+                occurred_at=observed,
             )
         )
-        engine.on_order_update(
-            PaperOrderUpdate(
-                intent_id=buy.intent_id,
-                broker_order_id=1,
-                status="Filled",
+        engine.on_order_event(
+            _intent_event(
+                buy,
+                status=OrderStatus.FILLED,
                 filled=Decimal(buy.quantity),
                 remaining=Decimal("0"),
-                average_fill_price=buy.limit_price,
-                last_fill_price=buy.limit_price,
-                message="",
-                observed_at=observed.isoformat(),
+                occurred_at=observed,
             )
         )
         for minute in range(1, 4):
@@ -1661,7 +1804,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
                 observed_at=at,
             )
         self.assertEqual(
-            len([i for i in submitted if i.side == "SELL"]), 1
+            len([i for i in submitted if i.side.order_text == "SELL"]), 1
         )
         self.assertEqual(len(engine.pending), 1)
 
@@ -1710,7 +1853,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
     def test_the_session_fraction_is_visible_as_a_risk_reduction(self) -> None:
         """The strategy requests its size; risk alone applies the session cap."""
 
-        submitted: list[PaperOrderIntent] = []
+        submitted: list[OrderIntent] = []
         risk = _RecordingRisk(
             LayeredRiskLimits(
                 account=RiskLimits(

@@ -1,24 +1,24 @@
-"""Step 5: the pure Paper order model layer.
+"""The pure Paper *session* model layer.
 
 The models were relocated, not redesigned, so these tests pin the contract the
-rest of the codebase depends on: field names, frozen/slots, defaults, and the
-fact that the old import path and the new one are the same object.
+rest of the codebase depends on: field names, frozen/slots, defaults.
+
+The per-order DTOs (``PaperOrderIntent`` / ``PaperOrderUpdate`` /
+``PaperExecution``) are gone: Execution v2 makes the domain's ``OrderIntent``,
+``OrderEvent`` and ``ExecutionFill`` the single order vocabulary, and a second
+set of order shapes is how two readings of one order start to differ.  What
+remains is the session-side data the window still displays.
 """
 
 from __future__ import annotations
 
 from dataclasses import MISSING, fields, is_dataclass
-from decimal import Decimal
 from pathlib import Path
 import sys
 
-from us_quant import ibkr_paper_orders as old_path
 from us_quant import paper_order_models as models
 
 MIGRATED_MODELS = (
-    "PaperOrderIntent",
-    "PaperOrderUpdate",
-    "PaperExecution",
     "PaperOrderConnection",
     "PaperBrokerPosition",
     "PaperBrokerState",
@@ -28,12 +28,14 @@ MIGRATED_MODELS = (
     "PaperReconciliationSnapshot",
 )
 
-
-def _field_map(cls: type) -> dict[str, tuple[str, object]]:
-    return {
-        field.name: (str(field.type), field.default)
-        for field in fields(cls)
-    }
+#: The order DTOs this migration removed.  Naming them here means a
+#: re-introduced second order vocabulary fails this file rather than quietly
+#: becoming a parallel truth.
+RETIRED_ORDER_MODELS = (
+    "PaperOrderIntent",
+    "PaperOrderUpdate",
+    "PaperExecution",
+)
 
 
 def test_models_module_has_no_runtime_dependencies() -> None:
@@ -47,7 +49,7 @@ def test_models_module_has_no_runtime_dependencies() -> None:
         "PySide6",
         "desktop",
         "paper_trading_service",
-        "IBKRPaperOrderService",
+        "IBKRExecutionAdapter",
         "connect_sqlite",
         "IBKR",
     ):
@@ -73,47 +75,19 @@ def test_every_migrated_model_is_a_frozen_slots_dataclass() -> None:
         assert "__slots__" in cls.__dict__, name
 
 
-def test_migrated_models_keep_their_exact_field_contract() -> None:
-    """Field names, order, types and defaults are part of the on-disk format.
+def test_the_order_dtos_are_gone() -> None:
+    for name in RETIRED_ORDER_MODELS:
+        assert not hasattr(models, name), name
 
-    The journal writes these values by position and reads them back by name,
-    so a rename or a reordered default silently corrupts stored orders.
+
+def test_migrated_models_keep_their_exact_field_contract() -> None:
+    """Field names, order, types and defaults are part of the on-disk contract.
+
+    The store writes these values by position and reads them back by name, so a
+    rename or a reordered default silently corrupts stored orders.
     """
 
     expected = {
-        "PaperOrderIntent": [
-            ("intent_id", "str", None),
-            ("session_id", "str", None),
-            ("strategy_version_id", "str", None),
-            ("symbol", "str", None),
-            ("side", "str", None),
-            ("quantity", "int", None),
-            ("limit_price", "Decimal", None),
-            ("reason", "str", None),
-            ("generated_at", "str", None),
-            ("idempotency_key", "str | None", None),
-        ],
-        "PaperOrderUpdate": [
-            ("intent_id", "str", None),
-            ("broker_order_id", "int", None),
-            ("status", "str", None),
-            ("filled", "Decimal", None),
-            ("remaining", "Decimal", None),
-            ("average_fill_price", "Decimal | None", None),
-            ("last_fill_price", "Decimal | None", None),
-            ("message", "str", None),
-            ("observed_at", "str", None),
-        ],
-        "PaperExecution": [
-            ("intent_id", "str", None),
-            ("broker_order_id", "int", None),
-            ("execution_id", "str", None),
-            ("symbol", "str", None),
-            ("side", "str", None),
-            ("quantity", "Decimal", None),
-            ("price", "Decimal", None),
-            ("occurred_at", "str", None),
-        ],
         "PaperBrokerPosition": [
             ("symbol", "str", None),
             ("quantity", "Decimal", None),
@@ -147,20 +121,7 @@ def test_migrated_models_keep_their_exact_field_contract() -> None:
 
 
 def test_defaults_survive_the_move() -> None:
-    """The only defaulted fields in the layer, checked by value."""
-
-    intent = models.PaperOrderIntent(
-        intent_id="i",
-        session_id="s",
-        strategy_version_id="v",
-        symbol="AAPL",
-        side="BUY",
-        quantity=1,
-        limit_price=Decimal("1"),
-        reason="r",
-        generated_at="g",
-    )
-    assert intent.idempotency_key is None
+    """The defaults in the remaining layer, checked by value."""
 
     connection = models.PaperOrderConnection(
         connected=True,
@@ -177,14 +138,9 @@ def test_defaults_survive_the_move() -> None:
 
 
 def test_models_keep_their_declared_defaults() -> None:
-    """Defaults are part of the constructor contract, not decoration.
-
-    The layer has exactly four defaulted fields; they are read here as values
-    so that flipping one is caught even though the field list still matches.
-    """
+    """Defaults are part of the constructor contract, not decoration."""
 
     expected = {
-        "PaperOrderIntent": {"idempotency_key": None},
         "PaperOrderConnection": {
             "open_broker_orders": 0,
             "unreconciled_local_orders": 0,
@@ -216,28 +172,20 @@ def test_models_keep_their_declared_defaults() -> None:
             assert (name, field.name) in seen, f"{name}.{field.name}"
 
 
-def test_old_and_new_import_paths_are_the_same_objects() -> None:
-    """Re-exports, not subclasses or wrappers; identity is what matters."""
-
-    for name in MIGRATED_MODELS:
-        assert getattr(old_path, name) is getattr(models, name), name
-
-    assert old_path.TERMINAL_ORDER_STATUSES is models.TERMINAL_ORDER_STATUSES
-
-
 def test_terminal_statuses_are_defined_exactly_once() -> None:
-    """Both the journal and the adapter read this vocabulary."""
+    """Both the order store and the adapter read this vocabulary.
 
-    import us_quant.paper_order_journal as journal
+    It is the vocabulary of the *stored text*, so the broker spellings appear
+    here while the domain's ``OrderStatus`` uses its own.
+    """
 
-    assert journal.TERMINAL_ORDER_STATUSES is models.TERMINAL_ORDER_STATUSES
     assert models.TERMINAL_ORDER_STATUSES == frozenset(
         {"filled", "cancelled", "apicancelled", "inactive", "error"}
     )
 
 
 def test_models_are_not_defined_anywhere_else() -> None:
-    """A second definition would let the journal and adapter drift apart."""
+    """A second definition would let the store and adapter drift apart."""
 
     package = Path(models.__file__ or "").parent
     needles = tuple(f"class {name}:" for name in MIGRATED_MODELS) + tuple(
@@ -253,13 +201,13 @@ def test_models_are_not_defined_anywhere_else() -> None:
 
 
 def test_models_module_is_importable_without_the_adapter() -> None:
-    """Import isolation: the DTO layer must not drag the adapter in."""
+    """Import isolation: the DTO layer must not drag the execution adapter in."""
 
     import subprocess
 
     script = (
         "import sys; import us_quant.paper_order_models; "
-        "print('ibkr_paper_orders' in sys.modules)"
+        "print('us_quant.trading.adapters.ibkr.execution' in sys.modules)"
     )
     result = subprocess.run(
         [sys.executable, "-c", script],

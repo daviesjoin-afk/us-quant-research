@@ -257,25 +257,79 @@ def test_side_and_order_status_values_are_unchanged() -> None:
 
 def test_order_intent_create_derives_client_order_id_from_order_id() -> None:
     intent = OrderIntent.create(
+        session_id="s-1",
+        strategy_version_id="v-1",
         signal_symbol="AAPL",
         execution_symbol="AAPL",
         side=Side.BUY,
         quantity=2,
-        estimated_price=Decimal("100"),
+        limit_price=Decimal("100"),
+        reason="entry",
     )
     assert intent.client_order_id == f"uq-{intent.order_id}"
     assert isinstance(intent.quantity, int)
-    assert isinstance(intent.estimated_price, Decimal)
+    assert isinstance(intent.limit_price, Decimal)
+    # The idempotency key is per intent, not derived from the order id: a key
+    # derived from the identity could never collide, which would make the
+    # duplicate-key guard vacuous.
+    assert intent.idempotency_key
+    assert intent.idempotency_key != intent.client_order_id
+
+
+def test_order_intent_carries_the_context_an_order_needs() -> None:
+    """Session, strategy, reason and price are recorded, not re-derivable."""
+
+    intent = OrderIntent.create(
+        session_id="s-1",
+        strategy_version_id="v-1",
+        signal_symbol="aapl",
+        execution_symbol="aapl",
+        side=Side.SELL,
+        quantity=1,
+        limit_price=Decimal("101.5"),
+        reason="trimmed 3 → 1",
+    )
+    assert intent.session_id == "s-1"
+    assert intent.strategy_version_id == "v-1"
+    assert intent.signal_symbol == "AAPL"
+    assert intent.execution_symbol == "AAPL"
+    assert intent.side is Side.SELL
+    assert intent.reason == "trimmed 3 → 1"
+    assert intent.created_at.tzinfo is not None
+
+
+def test_side_round_trips_the_order_text() -> None:
+    assert Side.BUY.order_text == "BUY"
+    assert Side.SELL.order_text == "SELL"
+    assert Side.from_order_text(" buy ") is Side.BUY
+    assert Side.from_order_text("SELL") is Side.SELL
+    with pytest.raises(ValueError, match="unsupported order side"):
+        Side.from_order_text("SHORT")
+
+
+def test_order_status_terminality_is_declared_not_guessed() -> None:
+    assert OrderStatus.FILLED.is_terminal is True
+    assert OrderStatus.CANCELED.is_terminal is True
+    assert OrderStatus.INACTIVE.is_terminal is True
+    assert OrderStatus.BROKER_REJECTED.is_terminal is True
+    assert OrderStatus.ACKNOWLEDGED.is_terminal is False
+    assert OrderStatus.PARTIALLY_FILLED.is_terminal is False
+    # "I do not know what the broker did" is not "finished".
+    assert OrderStatus.UNKNOWN.is_terminal is False
 
 
 def test_order_intent_requires_positive_whole_shares() -> None:
     base = {
         "order_id": "o-1",
         "client_order_id": "uq-o-1",
+        "session_id": "s-1",
+        "strategy_version_id": "v-1",
         "signal_symbol": "AAPL",
         "execution_symbol": "AAPL",
         "side": Side.BUY,
-        "estimated_price": Decimal("100"),
+        "limit_price": Decimal("100"),
+        "reason": "r",
+        "idempotency_key": "k-1",
     }
     with pytest.raises(ValueError, match="positive whole number"):
         OrderIntent(**base, quantity=0)
@@ -290,49 +344,74 @@ def test_order_intent_requires_positive_price_and_multiplier() -> None:
     base = {
         "order_id": "o-1",
         "client_order_id": "uq-o-1",
+        "session_id": "s-1",
+        "strategy_version_id": "v-1",
         "signal_symbol": "AAPL",
         "execution_symbol": "AAPL",
         "side": Side.BUY,
         "quantity": 1,
+        "reason": "r",
+        "idempotency_key": "k-1",
     }
-    with pytest.raises(ValueError, match="estimated price must be positive"):
-        OrderIntent(**base, estimated_price=ZERO)
-    with pytest.raises(ValueError, match="estimated price must be positive"):
-        OrderIntent(**base, estimated_price=Decimal("-5"))
+    with pytest.raises(ValueError, match="limit price must be positive"):
+        OrderIntent(**base, limit_price=ZERO)
+    with pytest.raises(ValueError, match="limit price must be positive"):
+        OrderIntent(**base, limit_price=Decimal("-5"))
     with pytest.raises(ValueError, match="exposure multiplier must be positive"):
         OrderIntent(
             **base,
-            estimated_price=Decimal("10"),
+            limit_price=Decimal("10"),
             exposure_multiplier=ZERO,
         )
 
 
-def test_order_event_carries_status_and_defaults_payload_per_instance() -> None:
-    first = OrderEvent(
+def test_order_event_carries_the_status_facts_as_fields() -> None:
+    """A runtime policy must not have to spell ``payload["filled"]``."""
+
+    event = OrderEvent(
         order_id="o-1",
-        status=OrderStatus.CREATED,
+        status=OrderStatus.PARTIALLY_FILLED,
+        broker_order_id=17,
+        broker_status="Submitted",
+        filled=Decimal("2"),
+        remaining=Decimal("3"),
+        average_fill_price=Decimal("101"),
+        last_fill_price=Decimal("101.25"),
+        message="held",
         idempotency_key="k-1",
     )
-    second = OrderEvent(
+    assert event.filled == Decimal("2")
+    assert event.remaining == Decimal("3")
+    assert event.broker_status == "Submitted"
+    assert event.status is OrderStatus.PARTIALLY_FILLED
+    # ``payload`` stays for stores that persist a whole snapshot, but the
+    # status facts above are fields -- reading them out of a dict is how a
+    # policy comes to treat a missing key as zero.
+    assert event.payload == {}
+    other = OrderEvent(
         order_id="o-2",
         status=OrderStatus.CREATED,
-        idempotency_key="k-2",
+        broker_order_id=18,
+        broker_status="Submitted",
     )
-    assert first.payload == {}
-    assert first.payload is not second.payload
+    assert other.payload is not event.payload
 
 
-def test_execution_fill_requires_whole_share_quantity_and_decimal_price() -> None:
+def test_execution_fill_keeps_the_broker_quantity_at_full_precision() -> None:
+    """A fractional fill is a fact to halt on, never a number to round down."""
+
     fill = ExecutionFill(
         execution_id="e-1",
         order_id="o-1",
+        broker_order_id=17,
         symbol="AAPL",
         side=Side.BUY,
-        quantity=5,
+        quantity=Decimal("1.5"),
         price=Decimal("101.25"),
         occurred_at=_AT,
     )
-    assert isinstance(fill.quantity, int)
+    assert isinstance(fill.quantity, Decimal)
+    assert fill.quantity == Decimal("1.5")
     assert isinstance(fill.price, Decimal)
 
 

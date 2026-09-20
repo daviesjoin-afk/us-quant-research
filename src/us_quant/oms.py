@@ -207,7 +207,7 @@ class OrderManager:
     def register_intent(self, intent: OrderIntent) -> bool:
         payload = asdict(intent)
         payload["side"] = intent.side.value
-        payload["estimated_price"] = str(intent.estimated_price)
+        payload["limit_price"] = str(intent.limit_price)
         payload["exposure_multiplier"] = str(intent.exposure_multiplier)
         payload["created_at"] = intent.created_at.isoformat()
         return self._journal.append(

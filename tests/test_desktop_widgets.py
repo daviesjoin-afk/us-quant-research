@@ -88,6 +88,13 @@ ALLOWED_QT_NAMES = {
     "QSizePolicy",
     "QVBoxLayout",
     "QWidget",
+    # Desktop Execution v2: the shared table and combo configuration lives here,
+    # so the execution page and the window apply one implementation of it.  The
+    # four names below are the types those two helpers name.
+    "QAbstractItemView",
+    "QComboBox",
+    "QHeaderView",
+    "QTableView",
 }
 
 

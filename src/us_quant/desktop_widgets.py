@@ -38,9 +38,13 @@ from PySide6.QtGui import (
 )
 
 from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QComboBox,
     QFrame,
+    QHeaderView,
     QLabel,
     QSizePolicy,
+    QTableView,
     QVBoxLayout,
     QWidget,
 )
@@ -62,6 +66,60 @@ MARKET_DATA_MODE_LABELS = {
 }
 
 from us_quant.ui_theme import theme_palette
+
+
+def configure_table(table: QTableView) -> None:
+    """Apply the workbench's shared read-only table behaviour.
+
+    One implementation, because two would be free to drift and the drift would
+    show up as one table looking different from its neighbours.  It takes
+    ``QTableView`` rather than ``QTableWidget`` so the model-backed and
+    item-backed tables share it: every call below is defined on the base class,
+    and the selection constants the window used to spell as ``QTableWidget.*``
+    are the same values on ``QAbstractItemView``.
+    """
+
+    table.setAlternatingRowColors(True)
+    table.setSelectionBehavior(QAbstractItemView.SelectRows)
+    table.setSelectionMode(QAbstractItemView.SingleSelection)
+    table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+    table.setWordWrap(False)
+    table.setTextElideMode(Qt.ElideRight)
+    table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+    table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+    table.verticalHeader().setVisible(False)
+    header = table.horizontalHeader()
+    header.setSectionResizeMode(QHeaderView.Interactive)
+    header.setMinimumSectionSize(72)
+    header.setDefaultSectionSize(128)
+    header.setStretchLastSection(True)
+    table.setSortingEnabled(True)
+
+
+def configure_combo_width(
+    combo: QComboBox,
+    *,
+    minimum_width: int,
+    minimum_contents: int,
+) -> None:
+    """Size a runtime-selection combo the way every combo in the workbench is.
+
+    Shared for the same reason ``configure_table`` is: the execution page's
+    strategy combo and the window's other selection combos must not drift into
+    two different widths or two different tooltip behaviours.
+    """
+
+    combo.setMinimumWidth(minimum_width)
+    combo.setMinimumContentsLength(minimum_contents)
+    combo.setSizeAdjustPolicy(
+        QComboBox.AdjustToMinimumContentsLengthWithIcon
+    )
+    combo.setSizePolicy(
+        QSizePolicy.Expanding,
+        QSizePolicy.Fixed,
+    )
+    combo.currentTextChanged.connect(combo.setToolTip)
+    combo.setToolTip(combo.currentText())
 
 
 def _sortable_number(value: str) -> float | None:

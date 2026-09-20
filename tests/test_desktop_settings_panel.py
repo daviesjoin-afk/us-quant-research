@@ -146,7 +146,8 @@ STRATEGY_V2_REMOVED_METHODS = frozenset(
 )
 STRATEGY_V2_ADDED_METHODS = frozenset(
     {
-        "_auto_strategy_selection_changed",
+        # Desktop Execution v2 renamed this handler to
+        # ``_auto_strategy_selected``; see the delta below.
         "_populate_strategy_selection_combos",
         "_record_runtime_strategy_selection",
         "_refresh_strategy_page",
@@ -177,7 +178,6 @@ STRATEGY_V2_METHODS = frozenset(
         "_apply_theme",
         "_auto_order_service_connected",
         "_auto_quant_preflight",
-        "_auto_quant_tab",
         "_backtest_records",
         "_refresh_backtest_strategy_combo",
         "_selected_auto_strategy_record",
@@ -216,7 +216,6 @@ BROKER_ACCOUNT_V2_METHODS = (
     "_account_snapshot_finished",
     "_export_terminal_state",
     "_paper_simulation_capital",
-    "_populate_auto_quant_snapshot",
     "_refresh_account_snapshot",
     "_refresh_cards",
     "_refresh_queue_table",
@@ -250,6 +249,67 @@ RUNTIME_V2A_METHODS = (
     "_prepare_auto_quant_candidates",
     "_reset_auto_launch_controls",
     "_task_failed",
+)
+
+# Desktop Execution v2: the execution route became a native v2 page.  The
+# legacy builder and the two table populators it owned are deleted, the page and
+# its control publisher are the new surface, and every handler that used to write
+# a widget by attribute now writes through the page.  Declared so the guard can
+# still assert the delta exactly, in both directions.
+# Desktop Execution v2: the legacy route builder and the table populators it
+# owned are deleted, and the page plus its control publisher take their place.
+# Declared as a delta so the guard can assert the surface exactly, in both
+# directions.
+DESKTOP_EXECUTION_V2_REMOVED_METHODS = (
+    "_auto_quant_tab",
+    "_populate_auto_latency_table",
+    "_populate_auto_quant_snapshot",
+    "_populate_auto_shadow_table",
+)
+
+DESKTOP_EXECUTION_V2_ADDED_METHODS = (
+    "_auto_order_channel_failed",
+    "_auto_strategy_selected",
+    "_connect_execution_page",
+    "_launch_locked",
+    "_publish_execution_controls",
+    "_render_auto_quant_snapshot",
+    "_set_launch_busy",
+    "_stream_is_live",
+    "_build_v2_pages",
+    "_populate_strategy_selection_combos",
+)
+
+DESKTOP_EXECUTION_V2_METHODS = (
+    "__init__",
+    "_apply_paper_workflow_button_state",
+    "_apply_paper_workflow_result",
+    "_auto_candidate_preparation_failed",
+    "_auto_order_channel_checked",
+    "_auto_order_service_connected",
+    "_auto_quant_preflight",
+    "_check_auto_order_channel",
+    "_configure_combo_width",
+    "_configure_table",
+    "_configure_table_view",
+    "_confirm_and_start_auto_quant",
+    "_current_auto_launch_matches",
+    "_finish_auto_quant_session_if_safe",
+    "_populate_auto_quant_candidates",
+    "_prepare_auto_quant_candidates",
+    "_reconnect_auto_order_service",
+    "_refresh_auto_quant_preflight",
+    "_refresh_extended_hours_status",
+    "_refresh_market_scope_summary",
+    "_reset_auto_launch_controls",
+    "_select_auto_quant_candidates",
+    "_start_auto_quant",
+    "_start_stream",
+    "_stop_auto_market_data",
+    "_stop_stream",
+    "_stream_finished",
+    "_task_failed",
+    "_worker_finished",
 )
 
 #: The frozen handlers this round legitimately rewrote, with the reason.
@@ -1514,11 +1574,13 @@ def test_only_the_settings_tab_was_rewritten() -> None:
         set(LATER_ROUND_REMOVED_METHODS)
         | set(STRATEGY_V2_REMOVED_METHODS)
         | set(RISK_V2_REMOVED_METHODS)
+        | set(DESKTOP_EXECUTION_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
         | set(STRATEGY_V2_ADDED_METHODS)
         | set(RISK_V2_ADDED_METHODS)
+        | set(DESKTOP_EXECUTION_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1540,6 +1602,7 @@ def test_only_the_settings_tab_was_rewritten() -> None:
         | set(STRATEGY_V2_METHODS)
         | set(EXECUTION_V2_METHODS)
         | set(RUNTIME_V2A_METHODS)
+        | set(DESKTOP_EXECUTION_V2_METHODS)
     )
     # Exact, not a subset: every changed method must be declared, and
     # every declared method must actually have changed.
@@ -1549,6 +1612,7 @@ def test_only_the_settings_tab_was_rewritten() -> None:
     assert set(STRATEGY_V2_METHODS) <= set(changed)
     assert set(EXECUTION_V2_METHODS) <= set(changed)
     assert set(RUNTIME_V2A_METHODS) <= set(changed)
+    assert set(DESKTOP_EXECUTION_V2_METHODS) <= set(changed)
     assert "_settings_tab" in changed
 
 

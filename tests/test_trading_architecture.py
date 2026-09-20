@@ -624,6 +624,17 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "pages/market/presenter.py",
         "pages/market/rows.py",
         "pages/market/tables.py",
+        "pages/research/__init__.py",
+        "pages/research/targeted/__init__.py",
+        "pages/research/targeted/controls.py",
+        "pages/research/targeted/evidence_panel.py",
+        "pages/research/targeted/evidence_presenter.py",
+        "pages/research/targeted/models.py",
+        "pages/research/targeted/page.py",
+        "pages/research/targeted/rows.py",
+        "pages/research/targeted/session_panel.py",
+        "pages/research/targeted/session_presenter.py",
+        "pages/research/targeted/tables.py",
     }
 
 

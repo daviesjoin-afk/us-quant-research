@@ -253,7 +253,7 @@ def test_the_targeted_symbol_path_writes_the_page_field(monkeypatch) -> None:
     try:
         _capture_messages(monkeypatch)
         window.market_page.set_subscription_symbols(("AAPL", "MSFT"))
-        window.target_symbol_input.setText("NVDA")
+        window.targeted_validation_page.set_target_symbol("NVDA")
 
         window._sync_targeted_symbol_to_stream()
 

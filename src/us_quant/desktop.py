@@ -229,6 +229,18 @@ from us_quant.desktop_v2.pages.market.presenter import (
     control_view,
 )
 from us_quant.desktop_v2.pages.market.rows import quote_rows
+from us_quant.desktop_v2.pages.research.targeted import TargetedValidationPage
+from us_quant.desktop_v2.pages.research.targeted.evidence_presenter import (
+    evidence_view,
+)
+from us_quant.desktop_v2.pages.research.targeted.models import (
+    TargetedControlView,
+    TargetedStrategyOption,
+    TargetedValidationView,
+)
+from us_quant.desktop_v2.pages.research.targeted.session_presenter import (
+    session_view,
+)
 from us_quant.desktop_tasks import DesktopTaskController
 from us_quant.desktop_workers import (
     StreamWorker,
@@ -495,6 +507,15 @@ class MainWindow(QMainWindow):
         # workflow last set the subscription -- and handed to the page as text.
         self._market_scope = ""
         self._market_watchlist_note: str | None = None
+        # Targeted workspace facts the page renders but does not own.
+        self._target_status = "未指定"
+        self._minute_status = (
+            "分钟证据：输入代码后显示本地已录数据；只回放 fresh bid/ask。"
+        )
+        self._selected_robustness_run_id: str | None = None
+        self._selected_review_run_id: str | None = None
+        self._targeted_active_workspace: int | None = None
+        self._targeted_active_evidence_tab: int | None = None
         self.account_portfolio: BrokerAccountPortfolio | None = None
         self.stream_worker: StreamWorker | None = None
         self._pending_stream_switch: (
@@ -698,8 +719,10 @@ class MainWindow(QMainWindow):
         research.setObjectName("workflowSecondaryTabs")
         research.setDocumentMode(True)
         research.setTabPosition(QTabWidget.North)
+        self.targeted_validation_page = TargetedValidationPage(palette=self.theme)
+        self._connect_targeted_validation_page()
         for title, page in (
-            ("针对性验证", self._simulation_tab()),
+            ("针对性验证", self.targeted_validation_page),
             ("广域标的池", self._universe_tab()),
             ("历史数据", self._data_tab()),
             ("市场扫描", self._scanner_tab()),
@@ -826,6 +849,88 @@ class MainWindow(QMainWindow):
         page.stop_requested.connect(self._stop_stream)
         page.load_scan_watchlist_requested.connect(self._apply_intraday_watchlist)
 
+    def _connect_targeted_validation_page(self) -> None:
+        """Wire the targeted page's intents to the existing window handlers."""
+
+        page = self.targeted_validation_page
+        page.strategy_selected.connect(self._shadow_strategy_selection_changed)
+        page.target_apply_requested.connect(self._target_symbol_requested)
+        page.target_subscribe_requested.connect(self._target_subscribe_requested)
+        page.shadow_start_requested.connect(self._start_shadow)
+        page.shadow_stop_requested.connect(self._stop_shadow)
+        page.replay_requested.connect(self._run_targeted_replay)
+        page.robustness_requested.connect(self._run_targeted_robustness)
+        page.robustness_run_selected.connect(self._robustness_run_selected)
+        page.review_run_selected.connect(self._review_run_selected)
+
+    def _target_symbol_requested(self, symbol: str) -> None:
+        self.targeted_validation_page.set_target_symbol(symbol)
+        self._apply_target_symbol()
+
+    def _target_subscribe_requested(self, symbol: str) -> None:
+        self.targeted_validation_page.set_target_symbol(symbol)
+        self._sync_targeted_symbol_to_stream()
+
+    def _robustness_run_selected(self, run_id: str) -> None:
+        self._selected_robustness_run_id = run_id
+        self._publish_targeted_view()
+
+    def _review_run_selected(self, run_id: str) -> None:
+        self._selected_review_run_id = run_id
+        self._publish_targeted_view()
+
+    def _targeted_controls(self) -> TargetedControlView:
+        shadow_active = bool(
+            self.shadow_snapshot is not None and self.shadow_snapshot.active
+        )
+        return TargetedControlView(
+            strategy_enabled=not shadow_active,
+            target_enabled=not shadow_active,
+            subscribe_enabled=not shadow_active,
+            shadow_start_enabled=not shadow_active,
+            shadow_stop_enabled=shadow_active,
+            replay_enabled=True,
+            robustness_enabled=True,
+        )
+
+    def _publish_targeted_view(self) -> None:
+        """Project targeted business state and render it on the native page."""
+
+        if not hasattr(self, "targeted_validation_page"):
+            return
+        session = session_view(
+            snapshot=self.shadow_snapshot,
+            target_status=self._target_status,
+            minute_status=self._minute_status,
+            preflight=self.target_preflight_result,
+            controls=self._targeted_controls(),
+        )
+        evidence = evidence_view(
+            replay_results=tuple(self.targeted_replay_results),
+            robustness_results=tuple(self.targeted_robustness_results),
+            walk_forward_results=tuple(self.targeted_walk_forward_results),
+            overfit_results=tuple(self.targeted_overfit_results),
+            data_quality_results=tuple(self.targeted_data_quality_results),
+            execution_stress_results=tuple(
+                self.targeted_execution_stress_results
+            ),
+            review_results=tuple(self.targeted_review_results),
+            selected_robustness_run_id=self._selected_robustness_run_id,
+            selected_review_run_id=self._selected_review_run_id,
+        )
+        active_workspace = self._targeted_active_workspace
+        active_evidence_tab = self._targeted_active_evidence_tab
+        self._targeted_active_workspace = None
+        self._targeted_active_evidence_tab = None
+        self.targeted_validation_page.render(
+            TargetedValidationView(
+                session=session,
+                evidence=evidence,
+                active_workspace=active_workspace,
+                active_evidence_tab=active_evidence_tab,
+            )
+        )
+
     @staticmethod
     def _field_label(text: str) -> QLabel:
         label = QLabel(text)
@@ -860,534 +965,6 @@ class MainWindow(QMainWindow):
             }:
                 label.setWordWrap(True)
 
-    def _simulation_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setSpacing(10)
-
-        header_panel = QFrame()
-        header_panel.setObjectName("panel")
-        header_layout = QVBoxLayout(header_panel)
-        header_layout.setSpacing(3)
-        header_title = QLabel("内部策略仿真工作台")
-        header_title.setObjectName("sectionTitle")
-        header_boundary = QLabel(
-            "仅验证“行情 → 信号 → 成本后模拟成交 → 持仓 → 盈亏”链路；"
-            "不会向 IBKR 或任何券商发送订单。"
-        )
-        header_boundary.setObjectName("subtitle")
-        header_boundary.setWordWrap(True)
-        header_layout.addWidget(header_title)
-        header_layout.addWidget(header_boundary)
-        layout.addWidget(header_panel)
-
-        cards = QHBoxLayout()
-        cards.setSpacing(8)
-        self.shadow_status_card = MetricCard(
-            "内部策略仿真", "未启动", "不进入 IBKR 模拟账户"
-        )
-        self.shadow_equity_card = MetricCard(
-            "影子净值", "—", "启动时读取 IBKR Paper 净值"
-        )
-        self.shadow_realized_card = MetricCard(
-            "已实现盈亏", "$0.00", "已扣双边模拟佣金"
-        )
-        self.shadow_unrealized_card = MetricCard(
-            "未实现盈亏", "$0.00", "按最新有效 mark"
-        )
-        self.shadow_trade_card = MetricCard(
-            "完成交易", "0 / 4", "整股；最多一笔持仓"
-        )
-        for card in (
-            self.shadow_status_card,
-            self.shadow_equity_card,
-            self.shadow_realized_card,
-            self.shadow_unrealized_card,
-            self.shadow_trade_card,
-        ):
-            cards.addWidget(card, 1)
-        layout.addLayout(cards)
-
-        self.shadow_strategy_combo = QComboBox()
-        self._configure_combo_width(
-            self.shadow_strategy_combo,
-            minimum_width=300,
-            minimum_contents=18,
-        )
-        self.shadow_strategy_combo.setToolTip(
-            "选择驱动本次实时影子会话的不可变策略版本"
-        )
-        self.shadow_strategy_combo.currentIndexChanged.connect(
-            self._shadow_strategy_selection_changed
-        )
-        self.shadow_strategy_combo.currentIndexChanged.connect(
-            self._refresh_target_preflight
-        )
-        self.target_symbol_input = QLineEdit()
-        self.target_symbol_input.setPlaceholderText(
-            "输入本次做 T 的美股或 ETF 代码"
-        )
-        self.target_symbol_input.setMaxLength(10)
-        self.target_symbol_input.setMinimumWidth(220)
-        self.target_symbol_input.setClearButtonEnabled(True)
-        self.target_symbol_input.returnPressed.connect(
-            self._apply_target_symbol
-        )
-        self.target_symbol_apply_button = QPushButton("应用标的")
-        self.target_symbol_apply_button.clicked.connect(
-            self._apply_target_symbol
-        )
-        self.target_symbol_subscribe_button = QPushButton(
-            "订阅该标的行情"
-        )
-        self.target_symbol_subscribe_button.clicked.connect(
-            self._sync_targeted_symbol_to_stream
-        )
-        self.target_symbol_status = QLabel("未指定")
-        self.target_symbol_status.setObjectName("subtitle")
-        self.shadow_start_button = QPushButton("启动内部仿真")
-        self.shadow_start_button.setDefault(True)
-        self.shadow_start_button.clicked.connect(self._start_shadow)
-        self.shadow_stop_button = QPushButton("停止内部仿真")
-        self.shadow_stop_button.clicked.connect(self._stop_shadow)
-        self.shadow_stop_button.setEnabled(False)
-        self.targeted_replay_button = QPushButton("回放已录分钟数据")
-        self.targeted_replay_button.clicked.connect(
-            self._run_targeted_replay
-        )
-        self.targeted_robustness_button = QPushButton(
-            "多日稳健性评估"
-        )
-        self.targeted_robustness_button.clicked.connect(
-            self._run_targeted_robustness
-        )
-        self.minute_data_status = QLabel(
-            "分钟证据：输入代码后显示本地已录数据；只回放 fresh bid/ask。"
-        )
-        self.minute_data_status.setObjectName("subtitle")
-
-        console_panel = QFrame()
-        console_panel.setObjectName("panel")
-        console_layout = QVBoxLayout(console_panel)
-        console_layout.setSpacing(8)
-        console_title = QLabel("会话控制台")
-        console_title.setObjectName("sectionTitle")
-        console_note = QLabel(
-            "启动前依次确认策略、标的与行情。启动时仅读取 IBKR Paper "
-            "净值；10% 单仓、整股、$0.35/单模拟佣金和 2bps 滑点均在内部仿真中计算。"
-        )
-        console_note.setObjectName("subtitle")
-        console_note.setWordWrap(True)
-        console_layout.addWidget(console_title)
-        console_layout.addWidget(console_note)
-
-        setup_groups = QGridLayout()
-        setup_groups.setHorizontalSpacing(16)
-        setup_groups.setVerticalSpacing(8)
-        strategy_group = QWidget()
-        strategy_layout = QVBoxLayout(strategy_group)
-        strategy_layout.setContentsMargins(0, 0, 0, 0)
-        strategy_layout.setSpacing(4)
-        strategy_layout.addWidget(self._field_label("1. 策略版本"))
-        strategy_layout.addWidget(self.shadow_strategy_combo)
-
-        target_group = QWidget()
-        target_layout = QVBoxLayout(target_group)
-        target_layout.setContentsMargins(0, 0, 0, 0)
-        target_layout.setSpacing(4)
-        target_layout.addWidget(self._field_label("2. 标的与行情"))
-        target_actions = QHBoxLayout()
-        target_actions.setSpacing(6)
-        target_actions.addWidget(self.target_symbol_input, 1)
-        target_actions.addWidget(self.target_symbol_apply_button)
-        target_actions.addWidget(self.target_symbol_subscribe_button)
-        target_layout.addLayout(target_actions)
-        target_layout.addWidget(self.target_symbol_status)
-        target_layout.addWidget(self.minute_data_status)
-
-        setup_groups.addWidget(strategy_group, 0, 0)
-        setup_groups.addWidget(target_group, 0, 1)
-        setup_groups.setColumnStretch(0, 2)
-        setup_groups.setColumnStretch(1, 3)
-        console_layout.addLayout(setup_groups)
-
-        session_group = QWidget()
-        session_layout = QHBoxLayout(session_group)
-        session_layout.setContentsMargins(0, 0, 0, 0)
-        session_layout.setSpacing(8)
-        session_layout.addWidget(self._field_label("3. 会话控制"))
-        session_layout.addWidget(self.shadow_start_button)
-        session_layout.addWidget(self.shadow_stop_button)
-        session_layout.addStretch()
-        session_layout.addWidget(self.targeted_replay_button)
-        session_layout.addWidget(self.targeted_robustness_button)
-        console_layout.addWidget(session_group)
-        position_panel = QFrame()
-        position_panel.setObjectName("panel")
-        position_layout = QVBoxLayout(position_panel)
-        position_title = QLabel("持仓（实时内部仿真）")
-        position_title.setObjectName("sectionTitle")
-        position_note = QLabel(
-            "未启动或尚无成交时保持为空；所有持仓均为内部影子记录。"
-        )
-        position_note.setObjectName("subtitle")
-        self.shadow_position_table = QTableWidget(0, 8)
-        self.shadow_position_table.setHorizontalHeaderLabels(
-            [
-                "代码",
-                "整股数量",
-                "入场价",
-                "入场时间",
-                "最高价",
-                "行情来源",
-                "覆盖",
-                "环境",
-            ]
-        )
-        self._configure_table(self.shadow_position_table)
-        position_layout.addWidget(position_title)
-        position_layout.addWidget(position_note)
-        position_layout.addWidget(self.shadow_position_table)
-        fill_panel = QFrame()
-        fill_panel.setObjectName("panel")
-        fill_layout = QVBoxLayout(fill_panel)
-        fill_title = QLabel("内部模拟成交记录（不发送 IBKR 订单）")
-        fill_title.setObjectName("sectionTitle")
-        self.shadow_fill_table = QTableWidget(0, 11)
-        self.shadow_fill_table.setHorizontalHeaderLabels(
-            [
-                "时间",
-                "代码",
-                "方向",
-                "数量",
-                "模拟成交价",
-                "佣金",
-                "本笔净P&L",
-                "原因",
-                "来源",
-                "覆盖",
-                "会话",
-            ]
-        )
-        self._configure_table(self.shadow_fill_table)
-        self.shadow_explanation = QLabel(
-            "状态：未启动。该工具只验证行情→信号→成本后模拟成交→"
-            "持仓→盈亏→平仓链路，不以单晚收益证明策略有效。"
-        )
-        self.shadow_explanation.setWordWrap(True)
-        fill_layout.addWidget(fill_title)
-        fill_layout.addWidget(self.shadow_fill_table)
-        fill_layout.addWidget(self.shadow_explanation)
-        self.targeted_research_tabs = QTabWidget()
-        self.targeted_research_tabs.setDocumentMode(True)
-        replay_panel = QFrame()
-        replay_panel.setObjectName("panel")
-        replay_layout = QVBoxLayout(replay_panel)
-        replay_title = QLabel("分钟回放结果与证据")
-        replay_title.setObjectName("sectionTitle")
-        self.targeted_replay_table = QTableWidget(0, 12)
-        self.targeted_replay_table.setHorizontalHeaderLabels(
-            [
-                "Run ID",
-                "代码",
-                "策略版本",
-                "行情源",
-                "分钟区间",
-                "有效行",
-                "缺口",
-                "总收益",
-                "最大回撤",
-                "已实现P&L",
-                "成交",
-                "佣金",
-            ]
-        )
-        self._configure_table(self.targeted_replay_table)
-        replay_layout.addWidget(replay_title)
-        replay_layout.addWidget(self.targeted_replay_table)
-        self.targeted_research_tabs.addTab(
-            replay_panel, "单会话回放"
-        )
-
-        robustness_panel = QFrame()
-        robustness_panel.setObjectName("panel")
-        robustness_layout = QVBoxLayout(robustness_panel)
-        self.targeted_robustness_summary = QLabel(
-            "尚未运行多日稳健性评估；结果不会自动晋级策略。"
-        )
-        self.targeted_robustness_summary.setObjectName("subtitle")
-        self.targeted_robustness_summary.setWordWrap(True)
-        robustness_layout.addWidget(self.targeted_robustness_summary)
-        self.targeted_robustness_detail_tabs = QTabWidget()
-        self.targeted_robustness_detail_tabs.setDocumentMode(True)
-        self.targeted_robustness_runs_table = QTableWidget(0, 8)
-        self.targeted_robustness_runs_table.setHorizontalHeaderLabels(
-            [
-                "Run ID",
-                "代码",
-                "策略版本",
-                "行情源",
-                "会话区间",
-                "有效/总计",
-                "收益方向一致",
-                "证据等级",
-            ]
-        )
-        self._configure_table(self.targeted_robustness_runs_table)
-        self.targeted_robustness_runs_table.itemSelectionChanged.connect(
-            self._robustness_selection_changed
-        )
-        self.targeted_robustness_detail_tabs.addTab(
-            self.targeted_robustness_runs_table,
-            "评估历史",
-        )
-        self.targeted_robustness_scenario_table = QTableWidget(0, 10)
-        self.targeted_robustness_scenario_table.setHorizontalHeaderLabels(
-            [
-                "参数场景",
-                "会话",
-                "复合收益",
-                "平均",
-                "中位数",
-                "最差会话",
-                "盈利会话",
-                "最大回撤",
-                "成交",
-                "佣金",
-            ]
-        )
-        self._configure_table(
-            self.targeted_robustness_scenario_table
-        )
-        self.targeted_robustness_detail_tabs.addTab(
-            self.targeted_robustness_scenario_table,
-            "参数扰动",
-        )
-        validation_panel = QWidget()
-        validation_layout = QVBoxLayout(validation_panel)
-        self.targeted_validation_summary = QLabel(
-            "时间隔离验证至少需要 20 个完整有效会话；"
-            "测试集永不参与参数选择。"
-        )
-        self.targeted_validation_summary.setObjectName("subtitle")
-        self.targeted_validation_summary.setWordWrap(True)
-        self.targeted_validation_table = QTableWidget(0, 12)
-        self.targeted_validation_table.setHorizontalHeaderLabels(
-            [
-                "Run ID",
-                "折",
-                "训练选中",
-                "训练区间",
-                "验证区间",
-                "验证策略",
-                "验证基准",
-                "验证门",
-                "测试区间",
-                "测试策略",
-                "测试基准",
-                "测试超额",
-            ]
-        )
-        self._configure_table(self.targeted_validation_table)
-        validation_layout.addWidget(self.targeted_validation_summary)
-        validation_layout.addWidget(self.targeted_validation_table)
-        robustness_layout.addWidget(
-            self.targeted_robustness_detail_tabs
-        )
-        self.targeted_research_tabs.addTab(
-            robustness_panel, "多日稳健性"
-        )
-        self.targeted_research_tabs.addTab(
-            validation_panel, "时间隔离验证"
-        )
-        overfit_panel = QFrame()
-        overfit_panel.setObjectName("panel")
-        overfit_layout = QVBoxLayout(overfit_panel)
-        self.targeted_overfit_summary = QLabel(
-            "PBO/CSCV 与 DSR 至少需要 20 个同步完整会话；"
-            "统计条件不足时明确显示不可估计。"
-        )
-        self.targeted_overfit_summary.setObjectName("subtitle")
-        self.targeted_overfit_summary.setWordWrap(True)
-        self.targeted_overfit_table = QTableWidget(0, 12)
-        self.targeted_overfit_table.setHorizontalHeaderLabels(
-            [
-                "Run ID",
-                "代码",
-                "有效/总计",
-                "候选",
-                "CSCV分区",
-                "组合",
-                "PBO",
-                "样本外亏损",
-                "平均退化",
-                "DSR概率",
-                "DSR候选",
-                "证据等级",
-            ]
-        )
-        self._configure_table(self.targeted_overfit_table)
-        overfit_layout.addWidget(self.targeted_overfit_summary)
-        overfit_layout.addWidget(self.targeted_overfit_table)
-        self.targeted_research_tabs.addTab(
-            overfit_panel, "过拟合诊断"
-        )
-        quality_panel = QFrame()
-        quality_panel.setObjectName("panel")
-        quality_layout = QVBoxLayout(quality_panel)
-        self.targeted_quality_summary = QLabel(
-            "数据质量报告检查每个会话的 346 个预期分钟、"
-            "连续缺口、异常报价、行情年龄和一档数量覆盖。"
-        )
-        self.targeted_quality_summary.setObjectName("subtitle")
-        self.targeted_quality_summary.setWordWrap(True)
-        self.targeted_quality_table = QTableWidget(0, 11)
-        self.targeted_quality_table.setHorizontalHeaderLabels(
-            [
-                "交易日",
-                "原始行",
-                "可用行",
-                "完整率",
-                "缺失",
-                "最长缺口",
-                "Stale",
-                "异常报价",
-                "Age P95",
-                "一档数量覆盖",
-                "状态",
-            ]
-        )
-        self._configure_table(self.targeted_quality_table)
-        quality_layout.addWidget(self.targeted_quality_summary)
-        quality_layout.addWidget(self.targeted_quality_table)
-        self.targeted_research_tabs.addTab(
-            quality_panel, "数据质量"
-        )
-
-        stress_panel = QFrame()
-        stress_panel.setObjectName("panel")
-        stress_layout = QVBoxLayout(stress_panel)
-        self.targeted_stress_summary = QLabel(
-            "执行压力测试将配置成本与 5bps、"
-            "10bps+双倍佣金场景对比，并检查最优价一档参与率。"
-        )
-        self.targeted_stress_summary.setObjectName("subtitle")
-        self.targeted_stress_summary.setWordWrap(True)
-        self.targeted_stress_table = QTableWidget(0, 9)
-        self.targeted_stress_table.setHorizontalHeaderLabels(
-            [
-                "成本场景",
-                "滑点",
-                "单笔佣金",
-                "会话",
-                "复合收益",
-                "相对退化",
-                "最大回撤",
-                "成交",
-                "总佣金",
-            ]
-        )
-        self._configure_table(self.targeted_stress_table)
-        stress_layout.addWidget(self.targeted_stress_summary)
-        stress_layout.addWidget(self.targeted_stress_table)
-        self.targeted_research_tabs.addTab(
-            stress_panel, "执行压力"
-        )
-
-        review_panel = QFrame()
-        review_panel.setObjectName("panel")
-        review_layout = QVBoxLayout(review_panel)
-        self.targeted_review_summary = QLabel(
-            "独立评审汇总真实流来源、时间隔离、过拟合、"
-            "序列相关性、成本与成交硬门；不会自动批准策略。"
-        )
-        self.targeted_review_summary.setObjectName("subtitle")
-        self.targeted_review_summary.setWordWrap(True)
-        review_layout.addWidget(self.targeted_review_summary)
-        self.targeted_review_detail_tabs = QTabWidget()
-        self.targeted_review_detail_tabs.setDocumentMode(True)
-        self.targeted_review_history_table = QTableWidget(0, 10)
-        self.targeted_review_history_table.setHorizontalHeaderLabels(
-            [
-                "Run ID",
-                "代码",
-                "行情源",
-                "证据来源",
-                "完整会话",
-                "测试会话",
-                "有效样本",
-                "HAC为正",
-                "通过门",
-                "结论",
-            ]
-        )
-        self._configure_table(self.targeted_review_history_table)
-        self.targeted_review_history_table.itemSelectionChanged.connect(
-            self._targeted_review_selection_changed
-        )
-        self.targeted_review_detail_tabs.addTab(
-            self.targeted_review_history_table, "评审历史"
-        )
-        self.targeted_review_gate_table = QTableWidget(0, 7)
-        self.targeted_review_gate_table.setHorizontalHeaderLabels(
-            [
-                "硬门",
-                "状态",
-                "观测值",
-                "要求",
-                "证据",
-                "级别",
-                "代码",
-            ]
-        )
-        self._configure_table(self.targeted_review_gate_table)
-        self.targeted_review_detail_tabs.addTab(
-            self.targeted_review_gate_table, "硬门明细"
-        )
-        review_layout.addWidget(self.targeted_review_detail_tabs)
-        self.targeted_research_tabs.addTab(
-            review_panel, "独立评审"
-        )
-        self.targeted_workspace_tabs = QTabWidget()
-        self.targeted_workspace_tabs.setDocumentMode(True)
-        self.targeted_workspace_tabs.addTab(
-            console_panel, "策略"
-        )
-        self.targeted_workspace_tabs.addTab(
-            position_panel, "持仓"
-        )
-        self.targeted_workspace_tabs.addTab(
-            fill_panel, "委托"
-        )
-        self.targeted_workspace_tabs.addTab(
-            self.targeted_research_tabs, "档案"
-        )
-        preflight_panel = QFrame()
-        preflight_panel.setObjectName("panel")
-        preflight_layout = QVBoxLayout(preflight_panel)
-        self.target_preflight_summary = QLabel(
-            "输入标的后，这里汇总身份、非中概、行情、资金、整股与策略检查。"
-        )
-        self.target_preflight_summary.setObjectName("subtitle")
-        self.target_preflight_summary.setWordWrap(True)
-        self.target_preflight_table = QTableWidget(0, 6)
-        self.target_preflight_table.setHorizontalHeaderLabels(
-            ["检查", "结果", "当前值", "要求", "类别", "影响"]
-        )
-        self._configure_table(self.target_preflight_table)
-        self.target_preflight_table.setColumnWidth(0, 180)
-        self.target_preflight_table.setColumnWidth(1, 90)
-        self.target_preflight_table.setColumnWidth(2, 320)
-        self.target_preflight_table.setColumnWidth(3, 280)
-        self.target_preflight_table.setColumnWidth(4, 90)
-        self.target_preflight_table.setColumnWidth(5, 110)
-        preflight_layout.addWidget(self.target_preflight_summary)
-        preflight_layout.addWidget(self.target_preflight_table)
-        self.targeted_workspace_tabs.addTab(
-            preflight_panel, "风控"
-        )
-        layout.addWidget(self.targeted_workspace_tabs)
-        return page
 
 
     def _runtime_tab(self) -> QWidget:
@@ -2064,49 +1641,43 @@ class MainWindow(QMainWindow):
                 / "targeted_replays"
             )
         )
-        self._populate_targeted_replay_results()
         self.targeted_robustness_results = list(
             load_targeted_robustness(
                 self.paths.research_results_root
                 / "targeted_robustness"
             )
         )
-        self._populate_targeted_robustness_results()
         self.targeted_walk_forward_results = list(
             load_targeted_walk_forwards(
                 self.paths.research_results_root
                 / "targeted_walk_forward"
             )
         )
-        self._populate_targeted_walk_forward_results()
         self.targeted_overfit_results = list(
             load_targeted_overfits(
                 self.paths.research_results_root
                 / "targeted_overfit"
             )
         )
-        self._populate_targeted_overfit_results()
         self.targeted_data_quality_results = list(
             load_targeted_data_quality(
                 self.paths.research_results_root
                 / "targeted_data_quality"
             )
         )
-        self._populate_targeted_data_quality_results()
         self.targeted_execution_stress_results = list(
             load_targeted_execution_stress(
                 self.paths.research_results_root
                 / "targeted_execution_stress"
             )
         )
-        self._populate_targeted_execution_stress_results()
         self.targeted_review_results = list(
             load_targeted_reviews(
                 self.paths.research_results_root
                 / "targeted_review"
             )
         )
-        self._populate_targeted_review_results()
+        self._publish_targeted_view()
 
     def _refresh_universe(self) -> None:
         cancel_event = Event()
@@ -4025,7 +3596,7 @@ class MainWindow(QMainWindow):
 
 
     def _current_target_symbol(self) -> str:
-        return self.target_symbol_input.text().strip().upper()
+        return self.targeted_validation_page.target_symbol()
 
     def _apply_target_symbol(self) -> None:
         symbol = self._current_target_symbol()
@@ -4043,11 +3614,11 @@ class MainWindow(QMainWindow):
                     "影子会话运行中",
                     "请先停止当前影子会话，再切换指定标的。",
                 )
-                self.target_symbol_input.setText(
+                self.targeted_validation_page.set_target_symbol(
                     self.shadow_snapshot.target_symbol
                 )
                 return
-        self.target_symbol_input.setText(symbol)
+        self.targeted_validation_page.set_target_symbol(symbol)
         eligible = None
         if self.universe is not None:
             eligible = any(
@@ -4055,13 +3626,11 @@ class MainWindow(QMainWindow):
                 for row in self.universe.records
             )
         if eligible is False:
-            self.target_symbol_status.setText(
+            self._target_status = (
                 f"{symbol} · 已设置，但尚未通过当前非中概研究资格门"
             )
         else:
-            self.target_symbol_status.setText(
-                f"{symbol} · 订阅、回放、评估和影子做 T 共用"
-            )
+            self._target_status = f"{symbol} · 订阅、回放、评估和影子做 T 共用"
         if (
             self.stream_worker is None
             or not self.stream_worker.isRunning()
@@ -4093,7 +3662,7 @@ class MainWindow(QMainWindow):
                 "停止当前行情流后，再切换本次针对性日内 T 标的。",
             )
             return
-        self.target_symbol_input.setText(symbol)
+        self.targeted_validation_page.set_target_symbol(symbol)
         self.market_page.set_subscription_symbols((symbol,))
         self._market_watchlist_note = f"针对性日内 T：{symbol}"
         self._publish_market_controls()
@@ -4112,9 +3681,10 @@ class MainWindow(QMainWindow):
             symbol or self._current_target_symbol()
         ).strip().upper()
         if not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", target):
-            self.minute_data_status.setText(
+            self._minute_status = (
                 "分钟证据：输入代码后显示本地已录数据；只回放 fresh bid/ask。"
             )
+            self._publish_targeted_view()
             return
         summary = self.minute_quote_store.summary(target)
         providers = " / ".join(summary.providers) or "无"
@@ -4124,14 +3694,15 @@ class MainWindow(QMainWindow):
             if summary.first_minute and summary.last_minute
             else "尚无"
         )
-        self.minute_data_status.setText(
+        self._minute_status = (
             f"分钟证据 · {target}：可用 {summary.usable_rows} / "
             f"总计 {summary.total_rows} 行 · 来源 {providers} · "
             f"证据类型 {origins} · 区间 {data_range}"
         )
+        self._publish_targeted_view()
 
     def _refresh_target_preflight(self, *_args: object) -> None:
-        if not hasattr(self, "target_preflight_table"):
+        if not hasattr(self, "targeted_validation_page"):
             return
         symbol = self._current_target_symbol()
         universe_record = next(
@@ -4170,68 +3741,7 @@ class MainWindow(QMainWindow):
             broker_orders_available=False,
         )
         self.target_preflight_result = result
-        decision = (
-            "可启动内部策略仿真"
-            if result.shadow_ready
-            else "暂不可启动"
-        )
-        optional_failures = sum(
-            not gate.passed
-            for gate in result.gates
-            if not gate.blocking
-        )
-        identity = " · ".join(
-            value
-            for value in (
-                result.symbol,
-                result.company_name,
-                result.security_type,
-                (
-                    f"龙头层级 {result.leader_tier}"
-                    if result.leader_tier is not None
-                    else ""
-                ),
-            )
-            if value
-        ) or "尚未指定标的"
-        self.target_preflight_summary.setText(
-            f"{decision} · 硬门 "
-            f"{result.hard_gates_passed}/{result.hard_gate_count} · "
-            f"{identity}"
-            + (
-                f" · {optional_failures} 项研究证据待补"
-                if optional_failures
-                else ""
-            )
-        )
-        self.target_preflight_table.setSortingEnabled(False)
-        self.target_preflight_table.setRowCount(len(result.gates))
-        for row_index, gate in enumerate(result.gates):
-            values = (
-                gate.name,
-                "通过" if gate.passed else "未通过",
-                gate.observed,
-                gate.required,
-                gate.category,
-                "阻断启动" if gate.blocking else "研究提示",
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setToolTip(value)
-                if column == 1:
-                    item.setForeground(
-                        QColor(
-                            self.theme.success
-                            if gate.passed
-                            else self.theme.error
-                            if gate.blocking
-                            else self.theme.warning
-                        )
-                    )
-                self.target_preflight_table.setItem(
-                    row_index, column, item
-                )
-        self.target_preflight_table.setSortingEnabled(True)
+        self._publish_targeted_view()
 
     def _run_targeted_replay(self) -> None:
         strategy = self._selected_shadow_strategy_record()
@@ -4313,7 +3823,7 @@ class MainWindow(QMainWindow):
         if not isinstance(result, TargetedReplayResult):
             raise TypeError("unexpected targeted replay result")
         self.targeted_replay_results.insert(0, result)
-        self._populate_targeted_replay_results()
+        self._publish_targeted_view()
         self._refresh_minute_data_status(result.symbol)
         self._record_runtime_event(
             severity="info",
@@ -4331,35 +3841,6 @@ class MainWindow(QMainWindow):
             f"{result.maximum_drawdown:.2%}，成交 {len(result.fills)} 笔。"
         )
 
-    def _populate_targeted_replay_results(self) -> None:
-        rows = self.targeted_replay_results
-        self.targeted_replay_table.setSortingEnabled(False)
-        self.targeted_replay_table.setRowCount(len(rows))
-        for row_index, result in enumerate(rows):
-            values = (
-                result.run_id[:8],
-                result.symbol,
-                result.strategy_semver,
-                " / ".join(result.providers),
-                (
-                    f"{result.first_minute[:16]} → "
-                    f"{result.last_minute[:16]}"
-                ),
-                str(result.row_count),
-                str(result.gap_count),
-                f"{result.total_return:+.2%}",
-                f"{result.maximum_drawdown:.2%}",
-                _money(result.realized_pnl, signed=True),
-                str(len(result.fills)),
-                _money(result.commission_cost),
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setToolTip(value)
-                self.targeted_replay_table.setItem(
-                    row_index, column, item
-                )
-        self.targeted_replay_table.setSortingEnabled(True)
 
     def _run_targeted_robustness(self) -> None:
         strategy = self._selected_shadow_strategy_record()
@@ -4556,19 +4037,16 @@ class MainWindow(QMainWindow):
             0, execution_stress
         )
         self.targeted_review_results.insert(0, review)
-        self._populate_targeted_robustness_results()
-        self._populate_targeted_walk_forward_results()
-        self._populate_targeted_overfit_results()
-        self._populate_targeted_data_quality_results()
-        self._populate_targeted_execution_stress_results()
-        self._populate_targeted_review_results()
+        self._selected_robustness_run_id = robustness.run_id
+        self._selected_review_run_id = review.run_id
         # Bring the finished robustness evidence into view: the targeted
         # workspace lives on the research route, and its own detail tabs are
         # what actually hold the result.
+        self._targeted_active_workspace = 3
+        self._targeted_active_evidence_tab = 6
+        self._publish_targeted_view()
         self.shell.navigate_to("research")
         self.v2_research_tabs.setCurrentIndex(0)
-        self.targeted_workspace_tabs.setCurrentIndex(3)
-        self.targeted_research_tabs.setCurrentIndex(6)
         self._record_runtime_event(
             severity="info",
             component="targeted_robustness",
@@ -4604,484 +4082,15 @@ class MainWindow(QMainWindow):
             )
         )
 
-    def _populate_targeted_walk_forward_results(self) -> None:
-        table = self.targeted_validation_table
-        table.setSortingEnabled(False)
-        rows = [
-            (result_index, result, fold)
-            for result_index, result in enumerate(
-                self.targeted_walk_forward_results
-            )
-            for fold in result.folds
-        ]
-        table.setRowCount(len(rows))
-        for row_index, (result_index, result, fold) in enumerate(rows):
-            values = (
-                result.run_id[:8],
-                str(fold.fold_number),
-                fold.selected_scenario,
-                f"{fold.train_start} → {fold.train_end}",
-                (
-                    f"{fold.validation_start} → "
-                    f"{fold.validation_end}"
-                ),
-                f"{fold.validation_metrics.compounded_return:+.2%}",
-                (
-                    f"{fold.validation_benchmark.compounded_return:+.2%}"
-                ),
-                "通过" if fold.validation_passed else "未通过",
-                f"{fold.test_start} → {fold.test_end}",
-                f"{fold.test_metrics.compounded_return:+.2%}",
-                f"{fold.test_benchmark.compounded_return:+.2%}",
-                f"{fold.test_excess_return:+.2%}",
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setToolTip(value)
-                if column == 0:
-                    item.setData(
-                        Qt.UserRole + 1,
-                        result_index * 1000 + fold.fold_number,
-                    )
-                if column == 7 and not fold.validation_passed:
-                    item.setForeground(QColor(self.theme.warning))
-                table.setItem(row_index, column, item)
-        table.setSortingEnabled(True)
-        table.sortItems(0, Qt.AscendingOrder)
-        if not self.targeted_walk_forward_results:
-            self.targeted_validation_summary.setText(
-                "时间隔离验证至少需要 20 个完整有效会话；"
-                "测试集永不参与参数选择。"
-            )
-            return
-        latest = self.targeted_walk_forward_results[0]
-        self.targeted_validation_summary.setText(
-            f"{latest.symbol} · {latest.strategy_semver} · "
-            f"{len(latest.folds)} 折 · 验证通过 "
-            f"{latest.validation_passed_folds}/{len(latest.folds)} · "
-            f"未触碰测试集策略 "
-            f"{latest.out_of_sample_metrics.compounded_return:+.2%}，"
-            f"等风险基准 "
-            f"{latest.out_of_sample_benchmark.compounded_return:+.2%}，"
-            f"超额 {latest.out_of_sample_excess_return:+.2%} · "
-            f"{latest.evidence_grade} · 不自动晋级"
-        )
 
-    def _populate_targeted_overfit_results(self) -> None:
-        table = self.targeted_overfit_table
-        table.setSortingEnabled(False)
-        table.setRowCount(len(self.targeted_overfit_results))
-        for row_index, result in enumerate(
-            self.targeted_overfit_results
-        ):
-            values = (
-                result.run_id[:8],
-                result.symbol,
-                (
-                    f"{result.observations_used}/"
-                    f"{result.observations_total}"
-                ),
-                str(result.candidate_count),
-                str(result.cscv_partitions),
-                str(result.cscv_combinations),
-                (
-                    f"{result.pbo:.1%}"
-                    if result.pbo is not None
-                    else "不可估计"
-                ),
-                (
-                    f"{result.probability_oos_loss:.1%}"
-                    if result.probability_oos_loss is not None
-                    else "不可估计"
-                ),
-                (
-                    f"{result.average_performance_degradation:+.3%}"
-                    if result.average_performance_degradation is not None
-                    else "不可估计"
-                ),
-                (
-                    f"{result.dsr_probability:.1%}"
-                    if result.dsr_probability is not None
-                    else "不可估计"
-                ),
-                result.dsr_selected_scenario or "—",
-                result.evidence_grade,
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setToolTip(value)
-                if column in (6, 7, 9, 11) and (
-                    "不可" in value
-                    or "风险" in value
-                    or "未通过" in value
-                ):
-                    item.setForeground(QColor(self.theme.warning))
-                table.setItem(row_index, column, item)
-        table.setSortingEnabled(True)
-        if not self.targeted_overfit_results:
-            self.targeted_overfit_summary.setText(
-                "PBO/CSCV 与 DSR 至少需要 20 个同步完整会话；"
-                "统计条件不足时明确显示不可估计。"
-            )
-            return
-        latest = self.targeted_overfit_results[0]
-        pbo = (
-            f"{latest.pbo:.1%}"
-            if latest.pbo is not None
-            else "不可估计"
-        )
-        dsr = (
-            f"{latest.dsr_probability:.1%}"
-            if latest.dsr_probability is not None
-            else "不可估计"
-        )
-        self.targeted_overfit_summary.setText(
-            f"{latest.symbol} · 固定候选 {latest.candidate_count} · "
-            f"同步会话 {latest.observations_used}/"
-            f"{latest.observations_total} · "
-            f"CSCV {latest.cscv_partitions} 分区/"
-            f"{latest.cscv_combinations} 组合 · "
-            f"PBO {pbo} · DSR {dsr} · "
-            f"{latest.evidence_grade}。"
-            "该页仅诊断研究选择偏差，不构成策略批准。"
-        )
 
-    def _populate_targeted_data_quality_results(self) -> None:
-        table = self.targeted_quality_table
-        table.setSortingEnabled(False)
-        latest = (
-            self.targeted_data_quality_results[0]
-            if self.targeted_data_quality_results
-            else None
-        )
-        sessions = latest.sessions if latest else ()
-        table.setRowCount(len(sessions))
-        for row_index, session in enumerate(sessions):
-            values = (
-                session.session_date,
-                str(session.raw_rows),
-                str(session.usable_rows),
-                f"{session.completeness:.1%}",
-                str(session.missing_minutes),
-                str(session.maximum_consecutive_missing),
-                str(session.stale_rows),
-                str(session.invalid_quote_rows),
-                (
-                    f"{session.p95_source_age_seconds:.2f}s"
-                    if session.p95_source_age_seconds is not None
-                    else "不可估计"
-                ),
-                f"{session.size_coverage_fraction:.1%}",
-                "通过" if session.high_quality else "阻断",
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setToolTip(
-                    "；".join(session.failure_reasons)
-                    if session.failure_reasons
-                    else value
-                )
-                if column == 10 and not session.high_quality:
-                    item.setForeground(QColor(self.theme.warning))
-                table.setItem(row_index, column, item)
-        table.setSortingEnabled(True)
-        if latest is None:
-            self.targeted_quality_summary.setText(
-                "数据质量报告检查每个会话的 346 个预期分钟、"
-                "连续缺口、异常报价、行情年龄和一档数量覆盖。"
-            )
-            return
-        age = (
-            f"{latest.p95_source_age_seconds:.2f}s"
-            if latest.p95_source_age_seconds is not None
-            else "不可估计"
-        )
-        self.targeted_quality_summary.setText(
-            f"{latest.symbol} · 高质量会话 "
-            f"{latest.high_quality_sessions}/{latest.session_count} · "
-            f"最差完整率 {latest.minimum_completeness:.1%} · "
-            f"最长连续缺口 {latest.maximum_consecutive_missing} 分钟 · "
-            f"行情年龄 P95 {age} · "
-            f"一档数量覆盖 {latest.size_coverage_fraction:.1%} · "
-            f"{latest.evidence_grade}"
-        )
 
-    def _populate_targeted_execution_stress_results(self) -> None:
-        table = self.targeted_stress_table
-        table.setSortingEnabled(False)
-        latest = (
-            self.targeted_execution_stress_results[0]
-            if self.targeted_execution_stress_results
-            else None
-        )
-        scenarios = latest.scenarios if latest else ()
-        table.setRowCount(len(scenarios))
-        for row_index, scenario in enumerate(scenarios):
-            values = (
-                scenario.scenario,
-                f"{scenario.slippage_bps}bps",
-                _money(scenario.commission_per_order),
-                str(scenario.session_count),
-                f"{scenario.compounded_return:+.2%}",
-                f"{scenario.degradation_vs_configured:+.2%}",
-                f"{scenario.maximum_drawdown:.2%}",
-                str(scenario.total_fills),
-                _money(scenario.commission_cost),
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setToolTip(value)
-                if column == 4 and scenario.compounded_return <= 0:
-                    item.setForeground(QColor(self.theme.warning))
-                table.setItem(row_index, column, item)
-        table.setSortingEnabled(True)
-        if latest is None:
-            self.targeted_stress_summary.setText(
-                "执行压力测试将配置成本与 5bps、"
-                "10bps+双倍佣金场景对比，并检查最优价一档参与率。"
-            )
-            return
-        participation = (
-            f"{latest.p95_top_of_book_participation:.1%}"
-            if latest.p95_top_of_book_participation is not None
-            else "不可估计"
-        )
-        self.targeted_stress_summary.setText(
-            f"{latest.symbol} · 最差压力收益 "
-            f"{latest.worst_stressed_return:+.2%} · "
-            f"最差相对退化 "
-            f"{latest.worst_performance_degradation:+.2%} · "
-            f"一档参与率 P95 {participation} · "
-            f"{latest.capacity_status} · {latest.evidence_grade}"
-        )
 
-    def _populate_targeted_review_results(self) -> None:
-        table = self.targeted_review_history_table
-        table.setSortingEnabled(False)
-        table.setRowCount(len(self.targeted_review_results))
-        for row_index, result in enumerate(
-            self.targeted_review_results
-        ):
-            dependence = result.dependence
-            values = (
-                result.run_id[:8],
-                result.symbol,
-                result.provider,
-                " / ".join(result.evidence_origins) or "缺失",
-                next(
-                    (
-                        gate.observed
-                        for gate in result.gates
-                        if gate.code == "complete_sessions"
-                    ),
-                    "—",
-                ),
-                str(dependence.oos_session_count),
-                (
-                    f"{dependence.effective_sample_size_ar1:.1f}"
-                    if dependence.effective_sample_size_ar1 is not None
-                    else "不可估计"
-                ),
-                (
-                    f"{dependence.probability_mean_positive:.1%}"
-                    if dependence.probability_mean_positive is not None
-                    else "不可估计"
-                ),
-                f"{result.passed_gates}/{len(result.gates)}",
-                (
-                    "可进入人工独立评审"
-                    if result.eligible_for_independent_review
-                    else f"阻断 {result.blocking_failures}"
-                ),
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setToolTip(value)
-                if column == 0:
-                    item.setData(Qt.UserRole, result.run_id)
-                if column in (7, 9) and (
-                    "不可" in value or "阻断" in value
-                ):
-                    item.setForeground(QColor(self.theme.warning))
-                table.setItem(row_index, column, item)
-        table.setSortingEnabled(True)
-        if not self.targeted_review_results:
-            self.targeted_review_summary.setText(
-                "独立评审汇总真实流来源、时间隔离、过拟合、"
-                "序列相关性、成本与成交硬门；不会自动批准策略。"
-            )
-            self._populate_targeted_review_gates(None)
-            return
-        table.selectRow(0)
-        self._populate_targeted_review_gates(
-            self.targeted_review_results[0]
-        )
 
-    def _targeted_review_selection_changed(self) -> None:
-        selected = self.targeted_review_history_table.selectedItems()
-        if not selected:
-            return
-        item = self.targeted_review_history_table.item(
-            selected[0].row(), 0
-        )
-        run_id = item.data(Qt.UserRole) if item is not None else None
-        result = next(
-            (
-                candidate
-                for candidate in self.targeted_review_results
-                if candidate.run_id == run_id
-            ),
-            None,
-        )
-        self._populate_targeted_review_gates(result)
 
-    def _populate_targeted_review_gates(
-        self,
-        result: TargetedReviewResult | None,
-    ) -> None:
-        table = self.targeted_review_gate_table
-        gates = result.gates if result else ()
-        table.setSortingEnabled(False)
-        table.setRowCount(len(gates))
-        for row_index, gate in enumerate(gates):
-            values = (
-                gate.name,
-                "通过" if gate.passed else "阻断",
-                gate.observed,
-                gate.required,
-                gate.evidence,
-                gate.severity,
-                gate.code,
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setToolTip(value)
-                if column == 1 and not gate.passed:
-                    item.setForeground(QColor(self.theme.warning))
-                table.setItem(row_index, column, item)
-        table.setSortingEnabled(False)
-        if result is None:
-            return
-        dependence = result.dependence
-        hac = (
-            f"{dependence.probability_mean_positive:.1%}"
-            if dependence.probability_mean_positive is not None
-            else "不可估计"
-        )
-        effective = (
-            f"{dependence.effective_sample_size_ar1:.1f}"
-            if dependence.effective_sample_size_ar1 is not None
-            else "不可估计"
-        )
-        self.targeted_review_summary.setText(
-            f"{result.symbol} · 通过 {result.passed_gates}/"
-            f"{len(result.gates)} · 阻断 {result.blocking_failures} · "
-            f"测试会话 {dependence.oos_session_count} · "
-            f"相关性折算样本 {effective} · HAC均值为正 {hac} · "
-            + (
-                "仅可进入人工独立评审；尚未批准。"
-                if result.eligible_for_independent_review
-                else "证据门未满足，不得晋级。"
-            )
-        )
 
-    def _populate_targeted_robustness_results(self) -> None:
-        rows = self.targeted_robustness_results
-        table = self.targeted_robustness_runs_table
-        table.setSortingEnabled(False)
-        table.setRowCount(len(rows))
-        for row_index, result in enumerate(rows):
-            values = (
-                result.run_id[:8],
-                result.symbol,
-                result.strategy_semver,
-                result.provider,
-                f"{result.first_session} → {result.last_session}",
-                f"{result.usable_sessions}/{result.total_sessions}",
-                f"{result.sign_stability_fraction:.0%}",
-                result.evidence_grade,
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setToolTip(value)
-                if column == 0:
-                    item.setData(Qt.UserRole, result.run_id)
-                    item.setData(Qt.UserRole + 1, row_index)
-                table.setItem(row_index, column, item)
-        table.setSortingEnabled(True)
-        table.sortItems(0, Qt.AscendingOrder)
-        if rows:
-            table.selectRow(0)
-            self._populate_robustness_scenarios(rows[0])
-        else:
-            self._populate_robustness_scenarios(None)
 
-    def _robustness_selection_changed(self) -> None:
-        selected = self.targeted_robustness_runs_table.selectedItems()
-        if not selected:
-            return
-        row = selected[0].row()
-        item = self.targeted_robustness_runs_table.item(row, 0)
-        run_id = item.data(Qt.UserRole) if item is not None else None
-        result = next(
-            (
-                candidate
-                for candidate in self.targeted_robustness_results
-                if candidate.run_id == run_id
-            ),
-            None,
-        )
-        self._populate_robustness_scenarios(result)
 
-    def _populate_robustness_scenarios(
-        self,
-        result: TargetedRobustnessResult | None,
-    ) -> None:
-        table = self.targeted_robustness_scenario_table
-        summaries = result.scenario_summaries if result else ()
-        table.setSortingEnabled(False)
-        table.setRowCount(len(summaries))
-        for row_index, summary in enumerate(summaries):
-            values = (
-                summary.scenario,
-                str(summary.session_count),
-                f"{summary.compounded_return:+.2%}",
-                f"{summary.mean_session_return:+.2%}",
-                f"{summary.median_session_return:+.2%}",
-                f"{summary.worst_session_return:+.2%}",
-                f"{summary.profitable_session_fraction:.0%}",
-                f"{summary.maximum_drawdown:.2%}",
-                str(summary.total_fills),
-                _money(summary.commission_cost),
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setToolTip(value)
-                if column == 0:
-                    item.setData(Qt.UserRole + 1, row_index)
-                table.setItem(row_index, column, item)
-        table.setSortingEnabled(True)
-        table.sortItems(0, Qt.AscendingOrder)
-        if result is None:
-            self.targeted_robustness_summary.setText(
-                "尚未运行多日稳健性评估；结果不会自动晋级策略。"
-            )
-            return
-        skipped = len(result.skipped_sessions)
-        readiness = (
-            "达到参数稳健性门；仍需时间隔离验证"
-            if result.review_ready
-            else "未达到参数稳健性门"
-        )
-        self.targeted_robustness_summary.setText(
-            f"{result.symbol} · {result.strategy_semver} · "
-            f"{result.provider} · 有效会话 "
-            f"{result.usable_sessions}/{result.total_sessions}，"
-            f"跳过 {skipped} · 参数收益方向一致 "
-            f"{result.sign_stability_fraction:.0%}"
-            "（不代表盈利）· "
-            f"{result.evidence_grade} · {readiness}"
-        )
 
     def _configured_exposure_multipliers(
         self,
@@ -5239,10 +4248,18 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "backtest_strategy_combo"):
             self._refresh_backtest_strategy_combo()
-        if hasattr(self, "shadow_strategy_combo"):
-            self._sync_strategy_combo(
-                StrategySelectionPurpose.TARGETED_SHADOW,
-                self.shadow_strategy_combo,
+        if hasattr(self, "targeted_validation_page"):
+            purpose = StrategySelectionPurpose.TARGETED_SHADOW
+            selected = self.strategy_selection.restore_or_default(purpose)
+            self.targeted_validation_page.set_strategy_options(
+                tuple(
+                    TargetedStrategyOption(
+                        version.version_id,
+                        strategy_option_label(version),
+                    )
+                    for version in self.strategy_selection.options(purpose)
+                ),
+                selected.version_id if selected else None,
             )
         if hasattr(self, "execution_page"):
             purpose = StrategySelectionPurpose.AUTO_ROTATION
@@ -5427,12 +4444,13 @@ class MainWindow(QMainWindow):
         )
 
     def _shadow_strategy_selection_changed(self, *_args: object) -> None:
-        """Adopt the targeted-shadow combo's choice as the runtime selection."""
+        """Adopt the targeted page's choice as the runtime selection."""
 
         self._record_runtime_strategy_selection(
             StrategySelectionPurpose.TARGETED_SHADOW,
-            self.shadow_strategy_combo.currentData(),
+            self.targeted_validation_page.selected_strategy_version_id(),
         )
+        self._refresh_target_preflight()
 
     def _selected_shadow_strategy_record(
         self,
@@ -5994,7 +5012,7 @@ class MainWindow(QMainWindow):
                 self._log(str(error))
         if self.shadow_engine is not None and self.shadow_engine.active:
             self.shadow_snapshot = self.shadow_engine.on_stream(result)
-            self._populate_shadow_snapshot(self.shadow_snapshot)
+            self._publish_targeted_view()
 
     def _record_minute_snapshot(
         self, snapshot: MarketSnapshot
@@ -6409,13 +5427,7 @@ class MainWindow(QMainWindow):
             self.shadow_engine = None
             QMessageBox.warning(self, "内部影子仿真未启动", str(error))
             return
-        self._populate_shadow_snapshot(self.shadow_snapshot)
-        self.shadow_start_button.setEnabled(False)
-        self.shadow_stop_button.setEnabled(True)
-        self.target_symbol_input.setEnabled(False)
-        self.target_symbol_apply_button.setEnabled(False)
-        self.target_symbol_subscribe_button.setEnabled(False)
-        self.shadow_strategy_combo.setEnabled(False)
+        self._publish_targeted_view()
         self._record_runtime_event(
             severity="info",
             component="shadow_paper",
@@ -6440,13 +5452,7 @@ class MainWindow(QMainWindow):
         self.shadow_snapshot = engine.stop()
         if self.shadow_workflow.active:
             self.shadow_workflow.stop()
-        self._populate_shadow_snapshot(self.shadow_snapshot)
-        self.shadow_start_button.setEnabled(True)
-        self.shadow_stop_button.setEnabled(False)
-        self.target_symbol_input.setEnabled(True)
-        self.target_symbol_apply_button.setEnabled(True)
-        self.target_symbol_subscribe_button.setEnabled(True)
-        self.shadow_strategy_combo.setEnabled(True)
+        self._publish_targeted_view()
         self._record_runtime_event(
             severity="info",
             component="shadow_paper",
@@ -6454,95 +5460,6 @@ class MainWindow(QMainWindow):
             message="内部影子盘停止；最后持仓按最后有效 mark 影子平仓",
         )
 
-    def _populate_shadow_snapshot(
-        self, snapshot: ShadowSnapshot
-    ) -> None:
-        self.shadow_status_card.set_value(
-            "运行中" if snapshot.active else "已停止",
-            (
-                f"{snapshot.target_symbol or '未选标的'} · "
-                "内部影子成交；券商订单 0"
-            ),
-        )
-        self.shadow_equity_card.set_value(
-            _money(snapshot.equity),
-            (
-                f"现金 {_money(snapshot.cash)} · "
-                f"初始 {_money(snapshot.initial_cash)}"
-            ),
-        )
-        self.shadow_realized_card.set_value(
-            _money(snapshot.realized_pnl, signed=True),
-            (
-                "累计；当日 "
-                f"{_money(snapshot.daily_realized_pnl, signed=True)}"
-            ),
-        )
-        self.shadow_unrealized_card.set_value(
-            _money(snapshot.unrealized_pnl, signed=True),
-            "不等于 IBKR 账户盈亏",
-        )
-        self.shadow_trade_card.set_value(
-            f"{snapshot.trades_today} / 4",
-            f"影子成交 {len(snapshot.fills)} 笔",
-        )
-        self.shadow_explanation.setText(
-            f"状态：{snapshot.status}\n"
-            f"会话：{snapshot.session_id or '无'} · "
-            f"策略版本：{snapshot.strategy_version_id} · "
-            f"参数：{snapshot.parameter_hash[:12]} · "
-            f"目标：{snapshot.target_symbol or '未设置'} · "
-            f"交易日：{snapshot.trading_day or '未开始'} · "
-            f"资金来源：{snapshot.capital_source} · "
-            "环境：internal_shadow · 券商订单接口：不存在"
-        )
-
-        self.shadow_position_table.setRowCount(len(snapshot.positions))
-        for row_index, position in enumerate(snapshot.positions):
-            values = (
-                position.symbol,
-                str(position.quantity),
-                _price(position.entry_price),
-                position.opened_at,
-                _price(position.high_water),
-                position.provider,
-                position.coverage,
-                "内部影子",
-            )
-            for column, value in enumerate(values):
-                self.shadow_position_table.setItem(
-                    row_index, column, QTableWidgetItem(value)
-                )
-
-        fills = tuple(reversed(snapshot.fills[-200:]))
-        self.shadow_fill_table.setRowCount(len(fills))
-        for row_index, fill in enumerate(fills):
-            values = (
-                fill.occurred_at,
-                fill.symbol,
-                fill.side,
-                str(fill.quantity),
-                _price(fill.price),
-                _money(fill.commission),
-                (
-                    _money(fill.realized_pnl, signed=True)
-                    if fill.realized_pnl is not None
-                    else "—"
-                ),
-                fill.reason,
-                fill.provider,
-                fill.coverage,
-                fill.session_id[:10],
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                if fill.side == "BUY" and column in {1, 2}:
-                    item.setForeground(QColor(self.theme.success))
-                if fill.side == "SELL" and column in {1, 2}:
-                    item.setForeground(QColor(self.theme.warning))
-                self.shadow_fill_table.setItem(
-                    row_index, column, item
-                )
 
     def _stream_failed(self, message: str) -> None:
         self.market_page.render_failure(message)
@@ -7694,6 +6611,8 @@ class MainWindow(QMainWindow):
         # so it has to be told when the palette changes.
         if hasattr(self, "risk_page"):
             self.risk_page.set_palette(self.theme)
+        if hasattr(self, "targeted_validation_page"):
+            self.targeted_validation_page.set_palette(self.theme)
         # The execution page colours toned status cells from the palette, and
         # its tables keep the rows they were handed, so it has to be told *and*
         # redrawn: there is no repaint path that would re-read the palette on

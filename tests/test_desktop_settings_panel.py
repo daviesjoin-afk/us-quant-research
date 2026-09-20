@@ -243,6 +243,15 @@ EXECUTION_V2_METHODS = (
     "_finish_auto_quant_session_if_safe",
 )
 
+# Runtime v2A: the window builds its trading session through the runtime
+# composition root, so the methods that named the old engine follow the rename.
+# Declared so the guard can assert the delta exactly rather than tolerate it.
+RUNTIME_V2A_METHODS = (
+    "_prepare_auto_quant_candidates",
+    "_reset_auto_launch_controls",
+    "_task_failed",
+)
+
 #: The frozen handlers this round legitimately rewrote, with the reason.
 #: Declared so `test_the_settings_handler_is_unchanged` can assert the
 #: exact delta instead of only the untouched remainder.
@@ -1530,6 +1539,7 @@ def test_only_the_settings_tab_was_rewritten() -> None:
         | set(BROKER_ACCOUNT_V2_METHODS)
         | set(STRATEGY_V2_METHODS)
         | set(EXECUTION_V2_METHODS)
+        | set(RUNTIME_V2A_METHODS)
     )
     # Exact, not a subset: every changed method must be declared, and
     # every declared method must actually have changed.
@@ -1538,6 +1548,7 @@ def test_only_the_settings_tab_was_rewritten() -> None:
     assert set(BROKER_ACCOUNT_V2_METHODS) <= set(changed)
     assert set(STRATEGY_V2_METHODS) <= set(changed)
     assert set(EXECUTION_V2_METHODS) <= set(changed)
+    assert set(RUNTIME_V2A_METHODS) <= set(changed)
     assert "_settings_tab" in changed
 
 

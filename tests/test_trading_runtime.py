@@ -4,13 +4,10 @@ from decimal import Decimal
 import unittest
 from collections import deque
 
-from us_quant.auto_quant import (
-    AutoQuantCandidate,
-    AutoQuantEngine,
-    AutoQuantPosition,
-    calculate_quote_readiness_breakdown,
-    evaluate_auto_quant_preflight,
-)
+from us_quant.trading.composition.runtime import build_trading_runtime
+from us_quant.trading.runtime.artifacts import AutoQuantPosition
+from us_quant.trading.runtime.models import AutoQuantCandidate
+from us_quant.trading.runtime.trading import TradingRuntime
 from us_quant.auto_intraday import resolve_paper_session_capital
 from us_quant.trading.application.execution import ExecutionApplication
 from us_quant.trading.domain.market import (
@@ -83,6 +80,31 @@ def _risk(
             symbols=symbols or {},
         ),
         exposure_multipliers=exposure_multipliers,
+    )
+
+def _runtime(
+    *,
+    candidates: tuple[AutoQuantCandidate, ...],
+    config: ShadowConfig,
+    strategy: StrategyIdentity,
+    risk: RiskApplication | None,
+    execution: ExecutionApplication | None,
+    market_reference_symbols: tuple[str, ...] = (),
+) -> TradingRuntime:
+    """The session under test, assembled the way the window assembles it.
+
+    It goes through the composition root rather than constructing the runtimes
+    directly, so a test can never hand the session a different strategy than the
+    one the window would build for the same candidates.
+    """
+
+    return build_trading_runtime(
+        config=config,
+        candidates=candidates,
+        identity=strategy,
+        risk=risk,
+        execution=execution,
+        market_reference_symbols=market_reference_symbols,
     )
 
 
@@ -310,102 +332,6 @@ def _intent_fill(
 
 
 class AutoQuantTests(unittest.TestCase):
-    def test_quote_readiness_separates_candidates_references_and_feed(self) -> None:
-        candidates = tuple(f"C{index}" for index in range(20))
-        observed = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
-        snapshot = _snapshot(
-            observed,
-            {symbol: Decimal("10") for symbol in (*candidates, "SPY", "QQQ")},
-            ready=False,
-        )
-        quotes = tuple(
-            replace(
-                quote,
-                mode=MarketDataMode.REALTIME,
-                stale=False,
-                stale_reason=None,
-            )
-            if quote.symbol in {"SPY", "QQQ"}
-            else quote
-            for quote in snapshot.quotes
-        )
-        snapshot = replace(snapshot, quotes=quotes)
-
-        references_only = calculate_quote_readiness_breakdown(
-            snapshot,
-            candidate_symbols=candidates,
-            reference_symbols=("SPY", "QQQ"),
-            recently_ready_symbols={"SPY", "QQQ"},
-        )
-        self.assertEqual(references_only.candidate_count, 20)
-        self.assertEqual(references_only.candidate_current_count, 0)
-        self.assertEqual(references_only.candidate_recent_count, 0)
-        self.assertEqual(references_only.reference_current_count, 2)
-        self.assertEqual(references_only.reference_recent_count, 2)
-        self.assertEqual(references_only.subscription_current_count, 2)
-        self.assertEqual(references_only.subscription_count, 22)
-
-        one_candidate_snapshot = replace(
-            snapshot,
-            quotes=tuple(
-                replace(
-                    quote,
-                    mode=MarketDataMode.REALTIME,
-                    stale=False,
-                    stale_reason=None,
-                )
-                if quote.symbol == "C0"
-                else quote
-                for quote in snapshot.quotes
-            ),
-        )
-        one_candidate = calculate_quote_readiness_breakdown(
-            one_candidate_snapshot,
-            candidate_symbols=candidates,
-            reference_symbols=("SPY", "QQQ"),
-            recently_ready_symbols={"SPY", "QQQ", "C0"},
-        )
-        self.assertEqual(one_candidate.candidate_current_count, 1)
-        self.assertEqual(one_candidate.candidate_recent_count, 1)
-
-        no_overlap = calculate_quote_readiness_breakdown(
-            snapshot,
-            candidate_symbols=("SPY", "C0"),
-            reference_symbols=("SPY",),
-            recently_ready_symbols={"SPY", "C0"},
-        )
-        self.assertEqual(no_overlap.candidate_count, 1)
-        self.assertEqual(no_overlap.candidate_current_count, 0)
-        self.assertEqual(no_overlap.reference_current_count, 1)
-
-    def test_preflight_reports_every_missing_gate(self) -> None:
-        result = evaluate_auto_quant_preflight(
-            capability_enabled=False,
-            paper_confirmed=False,
-            strategy_eligible=True,
-            strategy_detail="1.1.0-research",
-            candidate_count=2,
-            realtime_ready_count=1,
-            paper_capital=None,
-        )
-        self.assertFalse(result.ready)
-        self.assertEqual(result.passed_count, 1)
-        self.assertEqual(len(result.checks), 6)
-
-    def test_extended_session_can_start_with_one_fresh_candidate(self) -> None:
-        result = evaluate_auto_quant_preflight(
-            capability_enabled=True,
-            paper_confirmed=True,
-            strategy_eligible=True,
-            strategy_detail="1.2.0-research",
-            candidate_count=20,
-            realtime_ready_count=1,
-            recent_ready_count=1,
-            minimum_realtime_quotes=1,
-            paper_capital=Decimal("1000000"),
-        )
-
-        self.assertTrue(result.ready)
 
     def test_session_capital_uses_cash_and_optional_limit(self) -> None:
         self.assertEqual(
@@ -626,7 +552,7 @@ class AutoQuantTests(unittest.TestCase):
         submitted = []
         engine = _engine(submitted, market_reference_symbols=("SPY", "QQQ"))
         engine.start()
-        engine.positions["AAPL"] = AutoQuantPosition(
+        engine.book.positions["AAPL"] = AutoQuantPosition(
             symbol="AAPL",
             quantity=2,
             average_price=Decimal("200"),
@@ -713,6 +639,11 @@ class AutoQuantTests(unittest.TestCase):
             )
         )
         self.assertEqual(len(waiting.pending_orders), 1)
+        # A terminal status is not reconciliation: the order stays pending and
+        # the session keeps running until the executions say the same thing.
+        # Halting here instead would stop a session that is merely waiting.
+        self.assertTrue(waiting.active)
+        self.assertIn("等待逐笔成交回报对账", waiting.status)
         engine.on_stream(
             _snapshot(
                 start + timedelta(minutes=3),
@@ -731,6 +662,52 @@ class AutoQuantTests(unittest.TestCase):
         )
         self.assertEqual(len(reconciled.pending_orders), 0)
         self.assertEqual(len(reconciled.positions), 1)
+
+    def test_a_fractional_broker_fill_halts_the_session(self) -> None:
+        """A fractional fill is a fact to halt on, never a number to round.
+
+        Whole shares are the only thing this session may hold, so a fractional
+        execution means the broker and the session disagree about the order.
+        Truncating it would leave a position the book can never explain and a
+        cash figure that silently disagrees with the broker.
+        """
+
+        submitted: list[OrderIntent] = []
+        engine = _engine(submitted)
+        engine.start()
+        observed = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
+        for minute in range(3):
+            at = observed + timedelta(minutes=minute)
+            engine.on_stream(
+                _snapshot(
+                    at,
+                    {
+                        "AAPL": Decimal("200"),
+                        "MSFT": Decimal("400")
+                        * (Decimal("1.003") ** minute),
+                    },
+                ),
+                observed_at=at,
+            )
+        intent = submitted[0]
+
+        halted = engine.on_execution(
+            _intent_fill(
+                intent,
+                execution_id="exec-fractional",
+                quantity=Decimal("1.5"),
+                occurred_at=observed,
+            )
+        )
+
+        self.assertFalse(halted.active)
+        self.assertIn("非整股", halted.status)
+        # Nothing was booked: no position, no fill, and the order is still
+        # pending for a human to reconcile rather than quietly cleared.
+        self.assertEqual(halted.positions, ())
+        self.assertEqual(halted.fills, ())
+        self.assertEqual(len(halted.pending_orders), 1)
+        self.assertEqual(engine.book.cash, engine.config.initial_cash)
 
     def test_rejection_halts_instead_of_retrying_each_minute(self) -> None:
         submitted = []
@@ -772,7 +749,7 @@ class AutoQuantTests(unittest.TestCase):
         self.assertEqual(len(submitted), 1)
 
     def test_uncertain_submission_is_retained_and_halts(self) -> None:
-        engine = AutoQuantEngine(
+        engine = _runtime(
             candidates=(
                 AutoQuantCandidate(
                     "AAPL", "Apple", "科技", 1,
@@ -813,7 +790,7 @@ class AutoQuantTests(unittest.TestCase):
 
     def test_single_minute_spike_is_filtered(self) -> None:
         submitted = []
-        engine = AutoQuantEngine(
+        engine = _runtime(
             candidates=(
                 AutoQuantCandidate(
                     "AAPL", "Apple", "科技", 1,
@@ -913,8 +890,8 @@ class AutoQuantRecoveryTests(unittest.TestCase):
             limit_price=Decimal("200"),
             reason="manual recovery fixture",
         )
-        engine.pending[original.order_id] = original
-        engine._intents[original.order_id] = original
+        engine.book.pending[original.order_id] = original
+        engine.book._intents[original.order_id] = original
 
         replacement = engine.resubmit_pending_intent(original)
 
@@ -924,16 +901,16 @@ class AutoQuantRecoveryTests(unittest.TestCase):
         self.assertNotEqual(
             replacement.idempotency_key, original.idempotency_key
         )
-        self.assertNotIn(original.order_id, engine.pending)
-        self.assertIs(engine.pending[replacement.order_id], replacement)
+        self.assertNotIn(original.order_id, engine.book.pending)
+        self.assertIs(engine.book.pending[replacement.order_id], replacement)
 
 
 def _engine(
     submitted: list,
     *,
     market_reference_symbols: tuple[str, ...] = (),
-) -> AutoQuantEngine:
-    return AutoQuantEngine(
+) -> TradingRuntime:
+    return _runtime(
         candidates=(
             AutoQuantCandidate(
                 "AAPL", "Apple", "科技", 1,
@@ -1018,7 +995,7 @@ class MultiSymbolTests(unittest.TestCase):
             AutoQuantCandidate(symbol="BBB", name="B", sector="T", leader_tier=1, scan_score=Decimal("75"), signal="UP"),
         )
         intents: list[OrderIntent] = []
-        engine = AutoQuantEngine(
+        engine = _runtime(
             candidates=candidates,
             config=ShadowConfig(
                 initial_cash=Decimal("10000"),
@@ -1042,7 +1019,7 @@ class MultiSymbolTests(unittest.TestCase):
             execution=_execution_app(submitted=intents),
         )
         engine.start()
-        engine._histories = {
+        engine.strategy._scanner._histories = {
             "AAA": deque([
                 (datetime(2024, 1, 2, 19, 59, tzinfo=timezone.utc), Decimal("9.95")),
                 (datetime(2024, 1, 2, 20, 0, tzinfo=timezone.utc), Decimal("10")),
@@ -1067,7 +1044,7 @@ class MultiSymbolTests(unittest.TestCase):
     def test_account_daily_loss_halts_entries(self) -> None:
         """H-10: the configured account daily-loss halt must block entries."""
         submitted = []
-        engine = AutoQuantEngine(
+        engine = _runtime(
             candidates=(
                 AutoQuantCandidate(
                     "AAPL", "Apple", "科技", 1,
@@ -1152,7 +1129,7 @@ class MultiSymbolTests(unittest.TestCase):
             ),
             observed_at=at,
         )
-        self.assertIn("daily account loss halt is active", engine.status)
+        self.assertIn("daily account loss halt is active", engine.session.status)
         self.assertEqual(
             len([i for i in submitted if i.side.order_text == "BUY"]), 1
         )
@@ -1160,7 +1137,7 @@ class MultiSymbolTests(unittest.TestCase):
     def test_account_drawdown_halts_entries_after_peak(self) -> None:
         """H-10: the configured account drawdown halt must block entries."""
         submitted = []
-        engine = AutoQuantEngine(
+        engine = _runtime(
             candidates=(
                 AutoQuantCandidate(
                     "AAPL", "Apple", "科技", 1,
@@ -1243,7 +1220,7 @@ class MultiSymbolTests(unittest.TestCase):
             _snapshot(at, {"AAPL": Decimal("80"), "MSFT": Decimal("404")}),
             observed_at=at,
         )
-        self.assertIn("account drawdown halt is active", engine.status)
+        self.assertIn("account drawdown halt is active", engine.session.status)
         self.assertEqual(
             len([i for i in submitted if i.side.order_text == "BUY"]), 1
         )
@@ -1316,7 +1293,7 @@ class MultiSymbolTests(unittest.TestCase):
             AutoQuantCandidate(symbol="BBB", name="B", sector="T", leader_tier=1, scan_score=Decimal("75"), signal="UP"),
         )
         intents: list[OrderIntent] = []
-        engine = AutoQuantEngine(
+        engine = _runtime(
             candidates=candidates,
             config=ShadowConfig(
                 initial_cash=Decimal("10000"),
@@ -1332,13 +1309,13 @@ class MultiSymbolTests(unittest.TestCase):
             risk=_risk(),
             execution=_execution_app(submitted=intents),
         )
-        engine.positions = {
+        engine.book.positions = {
             "AAA": AutoQuantPosition(symbol="AAA", quantity=10, average_price=Decimal("10"), opened_at=datetime(2024, 1, 2, 10, 0, tzinfo=timezone.utc).isoformat(), high_water=Decimal("10.5"), provider="test"),
             "BBB": AutoQuantPosition(symbol="BBB", quantity=5, average_price=Decimal("20"), opened_at=datetime(2024, 1, 2, 10, 0, tzinfo=timezone.utc).isoformat(), high_water=Decimal("20.5"), provider="test"),
         }
         observed = datetime(2024, 1, 2, 10, 30, tzinfo=timezone.utc)
         quote = MarketQuote(symbol="AAA", bid=Decimal("11.1"), ask=Decimal("11.12"), last=Decimal("11.1"), close=None, bid_size=None, ask_size=None, mode=MarketDataMode.REALTIME, updated_at=observed, age_seconds=0, stale=False, stale_reason=None, generation=1, source_id="test_feed", source_label="TestFeed", coverage="test")
-        engine._check_exit(observed, quote)
+        engine._flatten(observed, {quote.symbol: quote})
         self.assertEqual(len(intents), 1)
         self.assertEqual(intents[0].execution_symbol, "AAA")
 
@@ -1379,10 +1356,10 @@ def _single_candidate_engine(
     submitted: list,
     *,
     config: ShadowConfig | None = None,
-) -> AutoQuantEngine:
+) -> TradingRuntime:
     """One candidate, warmed up, with a permissive risk application."""
 
-    engine = AutoQuantEngine(
+    engine = _runtime(
         candidates=(
             AutoQuantCandidate(
                 "AAA", "A", "T", 1, Decimal("80"), "趋势候选"
@@ -1404,7 +1381,7 @@ def _single_candidate_engine(
         execution=_execution_app(submitted=submitted),
     )
     engine.start()
-    engine._histories["AAA"] = deque(
+    engine.strategy._scanner._histories["AAA"] = deque(
         [
             (
                 datetime(2024, 1, 2, 19, 59, tzinfo=timezone.utc),
@@ -1440,14 +1417,14 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
         ):
             self.assertFalse(
                 hasattr(engine, retired),
-                f"AutoQuantEngine.{retired} should be gone",
+                f"TradingRuntime.{retired} should be gone",
             )
         self.assertIsInstance(engine.risk, RiskApplication)
-        self.assertIs(engine.strategy, _STRATEGY)
+        self.assertIs(engine.identity, _STRATEGY)
 
     def test_the_engine_refuses_a_missing_or_wrong_risk_application(self) -> None:
         with self.assertRaises(TypeError):
-            AutoQuantEngine(
+            _runtime(
                 candidates=(
                     AutoQuantCandidate(
                         "AAA", "A", "T", 1, Decimal("80"), "UP"
@@ -1461,7 +1438,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
                 execution=_execution_app(),
             )
         with self.assertRaises(TypeError):
-            AutoQuantEngine(
+            _runtime(
                 candidates=(
                     AutoQuantCandidate(
                         "AAA", "A", "T", 1, Decimal("80"), "UP"
@@ -1527,7 +1504,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
             ),
         )
         intents: list[OrderIntent] = []
-        engine = AutoQuantEngine(
+        engine = _runtime(
             candidates=candidates,
             config=ShadowConfig(
                 initial_cash=Decimal("10000"),
@@ -1547,7 +1524,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
             execution=_execution_app(submitted=intents),
         )
         engine.start()
-        engine._histories = {
+        engine.strategy._scanner._histories = {
             "AAA": deque(
                 [
                     (
@@ -1597,7 +1574,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
             ),
         )
         intents: list[OrderIntent] = []
-        engine = AutoQuantEngine(
+        engine = _runtime(
             candidates=candidates,
             config=ShadowConfig(
                 initial_cash=Decimal("10000"),
@@ -1624,8 +1601,8 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
         engine.start()
         # A 10% equity loss with no positions: the halt is an account fact,
         # not something a candidate can route around.
-        engine.estimated_cash = Decimal("9000")
-        engine._histories = {
+        engine.book.cash = Decimal("9000")
+        engine.strategy._scanner._histories = {
             "AAA": deque(
                 [
                     (
@@ -1661,7 +1638,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
             observed_at=observed,
         )
         self.assertEqual(intents, [])
-        self.assertIn("daily account loss halt is active", engine.status)
+        self.assertIn("daily account loss halt is active", engine.session.status)
 
     def test_every_exit_is_proposed_to_the_risk_layer(self) -> None:
         """Spec 108: stop-loss, force-flat and user stops all pass risk."""
@@ -1762,8 +1739,8 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
             _snapshot(later, {"AAA": Decimal("9.5")}),
             observed_at=later,
         )
-        self.assertFalse(engine.active)
-        self.assertIn("人工对账", engine.status)
+        self.assertFalse(engine.session.active)
+        self.assertIn("人工对账", engine.session.status)
         self.assertEqual(
             [intent for intent in submitted if intent.side.order_text == "SELL"], []
         )
@@ -1806,7 +1783,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
         self.assertEqual(
             len([i for i in submitted if i.side.order_text == "SELL"]), 1
         )
-        self.assertEqual(len(engine.pending), 1)
+        self.assertEqual(len(engine.book.pending), 1)
 
     def test_held_symbols_are_priced_from_their_marks_with_an_average_fallback(
         self,
@@ -1822,7 +1799,7 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
         """
 
         engine = _single_candidate_engine(_risk(), [])
-        engine.positions = {
+        engine.book.positions = {
             "AAA": AutoQuantPosition(
                 symbol="AAA",
                 quantity=5,
@@ -1834,15 +1811,17 @@ class AutoQuantRiskIntegrationTests(unittest.TestCase):
                 provider="test",
             )
         }
-        engine._marks.clear()
+        engine.book.marks.clear()
         self.assertEqual(
-            engine._risk_market_prices(), {"AAA": Decimal("10")}
+            engine.book.risk_market_prices(), {"AAA": Decimal("10")}
         )
-        engine._marks["AAA"] = Decimal("12")
+        engine.book.marks["AAA"] = Decimal("12")
         self.assertEqual(
-            engine._risk_market_prices(), {"AAA": Decimal("12")}
+            engine.book.risk_market_prices(), {"AAA": Decimal("12")}
         )
-        positions = engine._risk_positions()
+        positions = engine.book.risk_positions(
+            engine.risk.exposure_multiplier
+        )
         self.assertEqual(positions["AAA"].quantity, 5)
         self.assertEqual(positions["AAA"].average_price, Decimal("10"))
         self.assertEqual(

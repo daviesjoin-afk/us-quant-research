@@ -1,11 +1,11 @@
-"""Desktop risk wiring tests: one risk truth, from config to the running engine.
+"""Desktop risk wiring tests: one risk truth, from config to the running session.
 
 These exist because of a specific defect.  The window placed the account limits
-into ``ShadowConfig.layered_risk_limits`` and then constructed
-``AutoQuantEngine`` *without* passing ``layered_risk_limits`` to it, so the
-configured ``risk_limits`` reached a field nobody read and the running engine
+into ``ShadowConfig.layered_risk_limits`` and then constructed the runtime
+*without* passing ``layered_risk_limits`` to it, so the
+configured ``risk_limits`` reached a field nobody read and the running session
 enforced none of them.  The unit tests passed, because they injected the
-argument directly -- proving the engine works, never that the product uses it.
+argument directly -- proving the runtime works, never that the product uses it.
 
 The guards below close that gap from both ends:
 
@@ -29,7 +29,8 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from us_quant.auto_intraday import build_auto_rotation_config
-from us_quant.auto_quant import AutoQuantCandidate, AutoQuantEngine
+from us_quant.trading.composition.runtime import build_trading_runtime
+from us_quant.trading.runtime.models import AutoQuantCandidate
 from us_quant.desktop import MainWindow
 from us_quant.desktop_v2.pages.risk import RiskPage
 from us_quant.shadow_paper import ShadowConfig
@@ -67,6 +68,27 @@ _DISTINCTIVE = RiskLimits(
 _APP = QApplication.instance() or QApplication([])
 
 
+def _runtime(
+    *,
+    candidates,
+    config,
+    strategy,
+    risk,
+    execution,
+    market_reference_symbols=(),
+):
+    """Build the session through the composition root, as the window does."""
+
+    return build_trading_runtime(
+        config=config,
+        candidates=candidates,
+        identity=strategy,
+        risk=risk,
+        execution=execution,
+        market_reference_symbols=market_reference_symbols,
+    )
+
+
 @pytest.fixture()
 def window():
     widget = MainWindow()
@@ -77,7 +99,7 @@ def window():
 
 
 def _engine_call_keywords() -> list[dict[str, object]]:
-    """Every ``AutoQuantEngine(...)`` call in ``desktop.py``, by keyword."""
+    """Every ``build_trading_runtime(...)`` call in ``desktop.py``."""
 
     tree = ast.parse(_DESKTOP.read_text(encoding="utf-8"))
     calls = []
@@ -85,7 +107,7 @@ def _engine_call_keywords() -> list[dict[str, object]]:
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "AutoQuantEngine"
+            and node.func.id == "build_trading_runtime"
         ):
             calls.append(
                 {keyword.arg: keyword.value for keyword in node.keywords}
@@ -106,12 +128,12 @@ def test_the_window_builds_one_risk_application_from_its_current_config(
     assert risk.session_overrides is not None
 
 
-def test_the_engine_receives_the_application_the_window_built(window) -> None:
+def test_the_runtime_receives_the_application_the_window_built(window) -> None:
     """The regression itself: ``Engine.risk`` is what the window configured."""
 
     window.config = replace(window.config, risk_limits=_DISTINCTIVE)
     risk = window._build_auto_quant_risk()
-    engine = AutoQuantEngine(
+    engine = _runtime(
         candidates=(
             AutoQuantCandidate(
                 "AAA", "A", "T", 1, Decimal("80"), "趋势候选"
@@ -150,7 +172,7 @@ def test_the_window_passes_its_configured_exposure_multipliers(window) -> None:
 
 def test_the_engine_refuses_to_run_without_a_risk_application() -> None:
     with pytest.raises(TypeError):
-        AutoQuantEngine(
+        _runtime(
             candidates=(
                 AutoQuantCandidate(
                     "AAA", "A", "T", 1, Decimal("80"), "趋势候选"
@@ -175,7 +197,7 @@ def test_the_engine_refuses_to_run_without_an_execution_service() -> None:
     """
 
     with pytest.raises(TypeError):
-        AutoQuantEngine(
+        _runtime(
             candidates=(
                 AutoQuantCandidate(
                     "AAA", "A", "T", 1, Decimal("80"), "趋势候选"
@@ -247,7 +269,7 @@ def test_the_engine_call_site_passes_the_risk_application() -> None:
     assert len(calls) == 1, calls
     keywords = calls[0]
     assert "risk" in keywords
-    assert "strategy" in keywords
+    assert "identity" in keywords
     for retired in (
         "layered_risk_limits",
         "symbol_risk_multipliers",

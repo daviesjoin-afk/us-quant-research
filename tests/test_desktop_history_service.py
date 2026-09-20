@@ -205,16 +205,23 @@ EXECUTION_V2_METHODS = (
     "_finish_auto_quant_session_if_safe",
 )
 
+# Runtime v2A: the window builds its trading session through the runtime
+# composition root, so the methods that named the old engine follow the rename.
+# Declared so the guard can assert the delta exactly rather than tolerate it.
+RUNTIME_V2A_METHODS = (
+    "_prepare_auto_quant_candidates",
+    "_reset_auto_launch_controls",
+    "_task_failed",
+)
+
 FROZEN_METHODS = (
     "_data_tab",
     "_history_finished",
     "_scan_finished",
     "_auto_candidate_preparation_failed",
     "_auto_market_scan_finished",
-    "_prepare_auto_quant_candidates",
     "_start_task",
     "_worker_finished",
-    "_task_failed",
     "closeEvent",
 )
 
@@ -1122,12 +1129,14 @@ def test_only_the_declared_methods_changed() -> None:
         | set(BROKER_ACCOUNT_V2_METHODS)
         | set(STRATEGY_V2_METHODS)
         | set(EXECUTION_V2_METHODS)
+        | set(RUNTIME_V2A_METHODS)
     )
     assert set(changed) <= declared
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)
     assert set(BROKER_ACCOUNT_V2_METHODS) <= set(changed)
     assert set(STRATEGY_V2_METHODS) <= set(changed)
     assert set(EXECUTION_V2_METHODS) <= set(changed)
+    assert set(RUNTIME_V2A_METHODS) <= set(changed)
     for name in REFACTORED_METHODS:
         if name != "__init__":
             assert name in changed, name

@@ -193,6 +193,15 @@ EXECUTION_V2_METHODS = (
     "_finish_auto_quant_session_if_safe",
 )
 
+# Runtime v2A: the window builds its trading session through the runtime
+# composition root, so the methods that named the old engine follow the rename.
+# Declared so the guard can assert the delta exactly rather than tolerate it.
+RUNTIME_V2A_METHODS = (
+    "_prepare_auto_quant_candidates",
+    "_reset_auto_launch_controls",
+    "_task_failed",
+)
+
 FROZEN_METHODS = (
     "_backtest_workspace_finished",
     "_backtest_result_selection_changed",
@@ -203,7 +212,6 @@ FROZEN_METHODS = (
     "_run_strategy_research",
     "_strategy_finished",
     "_start_task",
-    "_task_failed",
     "closeEvent",
 )
 
@@ -1572,6 +1580,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(BROKER_ACCOUNT_V2_METHODS)
         | set(STRATEGY_V2_METHODS)
         | set(EXECUTION_V2_METHODS)
+        | set(RUNTIME_V2A_METHODS)
     )
     # Exact, not a subset: the delta is the declared surface and nothing
     # else, in both directions.
@@ -1580,6 +1589,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(BROKER_ACCOUNT_V2_METHODS) <= set(changed)
     assert set(STRATEGY_V2_METHODS) <= set(changed)
     assert set(EXECUTION_V2_METHODS) <= set(changed)
+    assert set(RUNTIME_V2A_METHODS) <= set(changed)
     assert "_run_backtest_workspace" in changed
 
 

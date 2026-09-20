@@ -165,6 +165,7 @@ from us_quant.trading.composition.strategies import (
     build_strategy_application,
 )
 from us_quant.trading.domain.strategy import (
+    StrategyIdentity,
     StrategyStatus,
     StrategyVersion,
 )
@@ -181,14 +182,6 @@ from us_quant.auto_intraday import (
     build_auto_rotation_config,
     resolve_paper_session_capital,
 )
-from us_quant.auto_quant import (
-    AutoQuantCandidate,
-    AutoQuantEngine,
-    AutoQuantPreflight,
-    AutoQuantSnapshot,
-    calculate_quote_readiness_breakdown,
-    evaluate_auto_quant_preflight,
-)
 from us_quant.auto_launch import (
     AutoLaunchPlan,
     auto_launch_plan_matches,
@@ -200,7 +193,16 @@ from us_quant.trading.composition.execution import (
     build_order_repository,
 )
 from us_quant.trading.composition.risk import build_risk_application
+from us_quant.trading.composition.runtime import build_trading_runtime
 from us_quant.trading.domain.risk import LayeredRiskLimits
+from us_quant.trading.runtime.artifacts import AutoQuantSnapshot
+from us_quant.trading.runtime.models import AutoQuantCandidate
+from us_quant.trading.runtime.preflight import (
+    AutoQuantPreflight,
+    calculate_quote_readiness_breakdown,
+    evaluate_auto_quant_preflight,
+)
+from us_quant.trading.runtime.trading import TradingRuntime
 from us_quant.runtime_supervisor import RuntimeSnapshot, RuntimeSupervisor
 from us_quant.paper_order_models import PaperOrderReconciliation
 from us_quant.trading.ports.broker_execution import ExecutionRefused
@@ -481,7 +483,7 @@ class MainWindow(QMainWindow):
         self.shadow_engine: ShadowPaperEngine | None = None
         self.shadow_snapshot: ShadowSnapshot | None = None
         self.target_preflight_result: TargetPreflightResult | None = None
-        self.auto_quant_engine: AutoQuantEngine | None = None
+        self.trading_runtime: TradingRuntime | None = None
         self.auto_quant_snapshot: AutoQuantSnapshot | None = None
         self.paper_execution_health: PaperExecutionHealth | None = None
         # Paper and internal Shadow simulation share one explicit execution
@@ -3442,7 +3444,7 @@ class MainWindow(QMainWindow):
     def _check_auto_order_channel(self) -> None:
         if (
             self.paper_trading.has_order_service()
-            or self.auto_quant_engine is not None
+            or self.trading_runtime is not None
         ):
             QMessageBox.information(
                 self,
@@ -3519,8 +3521,8 @@ class MainWindow(QMainWindow):
             )
             return
         if (
-            self.auto_quant_engine is not None
-            and self.auto_quant_engine.active
+            self.trading_runtime is not None
+            and self.trading_runtime.session.active
         ):
             QMessageBox.information(
                 self,
@@ -3772,7 +3774,7 @@ class MainWindow(QMainWindow):
         self.auto_arm_confirm.setChecked(False)
         if (
             not self.paper_trading.has_order_service()
-            and self.auto_quant_engine is None
+            and self.trading_runtime is None
         ):
             self.auto_start_button.setEnabled(True)
             self.auto_prepare_button.setEnabled(True)
@@ -4115,10 +4117,13 @@ class MainWindow(QMainWindow):
                 repository=self.order_repository,
                 broker=service,
             )
-            engine = AutoQuantEngine(
-                candidates=self.auto_quant_candidates,
+            # The runtime is assembled through the composition root, from the
+            # risk and execution services this window built, so the session
+            # dispatches through the same authorities it renders.
+            runtime = build_trading_runtime(
                 config=config,
-                strategy=strategy.identity,
+                candidates=self.auto_quant_candidates,
+                identity=strategy.identity,
                 risk=risk,
                 execution=execution,
                 market_reference_symbols=tuple(
@@ -4131,7 +4136,7 @@ class MainWindow(QMainWindow):
                     )
                 ),
             )
-            snapshot = engine.start()
+            snapshot = runtime.start()
             assert snapshot.session_id is not None
             service.arm(
                 session_id=snapshot.session_id,
@@ -4151,7 +4156,7 @@ class MainWindow(QMainWindow):
             self.paper_trading.ensure_candidate_can_promote(candidate_id)
             workflow_result = self.paper_workflow.publish_armed(
                 plan,
-                engine=engine,
+                engine=runtime,
                 orders=service,
                 health_evaluator=self._paper_execution_health_adapter,
                 candidate_symbols=frozenset(
@@ -4170,7 +4175,7 @@ class MainWindow(QMainWindow):
                 show_message=True,
             )
             return
-        self.auto_quant_engine = engine
+        self.trading_runtime = runtime
         self.auto_quant_snapshot = workflow_result.engine_snapshot
         self._active_auto_launch_plan = None
         self.auto_stop_button.setEnabled(True)
@@ -4486,7 +4491,7 @@ class MainWindow(QMainWindow):
         # Ownership is released only now, after the workflow itself reported the
         # session finalized -- a successful disconnect alone proves nothing.
         self.paper_trading.clear_active()
-        self.auto_quant_engine = None
+        self.trading_runtime = None
         self.paper_execution_health = None
         self.auto_execution_health_label.setText(
             "执行对账：会话已安全结束，券商持仓和订单均已核对。"
@@ -5925,9 +5930,10 @@ class MainWindow(QMainWindow):
         """The single pre-trade risk authority for the auto-rotation session.
 
         Built from this window's current configuration and handed to the
-        engine as one object.  It used to be two: the account limits were
-        placed in ``ShadowConfig.layered_risk_limits`` while ``AutoQuantEngine``
-        read ``layered_risk_limits`` from a separate constructor argument the
+        runtime through the composition root as one object.  It used to be
+        two: the account limits were placed in
+        ``ShadowConfig.layered_risk_limits`` while the engine read
+        ``layered_risk_limits`` from a separate constructor argument the
         window never passed, so the configured limits sat in a field nobody
         read and the running engine enforced none of them.  Unit tests passed
         because they injected the argument directly.
@@ -7104,8 +7110,8 @@ class MainWindow(QMainWindow):
 
     def _start_shadow(self) -> None:
         if (
-            self.auto_quant_engine is not None
-            and self.auto_quant_engine.active
+            self.trading_runtime is not None
+            and self.trading_runtime.session.active
         ):
             QMessageBox.warning(
                 self,
@@ -8058,7 +8064,7 @@ class MainWindow(QMainWindow):
         if (
             hasattr(self, "auto_start_button")
             and not self.paper_trading.has_order_service()
-            and self.auto_quant_engine is None
+            and self.trading_runtime is None
         ):
             self.auto_arm_confirm.setChecked(False)
             self.auto_start_button.setEnabled(True)

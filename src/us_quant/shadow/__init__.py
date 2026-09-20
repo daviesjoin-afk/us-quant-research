@@ -1,20 +1,30 @@
 """The internal shadow simulation subsystem.
 
-Shadow is the *research-only* simulator: it runs the strategy against a
-simulated book so a candidate set can be evaluated without touching a broker.
-It is not a trading path and holds no broker port, which is why it lives beside
-the trading core rather than inside it.
+Shadow is the *research-only* simulator: it runs the strategy against a simulated
+book so a candidate set can be evaluated without touching a broker.  It is not a
+trading path, it holds no broker port, and no module in the trading core may
+import it -- the production runtime takes ``TradingSessionConfig`` and never
+learns that a simulator exists.
 
-This package currently owns exactly one thing -- the shadow configuration, whose
-overlay fields are why it cannot simply reuse the production session config.
-The engine and its store are still in ``us_quant.shadow_paper``, which is
-explicitly **TRANSITIONAL**: it is scheduled to be split into
-``shadow/models.py``, ``shadow/store.py`` and ``shadow/engine.py``, and only
-then deleted.  That decomposition is deliberately *not* part of this round.
+Five modules, one responsibility each:
 
-What this round does fix is the dependency direction: the trading core imports
-``trading.runtime.config``, never ``shadow_paper``, and the shadow side imports
-the trading core for the base config it extends.  One way only.
+``config.py``
+    ``ShadowSimulationConfig`` -- the session config plus the simulator's risk
+    overlay, and the builder the Desktop and the replay tool share.
+``models.py``
+    the immutable facts: a position, a fill, a session's provenance and a
+    snapshot.  Standard library only.
+``store.py``
+    ``ShadowPaperStore`` -- the only thing here that touches SQLite.
+``trade_logic.py``
+    ``ShadowTradeLogic`` -- entry and exit behaviour, holding no state.
+``engine.py``
+    ``ShadowPaperEngine`` -- the lifecycle, the stream sequencing, and the one
+    copy of every mutable fact.
+
+This is a thin re-export surface, not a facade: importing a specific submodule is
+preferred, and nothing here reaches for the engine or the store on a caller's
+behalf.
 """
 
 from __future__ import annotations
@@ -23,8 +33,18 @@ from us_quant.shadow.config import (
     ShadowSimulationConfig,
     build_targeted_shadow_config,
 )
+from us_quant.shadow.models import (
+    ShadowFill,
+    ShadowPosition,
+    ShadowSessionProvenance,
+    ShadowSnapshot,
+)
 
 __all__ = [
+    "ShadowFill",
+    "ShadowPosition",
+    "ShadowSessionProvenance",
     "ShadowSimulationConfig",
+    "ShadowSnapshot",
     "build_targeted_shadow_config",
 ]

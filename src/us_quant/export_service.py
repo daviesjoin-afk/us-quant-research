@@ -11,7 +11,7 @@ from us_quant.trading.domain.account import BrokerAccountPortfolio
 from us_quant.trading.domain.market import MarketSnapshot
 from us_quant.runtime_events import RuntimeEvent
 from us_quant.redaction import sanitize_value
-from us_quant.shadow_paper import ShadowFill
+from us_quant.shadow.models import ShadowFill
 from us_quant.trading.domain.strategy import StrategyVersion
 from us_quant.targeted_replay import TargetedReplayResult
 from us_quant.targeted_robustness import TargetedRobustnessResult

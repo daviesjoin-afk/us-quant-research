@@ -170,12 +170,10 @@ from us_quant.trading.domain.strategy import (
 )
 from us_quant.runtime_events import RuntimeEventStore
 from us_quant.export_service import export_terminal_bundle
-from us_quant.shadow_paper import (
-    ShadowPaperEngine,
-    ShadowPaperStore,
-    ShadowSnapshot,
-)
 from us_quant.shadow.config import build_targeted_shadow_config
+from us_quant.shadow.engine import ShadowPaperEngine
+from us_quant.shadow.models import ShadowSnapshot
+from us_quant.shadow.store import ShadowPaperStore
 from us_quant.trading.composition.session_config import (
     build_auto_rotation_config,
     resolve_paper_session_capital,

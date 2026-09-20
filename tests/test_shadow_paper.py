@@ -12,11 +12,9 @@ from us_quant.trading.domain.market import (
     MarketSnapshot,
 )
 from us_quant.shadow.config import ShadowSimulationConfig
-from us_quant.shadow_paper import (
-    ShadowFill,
-    ShadowPaperEngine,
-    ShadowPaperStore,
-)
+from us_quant.shadow.engine import ShadowPaperEngine
+from us_quant.shadow.models import ShadowFill
+from us_quant.shadow.store import ShadowPaperStore
 
 
 def quote(
@@ -129,6 +127,14 @@ class ShadowPaperTests(unittest.TestCase):
                 store.add_fill(orphan)
 
     def test_delayed_quote_never_enters(self) -> None:
+        """A delayed quote must not even reach the momentum history.
+
+        The prices below rise hard enough to clear every entry gate, so the only
+        reason there is no fill is the freshness requirement itself.  Asserting
+        the warmup history stays empty is what makes this test about the gate
+        rather than about momentum.
+        """
+
         with TemporaryDirectory() as directory:
             engine = ShadowPaperEngine(
                 store=ShadowPaperStore(Path(directory) / "shadow.sqlite3"),
@@ -137,18 +143,20 @@ class ShadowPaperTests(unittest.TestCase):
                     initial_cash=Decimal("1500"),
                     capital_source="unit_test",
                     warmup_minutes=2,
+                    momentum_lookback_minutes=1,
+                    minimum_momentum=Decimal("0.0001"),
                 ),
             )
             engine.start()
             now = datetime(2026, 7, 24, 15, 0, tzinfo=timezone.utc)
-            for minute in range(4):
+            for minute, price in enumerate(("50.00", "50.60", "51.20", "51.80")):
                 at = now + timedelta(minutes=minute)
                 engine.on_stream(
                     stream(
                         quote(
                             "BAC",
-                            bid="50",
-                            ask="50.02",
+                            bid=price,
+                            ask=str(Decimal(price) + Decimal("0.02")),
                             observed_at=at,
                             ready=False,
                         ),
@@ -156,6 +164,11 @@ class ShadowPaperTests(unittest.TestCase):
                     ),
                     observed_at=at,
                 )
+            # A rising delayed quote would enter if freshness were ignored, so
+            # the absence of a fill is the gate, not a coincidence of prices.
+            self.assertEqual(
+                len(engine._minute_prices["BAC"]), 0, "delayed quote warmed up"
+            )
             self.assertEqual(engine.snapshot().positions, ())
             self.assertEqual(engine.snapshot().fills, ())
 
@@ -194,6 +207,18 @@ class ShadowPaperTests(unittest.TestCase):
             self.assertEqual(len(opened.positions), 1)
             self.assertEqual(opened.positions[0].quantity, 2)
             self.assertIsInstance(opened.positions[0].quantity, int)
+            # The entry is charged ask + slippage, and the commission is taken
+            # out of cash as well: the last ask is 50.32, so 50.32 * 1.0002 * 2
+            # plus 0.35.
+            expected_entry = (
+                Decimal("50.32") * (Decimal("1") + Decimal("2") / Decimal("10000"))
+            )
+            self.assertEqual(opened.positions[0].entry_price, expected_entry)
+            self.assertEqual(
+                opened.cash,
+                Decimal("1500") - expected_entry * 2 - Decimal("0.35"),
+            )
+            self.assertEqual(opened.fills[0].commission, Decimal("0.35"))
 
             exit_at = start + timedelta(minutes=4)
             engine.on_stream(
@@ -213,6 +238,19 @@ class ShadowPaperTests(unittest.TestCase):
             self.assertEqual(len(closed.fills), 2)
             self.assertGreater(closed.realized_pnl, Decimal("0"))
             self.assertEqual(len(store.recent_fills()), 2)
+            # A SELL is filled at bid minus the same slippage, and the round
+            # trip is charged twice: the sell commission already subtracted from
+            # proceeds, plus the buy commission paid on entry.
+            expected_exit = (
+                Decimal("51.00") * (Decimal("1") - Decimal("2") / Decimal("10000"))
+            )
+            self.assertEqual(closed.fills[1].price, expected_exit)
+            self.assertEqual(
+                closed.fills[1].realized_pnl,
+                (expected_exit - expected_entry) * 2
+                - Decimal("0.35")
+                - Decimal("0.35"),
+            )
 
     def test_configured_multiplier_reduces_position_notional(self) -> None:
         with TemporaryDirectory() as directory:

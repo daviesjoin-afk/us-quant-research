@@ -19,7 +19,7 @@ from PySide6.QtWidgets import QApplication
 
 from us_quant.desktop import MainWindow
 from us_quant.paper_trading_service import PaperTradingService
-from us_quant.workflow_state import PaperWorkflowPhase
+from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
 
 _APP = QApplication.instance() or QApplication([])

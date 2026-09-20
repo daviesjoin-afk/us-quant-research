@@ -22,6 +22,7 @@ not to defeat a determined author.
 from __future__ import annotations
 
 import ast
+from dataclasses import dataclass
 import pathlib
 import subprocess
 import sys
@@ -2198,7 +2199,6 @@ def test_only_the_execution_composition_wires_concrete_execution_pieces() -> (
         EXECUTION_APPLICATION,
         EXECUTION_DOMAIN,
         *RUNTIME_MODULES,
-        _SRC / "paper_session.py",
     ):
         modules = _imports(path)
         assert not _matches(modules, ("us_quant.trading.adapters",)), (
@@ -2376,6 +2376,15 @@ RUNTIME_DISPATCH = RUNTIME_DIR / "dispatch.py"
 RUNTIME_TRADING = RUNTIME_DIR / "trading.py"
 RUNTIME_COMPOSITION = _TRADING / "composition" / "runtime.py"
 
+#: Runtime v2B: the Paper session, workflow and lease migration.
+PAPER_CONTRACTS = RUNTIME_DIR / "paper_contracts.py"
+PAPER_MODELS = RUNTIME_DIR / "paper_models.py"
+PAPER_RECONCILIATION = RUNTIME_DIR / "reconciliation.py"
+PAPER_RECOVERY = RUNTIME_DIR / "recovery.py"
+PAPER_COORDINATOR = RUNTIME_DIR / "coordinator.py"
+PAPER_WORKFLOW_STATE = RUNTIME_DIR / "workflow_state.py"
+PAPER_WORKFLOW = RUNTIME_DIR / "workflow.py"
+
 #: Every production module of the runtime package.  ``__init__`` is excluded:
 #: it is a package marker, not a module with a responsibility.
 RUNTIME_MODULES = (
@@ -2388,6 +2397,13 @@ RUNTIME_MODULES = (
     RUNTIME_PORTFOLIO,
     RUNTIME_DISPATCH,
     RUNTIME_TRADING,
+    PAPER_CONTRACTS,
+    PAPER_MODELS,
+    PAPER_RECONCILIATION,
+    PAPER_RECOVERY,
+    PAPER_COORDINATOR,
+    PAPER_WORKFLOW_STATE,
+    PAPER_WORKFLOW,
 )
 
 #: The modules a *strategy* may import.  Kept separate from the list above
@@ -2591,6 +2607,95 @@ def test_the_desktop_builds_the_runtimes_through_composition() -> None:
     assert not offending, sorted(offending)
 
 
+@dataclass(frozen=True, slots=True)
+class _RuntimeClass:
+    """One class a runtime module defines, and the shape of its body.
+
+    Recorded per class rather than per module because two of these classes are
+    split across two files: the live half and the human-driven recovery half are
+    one object, and the guards below have to see both halves at once.
+    """
+
+    path: pathlib.Path
+    bases: tuple[str, ...]
+    methods: tuple[str, ...]
+    declared: tuple[str, ...]
+    calls: frozenset[str]
+    assigned: frozenset[str]
+
+
+def _class_names(path: pathlib.Path) -> set[str]:
+    """Every class name ``path`` itself defines.
+
+    ``_identifier_names`` reads *uses* of a name, not its definition, so a
+    class that is only defined and never referenced does not show up there.
+    """
+
+    return {
+        node.name
+        for node in ast.parse(path.read_text(encoding="utf-8")).body
+        if isinstance(node, ast.ClassDef)
+    }
+
+
+def _is_self_attribute(node: ast.expr) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    )
+
+
+def _runtime_class_records() -> dict[str, _RuntimeClass]:
+    """Every class the runtime package defines, keyed by class name."""
+
+    records: dict[str, _RuntimeClass] = {}
+    for path in RUNTIME_MODULES:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            calls: set[str] = set()
+            assigned: set[str] = set()
+            for child in ast.walk(node):
+                if (
+                    isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Attribute)
+                    and isinstance(child.func.value, ast.Name)
+                    and child.func.value.id == "self"
+                ):
+                    calls.add(child.func.attr)
+                elif isinstance(child, ast.Assign):
+                    for target in child.targets:
+                        if _is_self_attribute(target):
+                            assigned.add(target.attr)  # type: ignore[union-attr]
+                elif isinstance(child, ast.AnnAssign) and _is_self_attribute(
+                    child.target
+                ):
+                    assigned.add(child.target.attr)  # type: ignore[union-attr]
+            records[node.name] = _RuntimeClass(
+                path=path,
+                bases=tuple(
+                    base.id for base in node.bases if isinstance(base, ast.Name)
+                ),
+                methods=tuple(
+                    item.name
+                    for item in node.body
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                ),
+                declared=tuple(
+                    item.target.id
+                    for item in node.body
+                    if isinstance(item, ast.AnnAssign)
+                    and isinstance(item.target, ast.Name)
+                    and item.value is None
+                ),
+                calls=frozenset(calls),
+                assigned=frozenset(assigned),
+            )
+    return records
+
+
 def test_no_runtime_class_defines_a_method_twice() -> None:
     """A second definition of the same method is silently the only one.
 
@@ -2598,22 +2703,57 @@ def test_no_runtime_class_defines_a_method_twice() -> None:
     code that no linter here reports and no test can see -- it just sits there,
     calling helpers that may no longer exist, until the day the order of the two
     definitions changes.  That is what happened to ``TradingRuntime._flatten``.
+
+    The same dead code appears one level up when a subclass redefines a method a
+    runtime base already provides, which the Paper runtime now makes possible:
+    two of its classes are split across two modules.
     """
 
+    records = _runtime_class_records()
     duplicated: list[str] = []
-    for path in RUNTIME_MODULES:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.ClassDef):
+
+    for name, record in sorted(records.items()):
+        counts: dict[str, int] = {}
+        for method in record.methods:
+            counts[method] = counts.get(method, 0) + 1
+        for method, count in sorted(counts.items()):
+            if count > 1:
+                duplicated.append(f"{record.path.name}: {name}.{method} x{count}")
+        for base in record.bases:
+            if base not in records:
                 continue
-            definitions: dict[str, int] = {}
-            for item in node.body:
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    definitions[item.name] = definitions.get(item.name, 0) + 1
-            for name, count in sorted(definitions.items()):
-                if count > 1:
-                    duplicated.append(f"{path.name}: {node.name}.{name} x{count}")
+            for method in sorted(set(record.methods) & set(records[base].methods)):
+                duplicated.append(
+                    f"{record.path.name}: {name}.{method} overrides "
+                    f"{base}.{method}"
+                )
     assert not duplicated, duplicated
+
+
+def test_a_split_runtime_class_provides_what_its_other_half_relies_on() -> None:
+    """A half split into another file must say what it needs, and must get it.
+
+    ``SessionRecovery`` and ``ManualReconciliation`` are mixed into the classes
+    that own the state, so their bodies read attributes and call primitives they
+    do not define.  The contract is only real if the class that mixes them in
+    actually provides it, so this checks both directions: every attribute the
+    half declares is set by its owner, and every ``self.<name>()`` the half makes
+    is defined there.
+    """
+
+    records = _runtime_class_records()
+    problems: list[str] = []
+    for name, record in sorted(records.items()):
+        for base in record.bases:
+            half = records.get(base)
+            if half is None:
+                continue
+            provided = set(record.methods) | set(record.assigned)
+            for method in sorted(half.calls - set(half.methods) - provided):
+                problems.append(f"{half.path.name}: {base} calls self.{method}()")
+            for attribute in sorted(set(half.declared) - set(record.assigned)):
+                problems.append(f"{half.path.name}: {base} declares self.{attribute}")
+    assert not problems, problems
 
 
 def test_the_runtime_modules_stay_small() -> None:
@@ -2670,6 +2810,228 @@ def test_the_adapters_record_time_in_one_place() -> None:
         if "def now_iso" in source:
             formatters.add(path.relative_to(_SRC).as_posix())
     assert formatters == {"trading/adapters/clock.py"}, sorted(formatters)
+
+
+# -- Runtime v2B ----------------------------------------------------------
+#
+# The Paper session, workflow and lease migration.  The risk of a migration
+# round is the same one v2A had -- a 700-line module renamed into a differently
+# named 700-line module -- so the guards are again about size and direction, plus
+# the shape this round introduces: two classes whose human-driven half lives in
+# another module, and a coordinator that must stay a sequencer.
+
+#: The transitional root modules this round retired.  Deleted, not re-exported:
+#: a compatibility shim would keep a second entry point alive, and a second
+#: entry point is a second place that can halt, resume or finalize a session.
+RETIRED_PAPER_ROOT_MODULES = (
+    "us_quant.paper_session",
+    "us_quant.paper_workflow",
+    "us_quant.workflow_state",
+)
+
+#: What a migrated Paper module may not reach for: a provider, a store or a
+#: widget.  The coordinator sequences a port; the workflow renders a snapshot.
+PAPER_FORBIDDEN_BELOW = (
+    "ibapi",
+    "sqlite3",
+    "PySide6",
+    "us_quant.desktop",
+    "us_quant.trading.adapters",
+)
+
+#: Line budgets for the migrated Paper modules.  Each is well under the general
+#: 500-line ceiling on purpose: "tidy it up later" is how the first 700-line
+#: module happened, and a budget that only bites at 500 would not have caught it.
+PAPER_MODULE_LINE_LIMITS = {
+    "paper_contracts.py": 150,
+    "paper_models.py": 150,
+    "reconciliation.py": 300,
+    "recovery.py": 400,
+    "coordinator.py": 420,
+    "workflow_state.py": 250,
+    "workflow.py": 400,
+}
+
+
+def test_the_retired_paper_root_modules_are_gone() -> None:
+    """Guard H: deleted, not renamed and not re-exported."""
+
+    for module in RETIRED_PAPER_ROOT_MODULES:
+        path = _SRC / f"{module.removeprefix('us_quant.')}.py"
+        assert not path.exists(), (
+            f"{path.relative_to(_SRC).as_posix()} must not exist; the Paper "
+            "runtime migration moved its behaviour to trading/runtime/"
+        )
+
+
+def test_nothing_imports_a_retired_paper_root_module() -> None:
+    """Guard H, second half: production, scripts and tests alike."""
+
+    offenders: list[str] = []
+    for path in (
+        *_all_source_files(),
+        *_python_files(SCRIPTS_DIR),
+        *_python_files(_REPO_ROOT / "tests"),
+    ):
+        used = _matches(_imports(path), RETIRED_PAPER_ROOT_MODULES)
+        if used:
+            offenders.append(
+                f"{path.relative_to(_REPO_ROOT).as_posix()} -> {sorted(used)}"
+            )
+    assert not offenders, offenders
+
+
+def test_the_migrated_paper_modules_stay_small() -> None:
+    """Guard I: the migration is a split, not a move of one big class."""
+
+    oversized = [
+        f"{name}: {_line_count(RUNTIME_DIR / name)} lines (limit {limit})"
+        for name, limit in PAPER_MODULE_LINE_LIMITS.items()
+        if _line_count(RUNTIME_DIR / name) > limit
+    ]
+    assert not oversized, oversized
+
+    # And the modules really are the ones the Paper runtime uses, so the guard
+    # cannot pass by the files having been emptied.
+    for path in (PAPER_COORDINATOR, PAPER_WORKFLOW, PAPER_RECOVERY):
+        assert "PaperSession" in path.read_text(encoding="utf-8"), path.name
+
+
+def test_the_paper_contracts_and_models_depend_on_nothing_below_them() -> None:
+    """Guard J: the contracts name no provider, the models name no port call."""
+
+    for path in (PAPER_CONTRACTS, PAPER_MODELS):
+        offending = _matches(_imports(path), PAPER_FORBIDDEN_BELOW)
+        assert not offending, (path.name, sorted(offending))
+
+    assert "PaperEngine" in _class_names(PAPER_CONTRACTS)
+    assert "PaperSessionResult" in _class_names(PAPER_MODELS)
+
+
+def test_reconciliation_is_a_pure_proof() -> None:
+    """Guard K: it may read facts and raise; it may not act or decide."""
+
+    offending = _matches(
+        _imports(PAPER_RECONCILIATION),
+        PAPER_FORBIDDEN_BELOW
+        + (
+            "us_quant.trading.application",
+            "us_quant.trading.runtime.strategy",
+            "us_quant.trading.runtime.trading",
+            "us_quant.trading.runtime.coordinator",
+            "us_quant.trading.runtime.workflow",
+            "us_quant.trading.runtime.recovery",
+        ),
+    )
+    assert not offending, sorted(offending)
+
+    names = _identifier_names(PAPER_RECONCILIATION)
+    for forbidden in (
+        "PaperWorkflowPhase",
+        "ExecutionApplication",
+        "RiskApplication",
+        "StrategyRuntime",
+        "placeOrder",
+        "cancelOrder",
+    ):
+        assert forbidden not in names, forbidden
+
+    # It really does build proofs, so the guard cannot pass by the module
+    # having stopped working.
+    proofs = _class_names(PAPER_RECONCILIATION)
+    assert "CoordinatorReconciliationEvidence" in proofs
+    assert "CoordinatorFinalizationEvidence" in proofs
+
+
+def test_the_coordinator_sequences_and_does_not_decide() -> None:
+    """Guard L: it drains, times out and halts; it never submits or prices."""
+
+    offending = _matches(_imports(PAPER_COORDINATOR), PAPER_FORBIDDEN_BELOW)
+    assert not offending, sorted(offending)
+
+    names = _identifier_names(PAPER_COORDINATOR)
+    assert "PaperSessionCoordinator" in _class_names(PAPER_COORDINATOR)
+    assert "SessionRecovery" in names
+    for forbidden in (
+        "RiskApplication",
+        "ExecutionApplication",
+        "StrategyRuntime",
+        "OrderIntent",
+        "OrderRepositoryPort",
+        "TradeProposal",
+        "placeOrder",
+        "cancelOrder",
+    ):
+        assert forbidden not in names, forbidden
+
+    # The port it sequences is described by name only: the coordinator must not
+    # name a concrete order service or gateway either.
+    assert "IBKRPaperOrderService" not in names
+
+
+def test_the_paper_workflow_owns_lifecycle_and_no_broker() -> None:
+    """Guard M: the controller drives phases and hands out ports, nothing more."""
+
+    offending = _matches(
+        _imports(PAPER_WORKFLOW),
+        PAPER_FORBIDDEN_BELOW + ("us_quant.paper_trading_service",),
+    )
+    assert not offending, sorted(offending)
+
+    names = _identifier_names(PAPER_WORKFLOW)
+    assert "PaperWorkflowController" in _class_names(PAPER_WORKFLOW)
+    assert "ManualReconciliation" in names
+    assert "PaperSessionCoordinator" in names
+    for forbidden in (
+        "PaperTradingService",
+        "IBKRPaperOrderService",
+        "placeOrder",
+        "cancelOrder",
+        "submit_approved",
+    ):
+        assert forbidden not in names, forbidden
+
+    # The coordinator is constructed in exactly one place: publication.
+    source = PAPER_WORKFLOW.read_text(encoding="utf-8")
+    assert source.count("PaperSessionCoordinator(") == 1, source.count(
+        "PaperSessionCoordinator("
+    )
+
+
+def test_the_desktop_does_not_drive_the_paper_lifecycle_by_hand() -> None:
+    """Guard N: the window asks the workflow; it does not become one."""
+
+    desktop = _SRC / "desktop.py"
+    constructed: list[str] = []
+    for node in ast.walk(ast.parse(desktop.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in {
+                "PaperSessionCoordinator",
+                "SessionRecovery",
+                "ManualReconciliation",
+            }:
+                constructed.append(node.func.id)
+    assert not constructed, constructed
+
+    source = desktop.read_text(encoding="utf-8")
+    for forbidden in (
+        "CoordinatorReconciliationEvidence(",
+        "CoordinatorFinalizationEvidence(",
+        "validate_paper_transition(",
+        "ExecutionLeaseManager(",
+        "release_paper(",
+    ):
+        assert forbidden not in source, forbidden
+
+    # It still drives the workflow by its documented surface, so the guard
+    # cannot pass by the window having stopped launching Paper sessions.
+    for required in (
+        "paper_workflow.begin_connecting(",
+        "paper_workflow.publish_armed(",
+        "paper_workflow.begin_manual_reconciliation()",
+        "paper_workflow.finalize_if_safe()",
+    ):
+        assert required in source, required
 
 
 # -- scripts/ -------------------------------------------------------------

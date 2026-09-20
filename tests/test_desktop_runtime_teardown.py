@@ -354,8 +354,8 @@ def test_close_defers_the_paper_session_without_raising_the_gate(
     refuses to exit.
     """
 
-    from us_quant.paper_workflow import PaperWorkflowPhase
-    from us_quant.workflow_state import WorkflowStateError
+    from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
+    from us_quant.trading.runtime.workflow_state import WorkflowStateError
 
     _silence_dialogs(monkeypatch)
     window = _window()
@@ -443,7 +443,7 @@ class _HaltedPaperWorkflow:
     """
 
     def __init__(self, phase, *, finalized: bool = False) -> None:
-        from us_quant.paper_workflow import PaperWorkflowPhase  # noqa: F401
+        from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase  # noqa: F401
 
         self.phase = phase
         self._finalized = finalized
@@ -476,14 +476,14 @@ class _HaltedPaperWorkflow:
     def halt(self) -> object:
         """Model ``poll()`` discovering unsafe health: any phase -> HALTED."""
 
-        from us_quant.paper_workflow import PaperWorkflowPhase
+        from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
         self.phase = PaperWorkflowPhase.HALTED
         self._halted = True
         return self.result
 
     def fail_finalization_refresh(self) -> bool:
-        from us_quant.paper_workflow import PaperWorkflowPhase
+        from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
         if self.phase is not PaperWorkflowPhase.STOPPING:
             return False
@@ -497,7 +497,7 @@ class _HaltedPaperWorkflow:
         is a test bug and must be loud rather than silently accepted.
         """
 
-        from us_quant.paper_workflow import PaperWorkflowPhase
+        from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
         if self.phase not in {
             PaperWorkflowPhase.RUNNING,
@@ -553,7 +553,7 @@ def test_close_on_a_halted_session_refuses_without_tearing_paper_down(
 ) -> None:
     """Requirement 1: HALTED + not finalized -> refused, nothing disconnected."""
 
-    from us_quant.paper_workflow import PaperWorkflowPhase
+    from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
     _silence_dialogs(monkeypatch)
     window = _window()
@@ -602,7 +602,7 @@ def test_halted_close_does_not_lock_out_manual_reconciliation(
 ) -> None:
     """Requirement 2: the recovery task must be admitted after a refused close."""
 
-    from us_quant.paper_workflow import PaperWorkflowPhase
+    from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
     _silence_dialogs(monkeypatch)
     window = _window()
@@ -632,7 +632,7 @@ def test_halted_close_does_not_lock_out_manual_reconciliation(
 def test_reconciling_phases_also_release_the_close_drain(monkeypatch) -> None:
     """RECONCILING / RECONCILING_READY are operator-only too."""
 
-    from us_quant.paper_workflow import PaperWorkflowPhase
+    from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
     for phase in (
         PaperWorkflowPhase.RECONCILING,
@@ -660,7 +660,7 @@ def test_finalization_failure_during_close_reopens_manual_recovery(
     later does the finalization failure land the session in ``HALTED``.
     """
 
-    from us_quant.paper_workflow import PaperWorkflowPhase
+    from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
     _silence_dialogs(monkeypatch)
     window = _window()
@@ -703,7 +703,7 @@ def test_ordinary_tasks_stay_refused_while_an_automatic_stop_drains(
 ) -> None:
     """Requirement 4: the automatic path must keep the gate down."""
 
-    from us_quant.paper_workflow import PaperWorkflowPhase
+    from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
     _silence_dialogs(monkeypatch)
     window = _window()
@@ -735,7 +735,7 @@ def test_close_after_finalization_still_completes_the_teardown(
 ) -> None:
     """Requirement 5: a genuinely finalized session closes normally."""
 
-    from us_quant.paper_workflow import PaperWorkflowPhase
+    from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
     _silence_dialogs(monkeypatch)
     window = _window()
@@ -767,7 +767,7 @@ def test_a_halt_discovered_during_the_stop_reopens_manual_recovery(
     needs its own regression.
     """
 
-    from us_quant.paper_workflow import PaperWorkflowPhase
+    from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
     _silence_dialogs(monkeypatch)
     window = _window()

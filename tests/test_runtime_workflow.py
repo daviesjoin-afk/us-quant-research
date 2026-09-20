@@ -7,9 +7,9 @@ from decimal import Decimal
 import pytest
 
 from us_quant.auto_launch import build_auto_launch_plan
-from us_quant.paper_session import PaperSessionCoordinator
-from us_quant.paper_workflow import PaperWorkflowController
-from us_quant.workflow_state import ExecutionLease, PaperWorkflowPhase, WorkflowStateError
+from us_quant.trading.runtime.coordinator import PaperSessionCoordinator
+from us_quant.trading.runtime.workflow import PaperWorkflowController
+from us_quant.trading.runtime.workflow_state import ExecutionLease, PaperWorkflowPhase, WorkflowStateError
 
 
 @dataclass(frozen=True)

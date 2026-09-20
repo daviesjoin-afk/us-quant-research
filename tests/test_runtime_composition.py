@@ -13,7 +13,7 @@ from decimal import Decimal
 
 import pytest
 
-from us_quant.paper_session import PaperEngine
+from us_quant.trading.runtime.paper_contracts import PaperEngine
 from us_quant.shadow_paper import ShadowConfig
 from us_quant.trading.application.execution import ExecutionApplication
 from us_quant.trading.application.risk import RiskApplication

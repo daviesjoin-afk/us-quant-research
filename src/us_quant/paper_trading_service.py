@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from typing import Callable, Protocol, Sequence
 
 from .trading.composition.execution import build_execution_candidate
-from .workflow_state import PaperWorkflowPhase
+from .trading.runtime.workflow_state import PaperWorkflowPhase
 
 
 class PaperTradingLifecycleError(RuntimeError):

@@ -991,6 +991,14 @@ EXECUTION_V2_CHANGED_MODULES = (
     "src/us_quant/ibkr_paper_gateway.py",
 )
 
+# Runtime v2B: the Paper workflow and the lease/phase guards moved into
+# ``trading/runtime/``; the root copies are deleted.  Declared so the guard can
+# still assert the delta exactly.
+RUNTIME_V2B_CHANGED_MODULES = (
+    "src/us_quant/paper_workflow.py",
+    "src/us_quant/workflow_state.py",
+)
+
 
 def test_the_frozen_sibling_modules_are_untouched() -> None:
     """Spec 35/36/37: Paper, settings, workers and widgets are frozen."""
@@ -1032,6 +1040,7 @@ def test_the_frozen_sibling_modules_are_untouched() -> None:
         set(MARKET_DATA_V2_CHANGED_MODULES)
         | set(BROKER_ACCOUNT_V2_CHANGED_MODULES)
         | set(EXECUTION_V2_CHANGED_MODULES)
+        | set(RUNTIME_V2B_CHANGED_MODULES)
     )
 
 

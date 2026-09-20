@@ -3,23 +3,28 @@
 The controller deliberately owns no broker connection or order API.  A caller
 connects and arms the Paper service elsewhere, then publishes the resulting
 ports here only after the immutable :class:`AutoLaunchPlan` still matches.
+
+Its explicit recovery protocol -- manual reconciliation -- is mixed in from
+``recovery``; it shares this class's state and primitives rather than keeping a
+second copy of either.
 """
 
 from __future__ import annotations
 
-from uuid import uuid4
-
-from .auto_launch import AutoLaunchPlan
-from .paper_session import (
-    CoordinatorFinalizationEvidence,
-    CoordinatorReconciliationEvidence,
+from us_quant.auto_launch import AutoLaunchPlan
+from us_quant.trading.runtime.coordinator import PaperSessionCoordinator
+from us_quant.trading.runtime.paper_contracts import (
     HealthEvaluator,
     PaperEngine,
     PaperOrderPort,
-    PaperSessionCoordinator,
-    PaperSessionResult,
 )
-from .workflow_state import (
+from us_quant.trading.runtime.paper_models import PaperSessionResult
+from us_quant.trading.runtime.reconciliation import (
+    CoordinatorFinalizationEvidence,
+    CoordinatorReconciliationEvidence,
+)
+from us_quant.trading.runtime.recovery import ManualReconciliation
+from us_quant.trading.runtime.workflow_state import (
     ExecutionLease,
     ExecutionLeaseManager,
     PaperWorkflowPhase,
@@ -29,7 +34,7 @@ from .workflow_state import (
 )
 
 
-class PaperWorkflowController:
+class PaperWorkflowController(ManualReconciliation):
     """Own one Paper lifecycle while keeping the desktop and broker decoupled.
 
     The controller acquires its execution lease before an asynchronous broker
@@ -198,7 +203,9 @@ class PaperWorkflowController:
             PaperWorkflowPhase.RUNNING,
             PaperWorkflowPhase.PAUSED,
         }:
-            raise WorkflowStateError("Entries can only be paused for an active Paper session.")
+            raise WorkflowStateError(
+                "Entries can only be paused for an active Paper session."
+            )
         if not paused and self._phase is not PaperWorkflowPhase.PAUSED:
             raise WorkflowStateError("Entries can only resume from PAUSED.")
         result = self._apply_runtime_result(
@@ -213,7 +220,9 @@ class PaperWorkflowController:
         """Delegate an orderly stop; lease release remains explicit and final-only."""
 
         if self._phase not in {PaperWorkflowPhase.RUNNING, PaperWorkflowPhase.PAUSED}:
-            raise WorkflowStateError("A Paper stop requires a RUNNING or PAUSED session.")
+            raise WorkflowStateError(
+                "A Paper stop requires a RUNNING or PAUSED session."
+            )
         result = self._apply_runtime_result(
             self._require_runtime().request_stop(stream_snapshot)
         )
@@ -286,106 +295,17 @@ class PaperWorkflowController:
         self._transition(PaperWorkflowPhase.HALTED)
         return True
 
-    def begin_manual_reconciliation(self) -> str:
-        """Enter manual reconciliation only after a sticky safety halt."""
-
-        if self._phase is not PaperWorkflowPhase.HALTED:
-            raise WorkflowStateError("Manual reconciliation requires a HALTED Paper session.")
-        self._reconciliation_evidence = None
-        self._reconciliation_attempt_id = uuid4().hex
-        self._transition(PaperWorkflowPhase.RECONCILING, explicit_reconciliation=True)
-        return self._reconciliation_attempt_id
-
-    def complete_manual_reconciliation(
-        self, attempt_id: str
-    ) -> PaperSessionResult:
-        """Publish one-shot evidence for the matching async attempt only."""
-
-        if (
-            self._phase is not PaperWorkflowPhase.RECONCILING
-            or attempt_id != self._reconciliation_attempt_id
-        ):
-            raise WorkflowStateError(
-                "Stale or inactive manual reconciliation result."
-            )
-        coordinator = self._coordinator
-        if coordinator is None:
-            self._reconciliation_attempt_id = None
-            self._transition(PaperWorkflowPhase.HALTED)
-            raise WorkflowStateError("No halted Paper runtime is available.")
-        try:
-            result, evidence = coordinator.capture_reconciliation_evidence()
-        except (RuntimeError, ValueError) as error:
-            self._reconciliation_attempt_id = None
-            self._transition(PaperWorkflowPhase.HALTED)
-            raise WorkflowStateError(str(error)) from error
-        self._result = result
-        self._reconciliation_attempt_id = None
-        if evidence is None:
-            self._reconciliation_evidence = None
-            self._transition(PaperWorkflowPhase.HALTED)
-            return result
-        self._reconciliation_evidence = evidence
-        self._transition(PaperWorkflowPhase.RECONCILING_READY)
-        return result
-
-    def fail_manual_reconciliation(self, attempt_id: str | None = None) -> bool:
-        """Fail only the matching attempt; stale callbacks are ignored."""
-
-        if self._phase is not PaperWorkflowPhase.RECONCILING:
-            return False
-        if attempt_id is not None and attempt_id != self._reconciliation_attempt_id:
-            return False
-        self._reconciliation_attempt_id = None
-        self._reconciliation_evidence = None
-        self._transition(PaperWorkflowPhase.HALTED)
-        return True
-
-    def confirm_manual_resume(self, evidence_id: str) -> PaperSessionResult:
-        """Resume the existing coordinator after explicit reconciliation.
-
-        The coordinator invokes the engine recovery exactly once while keeping
-        the existing order port, health evaluator, and candidate context.  No
-        connect, arm, submit, resubmit, or disconnect action occurs here.
-        """
-
-        evidence = self._reconciliation_evidence
-        if (
-            self._phase is not PaperWorkflowPhase.RECONCILING_READY
-            or evidence is None
-            or evidence.evidence_id != evidence_id
-        ):
-            raise WorkflowStateError("Manual resume requires current reconciliation evidence.")
-        coordinator = self._coordinator
-        if coordinator is None:
-            raise WorkflowStateError("No halted Paper runtime is available for manual resume.")
-        # Atomically consume before invoking a second broker refresh so a
-        # duplicate click cannot recover the engine twice.
-        self._reconciliation_evidence = None
-        try:
-            coordinator = coordinator.confirm_reconciliation(evidence)
-        except (RuntimeError, ValueError) as error:
-            self._transition(PaperWorkflowPhase.HALTED)
-            raise WorkflowStateError(str(error)) from error
-        result = coordinator.snapshot()
-        if result.state.halted:
-            self._coordinator = coordinator
-            self._result = result
-            self._transition(PaperWorkflowPhase.HALTED)
-            return result
-        self._coordinator = coordinator
-        self._result = result
-        self._transition(PaperWorkflowPhase.RUNNING, explicit_reconciliation=True)
-        return result
-
     def finalize_if_safe(self) -> bool:
         """Release PAPER only after coordinator finalization is observable."""
 
         if self._result is None or not self._result.state.finalized:
             return False
-        if self._phase not in {PaperWorkflowPhase.STOPPING, PaperWorkflowPhase.RECONCILING,
-                               PaperWorkflowPhase.RECONCILING_READY,
-                               PaperWorkflowPhase.FINALIZED}:
+        if self._phase not in {
+            PaperWorkflowPhase.STOPPING,
+            PaperWorkflowPhase.RECONCILING,
+            PaperWorkflowPhase.RECONCILING_READY,
+            PaperWorkflowPhase.FINALIZED,
+        }:
             return False
         if self._phase is not PaperWorkflowPhase.FINALIZED:
             self._transition(PaperWorkflowPhase.FINALIZED)

@@ -9,8 +9,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from .paper_workflow import PaperWorkflowController
-from .workflow_state import ExecutionLeaseManager, WorkflowSnapshot, WorkflowStateError
+from .trading.runtime.workflow import PaperWorkflowController
+from .trading.runtime.workflow_state import (
+    ExecutionLeaseManager,
+    WorkflowSnapshot,
+    WorkflowStateError,
+)
 
 
 @dataclass(frozen=True, slots=True)

@@ -68,9 +68,17 @@ def runtime_status(snapshot: object) -> MetricView:
 
 
 def account_metrics(
-    snapshot: object, account: object | None, broker_state: object | None
+    snapshot: object,
+    account: object | None,
+    broker_state: object | None,
+    broker_positions: Sequence[object],
 ) -> tuple[MetricView, MetricView, MetricView, MetricView]:
-    """The four account cards, each labelled with where its number came from."""
+    """The four account cards, each labelled with where its number came from.
+
+    ``broker_positions`` is the caller's candidate-scoped slice of the broker
+    account and is forwarded to :func:`position_metric`; see that function for
+    why the scope is not the presenter's to decide.
+    """
 
     equity_value, equity_note = _prefer(
         (getattr(broker_state, "net_liquidation", None), "IBKR Paper 订单会话实时账户摘要"),
@@ -91,16 +99,27 @@ def account_metrics(
         MetricView(money(equity_value), equity_note),
         MetricView(money(realized_value, signed=True), realized_note),
         MetricView(money(unrealized_value, signed=True), unrealized_note),
-        position_metric(snapshot, broker_state),
+        position_metric(snapshot, broker_positions),
     )
 
 
-def position_metric(snapshot: object, broker_state: object | None) -> MetricView:
-    """The position count: broker holdings when there are any, else local."""
+def position_metric(
+    snapshot: object, broker_positions: Sequence[object]
+) -> MetricView:
+    """The position count: the session's broker holdings, else the local book.
 
-    broker_positions = tuple(getattr(broker_state, "positions", ()) or ())
+    The count deliberately uses the *session-scoped* broker positions the caller
+    passes in, never the whole Paper account.  The table below this card shows
+    the same slice, and the legacy card counted the same slice; counting the
+    account instead would let the card read "2" beside a one-row table whenever
+    the account holds a symbol that the current session never touched.  Which
+    positions belong to the session is a fact the window already knows, so the
+    presenter must not re-derive a wider scope from ``broker_state.positions``.
+    """
+
+    scoped = tuple(broker_positions or ())
     local_positions = tuple(getattr(snapshot, "positions", ()) or ())
-    count = len(broker_positions) if broker_positions else len(local_positions)
+    count = len(scoped) if scoped else len(local_positions)
     pending = len(tuple(getattr(snapshot, "pending_orders", ()) or ()))
     return MetricView(
         str(count),
@@ -192,7 +211,7 @@ def build_runtime_view(
     """Project one set of already-fetched facts into one renderable view."""
 
     equity, realized, unrealized, position_count = account_metrics(
-        snapshot, account, broker_state
+        snapshot, account, broker_state, broker_positions
     )
     return ExecutionRuntimeView(
         status=runtime_status(snapshot),

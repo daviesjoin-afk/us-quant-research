@@ -181,15 +181,15 @@ def test_the_equity_card_prefers_the_broker_then_the_account_then_local() -> Non
     snapshot, account = Snapshot(), Account()
 
     broker = BrokerState(net_liquidation=Decimal("2000"))
-    view = presenter.account_metrics(snapshot, account, broker)[0]
+    view = presenter.account_metrics(snapshot, account, broker, ())[0]
     assert view.value == "$2,000.00"
     assert view.note == "IBKR Paper 订单会话实时账户摘要"
 
-    view = presenter.account_metrics(snapshot, account, BrokerState())[0]
+    view = presenter.account_metrics(snapshot, account, BrokerState(), ())[0]
     assert view.value == "$1,490.00"
     assert view.note == "IBKR Paper 只读快照"
 
-    view = presenter.account_metrics(snapshot, None, BrokerState())[0]
+    view = presenter.account_metrics(snapshot, None, BrokerState(), ())[0]
     assert view.value == "$1,500.00"
     assert view.note == "等待券商刷新；显示本地估算"
 
@@ -198,16 +198,16 @@ def test_the_realized_card_prefers_the_broker_then_the_account_then_local() -> N
     snapshot, account = Snapshot(), Account()
 
     view = presenter.account_metrics(
-        snapshot, account, BrokerState(realized_pnl=Decimal("9"))
+        snapshot, account, BrokerState(realized_pnl=Decimal("9")), ()
     )[1]
     assert view.value == "+$9.00"
     assert view.note == "IBKR reqPnL（订单会话）"
 
-    view = presenter.account_metrics(snapshot, account, BrokerState())[1]
+    view = presenter.account_metrics(snapshot, account, BrokerState(), ())[1]
     assert view.value == "+$4.00"
     assert view.note == "IBKR reqPnL"
 
-    view = presenter.account_metrics(snapshot, None, BrokerState())[1]
+    view = presenter.account_metrics(snapshot, None, BrokerState(), ())[1]
     assert view.value == "+$5.00"
     assert view.note == "本地估算"
 
@@ -217,16 +217,16 @@ def test_the_unrealized_card_uses_the_same_order() -> None:
 
     assert (
         presenter.account_metrics(
-            snapshot, Account(), BrokerState(unrealized_pnl=Decimal("-3"))
+            snapshot, Account(), BrokerState(unrealized_pnl=Decimal("-3")), ()
         )[2].value
         == "$-3.00"
     )
     assert (
-        presenter.account_metrics(snapshot, Account(), BrokerState())[2].value
+        presenter.account_metrics(snapshot, Account(), BrokerState(), ())[2].value
         == "+$6.00"
     )
     assert (
-        presenter.account_metrics(snapshot, None, BrokerState())[2].value
+        presenter.account_metrics(snapshot, None, BrokerState(), ())[2].value
         == "+$7.00"
     )
 
@@ -234,17 +234,47 @@ def test_the_unrealized_card_uses_the_same_order() -> None:
 def test_the_position_card_counts_broker_holdings_when_there_are_any() -> None:
     snapshot = Snapshot(positions=(Position(), Position(symbol="BBB")))
 
-    assert presenter.position_metric(snapshot, BrokerState()).value == "2"
+    assert presenter.position_metric(snapshot, ()).value == "2"
     assert (
-        presenter.position_metric(
-            snapshot, BrokerState(positions=(BrokerPosition(),))
-        ).value
-        == "1"
+        presenter.position_metric(snapshot, (BrokerPosition(),)).value == "1"
     )
 
 
+def test_the_position_card_counts_only_the_sessions_broker_holdings() -> None:
+    """The account may hold symbols this session never touched."""
+
+    snapshot = Snapshot(positions=(Position(),))
+    broker_state = BrokerState(
+        positions=(BrokerPosition(), BrokerPosition(symbol="MSFT"))
+    )
+    scoped = (BrokerPosition(),)
+
+    card = presenter.account_metrics(snapshot, Account(), broker_state, scoped)[3]
+    rows = position_rows(snapshot, scoped, {"AAA": Quote()})
+    assert card.value == "1"
+    assert len(rows) == 1
+
+
+def test_the_position_card_falls_back_to_the_local_book_when_the_slice_is_empty() -> (
+    None
+):
+    """An unrelated account holding is not this session's position."""
+
+    snapshot = Snapshot(positions=(Position(),))
+    broker_state = BrokerState(
+        positions=(BrokerPosition(symbol="MSFT"), BrokerPosition(symbol="NVDA"))
+    )
+
+    card = presenter.account_metrics(snapshot, Account(), broker_state, ())[3]
+    rows = position_rows(snapshot, (), {"AAA": Quote()})
+    assert [position.symbol for position in broker_state.positions] == ["MSFT", "NVDA"]
+    assert card.value == "1"
+    assert len(rows) == 1
+    assert rows[0].source == "session"
+
+
 def test_the_position_card_notes_the_pending_count_and_the_day_trade_count() -> None:
-    view = presenter.position_metric(Snapshot(), BrokerState())
+    view = presenter.position_metric(Snapshot(), ())
     assert view.note == "在途 0 · 完成交易 2"
 
 
@@ -558,6 +588,28 @@ def test_the_view_assembles_every_table_from_one_set_of_facts() -> None:
     assert len(view.candidates.realtime) == 1
     assert len(view.orders) == 1
     assert len(view.candidates.static_key) == 1
+
+
+def test_the_assembled_view_counts_the_same_positions_it_tabulates() -> None:
+    """The card and the table must describe the same scope, not the account."""
+
+    view = presenter.build_runtime_view(
+        snapshot=Snapshot(positions=(Position(),)),
+        account=Account(),
+        broker_state=BrokerState(
+            positions=(BrokerPosition(), BrokerPosition(symbol="MSFT"))
+        ),
+        broker_positions=(BrokerPosition(),),
+        quotes={"AAA": Quote()},
+        pending_by_symbol={},
+        latency=(),
+        reconciliations=(),
+        audit_by_intent={},
+        candidates=(Candidate(),),
+        recently_ready=lambda _s: False,
+    )
+    assert view.position_count.value == "1"
+    assert len(view.positions) == 1
 
 
 def test_the_candidates_view_is_projectable_on_its_own() -> None:

@@ -196,6 +196,52 @@ def test_manual_resume_opens_only_with_evidence_awaiting_confirmation() -> None:
         window.deleteLater()
 
 
+def test_the_candidates_are_visible_before_a_session_is_armed() -> None:
+    """The shortlist is inspectable at the moment it is being approved.
+
+    The legacy route filled its candidate table straight from the prepared
+    candidates, with no session behind them.  A route that waited for a runtime
+    snapshot -- which only exists once a session is armed -- would show an empty
+    table while asking the operator to approve exactly that content.
+    """
+
+    window = _window()
+    try:
+        assert window.auto_quant_snapshot is None
+
+        window.auto_quant_candidates = (
+            _candidate("AAA"),
+            _candidate("BBB"),
+        )
+        window._populate_auto_quant_candidates()
+
+        table = window.execution_page.details.candidate_table
+        assert table.rowCount() == 2
+        # The table sorts itself once refilled, so the row order is not the
+        # contract -- the content is.
+        assert {
+            table.item(row, 0).text() for row in range(table.rowCount())
+        } == {"AAA", "BBB"}
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def _candidate(symbol: str):
+    from decimal import Decimal
+
+    from us_quant.trading.runtime.models import AutoQuantCandidate
+
+    return AutoQuantCandidate(
+        symbol=symbol,
+        name=f"{symbol} Inc",
+        sector="Tech",
+        leader_tier=1,
+        scan_score=Decimal("80"),
+        signal="buy",
+    )
+
+
 def test_the_window_no_longer_owns_the_execution_widgets() -> None:
     """The route is one attribute: the page.  Nothing inside it is the window's.
 

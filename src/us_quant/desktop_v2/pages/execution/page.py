@@ -37,6 +37,7 @@ from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from us_quant.desktop_v2.pages.execution.controls import ExecutionControls
 from us_quant.desktop_v2.pages.execution.models import (
+    ExecutionCandidatesView,
     ExecutionControlState,
     ExecutionRuntimeView,
 )
@@ -156,6 +157,17 @@ class ExecutionPage(QWidget):
         )
         self.controls.render_summary(view.summary)
         self.details.render(view)
+
+    def render_candidates(self, view: ExecutionCandidatesView) -> None:
+        """Draw the candidate table while no session exists yet.
+
+        The shortlist an operator approves is the one thing on this route that
+        has content before a launch: the session cards are empty and the other
+        tables have no session to read from, but the candidates must be
+        inspectable or the operator is asked to arm something unseen.
+        """
+
+        self.details.render_candidates(view)
 
     def render_context(self, **lines: str | None) -> None:
         """Replace the context lines written outside a session render."""

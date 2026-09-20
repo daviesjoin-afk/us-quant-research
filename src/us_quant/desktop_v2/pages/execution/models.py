@@ -142,6 +142,22 @@ class OrderRow:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionCandidatesView:
+    """The candidate table on its own, without a session behind it.
+
+    A candidate set exists before any session does -- the operator approves a
+    shortlist and only then arms it -- so the candidate table is the one table
+    that must be renderable while every session card is still empty.  Carrying
+    the static key here keeps the rebuild optimisation next to the rows it
+    protects.
+    """
+
+    candidates: tuple[CandidateRow, ...]
+    realtime: tuple[CandidateRealtime, ...]
+    static_key: tuple[tuple[str, ...], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionRuntimeView:
     """Everything one render of the execution page draws from session facts."""
 
@@ -155,10 +171,8 @@ class ExecutionRuntimeView:
     fills: tuple[FillRow, ...]
     shadow: tuple[ShadowRow, ...]
     latency: tuple[LatencyRow, ...]
-    candidates: tuple[CandidateRow, ...]
-    candidate_realtime: tuple[CandidateRealtime, ...]
+    candidates: ExecutionCandidatesView
     orders: tuple[OrderRow, ...]
-    candidates_static_key: tuple[tuple[str, ...], ...]
 
 
 @dataclass(frozen=True, slots=True)

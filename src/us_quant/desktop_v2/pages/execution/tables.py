@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from us_quant.desktop_v2.pages.execution.models import (
+    ExecutionCandidatesView,
     ExecutionRuntimeView,
     Tone,
 )
@@ -173,12 +174,17 @@ class ExecutionDetailTabs(QWidget):
 
     # -- rendering ------------------------------------------------------
 
+    def render_candidates(self, view: ExecutionCandidatesView) -> None:
+        """Draw the candidate table alone, without touching the session rows."""
+
+        self._render_candidates(view)
+
     def render(self, view: ExecutionRuntimeView) -> None:
         """Draw every table from one view, in the tables' own column order."""
 
         self.position_model.set_rows(display_values(view.positions))
         self.fill_model.set_rows(display_values(view.fills))
-        self._render_candidates(view)
+        self._render_candidates(view.candidates)
         self._render_toned(self.shadow_table, view.shadow, SHADOW_TONE_COLUMN)
         self._render_toned(self.latency_table, view.latency, LATENCY_TONE_COLUMN)
         self._render_toned(self.order_table, view.orders, ORDER_TONE_COLUMN)
@@ -201,22 +207,22 @@ class ExecutionDetailTabs(QWidget):
                 tone = tones[row_index] if column == tone_column else Tone.NEUTRAL
                 self._set_cell(table, row_index, column, value, tone)
 
-    def _render_candidates(self, view: ExecutionRuntimeView) -> None:
+    def _render_candidates(self, view: ExecutionCandidatesView) -> None:
         """Rebuild the scan columns only when the candidate set changed."""
 
-        if view.candidates_static_key != self._candidates_static_key:
-            self._candidates_static_key = view.candidates_static_key
+        if view.static_key != self._candidates_static_key:
+            self._candidates_static_key = view.static_key
             self.candidate_table.setSortingEnabled(False)
             self._render_toned(
                 self.candidate_table, view.candidates, CANDIDATE_TONE_COLUMN
             )
-        for index, realtime in enumerate(view.candidate_realtime):
+        for index, entry in enumerate(view.realtime):
             self._set_cell(
                 self.candidate_table,
                 index,
                 CANDIDATE_TONE_COLUMN,
-                realtime.status,
-                realtime.tone,
+                entry.status,
+                entry.tone,
             )
         self.candidate_table.setSortingEnabled(True)
 

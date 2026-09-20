@@ -172,6 +172,23 @@ def test_the_preflight_repaints_when_an_input_moves() -> None:
         window.deleteLater()
 
 
+def test_the_stop_stream_control_opens_once_the_thread_is_running() -> None:
+    """A direct start from the market page must enable the route's stop control.
+
+    The control reads "is a stream worker running", so the publisher has to run
+    *after* ``worker.start()``: publishing before it would leave the button
+    disabled for every start that did not happen to be followed by another
+    publish.
+    """
+
+    import inspect
+
+    source = inspect.getsource(MainWindow._start_stream)
+    assert source.index("worker.start()") < source.index(
+        "self._publish_execution_controls()"
+    )
+
+
 def test_the_window_repaints_the_page_from_the_workflow_truth() -> None:
     """The publisher is the one writer, and it reads the phase through the service."""
 

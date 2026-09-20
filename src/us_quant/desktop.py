@@ -217,6 +217,7 @@ from us_quant.trading.runtime.workflow_state import (
 )
 from us_quant.desktop_v2.pages.execution import ExecutionPage
 from us_quant.desktop_v2.pages.execution.presenter import (
+    build_candidates_view,
     build_runtime_view,
     control_state,
 )
@@ -4008,10 +4009,14 @@ class MainWindow(QMainWindow):
         package's presenter, which is Qt-free, and the drawing lives in the page,
         so neither of them can reach a service and neither of them is reached
         into by name from here.
+
+        The candidate table is drawn first and on its own, because it has content
+        before any session does: the operator approves a shortlist and only then
+        arms it, so a route that waited for a snapshot would show an empty table
+        at exactly the moment the shortlist is the thing being approved.
         """
 
-        snapshot = self.auto_quant_snapshot
-        if snapshot is None or not hasattr(self, "execution_page"):
+        if not hasattr(self, "execution_page"):
             return
         quotes = {
             quote.symbol: quote
@@ -4022,6 +4027,16 @@ class MainWindow(QMainWindow):
             )
         }
         candidates = self.auto_quant_candidates
+        self.execution_page.render_candidates(
+            build_candidates_view(
+                candidates=candidates,
+                quotes=quotes,
+                recently_ready=self._quote_was_recently_ready,
+            )
+        )
+        snapshot = self.auto_quant_snapshot
+        if snapshot is None:
+            return
         candidate_symbols = {row.symbol for row in candidates}
         broker_state = self.paper_trading.broker_state()
         broker_positions = (
@@ -5947,7 +5962,6 @@ class MainWindow(QMainWindow):
         self.stream_start_button.setEnabled(True)
         self.stream_start_button.setText("切换 / 重连行情")
         self.stream_stop_button.setEnabled(True)
-        self._publish_execution_controls()
         self.stream_symbols.setEnabled(False)
         self.stream_mode.setEnabled(True)
         self.stream_scan_watchlist_button.setEnabled(False)
@@ -5965,6 +5979,10 @@ class MainWindow(QMainWindow):
         )
         worker.start()
         self.stream_timer.start()
+        # Published *after* the thread starts: the route's stop-stream control
+        # reads "is a worker running", so publishing before ``start()`` would
+        # leave it disabled for every direct start from the market page.
+        self._publish_execution_controls()
         self._record_runtime_event(
             severity="info",
             component="market_data",

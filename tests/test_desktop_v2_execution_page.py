@@ -32,6 +32,7 @@ from us_quant.desktop_v2.pages.execution import ExecutionPage
 from us_quant.desktop_v2.pages.execution.models import (
     CandidateRealtime,
     CandidateRow,
+    ExecutionCandidatesView,
     ExecutionControlState,
     ExecutionRuntimeView,
     FillRow,
@@ -69,6 +70,18 @@ def page():
     widget.deleteLater()
 
 
+def _candidates_view(**overrides: object) -> ExecutionCandidatesView:
+    values: dict[str, object] = {
+        "candidates": (
+            CandidateRow("AAA", "Alpha", "Tech", "龙头", "88.5", "buy"),
+        ),
+        "realtime": (CandidateRealtime("等待", Tone.WARNING),),
+        "static_key": (("AAA", "Alpha", "Tech", "1", "88.5", "buy"),),
+    }
+    values.update(overrides)
+    return ExecutionCandidatesView(**values)  # type: ignore[arg-type]
+
+
 def _view(**overrides: object) -> ExecutionRuntimeView:
     values: dict[str, object] = {
         "status": MetricView("运行中", "armed"),
@@ -89,14 +102,10 @@ def _view(**overrides: object) -> ExecutionRuntimeView:
         "latency": (
             LatencyRow("intent-1", "AAA", "BUY", "42 ms", "13:05", Tone.SUCCESS),
         ),
-        "candidates": (
-            CandidateRow("AAA", "Alpha", "Tech", "龙头", "88.5", "buy"),
-        ),
-        "candidate_realtime": (CandidateRealtime("等待", Tone.WARNING),),
+        "candidates": _candidates_view(),
         "orders": (
             OrderRow("已核对", "AAA", "BUY", "10/10", "100.5", "filled", "42", Tone.SUCCESS),
         ),
-        "candidates_static_key": (("AAA", "Alpha", "Tech", "1", "88.5", "buy"),),
     }
     values.update(overrides)
     return ExecutionRuntimeView(**values)  # type: ignore[arg-type]
@@ -196,6 +205,41 @@ def test_the_tables_show_the_projected_values(page) -> None:
     assert page.details.candidate_table.item(0, 0).text() == "AAA"
     assert page.details.candidate_table.item(0, 6).text() == "等待"
     assert page.details.order_table.item(0, 0).text() == "已核对"
+
+
+def test_the_candidate_table_is_renderable_without_a_session(page) -> None:
+    """A shortlist exists before a session does, and must be inspectable.
+
+    The operator approves candidates and only then arms a session, so the table
+    cannot be gated on a runtime snapshot: at the moment the shortlist is the
+    thing being approved, no snapshot exists.
+    """
+
+    page.render_candidates(_candidates_view())
+
+    assert page.details.candidate_table.rowCount() == 1
+    assert page.details.candidate_table.item(0, 0).text() == "AAA"
+    assert page.details.candidate_table.item(0, 6).text() == "等待"
+
+
+def test_rendering_candidates_alone_leaves_the_session_tables_untouched(page) -> None:
+    """The session tables must not be cleared by a pre-launch repaint."""
+
+    page.render(_view())
+    assert page.details.position_model.rowCount() == 1
+    assert page.details.order_table.rowCount() == 1
+
+    page.render_candidates(
+        _candidates_view(
+            candidates=(CandidateRow("BBB", "Beta", "Energy", "层级3", "70.0", "hold"),),
+            realtime=(CandidateRealtime("当前 fresh"),),
+            static_key=(("BBB", "Beta", "Energy", "3", "70.0", "hold"),),
+        )
+    )
+
+    assert page.details.candidate_table.item(0, 0).text() == "BBB"
+    assert page.details.position_model.rowCount() == 1
+    assert page.details.order_table.rowCount() == 1
 
 
 def test_the_health_cards_are_migrated_as_placeholders(page) -> None:

@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Callable, Mapping, Sequence
 
 from us_quant.desktop_v2.pages.execution.models import (
+    ExecutionCandidatesView,
     ExecutionControlState,
     ExecutionRuntimeView,
     MetricView,
@@ -159,6 +160,21 @@ def control_state(
     )
 
 
+def build_candidates_view(
+    *,
+    candidates: Sequence[object],
+    quotes: Mapping[str, object],
+    recently_ready: Callable[[str], bool],
+) -> ExecutionCandidatesView:
+    """Project the candidate table alone, for a route with no session yet."""
+
+    return ExecutionCandidatesView(
+        candidates=candidate_rows(candidates),
+        realtime=candidate_realtime(candidates, quotes, recently_ready),
+        static_key=candidate_static_key(candidates),
+    )
+
+
 def build_runtime_view(
     *,
     snapshot: object,
@@ -189,8 +205,10 @@ def build_runtime_view(
         fills=fill_rows(snapshot),
         shadow=shadow_rows(candidates, quotes, pending_by_symbol),
         latency=latency_rows(latency),
-        candidates=candidate_rows(candidates),
-        candidate_realtime=candidate_realtime(candidates, quotes, recently_ready),
+        candidates=build_candidates_view(
+            candidates=candidates,
+            quotes=quotes,
+            recently_ready=recently_ready,
+        ),
         orders=order_rows(reconciliations, audit_by_intent),
-        candidates_static_key=candidate_static_key(candidates),
     )

@@ -554,7 +554,20 @@ def test_the_view_assembles_every_table_from_one_set_of_facts() -> None:
     assert len(view.fills) == 1
     assert len(view.shadow) == 1
     assert len(view.latency) == 1
-    assert len(view.candidates) == 1
-    assert len(view.candidate_realtime) == 1
+    assert len(view.candidates.candidates) == 1
+    assert len(view.candidates.realtime) == 1
     assert len(view.orders) == 1
-    assert len(view.candidates_static_key) == 1
+    assert len(view.candidates.static_key) == 1
+
+
+def test_the_candidates_view_is_projectable_on_its_own() -> None:
+    """The route must be able to draw the shortlist with no session behind it."""
+
+    view = presenter.build_candidates_view(
+        candidates=(Candidate(),),
+        quotes={"AAA": Quote()},
+        recently_ready=lambda _s: False,
+    )
+    assert view.candidates[0].symbol == "AAA"
+    assert view.realtime[0].status == "当前 fresh"
+    assert len(view.static_key) == 1

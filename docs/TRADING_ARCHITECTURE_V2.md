@@ -7,6 +7,10 @@
 Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只记录它们的
 归宿，不声称已完成。
 
+> **进度更新（Shadow Framework v2）**：`shadow_paper.py` 已删除，Shadow 拆分
+> 为 `shadow/{models,store,engine,trade_logic}.py` + `config.py`；唯一 state
+> owner 仍是 `ShadowPaperEngine`，`ShadowTradeLogic` 只提供行为。见 §10.7 与 §14。
+>
 > **进度更新（Trading Framework Closure v2C）**：正式 Trading Runtime 已完全
 > 脱离内部 Shadow 模拟器，正式 session config 与 Shadow overlay 分离，
 > 五个过渡 root module 已删除。见 §10.6 与 §14。
@@ -81,8 +85,12 @@ Shadow 子系统：
 
 | 组件 | 状态 |
 | --- | --- |
-| Shadow Simulation Config | MIGRATED（`shadow/config.py`） |
-| Shadow Engine / Store / Models | TRANSITIONAL（`shadow_paper.py`，下一阶段拆分） |
+| Shadow Config | MIGRATED（`shadow/config.py`） |
+| Shadow Models | MIGRATED（`shadow/models.py`） |
+| Shadow Store | MIGRATED（`shadow/store.py`） |
+| Shadow Engine | MIGRATED（`shadow/engine.py`） |
+| Shadow Trade Logic | MIGRATED（`shadow/trade_logic.py`） |
+| `shadow_paper.py` | DELETED |
 
 真实链路现在是：
 
@@ -353,7 +361,7 @@ Risk 不能：
 
 `MainWindow` 现在只通过 `build_risk_application()`（`trading/composition/risk.py`）
 构造一个 `RiskApplication`，并以构造参数注入 `AutoQuantEngine`。旧的双入口
-缺陷见 §10.4。
+缺陷见 §10.8。
 
 ### Execution —— **已迁移（Execution v2）**
 
@@ -1209,24 +1217,101 @@ production 中不再存在（Guard D 与
 仍是结构性的（Guard G 钉住它不得创建 broker adapter / RiskApplication /
 ExecutionApplication）。
 
-#### 10.6.4 仍然冻结
+#### 10.6.4 当时仍然冻结（已由 §10.7 完成）
 
 ```text
 shadow_paper.py（Shadow engine + store + models）  TRANSITIONAL
 ```
 
-它没有被拆分、没有被重构，只把 `ShadowConfig` 换成从 `shadow/config.py`
-导入的 `ShadowSimulationConfig`。下一阶段才做
-`shadow/models.py` / `shadow/store.py` / `shadow/engine.py`，然后彻底删除
-`shadow_paper.py`。
+v2C 时它没有被拆分、没有被重构，只把 `ShadowConfig` 换成从 `shadow/config.py`
+导入的 `ShadowSimulationConfig`。该拆分已在 Shadow Framework v2 完成，见 §10.7。
 
-本轮同样冻结：正式交易算法（signals / ranking / risk sizing / OrderIntent /
+v2C 同样冻结：正式交易算法（signals / ranking / risk sizing / OrderIntent /
 fill reconciliation）、Paper 安全语义（fills-before-events、BUY exact cancel、
 SELL HALT、reconciliation evidence、two-stage finalization、PAPER lease、
 HALTED 显式恢复路径）以及 `desktop_v2/pages/execution/`。后者只允许 import
 path 调整，不继续装修。
 
-### 10.7 已关闭的风险接线缺陷（Risk v2 修复）
+### 10.7 Shadow Framework v2 已完成
+
+Shadow 是最后一个 875 行 root transitional module。本轮把它拆成五个模块，
+职责分开，然后删除 `shadow_paper.py`。
+
+#### 10.7.1 最终目录
+
+```text
+src/us_quant/shadow/
+    __init__.py        (<= 60)   薄 re-export，非 facade
+    config.py          (<= 180)  ShadowSimulationConfig（v2C 已建，本轮冻结）
+    models.py          (<= 150)  ShadowPosition / ShadowFill /
+                                 ShadowSessionProvenance / ShadowSnapshot
+    store.py           (<= 300)  ShadowPaperStore（SQLite，schema 未变）
+    engine.py          (<= 380)  ShadowPaperEngine（lifecycle + 唯一 state owner）
+    trade_logic.py     (<= 330)  ShadowTradeLogic（entry/exit 行为，无 state）
+```
+
+`ShadowPaperEngine(ShadowTradeLogic)` 是一个 **stateless behavior mixin**：
+它没有 `__init__`、不持有 position / cash / config / store 的任何副本，只对
+engine 的 `self` 状态做决策。Guard E 与 Guard F 分别钉住"无 `__init__`"与
+"两半不得定义同名 method"（Runtime v2A 的 duplicate `_flatten` 教训）。
+
+#### 10.7.2 依赖方向
+
+```text
+TradingSessionConfig
+        ↑
+ShadowSimulationConfig
+
+MarketSnapshot
+        ↓
+ShadowPaperEngine
+        ↓
+ShadowTradeLogic
+        ↓
+simulated position / fill
+
+ShadowPaperEngine
+        ↓
+ShadowPaperStore
+        ↓
+SQLite
+```
+
+Shadow **永不触达 `BrokerExecutionPort`**：整个 package 不得 import IBKR
+adapter、trading application、`OrderIntent`，也不得出现 `placeOrder` /
+`cancelOrder` / `globalCancel` / `submit_approved` 任何名字。
+
+正式 Trading Core 依然完全不知道 Shadow engine 存在（Framework v2C 的
+Guard A 本轮重新验证）。
+
+#### 10.7.3 行为与 schema 冻结
+
+模拟行为**逐字未改**：fresh bid/ask 要求、分钟预热、动量计算、spread 过滤、
+min/max momentum、positive-step 与 one-minute-move gate、入场窗口、force-flat、
+profit target / stop loss / trailing stop / maximum hold、每日交易次数与亏损线、
+`max_position_fraction`、symbol risk multiplier、`LayeredRiskLimits` overlay、
+整股数量、commission、slippage、现金记账、realized 与 daily realized PnL。
+
+SQLite schema 未改：表名、列名、`ALTER TABLE` 增量升级与
+`shadow_fill → shadow_session` 外键全部保持，迁移前的数据库仍可被迁移后的
+`ShadowPaperStore` 读取。本轮不引入 schema versioning、migration framework、
+repository abstraction 或 generic `DatabaseManager`。
+
+#### 10.7.4 下一阶段
+
+阶段 1（框架闭环）至此 **COMPLETE**。下一阶段是前端全部 native v2：
+
+```text
+Desktop Market v2
+Desktop Research v2A-F
+Desktop System v2
+Desktop Dashboard v2
+```
+
+本轮不提前做 `MarketPage` / `ResearchPage` / `SystemPage` / `DashboardPage`，
+也不动 `MainWindow` decomposition。
+
+### 10.8 已关闭的风险接线缺陷（Risk v2 修复）
 
 旧 Desktop 把风险限额放进了错误的地方：
 
@@ -1312,7 +1397,7 @@ MainWindow._auto_quant_tab             ✅ 已删除（Desktop Execution v2）
 旧 paper_trading_service.py            ✅ 已删除（Trading Framework Closure v2C）
 旧 workflow_controller.py              ✅ 已删除（Trading Framework Closure v2C）
 ShadowConfig（含 compatibility alias）  ✅ 已删除（Trading Framework Closure v2C）
-shadow_paper.py                        ⏭ 下一阶段拆分后删除
+shadow_paper.py                        ✅ 已删除（Shadow Framework v2）
 旧 MainWindow stream lifecycle         ⏭ 后续
 旧 Paper-specific orchestration glue   ⏭ 后续
 旧 workflow duplicate state            ⏭ 后续
@@ -1371,34 +1456,42 @@ HALTED
 
 ## 14. 下一轮
 
-**Desktop Execution v2 已完成。** execution route 现在是原生 v2 page：旧
-`MainWindow._auto_quant_tab` 已删除，页面在
-`desktop_v2/pages/execution/`，presenter 是 Qt-free 纯投影，窗口只保留
-`self.execution_page` 并继续拥有取数与编排（见 §8.2）。
+**Shadow Framework v2 已完成，阶段 1（框架闭环）COMPLETE。** Shadow 不再是
+单个 875 行 root module，而是 `shadow/{config,models,store,engine,trade_logic}.py`
+五个职责清晰的模块，`shadow_paper.py` 已删除；唯一的 state owner 仍是
+`ShadowPaperEngine`（见 §10.7）。
 
-四个已完成轮次的顺序：
+五个已完成轮次的顺序：
 
 ```text
 Runtime v2A   AutoQuantEngine 拆成 StrategyRuntime / TradingRuntime（§10.3）
 Runtime v2B   paper_session / paper_workflow / workflow_state 模块化（§10.4）
 Desktop Exec  execution route 变成原生 v2 page（§8.2）
 Framework v2C runtime 脱离 shadow_paper，五个 root module 归位并删除（§10.6）
+Shadow v2     shadow_paper.py 拆成 shadow package 并删除（§10.7）
 ```
 
-下一轮（本轮不做）：
+下一阶段是**阶段 2：前端全部 native v2**：
 
 ```text
-Shadow subsystem decomposition
-    shadow/models.py
-    shadow/store.py
-    shadow/engine.py
-拆分完成后彻底删除 shadow_paper.py
+Desktop Market v2
+Desktop Research v2A-F
+Desktop System v2
+Desktop Dashboard v2
 ```
+
+Shadow Framework v2 刻意没有做的事，留给更后面：
+
+- 没有给 Shadow 建立 protocol 层（`ShadowStorePort` / `ShadowEnginePort` 等）
+  或任何 `ShadowManager` / `ShadowService` / `ShadowApplication`；
+- 没有改 SQLite schema，也没有引入 migration framework；
+- 没有重命名 `ShadowPaperEngine`（命名细修后置）；
+- 没有提前做 `MarketPage` / `ResearchPage` / `SystemPage` / `DashboardPage`
+  或 `MainWindow` decomposition。
 
 Framework v2C 刻意没有做的事，留给更后面：
 
-- 没有拆分或重构 `shadow_paper.py`（Shadow engine / store / models 仍是
-  TRANSITIONAL，只换了 config 的 import）；
+- 没有拆分或重构 `shadow_paper.py`（该项已在 Shadow Framework v2 完成）；
 - 没有继续装修 `desktop_v2/pages/execution/`（只允许 import path 调整）；
 - 没有改任何正式交易算法与 Paper 安全语义。
 

@@ -3,8 +3,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from us_quant.shadow_paper import ShadowPaperEngine, ShadowPaperStore
 from us_quant.shadow.config import build_targeted_shadow_config
+from us_quant.shadow.engine import ShadowPaperEngine
+from us_quant.shadow.store import ShadowPaperStore
 
 
 PARAMETERS = {

@@ -133,13 +133,14 @@ RETIRED_FRAMEWORK_ROOT_MODULES = (
 )
 
 #: Guard H: the hard limit for every new production module, plus the tighter
-#: per-file budgets the spec names for this round's files.
+#: per-file budgets the spec names for this round's files.  The shadow package's
+#: own budgets moved to ``test_shadow_architecture.py`` in Shadow Framework v2,
+#: which is why only the config file is still listed here.
 FRAMEWORK_MODULE_LINE_LIMIT = 400
 FRAMEWORK_MODULE_LINE_LIMITS = {
     _TRADING_RUNTIME_DIR / "config.py": 180,
     _TRADING_RUNTIME_DIR / "health.py": 240,
     _TRADING / "composition" / "session_config.py": 180,
-    _SHADOW_DIR / "__init__.py": 40,
     _SHADOW_DIR / "config.py": 180,
     _PAPER_PACKAGE_DIR / "__init__.py": 50,
     _PAPER_PACKAGE_DIR / "contracts.py": 180,

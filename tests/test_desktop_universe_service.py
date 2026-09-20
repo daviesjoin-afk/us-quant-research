@@ -196,6 +196,7 @@ DESKTOP_EXECUTION_V2_REMOVED_METHODS = (
 )
 
 DESKTOP_EXECUTION_V2_ADDED_METHODS = (
+    "_auto_order_channel_failed",
     "_auto_strategy_selected",
     "_connect_execution_page",
     "_launch_locked",

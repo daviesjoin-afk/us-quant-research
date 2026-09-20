@@ -479,6 +479,11 @@ class MainWindow(QMainWindow):
         # the page is told the resulting booleans, never these flags.
         self._launch_busy = False
         self._stream_stop_pending = False
+        # The channel probe is a launch step too, but it is owned by its own
+        # worker rather than by the shared launch flag: the broker resource
+        # group serializes it, so an unrelated task finishing must not be able
+        # to release the route on the probe's behalf.
+        self._channel_check_inflight = False
         self._quotes_scroll_active = False
         self._pending_stream_snapshot: MarketSnapshot | None = None
         self.account_portfolio: BrokerAccountPortfolio | None = None
@@ -3027,6 +3032,12 @@ class MainWindow(QMainWindow):
         )
 
     def _check_auto_order_channel(self) -> None:
+        if self._channel_check_inflight:
+            # The probe owns the route while it runs, so a second request can
+            # only come from a path that ignored the disabled control.  The
+            # broker resource group would refuse the second worker anyway, and
+            # that refusal must not clear the first probe's flag.
+            return
         if (
             self.paper_trading.has_order_service()
             or self.trading_runtime is not None
@@ -3068,12 +3079,21 @@ class MainWindow(QMainWindow):
         started = self._start_task(
             task,
             on_success=self._auto_order_channel_checked,
+            on_failure=self._auto_order_channel_failed,
             start_message="正在检查 IBKR Paper 订单通道（不下单）…",
             resource_group="broker",
         )
         if not started:
+            # This attempt never owned the route: the broker group was busy or
+            # the window is closing.  Only this attempt's own flag is released.
             self._channel_check_inflight = False
             self._apply_paper_workflow_button_state()
+
+    def _auto_order_channel_failed(self, _message: str) -> None:
+        """Release the probe's own lock; ``_start_task`` then reports failure."""
+
+        self._channel_check_inflight = False
+        self._apply_paper_workflow_button_state()
 
     def _auto_order_channel_checked(self, result: object) -> None:
         try:
@@ -4137,10 +4157,16 @@ class MainWindow(QMainWindow):
         connection attempt is pending, and while a session owns an order service
         or a runtime.  Each of those is a reason the operator must not be offered
         a second launch from the same route.
+
+        The probe is checked as its own fact rather than through
+        ``_launch_busy``: it is released by the probe's own worker, so an
+        unrelated task failing cannot reopen the route while the broker is still
+        being probed.
         """
 
         return bool(
             self._launch_busy
+            or self._channel_check_inflight
             or self._active_auto_launch_plan is not None
             or self.paper_trading.has_order_service()
             or self.trading_runtime is not None
@@ -7879,6 +7905,14 @@ class MainWindow(QMainWindow):
         # so it has to be told when the palette changes.
         if hasattr(self, "risk_page"):
             self.risk_page.set_palette(self.theme)
+        # The execution page colours toned status cells from the palette, and
+        # its tables keep the rows they were handed, so it has to be told *and*
+        # redrawn: there is no repaint path that would re-read the palette on
+        # its own.  The redraw is the same entry point a quote tick uses, so a
+        # theme switch and a tick cannot diverge.
+        if hasattr(self, "execution_page"):
+            self.execution_page.set_palette(self.theme)
+            self._render_auto_quant_snapshot()
         for chart_name in ("dashboard_chart", "strategy_chart"):
             chart = getattr(self, chart_name, None)
             if chart is not None:

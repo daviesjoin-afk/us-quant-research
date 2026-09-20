@@ -17,6 +17,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
 
 from us_quant.desktop import MainWindow
@@ -206,6 +207,172 @@ def test_the_window_repaints_the_page_from_the_workflow_truth() -> None:
 
         assert window.execution_page.details.reconcile_button.isEnabled()
         assert not window.execution_page.controls.pause_button.isEnabled()
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+# -- the palette reaches the page -----------------------------------------
+
+
+def _candidate(symbol: str):
+    from decimal import Decimal
+
+    from us_quant.trading.runtime.models import AutoQuantCandidate
+
+    return AutoQuantCandidate(
+        symbol=symbol,
+        name=f"{symbol} Inc",
+        sector="Tech",
+        leader_tier=1,
+        scan_score=Decimal("80"),
+        signal="buy",
+    )
+
+
+def _tone_cell(window: MainWindow, row: int = 0):
+    """The one candidate cell whose colour comes from the palette.
+
+    A candidate with no quote is the ``warning`` row, so this cell is a direct
+    read of which palette the page coloured it with.
+    """
+
+    return window.execution_page.details.candidate_table.item(
+        row, 6
+    ).foreground().color().name()
+
+
+def test_switching_the_theme_recolours_the_execution_page() -> None:
+    """A theme switch must reach the page *and* redraw its toned cells.
+
+    The page colours a status cell from the palette it was handed, and the table
+    keeps the rows it was given -- so telling the page about a new palette
+    without redrawing would leave every already-drawn row on the old colours.
+    This drives the real window, because the bug it guards against was a missing
+    call in ``MainWindow._apply_theme``, which no page-level test can see.
+    """
+
+    window = _window()
+    try:
+        window.auto_quant_candidates = (_candidate("AAA"),)
+        window._render_auto_quant_snapshot()
+
+        dark_warning = window.theme.warning
+        assert _tone_cell(window) == QColor(dark_warning).name()
+
+        window._apply_theme("light")
+
+        assert window.theme.name == "light"
+        light_warning = window.theme.warning
+        assert light_warning != dark_warning
+        assert _tone_cell(window) == QColor(light_warning).name()
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+# -- the channel probe owns the route while it runs -----------------------
+
+
+def _launch_controls_locked(window: MainWindow) -> bool:
+    controls = window.execution_page.controls
+    return not (
+        controls.prepare_button.isEnabled()
+        and controls.start_button.isEnabled()
+        and controls.channel_check_button.isEnabled()
+    )
+
+
+def test_the_probe_keeps_the_launch_controls_locked_while_it_runs(
+    monkeypatch,
+) -> None:
+    """The channel probe is a launch step: the route stays locked until it ends.
+
+    The probe runs on its own worker, so its lock is its own flag rather than the
+    shared one -- and the flag has to be *read*, or the route reopens under a
+    probe that is still talking to the broker.
+    """
+
+    window = _window()
+    try:
+        monkeypatch.setattr(window, "_start_task", lambda *a, **k: True)
+        assert not _launch_controls_locked(window)
+
+        window._check_auto_order_channel()
+
+        assert window._channel_check_inflight
+        assert _launch_controls_locked(window)
+
+        window._auto_order_channel_failed("broker said no")
+        assert not window._channel_check_inflight
+        assert not _launch_controls_locked(window)
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_an_unrelated_task_cannot_release_the_probe(monkeypatch) -> None:
+    """Only the probe's own lifecycle may clear the probe's lock.
+
+    A research task finishing or failing publishes the control state too, and it
+    clears the shared launch flag.  If the probe were riding on that flag, the
+    failure of an unrelated scan would silently reopen the route mid-probe.
+    """
+
+    from PySide6.QtWidgets import QMessageBox
+
+    window = _window()
+    try:
+        monkeypatch.setattr(window, "_start_task", lambda *a, **k: True)
+        monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+        window._check_auto_order_channel()
+        assert _launch_controls_locked(window)
+
+        # What an unrelated worker's failure does.
+        window._task_failed("scan failed")
+        assert window._channel_check_inflight
+        assert _launch_controls_locked(window)
+
+        # And what an unrelated worker finishing does.
+        class _Worker:
+            resource_group = "scan"
+
+            def isRunning(self) -> bool:
+                return False
+
+        window.task_controller._workers.append(_Worker())
+        window._worker_finished(window.task_controller._workers[-1])
+        assert window._channel_check_inflight
+        assert _launch_controls_locked(window)
+
+        # Only the probe itself, finishing, releases the route.
+        window._auto_order_channel_failed("done")
+        assert not _launch_controls_locked(window)
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_a_second_probe_request_does_not_release_the_first(monkeypatch) -> None:
+    """A refused second worker must not clear the running probe's lock.
+
+    The broker resource group serializes probes, so a second request is refused
+    by ``_start_task`` -- and that refusal belongs to the attempt that never
+    started, not to the probe that is still running.
+    """
+
+    window = _window()
+    try:
+        monkeypatch.setattr(window, "_start_task", lambda *a, **k: True)
+        window._check_auto_order_channel()
+        assert window._channel_check_inflight
+
+        # The retry path: the group is busy, so no worker is admitted.
+        monkeypatch.setattr(window, "_start_task", lambda *a, **k: False)
+        window._check_auto_order_channel()
+
+        assert window._channel_check_inflight
+        assert _launch_controls_locked(window)
     finally:
         window.close()
         window.deleteLater()

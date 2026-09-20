@@ -199,7 +199,7 @@ def window():
 
 
 def _engine_call_keywords() -> list[dict[str, object]]:
-    """Every ``AutoQuantEngine(...)`` call in ``desktop.py``, by keyword."""
+    """Every ``build_trading_runtime(...)`` call in ``desktop.py``, by keyword."""
 
     tree = ast.parse(_DESKTOP.read_text(encoding="utf-8"))
     calls = []
@@ -207,7 +207,7 @@ def _engine_call_keywords() -> list[dict[str, object]]:
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "AutoQuantEngine"
+            and node.func.id == "build_trading_runtime"
         ):
             calls.append(
                 {keyword.arg: keyword.value for keyword in node.keywords}
@@ -233,13 +233,13 @@ def test_the_window_owns_an_order_store_it_built_through_composition() -> None:
         window.deleteLater()
 
 
-def test_the_window_hands_the_engine_an_execution_service_not_a_sink(
+def test_the_window_hands_the_runtime_an_execution_service_not_a_sink(
     window,
 ) -> None:
-    """The engine must not be able to submit; the service must be injectable."""
+    """The runtime must not be able to submit; the service must be injectable."""
 
     calls = _engine_call_keywords()
-    assert calls, "no AutoQuantEngine construction found in desktop.py"
+    assert calls, "no build_trading_runtime call found in desktop.py"
     for keywords in calls:
         assert "order_sink" not in keywords, sorted(
             name for name in keywords if name
@@ -321,13 +321,28 @@ def test_the_session_coordinator_reads_domain_events(window) -> None:
     assert "def events(" in source
 
 
-def test_the_engine_keeps_domain_orders_in_its_pending_book() -> None:
+def test_the_runtime_keeps_domain_orders_in_its_pending_book() -> None:
     """Guard against a Paper DTO sneaking back into the runtime's book."""
 
-    source = (_REPO_ROOT / "src" / "us_quant" / "auto_quant.py").read_text(
-        encoding="utf-8"
-    )
+    source = (
+        _REPO_ROOT
+        / "src"
+        / "us_quant"
+        / "trading"
+        / "runtime"
+        / "portfolio.py"
+    ).read_text(encoding="utf-8")
     assert "PaperOrderIntent" not in source
     assert "order_sink" not in source
     assert "IBKRPaperOrderUncertainError" not in source
-    assert "ExecutionSubmissionUncertain" in source
+    # The uncertainty the session has to survive is the port's own type, and it
+    # is named where the broker call is -- the dispatch.
+    dispatch = (
+        _REPO_ROOT
+        / "src"
+        / "us_quant"
+        / "trading"
+        / "runtime"
+        / "dispatch.py"
+    ).read_text(encoding="utf-8")
+    assert "ExecutionSubmissionUncertain" in dispatch

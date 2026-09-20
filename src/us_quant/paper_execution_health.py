@@ -4,12 +4,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from us_quant.auto_quant import AutoQuantSnapshot
 from us_quant.paper_order_models import (
     PaperBrokerState,
     PaperOrderConnection,
     PaperOrderReconciliation,
 )
+from us_quant.trading.runtime.artifacts import AutoQuantSnapshot
 
 
 @dataclass(frozen=True, slots=True)

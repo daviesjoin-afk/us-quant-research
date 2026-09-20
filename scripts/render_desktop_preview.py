@@ -25,7 +25,7 @@ from us_quant.trading.domain.market import (  # noqa: E402
     MarketQuote,
     MarketSnapshot,
 )
-from us_quant.auto_quant import AutoQuantCandidate  # noqa: E402
+from us_quant.trading.runtime.models import AutoQuantCandidate  # noqa: E402
 
 
 def main() -> int:

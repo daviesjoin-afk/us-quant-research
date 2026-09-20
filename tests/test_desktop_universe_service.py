@@ -171,6 +171,15 @@ EXECUTION_V2_METHODS = (
     "_finish_auto_quant_session_if_safe",
 )
 
+# Runtime v2A: the window builds its trading session through the runtime
+# composition root, so the methods that named the old engine follow the rename.
+# Declared so the guard can assert the delta exactly rather than tolerate it.
+RUNTIME_V2A_METHODS = (
+    "_prepare_auto_quant_candidates",
+    "_reset_auto_launch_controls",
+    "_task_failed",
+)
+
 FROZEN_METHODS = (
     "_cancel_universe_refresh",
     "_reset_universe_refresh_controls",
@@ -179,7 +188,6 @@ FROZEN_METHODS = (
     "_worker_finished",
     "_task_cancelled",
     "_scan_finished",
-    "_prepare_auto_quant_candidates",
     "_auto_candidate_preparation_failed",
     "_auto_market_scan_finished",
     "_select_auto_quant_candidates",
@@ -1394,6 +1402,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(BROKER_ACCOUNT_V2_METHODS)
         | set(STRATEGY_V2_METHODS)
         | set(EXECUTION_V2_METHODS)
+        | set(RUNTIME_V2A_METHODS)
     )
     # Exact, not a subset: the delta is the declared surface and nothing
     # else, in both directions.
@@ -1402,6 +1411,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(BROKER_ACCOUNT_V2_METHODS) <= set(changed)
     assert set(STRATEGY_V2_METHODS) <= set(changed)
     assert set(EXECUTION_V2_METHODS) <= set(changed)
+    assert set(RUNTIME_V2A_METHODS) <= set(changed)
     assert "_refresh_universe" in changed
 
 

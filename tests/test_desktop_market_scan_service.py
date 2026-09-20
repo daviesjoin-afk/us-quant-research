@@ -200,9 +200,17 @@ STRATEGY_V2_METHODS = frozenset(
 )
 
 # Spec 46/47: byte-identical to the base commit.
+# Runtime v2A: the window builds its trading session through the runtime
+# composition root, so the methods that named the old engine follow the rename.
+# Declared so the guard can assert the delta exactly rather than tolerate it.
+RUNTIME_V2A_METHODS = (
+    "_prepare_auto_quant_candidates",
+    "_reset_auto_launch_controls",
+    "_task_failed",
+)
+
 FROZEN_METHODS = (
     "_scan_finished",
-    "_prepare_auto_quant_candidates",
     "_auto_candidate_preparation_failed",
     "_auto_market_scan_finished",
     "_select_auto_quant_candidates",
@@ -1202,12 +1210,14 @@ def test_only_the_declared_methods_changed() -> None:
         | set(BROKER_ACCOUNT_V2_METHODS)
         | set(STRATEGY_V2_METHODS)
         | set(EXECUTION_V2_METHODS)
+        | set(RUNTIME_V2A_METHODS)
     )
     assert set(changed) <= allowed
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)
     assert set(BROKER_ACCOUNT_V2_METHODS) <= set(changed)
     assert set(STRATEGY_V2_METHODS) <= set(changed)
     assert set(EXECUTION_V2_METHODS) <= set(changed)
+    assert set(RUNTIME_V2A_METHODS) <= set(changed)
     assert "_run_scan" in changed
 
 

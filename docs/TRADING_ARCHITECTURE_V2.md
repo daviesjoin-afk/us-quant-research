@@ -7,12 +7,18 @@
 Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只记录它们的
 归宿，不声称已完成。
 
+> **进度更新（Runtime v2A）**：`AutoQuantEngine` 已删除。信号与运行时状态
+> 已拆成 `trading/runtime/strategy.py`（StrategyRuntime）与
+> `trading/runtime/trading.py`（TradingRuntime），
+> `src/us_quant/auto_quant.py` **不存在**且没有任何 import 指向它。
+> 见 §2、§4 与 §10.3。**Paper Session Coordination / Paper Workflow / Lease
+> 仍是 TRANSITIONAL**，留给 Runtime v2B。
+>
 > **进度更新（Execution v2）**：Execution 链已完成迁移。
 > `PaperOrderIntent` / `new_paper_order_intent` / `order_sink` 与
 > `paper_order_journal.py` / `ibkr_paper_orders.py` 已删除，
 > `TRANSITIONAL_EXECUTION_COUPLED_STRATEGY_FILES` **已归零**。见 §4 Execution
-> 与 §10.2。**Strategy Runtime 仍是 TRANSITIONAL**：`AutoQuantEngine` 仍然
-> 同时承担信号与运行时状态，把它拆成 StrategyRuntime + TradingRuntime 是下一轮。
+> 与 §10.2。
 >
 > **进度更新（Risk v2）**：Risk Domain、Risk Application、Desktop RiskPage 与
 > AutoQuant 的风险集成已完成迁移。
@@ -44,12 +50,31 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | SQLite Order Repository | MIGRATED |
 | IBKR Paper Execution Adapter | MIGRATED |
 | AutoQuant Execution Integration | MIGRATED |
-| Strategy Runtime | **TRANSITIONAL** |
+| Strategy Runtime | MIGRATED |
+| Trading Runtime Core | MIGRATED |
+| Paper Session Coordination | **TRANSITIONAL** |
+| Paper Workflow / Lease | **TRANSITIONAL** |
 
-**这不是"策略已完全迁移"。** 策略的治理、存储、选择与界面已经在内，风控是
-唯一权威，执行也只经 `ExecutionApplication` 一条路——但策略的**运行时形态**
-仍然由 `AutoQuantEngine` 兼任：它同时产出信号、维护会话状态、判断出场时机。
-把它拆成 `StrategyRuntime` 与 `TradingRuntime` 是下一轮，见 §14。
+真实链路现在是：
+
+```text
+Market Data
+    ↓
+StrategyRuntime
+    ↓ TradeProposal（按排名）
+TradingRuntime
+    ↓
+RiskApplication
+    ↓ RiskDecision
+ExecutionApplication
+    ↓
+OrderRepositoryPort / BrokerExecutionPort
+```
+
+**这不是"全部完成"。** 策略与交易会话已经各自只有一个职责，风控与执行也各自
+只有一个权威，但 `paper_session.py` / `paper_workflow.py` /
+`workflow_state.py` 仍然在三者之上：会话协调、阶段机与执行租约还没有模块化。
+那是 Runtime v2B，见 §14。
 
 ## 1. 核心依赖方向
 
@@ -823,21 +848,58 @@ TRANSITIONAL_EXECUTION_COUPLED_STRATEGY_FILES: set[str] = set()
 - 订单库的 DDL 仍是冻结的那三张表，唯一允许的 DDL 变化是给旧库补一个缺失
   的 `idempotency_key` 列（`ADD COLUMN`，不改写任何行）。
 
-### 10.3 Strategy Runtime 的下一步
+### 10.3 Strategy Runtime 已完成（Runtime v2A）
 
-Execution v2 只删掉了 **Strategy → Broker 直连**。`AutoQuantEngine` 仍然
-同时承担信号生成与运行时状态（会话、在仓、出场时机），因此下一轮是把它拆成：
+`AutoQuantEngine` 已删除，信号与运行时状态拆成两个运行时和支撑它们的模块：
 
 ```text
-Strategy Runtime        ← 现在由 AutoQuantEngine 兼任
-+
-Trading Runtime
+trading/runtime/
+  models.py     策略可以读的东西：候选、冻结的持仓/策略视图、一次扫描的结果
+  artifacts.py  会话自己的 artifact（含窗口渲染的 snapshot）
+  signals.py    信号检测：分钟历史、入场门、排名
+  strategy.py   StrategyRuntime：策略想要什么（TradeProposal）
+  session.py    SessionState：会话状态与它的状态转换
+  portfolio.py  SessionBook：持仓/现金/PnL/在途单/成交，以及向风控域的投影
+  dispatch.py   OrderDispatch：唯一调用 Risk/Execution 的地方
+  trading.py    TradingRuntime：把提案变成订单的交易会话
+trading/composition/runtime.py
+  build_trading_runtime(...)   显式组装上面两个 runtime
 ```
 
-`PaperWorkflowPhase` / `ExecutionLease` / `paper_workflow.py` →
-`trading/runtime/session.py` 也属于那一轮，**本轮刻意未动**。
+拆分后的链路是单向的：
 
-### 10.4 已关闭的风险接线缺陷（Risk v2 修复）
+```text
+Market Data → StrategyRuntime → TradeProposal（按排名）
+            → TradingRuntime → RiskApplication → ExecutionApplication
+```
+
+- `StrategyRuntime` **不能** import Risk/Execution/ports/adapters/sqlite/Qt，
+  也不能出现 `OrderIntent` / `OrderEvent` / `ExecutionFill` / `placeOrder`
+  这些名字：它只产出 `TradeProposal`，由 architecture guard AST 扫描钉住。
+- `TradingRuntime` 是唯一同时持有 strategy + risk + execution 的对象；
+  `OrderDispatch` 持有 risk + execution 但**看不到** strategy，因此
+  "谁在提交"是结构性的，而不是约定。
+- `auto_quant.py` 不存在、没有任何 production/scripts import、也没有
+  compatibility re-export：`test_the_retired_mixed_engine_is_gone` 与
+  `test_nothing_imports_the_retired_mixed_engine` 钉住这一点。
+- 每个 `trading/runtime/*.py` production 模块 <= 500 行，
+  `trading/composition/runtime.py` <= 200 行，由
+  `test_the_runtime_modules_stay_small` 钉住；`utils.py` / `helpers.py` /
+  `manager.py` / `ServiceLocator` 一类垃圾桶模块由
+  `test_the_runtime_has_no_god_objects_or_junk_drawers` 禁止。
+
+**仍然冻结**：`paper_session.py` / `paper_workflow.py` / `workflow_state.py`
+与全部 `PaperWorkflowPhase` 转换、`ExecutionLease` 语义本轮未动。
+`TradingRuntime` 只是满足 `PaperEngine` protocol，coordinator 侧几乎没有改动。
+
+### 10.4 下一轮：Runtime v2B
+
+`paper_session.py` / `paper_workflow.py` / `workflow_state.py` 三个模块本轮
+刻意冻结，下一轮把它们拆成模块化的 session / workflow / state /
+reconciliation 模块。**v2B 同样受 production file <= 500 行的约束**：不能把
+三个旧文件合并成一个超大的 `session.py`。
+
+### 10.5 已关闭的风险接线缺陷（Risk v2 修复）
 
 旧 Desktop 把风险限额放进了错误的地方：
 
@@ -965,37 +1027,33 @@ HALTED
 
 ## 14. 下一轮
 
-**Strategy Runtime / Trading Runtime** —— Execution v2 把最后这段
+**Runtime v2B** —— Runtime v2A 已经删掉 `AutoQuantEngine`，把信号与会话拆成
+`StrategyRuntime` / `TradingRuntime`（见 §10.3）。剩下唯一的过渡态在
+`paper_session.py` / `paper_workflow.py` / `workflow_state.py`：会话协调、
+`PaperWorkflowPhase` 阶段机与 `ExecutionLease` 还没有模块化。
 
-```text
-RiskDecision → PaperOrderIntent → order_sink
-```
+下一轮把它们拆成模块化的 session / workflow / state / reconciliation 模块，
+**同样受 production file <= 500 行约束**——不能把三个旧文件合并成一个超大的
+`session.py`。
 
-换成了
-
-```text
-RiskDecision → OrderIntent → ExecutionApplication → BrokerExecutionPort
-```
-
-`TRANSITIONAL_EXECUTION_COUPLED_STRATEGY_FILES` 已随之变为空集。剩下的过渡态
-不在执行侧，而在**运行时形态**：`AutoQuantEngine` 仍然把信号生成、会话状态与
-出场时机放在同一个类里，`paper_workflow.py` / `PaperWorkflowPhase` /
-`ExecutionLease` 也还没有归宿。下一轮把它们拆成
-`StrategyRuntime` + `TradingRuntime`（`paper_workflow.py` →
-`trading/runtime/session.py`）。
-
-Execution v2 刻意没有做的事，留给那一轮或更后面：
+Runtime v2A 刻意没有做的事，留给那一轮或更后面：
 
 - 没有把 `PaperWorkflowPhase` / `ExecutionLease` 改成 trading 层类型；
 - 没有重写 Desktop execution 路由页（`_auto_quant_tab` 仍然按原样渲染，
   只是数据来自域类型）；
 - 没有合并 Account socket 与 Execution socket；
+- 没有改 pricing ownership：`_limit_price` 仍产出
+  `TradeProposal.reference_price`，Risk 按同一价格定量，Execution 按同一价格
+  发单——三者一致，本轮不拆开；
+- 没有重做 `ShadowConfig` 配置模型（名字仍然是历史包袱，先拆职责）；
 - 没有新增任何真实交易能力：仍然 Paper only、整股、限价、无做空、无保证金。
 
 同样刻意不创建 `TradingManager`、`TradingGodService`、`GlobalAppState`、
 `ServiceLocator` 或 `ApplicationContext`：runtime 由 composition root 显式
 组装，不通过全局注册表解析。Execution v2 新增的
-`trading/composition/execution.py` 就是这条原则的又一例。
+`trading/composition/execution.py` 与 Runtime v2A 新增的
+`trading/composition/runtime.py` 就是这条原则的又一例，并由
+`test_the_runtime_has_no_god_objects_or_junk_drawers` 钉住。
 
 同样刻意不引入 `DatabaseMigrationManager` / `MigrationRegistry` /
 `SchemaVersionFramework` / Alembic：当前 schema 迁移仍是每个 store 自己的一次性

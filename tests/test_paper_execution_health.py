@@ -2,10 +2,6 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import unittest
 
-from us_quant.auto_quant import (
-    AutoQuantPosition,
-    AutoQuantSnapshot,
-)
 from us_quant.paper_order_models import (
     PaperBrokerPosition,
     PaperBrokerState,
@@ -15,6 +11,10 @@ from us_quant.paper_order_models import (
 )
 from us_quant.paper_execution_health import (
     evaluate_paper_execution_health,
+)
+from us_quant.trading.runtime.artifacts import (
+    AutoQuantPosition,
+    AutoQuantSnapshot,
 )
 
 

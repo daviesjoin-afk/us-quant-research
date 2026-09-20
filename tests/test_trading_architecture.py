@@ -2008,23 +2008,26 @@ def test_the_risk_page_imports_no_business_service() -> None:
 
 
 def test_auto_quant_no_longer_owns_account_risk() -> None:
-    """Spec 89: one authority, and it is not the strategy runtime.
+    """Spec 89: one authority, and it is not the trading runtime either.
 
-    Each retired name below was a calculation performed inside
+    Each retired name below was a calculation performed inside the old
     ``AutoQuantEngine`` while the same question was also answered by
     ``RiskApplication`` -- two answers no unit test could tell apart, because
-    the tests injected the risk argument directly.
+    the tests injected the risk argument directly.  Runtime v2A moved the
+    session into the trading layer without moving those calculations back in.
     """
 
-    used = _identifier_names(AUTO_QUANT_PATH) & set(
-        AUTO_QUANT_RETIRED_RISK_NAMES
-    )
-    assert not used, sorted(used)
+    for path in RUNTIME_MODULES:
+        used = _identifier_names(path) & set(
+            AUTO_QUANT_RETIRED_RISK_NAMES
+        )
+        assert not used, (path.name, sorted(used))
     # And the verdict really is routed through the risk layer, so the guard
     # above cannot pass by the whole path having been deleted.
-    names = _identifier_names(AUTO_QUANT_PATH)
+    names = _identifier_names(RUNTIME_DISPATCH)
     assert "RiskApplication" in names
     assert "RiskEvaluationRequest" in names
+    assert "ExecutionApplication" in names
 
 
 def test_the_account_halt_ratios_have_one_implementation() -> None:
@@ -2194,7 +2197,7 @@ def test_only_the_execution_composition_wires_concrete_execution_pieces() -> (
     for path in (
         EXECUTION_APPLICATION,
         EXECUTION_DOMAIN,
-        _SRC / "auto_quant.py",
+        *RUNTIME_MODULES,
         _SRC / "paper_session.py",
     ):
         modules = _imports(path)
@@ -2325,6 +2328,337 @@ def test_the_execution_adapter_keeps_its_paper_safety_gates() -> None:
         "the adapter must not write the correlation; the application does "
         "that between reserve and submit"
     )
+
+
+# -- Runtime v2A ----------------------------------------------------------
+#
+# The strategy/trading split, and the guards that keep it a split.  The whole
+# risk of this round is a "migration" that moves a 1,400-line engine into a
+# differently named 1,400-line engine, so the guards below are about shape as
+# much as about dependency direction: file size, one caller per authority, and
+# the strategy being structurally unable to send anything.
+
+#: The retired mixed engine.  Deleted, not renamed: a compatibility re-export
+#: would keep a second entry point alive, and a second entry point is a second
+#: place that can submit.
+RETIRED_RUNTIME_MODULES = ("us_quant.auto_quant",)
+
+#: Modules that would be either a god object or a hiding place for one.  Each
+#: name is something a reader would have to open to find out what it does.
+FORBIDDEN_RUNTIME_MODULES = (
+    "utils.py",
+    "helpers.py",
+    "common.py",
+    "manager.py",
+    "runtime_manager.py",
+    "context.py",
+    "app_state.py",
+    "service_locator.py",
+)
+
+FORBIDDEN_RUNTIME_TYPE_NAMES = (
+    "TradingManager",
+    "TradingGodService",
+    "GlobalAppState",
+    "ServiceLocator",
+    "ApplicationContext",
+)
+
+RUNTIME_DIR = _TRADING / "runtime"
+RUNTIME_MODELS = RUNTIME_DIR / "models.py"
+RUNTIME_ARTIFACTS = RUNTIME_DIR / "artifacts.py"
+RUNTIME_PREFLIGHT = RUNTIME_DIR / "preflight.py"
+RUNTIME_SIGNALS = RUNTIME_DIR / "signals.py"
+RUNTIME_STRATEGY = RUNTIME_DIR / "strategy.py"
+RUNTIME_SESSION = RUNTIME_DIR / "session.py"
+RUNTIME_PORTFOLIO = RUNTIME_DIR / "portfolio.py"
+RUNTIME_DISPATCH = RUNTIME_DIR / "dispatch.py"
+RUNTIME_TRADING = RUNTIME_DIR / "trading.py"
+RUNTIME_COMPOSITION = _TRADING / "composition" / "runtime.py"
+
+#: Every production module of the runtime package.  ``__init__`` is excluded:
+#: it is a package marker, not a module with a responsibility.
+RUNTIME_MODULES = (
+    RUNTIME_MODELS,
+    RUNTIME_ARTIFACTS,
+    RUNTIME_PREFLIGHT,
+    RUNTIME_SIGNALS,
+    RUNTIME_STRATEGY,
+    RUNTIME_SESSION,
+    RUNTIME_PORTFOLIO,
+    RUNTIME_DISPATCH,
+    RUNTIME_TRADING,
+)
+
+#: The modules a *strategy* may import.  Kept separate from the list above
+#: because the artifact module carries order identity -- a snapshot names the
+#: orders a session is holding -- and the strategy must not be able to reach
+#: that even transitively.
+STRATEGY_FACING_MODULES = (RUNTIME_MODELS, RUNTIME_SIGNALS, RUNTIME_STRATEGY)
+
+#: What the *strategy* runtime may not reach for.  Each is a capability that
+#: belongs to the session or below it: a verdict, an order, a fill, a broker, a
+#: store or a widget.  A strategy that names one has taken a job that is not
+#: its own -- and a strategy that can submit cannot be reasoned about.
+STRATEGY_RUNTIME_FORBIDDEN_IMPORTS = (
+    "us_quant.trading.application.risk",
+    "us_quant.trading.application.execution",
+    "us_quant.trading.ports",
+    "us_quant.trading.adapters",
+    "us_quant.trading.composition",
+    "us_quant.trading.runtime.dispatch",
+    "us_quant.trading.runtime.portfolio",
+    "us_quant.trading.runtime.session",
+    "us_quant.trading.runtime.trading",
+    "us_quant.paper_session",
+    "us_quant.paper_workflow",
+    "us_quant.paper_order_models",
+    "ibapi",
+    "sqlite3",
+    "PySide6",
+    "us_quant.desktop",
+)
+
+STRATEGY_RUNTIME_FORBIDDEN_NAMES = (
+    "RiskApplication",
+    "RiskDecision",
+    "RiskEvaluationRequest",
+    "ExecutionApplication",
+    "ExecutionSubmissionUncertain",
+    "BrokerExecutionPort",
+    "OrderRepositoryPort",
+    "OrderIntent",
+    "OrderEvent",
+    "ExecutionFill",
+    "order_sink",
+    "placeOrder",
+    "cancelOrder",
+)
+
+#: What the *trading* runtime may reach for, and what it may not.  It is the
+#: only place that sees the strategy, the risk authority and the execution
+#: service together; everything below them stays out.
+TRADING_RUNTIME_FORBIDDEN_PREFIXES = (
+    "ibapi",
+    "sqlite3",
+    "PySide6",
+    "us_quant.desktop",
+    "us_quant.trading.adapters",
+    "us_quant.paper_session",
+    "us_quant.paper_workflow",
+)
+
+#: The one module allowed to name both authorities, and the trade it makes:
+#: it sees risk and execution but never the strategy.
+RUNTIME_AUTHORITY_CALLERS = (RUNTIME_DISPATCH, RUNTIME_TRADING)
+
+#: Line budgets.  A soft target and a hard limit, because "tidy it later" is
+#: how a 1,400-line engine happened the first time.
+RUNTIME_MODULE_LINE_LIMIT = 500
+RUNTIME_COMPOSITION_LINE_LIMIT = 200
+
+
+def _line_count(path: pathlib.Path) -> int:
+    return len(path.read_text(encoding="utf-8").splitlines())
+
+
+def test_the_retired_mixed_engine_is_gone() -> None:
+    """Guard A: deleted, not renamed and not re-exported."""
+
+    for module in RETIRED_RUNTIME_MODULES:
+        path = _SRC / f"{module.removeprefix('us_quant.')}.py"
+        assert not path.exists(), (
+            f"{path.relative_to(_SRC).as_posix()} must not exist; the runtime "
+            "split moved its behaviour to trading/runtime/"
+        )
+
+
+def test_nothing_imports_the_retired_mixed_engine() -> None:
+    """Guard A, second half: no production module and no script."""
+
+    offenders: list[str] = []
+    for path in (*_all_source_files(), *_python_files(SCRIPTS_DIR)):
+        used = _matches(_imports(path), RETIRED_RUNTIME_MODULES)
+        if used:
+            offenders.append(
+                f"{path.relative_to(_REPO_ROOT).as_posix()} -> "
+                f"{sorted(used)}"
+            )
+    assert not offenders, offenders
+
+
+def test_the_strategy_runtime_cannot_reach_risk_execution_or_a_broker() -> None:
+    """Guard B: the strategy proposes; it cannot decide or send."""
+
+    offending_imports = _matches(
+        _imports(RUNTIME_STRATEGY),
+        STRATEGY_RUNTIME_FORBIDDEN_IMPORTS,
+    ) | _matches(_imports(RUNTIME_SIGNALS), STRATEGY_RUNTIME_FORBIDDEN_IMPORTS)
+    assert not offending_imports, sorted(offending_imports)
+
+    for path in STRATEGY_FACING_MODULES:
+        used = _identifier_names(path) & set(
+            STRATEGY_RUNTIME_FORBIDDEN_NAMES
+        )
+        assert not used, (path.name, sorted(used))
+
+    # It really does produce proposals, so the guard cannot pass by the module
+    # having stopped working.
+    assert "TradeProposal" in _identifier_names(RUNTIME_STRATEGY)
+
+
+def test_the_trading_runtime_owns_no_adapter_store_or_widget() -> None:
+    """Guard C: the session orchestrates; it does not implement a layer."""
+
+    for path in RUNTIME_MODULES:
+        offending = _matches(
+            _imports(path), TRADING_RUNTIME_FORBIDDEN_PREFIXES
+        )
+        assert not offending, (path.name, sorted(offending))
+
+    names = _identifier_names(RUNTIME_TRADING)
+    assert "StrategyRuntime" in names
+    assert "OrderDispatch" in names
+    assert "SessionBook" in names
+    assert "RiskApplication" in names
+    assert "ExecutionApplication" in names
+
+
+def test_only_the_dispatch_and_the_session_call_risk_and_execution() -> None:
+    """One caller per authority, and it can be checked by reading a list."""
+
+    callers: list[str] = []
+    for path in RUNTIME_MODULES:
+        names = _identifier_names(path)
+        if names & {"RiskApplication", "ExecutionApplication"}:
+            callers.append(path.relative_to(_SRC).as_posix())
+    assert callers == [
+        path.relative_to(_SRC).as_posix()
+        for path in RUNTIME_AUTHORITY_CALLERS
+    ], callers
+
+    # The dispatch must not learn why a proposal was made: it sees the verdict
+    # path and nothing of the strategy.
+    dispatch_names = _identifier_names(RUNTIME_DISPATCH)
+    assert "StrategyRuntime" not in dispatch_names
+    assert "TradeProposal" in dispatch_names
+
+
+def test_the_desktop_builds_the_runtimes_through_composition() -> None:
+    """Guard D: the window never assembles or constructs a session itself.
+
+    Checked as *calls* rather than as names: importing ``TradingRuntime`` to
+    annotate the attribute it holds is fine, and a name scan cannot tell that
+    from a construction.  What must never appear is ``TradingRuntime(...)``.
+    """
+
+    desktop = _SRC / "desktop.py"
+    source = desktop.read_text(encoding="utf-8")
+    constructed: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in {
+                "StrategyRuntime",
+                "TradingRuntime",
+                "OrderDispatch",
+                "SessionBook",
+            }:
+                constructed.append(node.func.id)
+    assert not constructed, constructed
+
+    names = _identifier_names(desktop)
+    assert "build_trading_runtime" in names, (
+        "the window must build its session through the runtime composition"
+    )
+    assert "StrategyRuntime" not in names, (
+        "the strategy runtime is built by the composition root, not the window"
+    )
+
+    composition = _identifier_names(RUNTIME_COMPOSITION)
+    assert "StrategyRuntime" in composition
+    assert "TradingRuntime" in composition
+    # And it assembles rather than connects: no broker, no store, no widget.
+    offending = _matches(
+        _imports(RUNTIME_COMPOSITION),
+        (
+            "ibapi",
+            "sqlite3",
+            "PySide6",
+            "us_quant.desktop",
+            "us_quant.trading.adapters",
+        ),
+    )
+    assert not offending, sorted(offending)
+
+
+def test_no_runtime_class_defines_a_method_twice() -> None:
+    """A second definition of the same method is silently the only one.
+
+    Python keeps the last one, so a stale copy left behind by a rename is dead
+    code that no linter here reports and no test can see -- it just sits there,
+    calling helpers that may no longer exist, until the day the order of the two
+    definitions changes.  That is what happened to ``TradingRuntime._flatten``.
+    """
+
+    duplicated: list[str] = []
+    for path in RUNTIME_MODULES:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            definitions: dict[str, int] = {}
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    definitions[item.name] = definitions.get(item.name, 0) + 1
+            for name, count in sorted(definitions.items()):
+                if count > 1:
+                    duplicated.append(f"{path.name}: {node.name}.{name} x{count}")
+    assert not duplicated, duplicated
+
+
+def test_the_runtime_modules_stay_small() -> None:
+    """Guard F: the split is a split, not a rename of one big class."""
+
+    oversized = [
+        f"{path.name}: {_line_count(path)} lines"
+        for path in RUNTIME_MODULES
+        if _line_count(path) > RUNTIME_MODULE_LINE_LIMIT
+    ]
+    assert not oversized, oversized
+
+    composition_lines = _line_count(RUNTIME_COMPOSITION)
+    assert composition_lines <= RUNTIME_COMPOSITION_LINE_LIMIT, (
+        f"composition/runtime.py: {composition_lines} lines"
+    )
+
+
+def test_the_runtime_has_no_god_objects_or_junk_drawers() -> None:
+    """Guard G: no grab-bag module and no grab-bag type."""
+
+    for name in FORBIDDEN_RUNTIME_MODULES:
+        assert not (RUNTIME_DIR / name).exists(), name
+
+    offenders: list[str] = []
+    for path in RUNTIME_MODULES:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and (
+                node.name in FORBIDDEN_RUNTIME_TYPE_NAMES
+            ):
+                offenders.append(f"{path.name}.{node.name}")
+    assert not offenders, offenders
+
+
+def test_every_runtime_module_is_covered_by_the_guards() -> None:
+    """A new runtime module must be added to the lists above, not slipped past."""
+
+    covered = {path.name for path in RUNTIME_MODULES}
+    actual = {
+        path.name
+        for path in _python_files(RUNTIME_DIR)
+        if path.name != "__init__.py"
+    }
+    assert actual == covered, sorted(actual ^ covered)
 
 
 def test_the_adapters_record_time_in_one_place() -> None:

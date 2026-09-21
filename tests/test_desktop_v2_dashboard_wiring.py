@@ -155,7 +155,7 @@ def test_account_publish_is_visible_on_the_real_dashboard_cards(window) -> None:
 
 
 def test_market_snapshot_states_are_visible_on_the_real_dashboard(window) -> None:
-    window.stream_snapshot = None
+    window.market_orchestrator._snapshot = None
     window._publish_dashboard_view()
     card = window.dashboard_page._intraday_market_card
     assert (card.value_label.text(), card.note_label.text()) == (
@@ -163,14 +163,14 @@ def test_market_snapshot_states_are_visible_on_the_real_dashboard(window) -> Non
         "尚未启动流行情",
     )
 
-    window.stream_snapshot = _snapshot(quotes=(_quote(),))
+    window.market_orchestrator._snapshot = _snapshot(quotes=(_quote(),))
     window._publish_dashboard_view()
     assert (card.value_label.text(), card.note_label.text()) == (
         "可用",
         "Alpaca IEX 单交易所实时",
     )
 
-    window.stream_snapshot = _snapshot(message="Type 1 尚未就绪")
+    window.market_orchestrator._snapshot = _snapshot(message="Type 1 尚未就绪")
     window._publish_dashboard_view()
     assert (card.value_label.text(), card.note_label.text()) == (
         "不可用",
@@ -194,19 +194,20 @@ def test_gateway_button_reaches_the_real_main_window_handler(
 
 
 def test_stream_receive_updates_dashboard_through_the_window(window, monkeypatch) -> None:
-    window._dashboard_market_stop_reason = "旧停止原因"
+    """A market snapshot must reach the dashboard card through the fan-out."""
+
     monkeypatch.setattr(window, "_record_minute_snapshot", lambda snapshot: None)
-    monkeypatch.setattr(window, "_publish_market_view", lambda snapshot: None)
     monkeypatch.setattr(window, "_populate_auto_quant_candidates", lambda: None)
     monkeypatch.setattr(window, "_refresh_target_preflight", lambda: None)
-    window._stream_snapshot_received(_snapshot(quotes=(_quote(),)))
+    window.market_orchestrator._on_snapshot(_snapshot(quotes=(_quote(),)))
     assert window.dashboard_page._intraday_market_card.value_label.text() == "可用"
 
 
-def test_stream_stop_updates_dashboard_through_the_window(window, monkeypatch) -> None:
-    monkeypatch.setattr(window, "_publish_market_view", lambda snapshot: None)
-    window.stream_snapshot = None
-    window._invalidate_stream_snapshot("行情流正在停止")
+def test_stream_stop_updates_dashboard_through_the_window(window) -> None:
+    """An invalidated feed must repaint the card as stopped."""
+
+    window.market_orchestrator._snapshot = None
+    window.market_orchestrator._invalidate("行情流正在停止")
     card = window.dashboard_page._intraday_market_card
     assert (card.value_label.text(), card.note_label.text()) == (
         "不可用",

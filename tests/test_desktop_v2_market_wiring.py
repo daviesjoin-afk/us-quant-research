@@ -35,11 +35,14 @@ from us_quant.scanner import MarketScan, ScanResult
 
 _APP = QApplication.instance() or QApplication([])
 
-#: Each page signal and the window method that must receive it.
+#: Each page signal and the window method that must receive it.  The start and
+#: stop entries are the window's cross-workflow bridges, not the orchestrator's
+#: methods: the gates that decide whether a stop or switch is allowed live on
+#: the window, so the page signals land there first.
 EXPECTED_WIRING = (
     ("provider_selected", "_stream_provider_selected"),
-    ("start_requested", "_start_stream"),
-    ("stop_requested", "_stop_stream"),
+    ("start_requested", "_request_market_start"),
+    ("stop_requested", "_request_market_stop"),
     ("load_scan_watchlist_requested", "_apply_intraday_watchlist"),
 )
 
@@ -108,9 +111,9 @@ def test_a_real_click_reaches_the_window_handler(monkeypatch) -> None:
         page.controls.provider_combo.setCurrentIndex(index)
 
         assert seen == [
-            "_start_stream",
+            "_request_market_start",
             "_apply_intraday_watchlist",
-            "_stop_stream",
+            "_request_market_stop",
             "_stream_provider_selected",
         ]
     finally:
@@ -214,7 +217,7 @@ def test_a_saved_settings_preference_lands_on_the_page(
 
 
 def test_loading_the_scan_watchlist_writes_the_page_field() -> None:
-    """``_apply_intraday_watchlist`` must write through the page, not a widget."""
+    """``_apply_intraday_watchlist`` writes through the market orchestrator."""
 
     window = _window()
     try:
@@ -224,7 +227,11 @@ def test_loading_the_scan_watchlist_writes_the_page_field() -> None:
         window._apply_intraday_watchlist()
 
         assert window.market_page.subscription_symbols() == ("S00", "S01")
-        assert window._market_watchlist_note is not None
+        # The note is asserted on the rendered card rather than through the
+        # orchestrator's private state: what the operator reads is the fact.
+        assert window.market_page.watchlist_card.note_label.text() == (
+            "实时订阅子集；不限制研究或交易范围"
+        )
         # And the watchlist card follows, through the page's own render.
         assert window.market_page.watchlist_card.value_label.text() == "2"
     finally:
@@ -237,19 +244,19 @@ def test_load_watchlist_is_refused_while_a_stream_runs() -> None:
     try:
         window.scan = _scan_result()
         window.market_page.set_subscription_symbols(())
-        window.stream_worker = _FakeWorker(running=True)
+        window.market_orchestrator._worker = _FakeWorker(running=True)
 
         window._apply_intraday_watchlist()
 
         assert window.market_page.subscription_symbols() == ()
     finally:
-        window.stream_worker = None
+        window.market_orchestrator._worker = None
         window.close()
         window.deleteLater()
 
 
 def test_the_targeted_symbol_path_writes_the_page_field(monkeypatch) -> None:
-    """A targeted session subscribes one symbol, through the page.
+    """A targeted session subscribes one symbol, through the orchestrator.
 
     ``_sync_targeted_symbol_to_stream`` finishes by starting the stream, which
     fails closed without a credential; the message box is recorded so the test
@@ -265,9 +272,11 @@ def test_the_targeted_symbol_path_writes_the_page_field(monkeypatch) -> None:
         window._sync_targeted_symbol_to_stream()
 
         assert window.market_page.subscription_symbols() == ("NVDA",)
-        assert window._market_watchlist_note == "针对性日内 T：NVDA"
+        assert window.market_page.watchlist_card.note_label.text() == (
+            "针对性日内 T：NVDA"
+        )
     finally:
-        window.stream_worker = None
+        window.market_orchestrator._worker = None
         window.close()
         window.deleteLater()
 
@@ -318,7 +327,7 @@ def test_the_execution_stop_stream_control_follows_the_started_worker(
 ) -> None:
     """The ordering Execution v2 fixed, asserted from the market route's side.
 
-    ``_start_stream`` hands the worker to the window and then calls ``start()``.
+    The orchestrator hands the worker over and then calls ``start()``.
     Publishing the execution controls *before* ``start()`` would leave the
     route's stop-stream control disabled for every direct start -- the control
     reads "is a worker running", and at that moment none is.  Swapping the two
@@ -329,7 +338,8 @@ def test_the_execution_stop_stream_control_follows_the_started_worker(
     try:
         worker = _FakeWorker(running=False)
         monkeypatch.setattr(
-            "us_quant.desktop.StreamWorker", lambda *a, **k: worker
+            "us_quant.desktop_v2.orchestration.market.orchestrator.StreamWorker",
+            lambda *a, **k: worker,
         )
         monkeypatch.setattr(
             window.credential_service,
@@ -341,23 +351,23 @@ def test_the_execution_stop_stream_control_follows_the_started_worker(
         real_publish = window._publish_execution_controls
 
         def record() -> None:
-            observed.append(window._stream_is_live())
+            observed.append(window.market_orchestrator.is_live)
             real_publish()
 
         monkeypatch.setattr(window, "_publish_execution_controls", record)
 
         window.market_page.set_selected_provider("ibkr")
         window.market_page.set_subscription_symbols(("SPY",))
-        window._start_stream()
+        window.market_orchestrator.start()
 
         assert worker.started, "the worker was never started"
         assert observed, "the controls were never published"
         # Every publish happened while a worker was running.
         assert all(observed), observed
-        assert window._stream_is_live()
+        assert window.market_orchestrator.is_live
     finally:
-        window.stream_worker = None
-        window.stream_timer.stop()
+        window.market_orchestrator._worker = None
+        window.market_orchestrator.stop_polling()
         window.close()
         window.deleteLater()
 
@@ -371,7 +381,8 @@ def test_the_market_stop_control_follows_the_started_worker(
     try:
         worker = _FakeWorker(running=False)
         monkeypatch.setattr(
-            "us_quant.desktop.StreamWorker", lambda *a, **k: worker
+            "us_quant.desktop_v2.orchestration.market.orchestrator.StreamWorker",
+            lambda *a, **k: worker,
         )
         monkeypatch.setattr(
             window.credential_service,
@@ -380,25 +391,27 @@ def test_the_market_stop_control_follows_the_started_worker(
         )
 
         observed: list[bool] = []
-        real_publish = window._publish_market_controls
+        real_publish = window.market_orchestrator._render_controls
 
         def record() -> None:
-            observed.append(window._stream_is_live())
+            observed.append(window.market_orchestrator.is_live)
             real_publish()
 
-        monkeypatch.setattr(window, "_publish_market_controls", record)
+        monkeypatch.setattr(
+            window.market_orchestrator, "_render_controls", record
+        )
 
         window.market_page.set_selected_provider("ibkr")
         window.market_page.set_subscription_symbols(("SPY",))
-        window._start_stream()
+        window.market_orchestrator.start()
 
         assert worker.started, "the worker was never started"
         assert observed, "the market controls were never published"
         assert all(observed), observed
         assert window.market_page.controls.stop_button.isEnabled()
     finally:
-        window.stream_worker = None
-        window.stream_timer.stop()
+        window.market_orchestrator._worker = None
+        window.market_orchestrator.stop_polling()
         window.close()
         window.deleteLater()
 
@@ -412,7 +425,8 @@ def test_the_market_start_publishes_the_connecting_state(
     try:
         worker = _FakeWorker(running=False)
         monkeypatch.setattr(
-            "us_quant.desktop.StreamWorker", lambda *a, **k: worker
+            "us_quant.desktop_v2.orchestration.market.orchestrator.StreamWorker",
+            lambda *a, **k: worker,
         )
         monkeypatch.setattr(
             window.credential_service,
@@ -422,7 +436,7 @@ def test_the_market_start_publishes_the_connecting_state(
 
         window.market_page.set_selected_provider("ibkr")
         window.market_page.set_subscription_symbols(("SPY", "QQQ"))
-        window._start_stream()
+        window.market_orchestrator.start()
 
         assert worker.started
         assert window.market_page.connection_card.value_label.text() == "连接中"
@@ -432,8 +446,8 @@ def test_the_market_start_publishes_the_connecting_state(
         )
         assert window.market_page.watchlist_card.value_label.text() == "2"
     finally:
-        window.stream_worker = None
-        window.stream_timer.stop()
+        window.market_orchestrator._worker = None
+        window.market_orchestrator.stop_polling()
         window.close()
         window.deleteLater()
 
@@ -449,10 +463,18 @@ def _credentials():
 
 
 # -- the stop safety gates (characterization) ----------------------------
+#
+# The gates moved *shape* but not meaning.  They now live on the window's
+# ``_stop_market_data`` / ``_request_market_switch`` bridges rather than inside
+# ``_stop_stream``, because the market orchestrator may not name the Paper
+# session or the Shadow book.  The behaviour is unchanged: a Paper session
+# holding anything refuses an ordinary stop, an active Shadow book is stopped
+# first, and the automatic session rotation is the one path allowed past the
+# interlock.
 
 
 class _Snapshot:
-    """The only facts ``_stop_stream`` reads off the session snapshot."""
+    """The only facts the stop gate reads off the session snapshot."""
 
     def __init__(
         self, *, active: bool = False, positions=(), pending=()
@@ -469,17 +491,19 @@ def test_an_active_paper_session_refuses_a_normal_stop(monkeypatch) -> None:
     try:
         messages = _capture_messages(monkeypatch)
         worker = _FakeWorker(running=True)
-        window.stream_worker = worker
+        window.market_orchestrator._worker = worker
         window.auto_quant_snapshot = _Snapshot(active=True)
 
-        refused = window._stop_stream()
+        refused = window._stop_market_data()
 
         assert refused is False
         assert len(messages) == 1
         assert messages[0][0] == "warning"
+        # And the feed is still running: a refusal must not half-stop it.
+        assert worker.requested is False
     finally:
         window.auto_quant_snapshot = None
-        window.stream_worker = None
+        window.market_orchestrator._worker = None
         window.close()
         window.deleteLater()
 
@@ -488,16 +512,16 @@ def test_open_positions_refuse_a_normal_stop(monkeypatch) -> None:
     window = _window()
     try:
         messages = _capture_messages(monkeypatch)
-        window.stream_worker = _FakeWorker(running=True)
+        window.market_orchestrator._worker = _FakeWorker(running=True)
         window.auto_quant_snapshot = _Snapshot(
             positions=(object(),), pending=()
         )
 
-        assert window._stop_stream() is False
+        assert window._stop_market_data() is False
         assert messages
     finally:
         window.auto_quant_snapshot = None
-        window.stream_worker = None
+        window.market_orchestrator._worker = None
         window.close()
         window.deleteLater()
 
@@ -506,13 +530,13 @@ def test_a_pending_order_refuses_a_normal_stop(monkeypatch) -> None:
     window = _window()
     try:
         _capture_messages(monkeypatch)
-        window.stream_worker = _FakeWorker(running=True)
+        window.market_orchestrator._worker = _FakeWorker(running=True)
         window.auto_quant_snapshot = _Snapshot(pending=(object(),))
 
-        assert window._stop_stream() is False
+        assert window._stop_market_data() is False
     finally:
         window.auto_quant_snapshot = None
-        window.stream_worker = None
+        window.market_orchestrator._worker = None
         window.close()
         window.deleteLater()
 
@@ -526,16 +550,49 @@ def test_the_declared_auto_session_switch_path_is_still_allowed(
     try:
         _capture_messages(monkeypatch)
         worker = _FakeWorker(running=True)
-        window.stream_worker = worker
+        window.market_orchestrator._worker = worker
         window.auto_quant_snapshot = _Snapshot(active=True)
+        window.market_page.set_subscription_symbols(("SPY",))
+        # The automatic path runs the whole switch, which would build a real
+        # feed once the fake worker reports itself stopped; the activation is
+        # recorded instead so this test observes the interlock rather than
+        # reaching a provider.
+        activated: list[str] = []
+        monkeypatch.setattr(
+            window.market_orchestrator, "start", lambda: activated.append("start")
+        )
 
-        stopped = window._stop_stream(allow_auto_session_switch=True)
+        window._request_automatic_market_switch("ibkr")
 
-        assert stopped is True
         assert worker.requested is True
+        assert activated == ["start"]
     finally:
         window.auto_quant_snapshot = None
-        window.stream_worker = None
+        window.market_orchestrator._worker = None
+        window.close()
+        window.deleteLater()
+
+
+def test_a_normal_switch_is_refused_while_a_paper_session_holds(
+    monkeypatch,
+) -> None:
+    """The operator's switch obeys the interlock the automatic one bypasses."""
+
+    window = _window()
+    try:
+        messages = _capture_messages(monkeypatch)
+        worker = _FakeWorker(running=True)
+        window.market_orchestrator._worker = worker
+        window.auto_quant_snapshot = _Snapshot(active=True)
+        window.market_page.set_subscription_symbols(("SPY",))
+
+        window._request_market_switch("ibkr")
+
+        assert worker.requested is False
+        assert len(messages) == 1
+    finally:
+        window.auto_quant_snapshot = None
+        window.market_orchestrator._worker = None
         window.close()
         window.deleteLater()
 
@@ -556,13 +613,13 @@ def test_an_active_shadow_session_is_stopped_first(monkeypatch) -> None:
             window, "_stop_shadow", lambda: stopped.append("shadow")
         )
 
-        window.stream_worker = _FakeWorker(running=True)
+        window.market_orchestrator._worker = _FakeWorker(running=True)
 
-        assert window._stop_stream() is True
+        assert window._stop_market_data() is True
         assert stopped == ["shadow"]
     finally:
         window.shadow_engine = None
-        window.stream_worker = None
+        window.market_orchestrator._worker = None
         window.close()
         window.deleteLater()
 
@@ -581,16 +638,15 @@ def test_a_stuck_stop_keeps_the_start_gate_closed(monkeypatch) -> None:
             def wait(self, _timeout: int) -> bool:
                 return False
 
-        window.stream_worker = _Stuck(running=True)
+        window.market_orchestrator._worker = _Stuck(running=True)
 
-        assert window._stop_stream() is False
-        assert window._stream_stop_pending is True
-        assert not window._stream_is_live()
+        assert window._stop_market_data() is False
+        assert not window.market_orchestrator.is_live
         # And the page is told, so its stop control closes.
         assert not window.market_page.controls.stop_button.isEnabled()
     finally:
-        window._stream_stop_pending = False
-        window.stream_worker = None
+        window.market_orchestrator._worker = None
+        window.market_orchestrator._stop_pending = False
         window.close()
         window.deleteLater()
 

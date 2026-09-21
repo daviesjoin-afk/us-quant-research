@@ -263,8 +263,8 @@ def test_gateway_and_theme_are_wired_at_page_level() -> None:
         "_load_local_state",
         "_cross_section_finished",
         "_refresh_account_surfaces",
-        "_invalidate_stream_snapshot",
-        "_stream_snapshot_received",
+        "_on_market_snapshot_invalidated",
+        "_on_market_snapshot_changed",
     ),
 )
 def test_fact_change_paths_publish_the_dashboard(method: str) -> None:

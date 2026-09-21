@@ -214,7 +214,7 @@ def test_migrated_reads_no_longer_touch_the_workflow_directly() -> None:
         "_publish_execution_controls",
         "_paper_needs_manual_recovery",
         "_poll_auto_quant_orders",
-        "_stream_snapshot_received",
+        "_on_market_snapshot_changed",
         "_auto_candidate_preparation_failed",
     ):
         source = _source(name)

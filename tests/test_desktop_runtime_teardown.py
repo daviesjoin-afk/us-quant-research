@@ -66,7 +66,8 @@ def test_close_stops_every_registered_heartbeat_timer() -> None:
 
     assert not window.paper_order_timer.isActive()
     assert not window.extended_session_timer.isActive()
-    assert not window.stream_timer.isActive()
+    # The market poll timer is the orchestrator's, so its state is read there.
+    assert not window.market_orchestrator.polling_active
 
     states = {
         component.name: component.state
@@ -332,7 +333,7 @@ def test_close_after_the_task_finished_completes_the_teardown(
 
         assert not window.paper_order_timer.isActive()
         assert not window.extended_session_timer.isActive()
-        assert not window.stream_timer.isActive()
+        assert not window.market_orchestrator.polling_active
         states = {
             component.name: component.state
             for component in window.runtime_supervisor.snapshot().components
@@ -749,7 +750,7 @@ def test_close_after_finalization_still_completes_the_teardown(
 
         assert not window.paper_order_timer.isActive()
         assert not window.extended_session_timer.isActive()
-        assert not window.stream_timer.isActive()
+        assert not window.market_orchestrator.polling_active
         assert window.runtime_supervisor.errors() == ()
     finally:
         _restore_paper_workflow(window, real)

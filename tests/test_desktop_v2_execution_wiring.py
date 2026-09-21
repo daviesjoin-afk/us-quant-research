@@ -176,17 +176,26 @@ def test_the_preflight_repaints_when_an_input_moves() -> None:
 def test_the_stop_stream_control_opens_once_the_thread_is_running() -> None:
     """A direct start from the market page must enable the route's stop control.
 
-    The control reads "is a stream worker running", so the publisher has to run
-    *after* ``worker.start()``: publishing before it would leave the button
-    disabled for every start that did not happen to be followed by another
-    publish.
+    The control reads "is a stream worker running", so the market orchestrator
+    has to publish its control state *after* ``worker.start()``: publishing
+    before it would leave the button disabled for every start that did not
+    happen to be followed by another publish.  The window's
+    ``_publish_execution_controls`` is connected to the orchestrator's
+    ``controls_changed``, which is emitted right after that publish.
     """
 
     import inspect
 
-    source = inspect.getsource(MainWindow._start_stream)
+    from us_quant.desktop_v2.orchestration.market.orchestrator import (
+        MarketOrchestrator,
+    )
+
+    source = inspect.getsource(MarketOrchestrator.start)
     assert source.index("worker.start()") < source.index(
-        "self._publish_execution_controls()"
+        "self._render_controls()"
+    )
+    assert source.index("self._render_controls()") < source.index(
+        "self.controls_changed.emit()"
     )
 
 

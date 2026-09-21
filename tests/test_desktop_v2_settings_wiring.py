@@ -295,7 +295,7 @@ def test_active_provider_credentials_cannot_be_cleared(
             "clear_provider",
             cleared.append,
         )
-        window.stream_worker = _RunningWorker("finnhub_trades")
+        window.market_orchestrator._worker = _RunningWorker("finnhub_trades")
         warnings = _capture(monkeypatch, "warning")
         _select_api_provider(window, "finnhub_trades")
 
@@ -305,7 +305,7 @@ def test_active_provider_credentials_cannot_be_cleared(
         assert len(warnings) == 1
         assert "行情运行中" in warnings[0][0][1]
     finally:
-        window.stream_worker = None
+        window.market_orchestrator._worker = None
         window.close()
         window.deleteLater()
 
@@ -321,13 +321,13 @@ def test_inactive_provider_credentials_can_be_cleared(
             "clear_provider",
             cleared.append,
         )
-        window.stream_worker = _RunningWorker("finnhub_trades")
+        window.market_orchestrator._worker = _RunningWorker("finnhub_trades")
         _select_api_provider(window, "alpaca_iex")
 
         window.settings_page.credentials.clear_button.click()
 
         assert cleared == ["alpaca_iex"]
     finally:
-        window.stream_worker = None
+        window.market_orchestrator._worker = None
         window.close()
         window.deleteLater()

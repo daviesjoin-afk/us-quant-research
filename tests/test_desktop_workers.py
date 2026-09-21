@@ -352,14 +352,17 @@ def test_old_and_new_import_paths_are_the_same_object() -> None:
     """``from us_quant.desktop import TaskThread`` must not be a copy.
 
     A wrapper or subclass would satisfy the import but break every
-    ``isinstance`` check in the desktop.
+    ``isinstance`` check in the desktop.  ``StreamWorker`` is no longer
+    re-exported from ``desktop``: the market orchestrator is its only owner, so
+    the identity that matters is between the worker module and that owner.
     """
 
     import us_quant.desktop as desktop
     import us_quant.desktop_workers as workers
+    from us_quant.desktop_v2.orchestration.market import orchestrator
 
     assert desktop.TaskThread is workers.TaskThread
-    assert desktop.StreamWorker is workers.StreamWorker
+    assert orchestrator.StreamWorker is workers.StreamWorker
 
 
 # -- structural guards -------------------------------------------------
@@ -506,7 +509,12 @@ def test_worker_module_names_no_provider_adapter() -> None:
 
 
 def test_desktop_reexports_the_workers_instead_of_defining_them() -> None:
-    """``desktop.py`` must import the classes, not redefine them."""
+    """``desktop.py`` must import the classes, not redefine them.
+
+    ``StreamWorker`` is deliberately *not* imported any more: the market
+    orchestrator owns it, and a window that still held the type would be a
+    second owner of the feed.
+    """
 
     tree = ast.parse(_DESKTOP_SOURCE.read_text(encoding="utf-8"))
 
@@ -527,7 +535,7 @@ def test_desktop_reexports_the_workers_instead_of_defining_them() -> None:
         ):
             imported.extend(alias.name for alias in node.names)
 
-    assert sorted(imported) == ["StreamWorker", "TaskThread"]
+    assert sorted(imported) == ["TaskThread"]
 
 
 def test_worker_module_defines_each_class_exactly_once() -> None:

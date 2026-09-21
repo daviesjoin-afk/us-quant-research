@@ -136,6 +136,7 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Paper Execution Health | MIGRATED |
 | Paper Trading Service | MIGRATED |
 | Desktop Workflow Aggregate | MIGRATED |
+| Market Orchestration | MIGRATED（v2O-A，`desktop_v2/orchestration/market/`） |
 
 Shadow 子系统：
 
@@ -1173,6 +1174,88 @@ child identity / state、fail-closed behavior、route ownership、preview semant
 navigation、no store / service imports、Qt-free contract、lazy initializer、
 stable-id resolve、programmatic-setter silence、render 只写外部事实与 line budgets。
 
+### 8.11 market orchestration 已抽出（v2O-A）
+
+八个一级 route 全部 native v2 之后，`MainWindow` 仍是唯一的 orchestration owner。
+本轮把 **Market runtime truth** 从窗口搬进
+`desktop_v2/orchestration/market/`：
+
+```text
+desktop_v2/orchestration/
+  __init__.py           包 docstring；本轮只有 market 一个 capability
+  market/
+    __init__.py         lazy export MarketOrchestrator + 三个 fact 类型
+    models.py           Qt-free：MarketReadinessInputs / MarketRuntimeEvent /
+                        MarketShellHealthView
+    health.py           ShellHealthPublisher：badge 投影 + 30 秒节流状态行
+    renderer.py         MarketRenderer：page 投影 + scope / watchlist note +
+                        recently-ready cache
+    orchestrator.py     MarketOrchestrator：worker / snapshot / timer /
+                        pending switch / stop-pending / lifecycle
+```
+
+职责边界：
+
+```text
+MainWindow            construct MarketPage + MarketOrchestrator、connect signals、
+                      跨 workflow interlock（Paper / Shadow）、snapshot fan-out
+MarketOrchestrator    worker、snapshot、poll timer、pending switch、stop-pending、
+                      生命周期、runtime event 请求
+MarketRenderer        page render、scope 行、watchlist note、recently-ready cache
+ShellHealthPublisher  market / handshake badge 文本与状态、节流后的状态行
+```
+
+- **单一真相。** `stream_worker` / `stream_snapshot` / `stream_timer` /
+  `_pending_stream_switch` / `_stream_stop_pending` / `_market_scope` /
+  `_market_watchlist_note` / `_dashboard_market_stop_reason` /
+  `_quote_last_ready_monotonic` / `_last_stream_event_key` /
+  `_last_stream_status_key` / `_last_stream_status_log_at` /
+  `_last_stream_push_monotonic` 已从 `MainWindow` 全部消失，且**没有**任何
+  compatibility property 或镜像 state。
+- **公开读取面。** 只有 `snapshot` / `is_live` / `worker_running` /
+  `active_source_id` / `active_market_exchange` / `stop_reason` /
+  `polling_active` / `was_recently_ready()` / `recently_ready_symbols()`；
+  worker、timer、pending switch 与 readiness dict 保持私有，window 不允许
+  reach-through `market_orchestrator._*`。
+- **两个 liveness 事实，语义不同，不可互换。** `is_live` = **feed 可用性**：
+  `not _stop_pending and _worker_running`，stop 一旦 pending 就为 False，
+  业务门（market controls / execution stop-stream / preflight / Shadow
+  launch gate）继续读它。`worker_running` = **底层 StreamWorker 线程是否真的
+  还在跑**：stop 超时（`worker.wait(3000)` 返回 False）时 `is_live == False`
+  而 `worker_running == True`，shutdown 必须读这一个。它是只读 bool，**不是**
+  worker handle：`market_orchestrator.worker` / `._worker` 与任何
+  QThread/StreamWorker 对象仍然禁止泄露到 MainWindow。
+- **跨 workflow gate 暂留窗口。** 停止 / 切换仍要先读 Paper 持仓、在途订单与
+  Shadow 是否 active，所以 `_request_market_start` / `_request_market_stop` /
+  `_request_market_switch` / `_request_market_switch(allow_auto_session_switch=True)` /
+  `_stop_market_data` 留在窗口，且只做「读事实 → 判定 → 调 orchestrator」。
+  `MarketOrchestrator` 不 import Paper / Shadow / MainWindow。
+- **snapshot fan-out 本轮不拆。** `_on_market_snapshot_changed()` 只做跨 workflow
+  分发：`workflow_controller.market_account` readiness、Dashboard、minute
+  evidence、Auto Quant 候选、targeted preflight、Paper `on_stream`、Shadow
+  `on_stream`。它不再 render page、不碰 worker、不维护 readiness cache。
+- **shell 与事件是请求，不是写入。** badge 由 `MarketShellHealthView` 描述后由窗口
+  绘制；runtime event 通过 `runtime_event_requested` 请求窗口记录，因此不存在
+  `Market → System` 反向依赖。
+- **shutdown 顺序不变。** supervisor 与 `closeEvent` 使用
+  `stop_polling` / `polling_active` / `worker_running`（**不是** `is_live`，
+  否则超时停止会被判成 clean release）；Paper shutdown ordering 未动。
+  `closeEvent` 最终检查同样是 `worker_running`：只要行情网络线程没真正退出就
+  `event.ignore()`，即使 `is_live` 已经是 False 也不放行。
+- **IBKR 时段轮换仍是请求。** orchestrator 检测 venue 变化后 emit
+  `automatic_switch_requested`，由窗口以 `allow_auto_session_switch=True` 走
+  interlock，不会自行绕过 Paper gate。
+
+新增守卫位于 `tests/test_desktop_market_orchestration_architecture.py`、
+`tests/test_desktop_market_orchestrator.py` 与
+`tests/test_desktop_market_orchestration_wiring.py`，覆盖已删 state / 无
+compatibility property / 无 reach-through / orchestrator 的禁止依赖 /
+render 单一调用者 / StreamWorker 单一持有者 / snapshot fan-out 不夺回 ownership /
+per-file line budgets（`orchestrator.py ≤ 550`）/ `desktop.py` 相对 base commit
+净减少 ≥ 300 行。
+
+`desktop.py`：**5847 → 5432 行（净减 415）**；`orchestrator.py` 544 行。
+
 ## 9. 已删除的旧架构
 
 ```text
@@ -1892,11 +1975,23 @@ MainWindow._auto_quant_tab             ✅ 已删除（Desktop Execution v2）
 旧 workflow_controller.py              ✅ 已删除（Trading Framework Closure v2C）
 ShadowConfig（含 compatibility alias）  ✅ 已删除（Trading Framework Closure v2C）
 shadow_paper.py                        ✅ 已删除（Shadow Framework v2）
-旧 MainWindow stream lifecycle         ⏭ 后续
+旧 MainWindow stream lifecycle         ✅ 已删除（v2O-A Market orchestration）
 旧 Paper-specific orchestration glue   ⏭ 后续
 旧 workflow duplicate state            ⏭ 后续
 旧页面 builder（其余 route）            ⏭ 后续
 旧 desktop service                     ⏭ 后续
+```
+
+后续 orchestration 抽取路线：
+
+```text
+v2O-A Market orchestration      ✅ 已完成（§8.11）
+v2O-B Account orchestration     ⏭ 后续
+v2O-C Research orchestration    ⏭ 后续
+v2O-D Shadow orchestration      ⏭ 后续
+v2O-E Paper orchestration       ⏭ 后续
+v2O-F System orchestration      ⏭ 后续
+MainWindow composition closure  ⏭ 后续
 ```
 
 ## 12. 本轮冻结的行为
@@ -1974,10 +2069,24 @@ v2。**Desktop Research v2E 已完成**（§8.8），CrossSectionResearchPage �
 **Desktop Research v2R-F 已完成**（§8.9），Research aggregate 已 native v2，
 但 Research orchestration 仍暂留在 MainWindow。**Desktop System v2 已完成**（§8.10），
 System aggregate 已 native v2 且两类大 UI 耦合已清零；System orchestration 仍暂留在
-MainWindow。阶段 2 剩余：
+MainWindow。**v2O-A Market orchestration 已完成**（§8.11），Market runtime truth 已
+从 `MainWindow` 迁入 `desktop_v2/orchestration/market/`，窗口只保留跨 workflow
+safety bridge 与 snapshot fan-out。阶段 2 剩余：
 
 ```text
 Desktop Dashboard v2
+```
+
+后续 orchestration 抽取：
+
+```text
+v2O-B Account orchestration
+v2O-C Research orchestration
+v2O-D Shadow orchestration
+v2O-E Paper orchestration
+v2O-F System orchestration
+MainWindow composition closure
+Final Architecture Closure
 ```
 
 Shadow Framework v2 刻意没有做的事，留给更后面：
@@ -1993,12 +2102,22 @@ Desktop Market v2 刻意没有做的事，留给更后面：
 - 没有提前拆 stream orchestration：没有 `MarketController` / `MarketWorkflow` /
   `MarketOrchestrator` / `StreamManager`。既定路线是先全部页面 native v2，
   再统一拆 `MainWindow` orchestration，否则会边迁页面边反复拆 controller；
+  **该路线已执行：`MarketOrchestrator` 在 v2O-A 落地（§8.11）**；
 - 本轮只迁 Research aggregate，System / Dashboard 仍冻结；settings provider
   combo 仍在旧 System route，只做必要的双向 wiring（§63）；
 - 没有碰 `ExecutionPage`，只让 `_publish_execution_controls()` 因为 stream
   state 继续工作；
 - 没有改 `MarketDataApplication` / provider lifecycle / push-poll 划分 /
   IBKR venue resolver / stale 阈值。
+
+v2O-A 刻意没有做的事，留给更后面：
+
+- 只抽 Market，没有 Account / Research / Shadow / Paper / System orchestration；
+- 没有继续拆 snapshot fan-out：Paper / Shadow 的 `on_stream` 仍由窗口转发；
+- 没有把 Paper / Shadow interlock 搬进 orchestrator（那需要先完成 v2O-D / v2O-E）；
+- 没有引入 `DesktopManager` / `ApplicationContext` 之类依赖袋；
+- 没有改 `MarketDataApplication`、readiness 判定语义、30 秒 recently-ready 窗口、
+  1 秒 push-idle 阈值或 30 个订阅上限。
 
 Framework v2C 刻意没有做的事，留给更后面：
 

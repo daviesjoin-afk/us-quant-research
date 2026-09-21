@@ -84,6 +84,18 @@ class _RunningWorker:
         return True
 
 
+def _fake_live_market(window: MainWindow, stream: SimpleNamespace) -> None:
+    """Make the market orchestrator report a live feed carrying ``stream``.
+
+    The shadow gate reads the market truth through the orchestrator now, so the
+    test supplies it there rather than by assigning a worker to the window.
+    """
+
+    orchestrator = window.market_orchestrator
+    orchestrator._worker = _RunningWorker()
+    orchestrator._snapshot = stream
+
+
 class _Workflow:
     def __init__(self) -> None:
         self.active = False
@@ -255,8 +267,16 @@ def test_shadow_start_rejects_stale_market(
 ) -> None:
     monkeypatch.setattr(window, "_selected_shadow_strategy_record", _valid_strategy)
     monkeypatch.setattr(window, "_paper_simulation_capital", lambda: Decimal("10000"))
-    window.stream_worker = _RunningWorker()
-    window.stream_snapshot = SimpleNamespace(realtime_ready=False, quotes=())
+    monkeypatch.setattr(
+        type(window.market_orchestrator),
+        "is_live",
+        property(lambda self: True),
+    )
+    monkeypatch.setattr(
+        type(window.market_orchestrator),
+        "snapshot",
+        property(lambda self: SimpleNamespace(realtime_ready=False, quotes=())),
+    )
     window._start_shadow()
     assert dialogs[0][1][1] == "行情门未通过"
 
@@ -266,8 +286,7 @@ def test_shadow_start_rejects_non_research_eligible_symbol(
 ) -> None:
     monkeypatch.setattr(window, "_selected_shadow_strategy_record", _valid_strategy)
     monkeypatch.setattr(window, "_paper_simulation_capital", lambda: Decimal("10000"))
-    window.stream_worker = _RunningWorker()
-    window.stream_snapshot = _ready_stream()
+    _fake_live_market(window, _ready_stream())
     window.universe = SimpleNamespace(
         records=(SimpleNamespace(symbol="AAPL", eligible_for_research=False),)
     )
@@ -281,9 +300,9 @@ def test_shadow_start_rejects_missing_fresh_target_quote(
 ) -> None:
     monkeypatch.setattr(window, "_selected_shadow_strategy_record", _valid_strategy)
     monkeypatch.setattr(window, "_paper_simulation_capital", lambda: Decimal("10000"))
-    window.stream_worker = _RunningWorker()
-    window.stream_snapshot = _ready_stream(
-        SimpleNamespace(symbol="AAPL", realtime_ready=False)
+    _fake_live_market(
+        window,
+        _ready_stream(SimpleNamespace(symbol="AAPL", realtime_ready=False)),
     )
     window.universe = _eligible_universe()
     window.targeted_validation_page.set_target_symbol("AAPL")
@@ -302,8 +321,7 @@ def test_shadow_start_allowed_path_builds_and_starts_engine(
     monkeypatch.setattr(window, "_publish_targeted_view", lambda: None)
     monkeypatch.setattr(window, "_record_runtime_event", lambda **kwargs: None)
     monkeypatch.setattr(window, "_log", lambda *args, **kwargs: None)
-    window.stream_worker = _RunningWorker()
-    window.stream_snapshot = _ready_stream()
+    _fake_live_market(window, _ready_stream())
     window.universe = _eligible_universe()
     window.account_portfolio = SimpleNamespace(
         account=SimpleNamespace(account_alias="Paper")

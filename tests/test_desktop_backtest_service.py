@@ -169,15 +169,8 @@ MARKET_DATA_V2_METHODS = (
     # Market Data v2: the window talks to the application service and the
     # domain snapshot instead of the v1 service and transport types.
     "__init__",
-    "_start_stream",
-    "_stream_snapshot_pushed",
-    "_stream_snapshot_received",
-    "_poll_stream_snapshot",
-    "_invalidate_stream_snapshot",
     "_record_minute_snapshot",
-    "_update_quote_readiness",
     "_maybe_rotate_extended_ibkr_session",
-    "_request_stream_switch",
     "_save_user_preferences",
     "_clear_selected_api_credentials",
     "_api_provider_changed",
@@ -239,22 +232,80 @@ DESKTOP_MARKET_V2_REMOVED_METHODS = (
 
 DESKTOP_MARKET_V2_ADDED_METHODS = (
     "_connect_market_page",
-    "_market_controls",
-    "_publish_market_controls",
-    "_publish_market_health",
-    "_publish_market_view",
 )
 
 DESKTOP_MARKET_V2_METHODS = (
-    "_activate_pending_stream_switch",
     "_apply_intraday_watchlist",
     "_apply_target_symbol",
     "_settings_provider_selected",
-    "_stream_failed",
     "_stream_provider_selected",
-    "_stream_symbols_from_input",
     "_switch_to_settings_provider",
     "_sync_targeted_symbol_to_stream",
+)
+
+# v2O-A Market orchestration extraction: the market route's runtime truth moved
+# out of ``MainWindow`` into ``MarketOrchestrator``.  The methods that owned the
+# worker, the snapshot, the poll timer, the pending switch, the readiness cache
+# and the page render are deleted; what replaces them is the cross-workflow
+# safety bridge (stop/switch still obey the Paper interlock, which the market
+# layer may not name) plus the one snapshot fan-out that feeds the dashboard,
+# the minute recorder, the auto-quant shortlist, Paper and Shadow.  Declared so
+# the guard can assert the delta exactly, in both directions.
+DESKTOP_MARKET_ORCHESTRATION_V2_REMOVED_METHODS = (
+    "_activate_pending_stream_switch",
+    "_invalidate_stream_snapshot",
+    "_poll_stream_snapshot",
+    "_quote_was_recently_ready",
+    "_request_stream_switch",
+    "_start_stream",
+    "_stop_stream",
+    "_stream_failed",
+    "_stream_finished",
+    "_stream_snapshot_pushed",
+    "_stream_snapshot_received",
+    "_stream_symbols_from_input",
+    "_update_quote_readiness",
+)
+
+DESKTOP_MARKET_ORCHESTRATION_V2_ADDED_METHODS = (
+    "_on_market_snapshot_changed",
+    "_on_market_snapshot_invalidated",
+    "_publish_market_readiness_inputs",
+    "_record_market_runtime_event",
+    "_render_market_shell_health",
+    "_report_market_refusal",
+    "_request_automatic_market_switch",
+    "_request_market_start",
+    "_request_market_stop",
+    "_request_market_switch",
+    "_stop_market_data",
+)
+
+# Rewritten rather than added or removed: the runtime registration now asks the
+# orchestrator for the poll timer and the feed, the auto-quant stop reads the
+# market truth through the orchestrator instead of the window, and ``closeEvent``
+# asks it whether a feed is live instead of reading the worker attribute.
+DESKTOP_MARKET_ORCHESTRATION_V2_METHODS = (
+    "_register_runtime_components",
+    "_stop_auto_quant",
+    "closeEvent",
+)
+
+# v2O-A: ``closeEvent`` asks the market orchestrator whether the market
+# *thread* is still alive instead of reaching for the worker.  The fact is
+# ``worker_running`` rather than ``is_live``: a stop that timed out makes the
+# feed unusable while the network thread is still running, so ``is_live``
+# would let the application exit over a live worker.  Declared as a
+# byte-level delta so the frozen-method guard still proves nothing else moved.
+_DESKTOP_MARKET_ORCHESTRATION_V2_CLOSE_EVENT_BASE = (
+    '        if (\n            self.stream_worker is not None\n            and self.stream_worker.isRunning()\n        ):\n'
+)
+_DESKTOP_MARKET_ORCHESTRATION_V2_CLOSE_EVENT_DELTA = (
+    '        # ``worker_running``, not ``is_live``: the question here is whether the\n'
+    '        # network thread has actually exited, and a stop that timed out has\n'
+    '        # already made the *feed* unavailable without ending the thread.  Asking\n'
+    '        # the business fact would let the application exit over a live worker.\n'
+    '        if self.market_orchestrator.worker_running:\n'
 )
 
 TARGETED_RESEARCH_V2_REMOVED_METHODS = (
@@ -400,7 +451,6 @@ DESKTOP_EXECUTION_V2_ADDED_METHODS = (
     "_publish_execution_controls",
     "_render_auto_quant_snapshot",
     "_set_launch_busy",
-    "_stream_is_live",
     "_build_v2_pages",
     "_populate_strategy_selection_combos",
 )
@@ -429,10 +479,7 @@ DESKTOP_EXECUTION_V2_METHODS = (
     "_reset_auto_launch_controls",
     "_select_auto_quant_candidates",
     "_start_auto_quant",
-    "_start_stream",
     "_stop_auto_market_data",
-    "_stop_stream",
-    "_stream_finished",
     "_task_failed",
     "_worker_finished",
 )
@@ -449,7 +496,6 @@ SYSTEM_V2_REMOVED_METHODS = (
     "_refresh_credential_status",
 )
 SYSTEM_V2_ADDED_METHODS = (
-    "_active_stream_provider",
     "_connect_runtime_events_page",
     "_connect_settings_page",
     "_credential_status_text",
@@ -1815,6 +1861,20 @@ def test_the_frozen_method_is_byte_identical(name: str) -> None:
             _SYSTEM_V2_REPAIR_DELTA_BLOCK, _SYSTEM_V2_REPAIR_BASE_BLOCK
         )
 
+    if name == "closeEvent":
+        # v2O-A: the live-worker check asks the market orchestrator instead of
+        # reading the worker attribute.  Only that declared delta may differ.
+        assert (
+            current_body.count(
+                _DESKTOP_MARKET_ORCHESTRATION_V2_CLOSE_EVENT_DELTA
+            )
+            == 1
+        ), name
+        current_body = current_body.replace(
+            _DESKTOP_MARKET_ORCHESTRATION_V2_CLOSE_EVENT_DELTA,
+            _DESKTOP_MARKET_ORCHESTRATION_V2_CLOSE_EVENT_BASE,
+        )
+
     assert current_body == base_body, name
 
 
@@ -1861,6 +1921,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(CROSS_SECTION_V2_REMOVED_METHODS)
         | set(SYSTEM_V2_REMOVED_METHODS)
         | set(DASHBOARD_V2_REMOVED_METHODS)
+        | set(DESKTOP_MARKET_ORCHESTRATION_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1875,6 +1936,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(CROSS_SECTION_V2_ADDED_METHODS)
         | set(SYSTEM_V2_ADDED_METHODS)
         | set(DASHBOARD_V2_ADDED_METHODS)
+        | set(DESKTOP_MARKET_ORCHESTRATION_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1905,6 +1967,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(CROSS_SECTION_V2_METHODS)
         | set(SYSTEM_V2_METHODS)
         | set(SYSTEM_V2_REPAIR_METHODS)
+        | set(DESKTOP_MARKET_ORCHESTRATION_V2_METHODS)
     )
     # Exact, not a subset: the delta is the declared surface and nothing
     # else, in both directions.
@@ -1923,6 +1986,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(CROSS_SECTION_V2_METHODS) <= set(changed)
     assert set(SYSTEM_V2_METHODS) <= set(changed)
     assert set(SYSTEM_V2_REPAIR_METHODS) <= set(changed)
+    assert set(DESKTOP_MARKET_ORCHESTRATION_V2_METHODS) <= set(changed)
     assert "_run_backtest_workspace" in changed
 
 

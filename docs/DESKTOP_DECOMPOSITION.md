@@ -155,7 +155,7 @@
    `closing_gate`(5) → `paper_order_heartbeat`(10) → `extended_session_heartbeat`(20)
    → `stream_snapshot_timer`(30) → `market_data_stream`(100)
    → `background_workers`(200)
-8. 行情线程仍存活 → `event.ignore()` + 弹窗（原有行为，未改）
+8. 行情线程仍存活（`worker_running`，非 `is_live`）→ `event.ignore()` + 弹窗
 9. `event.accept()`
 
 交易安全判断全部在第 5–6 步之前完成，supervisor 的完整 `shutdown()` 只在会话已
@@ -303,6 +303,11 @@ runtime 改掉——否则写盘失败会出现「提示未保存、runtime 却�
 行情停止仍走既有的 `runtime_supervisor`（`market_data_stream`, order=100），
 没有第二套 shutdown 管理。第二步只改变「谁来构造 adapter」，关闭顺序、Paper
 安全顺序、`begin_shutdown`/`cancel_shutdown` 一律未动。
+
+该组件的存活探针读的是 `market_orchestrator.worker_running`（底层线程是否真的
+还在跑），**不是** `is_live`。`is_live` 表达的是「行情是否可用」，stop 一旦
+pending 就为 False；若用它做探针，超时未退出的线程会被判成已释放，shutdown
+会误报 clean release。`closeEvent` 第 8 步的最终检查同理。
 
 ## 8. 第七步：`desktop_workers.py`（Qt worker 边界）
 

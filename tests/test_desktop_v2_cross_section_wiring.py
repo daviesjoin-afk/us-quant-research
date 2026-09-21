@@ -18,9 +18,6 @@ from us_quant.desktop import MainWindow
 from us_quant.desktop_v2.pages.research.cross_section.models import (
     CrossSectionResearchDraft,
 )
-from us_quant.desktop_v2.pages.research.cross_section.page import (
-    CrossSectionResearchPage,
-)
 from us_quant.paths import STATE_ROOT_ENV
 
 
@@ -79,12 +76,6 @@ def _report() -> dict:
         "promotion_gate": {"passed": False, "reasons": ["第一理由"]},
     }
 
-
-def test_research_tab_index_five_is_cross_section_page(
-    window: MainWindow,
-) -> None:
-    assert isinstance(window.v2_research_tabs.widget(5), CrossSectionResearchPage)
-    assert window.v2_research_tabs.widget(5) is window.cross_section_page
 
 
 def test_capital_change_updates_window_scalar_and_account_card(

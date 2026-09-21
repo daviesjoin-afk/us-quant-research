@@ -265,6 +265,10 @@ from us_quant.desktop_v2.pages.research.cross_section.models import (
 from us_quant.desktop_v2.pages.research.cross_section.presenter import (
     build_cross_section_view,
 )
+from us_quant.desktop_v2.pages.research import (
+    ResearchPage,
+    ResearchWorkspace,
+)
 from us_quant.desktop_tasks import DesktopTaskController
 from us_quant.desktop_workers import (
     StreamWorker,
@@ -739,15 +743,11 @@ class MainWindow(QMainWindow):
         route and must cover ``ROUTES`` exactly -- the shell fails closed on a
         missing or unknown route.
 
-        ``research`` and ``system`` group several functions behind a
-        second-level ``QTabWidget``.  Research is deliberately not part of
-        the trading runtime navigation, and System collects operations and
-        settings.
+        ``research`` is a native aggregate that owns the fixed secondary
+        workspace tabs.  ``system`` is still a transitional ``QTabWidget``
+        that collects operations and settings.  Research is deliberately not
+        part of the trading runtime navigation.
         """
-        research = QTabWidget()
-        research.setObjectName("workflowSecondaryTabs")
-        research.setDocumentMode(True)
-        research.setTabPosition(QTabWidget.North)
         self.targeted_validation_page = TargetedValidationPage(palette=self.theme)
         self._connect_targeted_validation_page()
         self.universe_page = UniversePage(palette=self.theme)
@@ -773,16 +773,16 @@ class MainWindow(QMainWindow):
         )
         self._connect_cross_section_page()
         self._publish_cross_section_view()
-        for title, page in (
-            ("针对性验证", self.targeted_validation_page),
-            ("广域标的池", self.universe_page),
-            ("历史数据", self.history_page),
-            ("市场扫描", self.scanner_page),
-            ("回测", self.backtest_page),
-            ("横截面研究", self.cross_section_page),
-        ):
-            research.addTab(page, title)
-        self.v2_research_tabs = research
+        self.research_page = ResearchPage(
+            {
+                ResearchWorkspace.TARGETED: self.targeted_validation_page,
+                ResearchWorkspace.UNIVERSE: self.universe_page,
+                ResearchWorkspace.HISTORY: self.history_page,
+                ResearchWorkspace.SCANNER: self.scanner_page,
+                ResearchWorkspace.BACKTEST: self.backtest_page,
+                ResearchWorkspace.CROSS_SECTION: self.cross_section_page,
+            }
+        )
 
         system = QTabWidget()
         system.setObjectName("workflowSecondaryTabs")
@@ -847,7 +847,7 @@ class MainWindow(QMainWindow):
             "strategy": self.strategy_page,
             "risk": self.risk_page,
             "execution": self.execution_page,
-            "research": research,
+            "research": self.research_page,
             "system": system,
         }
         assert set(pages) == set(ROUTES)
@@ -3615,7 +3615,9 @@ class MainWindow(QMainWindow):
         self._targeted_active_evidence_tab = 6
         self._publish_targeted_view()
         self.shell.navigate_to("research")
-        self.v2_research_tabs.setCurrentIndex(0)
+        self.research_page.set_active_workspace(
+            ResearchWorkspace.TARGETED
+        )
         self._record_runtime_event(
             severity="info",
             component="targeted_robustness",

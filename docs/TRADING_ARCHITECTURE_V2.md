@@ -55,36 +55,42 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 > **进度更新（Desktop Research v2A）**：Research 的“针对性验证”二级页已迁成
 > 原生 `TargetedValidationPage`，旧 `MainWindow._simulation_tab()` 已删除。
 > 页面位于 `desktop_v2/pages/research/targeted/`，presenter 是 Qt-free 纯投影；
-> Research aggregate 仍是 transitional，其他五个二级页保持 legacy。一级 native
-> 计数仍为 **5 / 8**，v2R-F aggregate 完成后才会变成 6 / 8。见 §8.4。
+> Research aggregate 当时仍未计入一级 native route；v2R-F 完成后为 **6 / 8**。
+> 见 §8.4。
 >
 > **进度更新（Desktop Research v2B）**：Research 的“广域标的池”和“历史数据”二级页
 > 已分别迁成原生 `UniversePage`、`HistoryPage`，旧 `_universe_tab()` / `_data_tab()`
 > 已删除。Universe 刷新/取消控件已从 Dashboard 搬回 UniversePage；History 队列下载、
-> 进度和失败状态仍由 MainWindow 编排。Research aggregate 仍是 transitional，一级 native
-> 计数仍为 **5 / 8**。见 §8.5。
+> 进度和失败状态仍由 MainWindow 编排。Research aggregate 当时仍未计入一级
+> native route；v2R-F 完成后为 **6 / 8**。见 §8.5。
 >
 > **进度更新（Desktop Research v2C）**：Research 的“市场扫描”二级页已迁成原生
 > `ScannerPage`，旧 `_scanner_tab()` / `_populate_scan_table()` /
 > `_scan_selection_changed()` 已删除，Dashboard 的“运行市场扫描”按钮也已退休。
 > 手动扫描 service、任务编排、`self.scan` 真值和图表文件读取仍由 MainWindow 持有。
-> Research aggregate 仍是 transitional，一级 native 计数仍为 **5 / 8**。见 §8.6。
+> Research aggregate 当时仍未计入一级 native route；v2R-F 完成后为 **6 / 8**。
+> 见 §8.6。
 >
 > **进度更新（Desktop Research v2D）**：Research 的“回测”二级页已迁成原生
 > `BacktestPage`，旧 `_backtest_tab()` / `_refresh_backtest_strategy_combo()` /
 > `_backtest_result_selection_changed()` / `_show_backtest_run()` 已删除，
 > MainWindow 不再持有任何 Backtest widget。`self.backtest_runs`、selected run id、
 > `_backtest_busy`、StrategySelectionService、BacktestRequest construction 与
-> DesktopBacktestService 仍由 MainWindow 持有。Research aggregate 仍是 transitional，
-> 一级 native 计数仍为 **5 / 8**。见 §8.7。
+> DesktopBacktestService 仍由 MainWindow 持有。Research aggregate 当时仍未计入
+> 一级 native route；v2R-F 完成后为 **6 / 8**。见 §8.7。
 >
 > **进度更新（Desktop Research v2E）**：Research 的“横截面研究”二级页已迁成原生
 > `CrossSectionResearchPage`，旧 `_strategy_tab()` / `_populate_strategy_report()` 及
 > `_run_strategy_research()` / `_strategy_finished()` / `_load_strategy_report()` 已退休。
 > Research capital 真值仍在 MainWindow，Page 只持有 spinbox 并发 `capital_changed`，
 > run 信号携带 immutable `CrossSectionResearchDraft`。Report truth、文件读写、算法调用、
-> task orchestration 与 artifact refresh 仍在 MainWindow。Research aggregate 仍是
-> transitional，一级 native 计数仍为 **5 / 8**。见 §8.8。
+> task orchestration 与 artifact refresh 仍在 MainWindow。Research aggregate 当时
+> 仍未计入一级 native route；v2R-F 完成后为 **6 / 8**。见 §8.8。
+
+> **进度更新（Desktop Research v2R-F）**：Research 一级 route 已迁成原生
+> `ResearchPage` aggregate，二级导航由 `ResearchWorkspace` 语义 identity 驱动；
+> MainWindow 仍创建、接线并编排六个 child pages。一级 native route 计数变为
+> **6 / 8**。见 §8.9。
 
 ## 迁移状态一览
 
@@ -108,7 +114,7 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Desktop BacktestPage | MIGRATED |
 | Desktop CrossSectionResearchPage | MIGRATED |
 | Desktop Dashboard | TRANSITIONAL |
-| Desktop Research aggregate | TRANSITIONAL |
+| Desktop Research aggregate | MIGRATED |
 | Desktop System | TRANSITIONAL |
 | AutoQuant Risk Integration | MIGRATED |
 | Execution Domain | MIGRATED |
@@ -606,14 +612,13 @@ account    → desktop_v2/pages/account.py            ✅ native v2
 strategy   → desktop_v2/pages/strategy.py           ✅ native v2
 risk       → desktop_v2/pages/risk.py               ✅ native v2
 execution  → desktop_v2/pages/execution/            ✅ native v2
-research   → QTabWidget（TargetedValidationPage / UniversePage / HistoryPage / ScannerPage / BacktestPage / 横截面研究）
+research   → desktop_v2/pages/research/           ✅ native v2 aggregate
 system     → QTabWidget（运行事件 / 系统设置）
 ```
 
-前端进度：**5 / 8 native v2**。Research 的前五个二级页已 native v2，
-但一级 Research aggregate 仍算 transitional；Cross Section 二级页、
-剩余 Dashboard、Research、System 仍是 transitional，`Market` 已于 Desktop Market v2
-迁完。
+前端进度：**6 / 8 native v2**。Research 一级 route 已由原生 `ResearchPage`
+aggregate 承接，六个二级 workspace 均已纳入；剩余 Dashboard、System 仍是
+transitional。Research orchestration 仍暂留在 MainWindow，后续统一拆分。
 
 ### 8.2 execution 页已完成（Desktop Execution v2）
 
@@ -841,8 +846,8 @@ presenters / rows          facts → immutable presentation view（Qt-free）
 TargetedValidationPage     只 render + emit intent
 ```
 
-- **Research aggregate 仍 transitional。** 本轮只替换第一个二级页；Universe、
-  History、Scanner、Backtest、Cross Section 仍由 legacy builder 提供。
+- **Research aggregate 当时仍 transitional。** 本轮只替换第一个二级页；其余
+  二级页后来已迁完，v2R-F 后 aggregate 也已 native。
 - **页面不持有业务对象。** `ShadowPaperEngine` / `ShadowPaperStore` /
   `run_targeted_*` / `MarketPage` / `MarketDataApplication` 都不在 targeted UI
   package 里；目标订阅由页面 signal 交回 `MainWindow`，再由窗口调用
@@ -968,8 +973,8 @@ ScannerPage       local search/filter/table/chart + scan/symbol intent
 新增守卫位于 `tests/test_desktop_v2_scanner_architecture.py`，覆盖 legacy surface、
 MainWindow widget ownership、Dashboard scan action、executor imports/calls、
 Qt-free models/presenter、lazy package initializer、MainWindow public surface、
-业务路径不读取显示行与 per-file line budgets。一级 native route 计数仍为 **5 / 8**；
-Research aggregate 仍是后续 v2R-F 的范围；Cross Section 见 §8.8，Backtest 见 §8.7。
+业务路径不读取显示行与 per-file line budgets。v2R-F 完成后一级 native route
+计数为 **6 / 8**；Research aggregate 见 §8.9，Cross Section 见 §8.8，Backtest 见 §8.7。
 
 ### 8.7 backtest 页已完成（Desktop Research v2D）
 
@@ -1013,7 +1018,7 @@ BacktestPage      render + hold UI draft + emit intent
 新增守卫位于 `tests/test_desktop_v2_backtest_architecture.py`，覆盖 legacy surface、
 MainWindow widget ownership、executor imports/calls、`BacktestRequest` construction、
 Qt-free models/presenter、lazy package initializer、MainWindow public surface、worker
-coupling 与 per-file line budgets。一级 native route 计数仍为 **5 / 8**。
+coupling 与 per-file line budgets。v2R-F 完成后一级 native route 计数为 **6 / 8**。
 
 ### 8.8 cross-section research 页已完成（Desktop Research v2E）
 
@@ -1060,8 +1065,44 @@ CrossSectionPage  render + hold UI controls + emit capital/run intent
 新增守卫位于 `tests/test_desktop_v2_cross_section_architecture.py`，覆盖 legacy surface、
 ambiguous state names、MainWindow widget ownership、executor imports/calls、Qt-free
 models/presenter、lazy package initializer、MainWindow public surface、central capital
-dependency 与 per-file line budgets。一级 native route 计数仍为 **5 / 8**；v2R-F 完成
-Research aggregate 后才变为 6 / 8。
+dependency 与 per-file line budgets。v2R-F 完成后一级 native route 计数为
+**6 / 8**。
+
+### 8.9 research aggregate 页已完成（Desktop Research v2R-F）
+
+Research 一级 route 已由 `ResearchPage` aggregate 承接，旧的 MainWindow-owned Research
+`QTabWidget`、`v2_research_tabs` 与六个 `addTab()` 调用已删除。目录保持很小：
+
+```text
+desktop_v2/pages/research/
+  __init__.py    lazy export ResearchPage / ResearchWorkspace
+  navigation.py  Qt-free ResearchWorkspace + frozen navigation table
+  page.py        receive six existing QWidget instances and own QTabWidget
+  targeted/ universe/ history/ scanner/ backtest/ cross_section/
+```
+
+职责边界：
+
+```text
+MainWindow       creates / wires / orchestrates the six child pages
+ResearchPage     validates the complete workspace mapping and owns secondary tabs
+navigation.py    stable semantic identity + fixed order / labels
+```
+
+- **语义导航。** 生产与预览统一使用
+  `research_page.set_active_workspace(ResearchWorkspace.BACKTEST)`，读取使用
+  `active_workspace()`；Research secondary navigation 不再依赖 magic index。
+- **fail closed。** 构造时缺少或混入未知 workspace 会直接 `ValueError`；非法
+  workspace 请求不会 fallback 到 Targeted，也不会半切换 UI。
+- **六页冻结。** TargetedValidationPage、UniversePage、HistoryPage、ScannerPage、
+  BacktestPage、CrossSectionResearchPage 的内部实现未在本轮重构。
+- **编排边界。** Research UI ownership = migrated；Research orchestration =
+  still MainWindow transitional。MainWindow 仍持有六个 child refs 与业务 wiring。
+
+新增守卫位于 `tests/test_desktop_v2_research_page.py` 与
+`tests/test_desktop_v2_research_architecture.py`，覆盖 navigation order/labels、child
+identity/state、fail-closed behavior、MainWindow route ownership、preview semantic
+navigation、no child-page imports、Qt-free contract、lazy initializer 与 line budgets。
 
 ## 9. 已删除的旧架构
 
@@ -1687,13 +1728,13 @@ Desktop Research v2A     ✅（§8.4）
 Desktop Research v2B     ✅（§8.5）
 Desktop Research v2C     ✅（§8.6）
 Desktop Research v2D     ✅（§8.7）
-Desktop Research v2E-F
+Desktop Research v2E       ✅（§8.8）
+Desktop Research v2R-F     ✅（§8.9）
 Desktop System v2
 Desktop Dashboard v2
 ```
 
-本轮不提前做 `MarketPage` / `ResearchPage` / `SystemPage` / `DashboardPage`，
-也不动 `MainWindow` decomposition。
+后续再做 `SystemPage` / `DashboardPage`，暂不动 `MainWindow` decomposition。
 
 ### 10.8 已关闭的风险接线缺陷（Risk v2 修复）
 
@@ -1861,10 +1902,10 @@ v2。**Desktop Research v2B 已完成**（§8.5），Universe/History 两个二�
 v2。**Desktop Research v2C 已完成**（§8.6），ScannerPage 已 native v2，Dashboard
 人工扫描入口已退休。**Desktop Research v2D 已完成**（§8.7），BacktestPage 已 native
 v2。**Desktop Research v2E 已完成**（§8.8），CrossSectionResearchPage 已 native v2；
-Research aggregate 仍 transitional。阶段 2 剩余：
+**Desktop Research v2R-F 已完成**（§8.9），Research aggregate 已 native v2，
+但 Research orchestration 仍暂留在 MainWindow。阶段 2 剩余：
 
 ```text
-Desktop Research v2R-F   （只做 ResearchPage aggregate，禁止重写六个 secondary page）
 Desktop System v2
 Desktop Dashboard v2
 ```
@@ -1875,16 +1916,15 @@ Shadow Framework v2 刻意没有做的事，留给更后面：
   或任何 `ShadowManager` / `ShadowService` / `ShadowApplication`；
 - 没有改 SQLite schema，也没有引入 migration framework；
 - 没有重命名 `ShadowPaperEngine`（命名细修后置）；
-- 没有提前做 `ResearchPage` / `SystemPage` / `DashboardPage`
-  或 `MainWindow` decomposition。
+- 没有提前做 `SystemPage` / `DashboardPage` 或 `MainWindow` decomposition。
 
 Desktop Market v2 刻意没有做的事，留给更后面：
 
 - 没有提前拆 stream orchestration：没有 `MarketController` / `MarketWorkflow` /
   `MarketOrchestrator` / `StreamManager`。既定路线是先全部页面 native v2，
   再统一拆 `MainWindow` orchestration，否则会边迁页面边反复拆 controller；
-- 没有碰 Research / System / Dashboard 三个 transitional route；settings
-  provider combo 仍在旧 System route，只做必要的双向 wiring（§63）；
+- 本轮只迁 Research aggregate，System / Dashboard 仍冻结；settings provider
+  combo 仍在旧 System route，只做必要的双向 wiring（§63）；
 - 没有碰 `ExecutionPage`，只让 `_publish_execution_controls()` 因为 stream
   state 继续工作；
 - 没有改 `MarketDataApplication` / provider lifecycle / push-poll 划分 /

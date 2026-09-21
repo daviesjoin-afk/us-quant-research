@@ -49,3 +49,40 @@ def test_preview_does_not_call_the_retired_one_argument_signature() -> None:
     source = _PREVIEW_PATH.read_text(encoding="utf-8")
     assert "_run_backtest_workspace(False)" not in source
     assert "backtest_page.current_draft()" in source
+
+
+class _FakeShell:
+    def __init__(self) -> None:
+        self.routes: list[str] = []
+
+    def navigate_to(self, route: str) -> None:
+        self.routes.append(route)
+
+
+class _FakeResearchPage:
+    def __init__(self) -> None:
+        self.workspaces: list[object] = []
+
+    def set_active_workspace(self, workspace: object) -> None:
+        self.workspaces.append(workspace)
+
+
+class _FakeSelectWindow:
+    def __init__(self) -> None:
+        self.shell = _FakeShell()
+        self.research_page = _FakeResearchPage()
+
+
+def test_preview_select_research_uses_the_semantic_workspace() -> None:
+    module = _preview_module()
+    window = _FakeSelectWindow()
+
+    module.select_research(
+        window,
+        module.ResearchWorkspace.BACKTEST,
+    )
+
+    assert window.shell.routes == ["research"]
+    assert window.research_page.workspaces == [
+        module.ResearchWorkspace.BACKTEST
+    ]

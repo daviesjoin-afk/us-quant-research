@@ -14,7 +14,6 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from us_quant.backtest_workspace import STRATEGY_SPECS
 from us_quant.desktop import MainWindow
-from us_quant.desktop_v2.pages.research.backtest.page import BacktestPage
 from us_quant.desktop_workers import TaskThread
 from us_quant.paths import STATE_ROOT_ENV
 from us_quant.trading.application.strategy_selection import (
@@ -35,10 +34,6 @@ def window(monkeypatch, tmp_path):
     widget.close()
     widget.deleteLater()
 
-
-def test_research_tab_index_four_is_backtest_page(window: MainWindow) -> None:
-    assert isinstance(window.v2_research_tabs.widget(4), BacktestPage)
-    assert window.v2_research_tabs.widget(4) is window.backtest_page
 
 
 def test_run_intents_reach_window_handlers(

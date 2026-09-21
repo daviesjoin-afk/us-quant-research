@@ -11,6 +11,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from us_quant.desktop import MainWindow
+from us_quant.desktop_v2.pages.research import ResearchWorkspace
 from us_quant.paths import STATE_ROOT_ENV
 from us_quant.targeted_data_quality import TargetedDataQualityResult
 from us_quant.targeted_execution_stress import TargetedExecutionStressResult
@@ -269,6 +270,10 @@ def test_completed_robustness_pipeline_selects_the_new_evidence(
     assert view.evidence.review_gate_rows
     assert view.active_workspace == 3
     assert view.active_evidence_tab == 6
+    assert (
+        window.research_page.active_workspace()
+        is ResearchWorkspace.TARGETED
+    )
 
 
 def test_normal_targeted_refresh_preserves_a_historical_run_selection(
@@ -287,6 +292,7 @@ def test_normal_targeted_refresh_preserves_a_historical_run_selection(
     window.targeted_review_results = [new_review, old_review]
     window._selected_robustness_run_id = old_robustness.run_id
     window._selected_review_run_id = old_review.run_id
+    window.research_page.set_active_workspace(ResearchWorkspace.BACKTEST)
     seen = _capture_views(window, monkeypatch)
 
     window._publish_targeted_view()
@@ -301,3 +307,7 @@ def test_normal_targeted_refresh_preserves_a_historical_run_selection(
     assert "MSFT" not in view.evidence.robustness_summary
     assert view.active_workspace is None
     assert view.active_evidence_tab is None
+    assert (
+        window.research_page.active_workspace()
+        is ResearchWorkspace.BACKTEST
+    )

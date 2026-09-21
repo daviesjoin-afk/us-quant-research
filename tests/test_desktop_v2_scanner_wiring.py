@@ -12,7 +12,6 @@ from PySide6.QtWidgets import QApplication
 
 from us_quant.desktop import MainWindow
 from us_quant.desktop_v2.pages.research.scanner.models import ScannerChartView
-from us_quant.desktop_v2.pages.research.scanner.page import ScannerPage
 from us_quant.paths import STATE_ROOT_ENV
 from us_quant.scanner import MarketScan, ScanResult, save_market_scan
 from us_quant.universe import UniverseRecord, UniverseSnapshot
@@ -92,10 +91,6 @@ def _universe() -> UniverseSnapshot:
         ),
     )
 
-
-def test_research_tab_index_three_is_scanner_page(window: MainWindow) -> None:
-    assert isinstance(window.v2_research_tabs.widget(3), ScannerPage)
-    assert window.v2_research_tabs.widget(3) is window.scanner_page
 
 
 def test_scan_intent_reaches_run_scan(window: MainWindow, monkeypatch) -> None:

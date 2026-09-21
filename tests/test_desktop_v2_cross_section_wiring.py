@@ -173,12 +173,14 @@ def test_success_stores_report_publishes_and_refreshes_artifacts(
     window: MainWindow, monkeypatch
 ) -> None:
     published: list[None] = []
-    populated: list[None] = []
+    dashboard_published: list[None] = []
     monkeypatch.setattr(
         window, "_publish_cross_section_view", lambda: published.append(None)
     )
     monkeypatch.setattr(
-        window, "_populate_artifact_table", lambda: populated.append(None)
+        window,
+        "_publish_dashboard_view",
+        lambda: dashboard_published.append(None),
     )
     monkeypatch.setattr(
         desktop_module, "load_artifact_catalog", lambda root: "CATALOG"
@@ -187,7 +189,7 @@ def test_success_stores_report_publishes_and_refreshes_artifacts(
     window._cross_section_finished(report)
     assert window.cross_section_report is report
     assert published == [None]
-    assert populated == [None]
+    assert dashboard_published == [None]
     assert window.artifact_catalog == "CATALOG"
 
 

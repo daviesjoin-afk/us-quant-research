@@ -161,7 +161,9 @@ def test_window_no_longer_owns_scanner_widgets() -> None:
 
 
 def test_dashboard_no_longer_offers_manual_scan() -> None:
-    source = _method_source(_DESKTOP_PATH, "_dashboard_tab")
+    source = (
+        _SRC / "desktop_v2" / "pages" / "dashboard" / "page.py"
+    ).read_text(encoding="utf-8")
     assert "运行市场扫描" not in source
     assert "_run_scan" not in source
 

@@ -26,38 +26,18 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
-    QFrame,
     QGridLayout,
-    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
-    QPushButton,
     QSplashScreen,
     QSizePolicy,
     QSplitter,
     QTableWidget,
-    QTableWidgetItem as _QTableWidgetItem,
     QTableView,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
-
-
-class QTableWidgetItem(_QTableWidgetItem):
-    """Keep display formatting while sorting numeric cells numerically."""
-
-    def __lt__(self, other: _QTableWidgetItem) -> bool:
-        left_order = self.data(Qt.UserRole + 1)
-        right_order = other.data(Qt.UserRole + 1)
-        if left_order is not None and right_order is not None:
-            return left_order < right_order
-        left = _sortable_number(self.text())
-        right = _sortable_number(other.text())
-        if left is not None and right is not None:
-            return left < right
-        return self.text().casefold() < other.text().casefold()
 
 
 from us_quant.config import load_config
@@ -129,6 +109,13 @@ from us_quant.desktop_v2.pages.risk import RiskPage
 from us_quant.desktop_v2.pages.strategy import (
     StrategyPage,
     strategy_option_label,
+)
+from us_quant.desktop_v2.pages.dashboard.models import (
+    DashboardChartView,
+)
+from us_quant.desktop_v2.pages.dashboard.page import DashboardPage
+from us_quant.desktop_v2.pages.dashboard.presenter import (
+    build_dashboard_view,
 )
 from us_quant.scanner import (
     MarketScan,
@@ -569,6 +556,8 @@ class MainWindow(QMainWindow):
         self._targeted_active_workspace: int | None = None
         self._targeted_active_evidence_tab: int | None = None
         self.account_portfolio: BrokerAccountPortfolio | None = None
+        self._dashboard_chart_view = DashboardChartView(None, ())
+        self._dashboard_market_stop_reason: str | None = None
         self.stream_worker: StreamWorker | None = None
         self._pending_stream_switch: (
             tuple[str, tuple[str, ...]] | None
@@ -868,8 +857,12 @@ class MainWindow(QMainWindow):
         )
         self._connect_market_page()
 
+        self.dashboard_page = DashboardPage(palette=self.theme)
+        self._connect_dashboard_page()
+        self._publish_dashboard_view()
+
         pages: dict[str, QWidget] = {
-            "dashboard": self._dashboard_tab(),
+            "dashboard": self.dashboard_page,
             "market": self.market_page,
             "account": self.account_page,
             "strategy": self.strategy_page,
@@ -1058,6 +1051,28 @@ class MainWindow(QMainWindow):
         page.start_requested.connect(self._start_stream)
         page.stop_requested.connect(self._stop_stream)
         page.load_scan_watchlist_requested.connect(self._apply_intraday_watchlist)
+
+    def _connect_dashboard_page(self) -> None:
+        """Wire the Dashboard's only user intent to its business handler."""
+
+        self.dashboard_page.gateway_probe_requested.connect(
+            self._probe_gateway
+        )
+
+    def _publish_dashboard_view(self) -> None:
+        """Project window facts onto the native Dashboard page once."""
+
+        if not hasattr(self, "dashboard_page"):
+            return
+        self.dashboard_page.render(
+            build_dashboard_view(
+                portfolio=self.account_portfolio,
+                snapshot=self.stream_snapshot,
+                artifacts=self.artifact_catalog.artifacts,
+                chart=self._dashboard_chart_view,
+                market_stop_reason=self._dashboard_market_stop_reason,
+            )
+        )
 
     def _connect_targeted_validation_page(self) -> None:
         """Wire the targeted page's intents to the existing window handlers."""
@@ -1264,99 +1279,6 @@ class MainWindow(QMainWindow):
 
 
 
-    def _dashboard_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        cards = QHBoxLayout()
-        self.universe_card = MetricCard(
-            "IBKR Paper 净值", "未读取", "不是回测收益"
-        )
-        self.verified_card = MetricCard(
-            "账户当日盈亏", "不可用", "IBKR reqPnL"
-        )
-        self.history_card = MetricCard(
-            "真实持仓", "未读取", "整股数量"
-        )
-        self.signal_card = MetricCard(
-            "日内行情", "不可用", "必须 fresh Type 1"
-        )
-        for card in (
-            self.universe_card,
-            self.verified_card,
-            self.history_card,
-            self.signal_card,
-        ):
-            cards.addWidget(card)
-        layout.addLayout(cards)
-
-        provenance_panel = QFrame()
-        provenance_panel.setObjectName("panel")
-        provenance_layout = QVBoxLayout(provenance_panel)
-        provenance_header = QVBoxLayout()
-        provenance_header.setSpacing(2)
-        provenance_title = QLabel("数据与研究产物真值")
-        provenance_title.setObjectName("sectionTitle")
-        provenance_note = QLabel(
-            "账户、实时行情、历史研究严格分区；失效结果不得部署"
-        )
-        provenance_note.setObjectName("subtitle")
-        provenance_header.addWidget(provenance_title)
-        provenance_header.addWidget(provenance_note)
-        provenance_layout.addLayout(provenance_header)
-        self.artifact_table = QTableWidget(0, 7)
-        self.artifact_table.setHorizontalHeaderLabels(
-            [
-                "产物",
-                "状态",
-                "数据截至",
-                "生成时间",
-                "来源",
-                "Run ID",
-                "限制",
-            ]
-        )
-        self._configure_table(self.artifact_table)
-        self.artifact_table.setFixedHeight(150)
-        provenance_layout.addWidget(self.artifact_table)
-        provenance_panel.setMaximumHeight(215)
-        layout.addWidget(provenance_panel)
-
-        toolbar = QHBoxLayout()
-        gateway_button = QPushButton("仅检查 Gateway 端口")
-        gateway_button.clicked.connect(self._probe_gateway)
-        toolbar.addWidget(gateway_button)
-        toolbar.addStretch()
-        layout.addLayout(toolbar)
-
-        body = QSplitter(Qt.Horizontal)
-        self.dashboard_chart = PriceChart()
-        body.addWidget(self.dashboard_chart)
-        insight_panel = QFrame()
-        insight_panel.setObjectName("panel")
-        insight_layout = QVBoxLayout(insight_panel)
-        insight_title = QLabel("当前研究边界")
-        insight_title.setObjectName("sectionTitle")
-        self.dashboard_notes = QTextEdit()
-        self.dashboard_notes.setReadOnly(True)
-        self.dashboard_notes.setPlainText(
-            "账户实况：尚未连接，只显示离线研究资源\n"
-            "旧 +205.6%：已封存为不可部署结果\n\n"
-            "• 中国概念股：全部关闭\n"
-            "• 交易单位：只允许整股\n"
-            "• 核心：板块龙头；优质二线可观察\n"
-            "• 广域后排：研究样本，不直接进入交易池\n"
-            "• 杠杆 ETF：单独折算风险，仅限短期研究\n"
-            "• 自动下单：关闭"
-        )
-        insight_layout.addWidget(insight_title)
-        insight_layout.addWidget(self.dashboard_notes)
-        body.addWidget(insight_panel)
-        body.setSizes([900, 360])
-        layout.addWidget(body)
-        return page
-
-
-
     def _configure_table(self, table: QTableWidget) -> None:
         """Apply the workbench's shared read-only table behaviour."""
 
@@ -1376,9 +1298,7 @@ class MainWindow(QMainWindow):
             except Exception as error:
                 self._log(f"标的快照读取失败：{error}")
         self._publish_universe_view()
-        self._populate_artifact_table()
         self._publish_history_view()
-        self._refresh_cards()
         self._probe_gateway()
         if self.scan_path.exists():
             self._load_scan_file()
@@ -1394,8 +1314,11 @@ class MainWindow(QMainWindow):
                 )
             except (FileNotFoundError, ValueError):
                 continue
-            self.dashboard_chart.set_series(symbol, points)
+            self._dashboard_chart_view = DashboardChartView(
+                symbol, tuple(points)
+            )
             break
+        self._publish_dashboard_view()
         self.targeted_replay_results = list(
             load_targeted_replays(
                 self.paths.research_results_root
@@ -1495,7 +1418,6 @@ class MainWindow(QMainWindow):
             self.reference_root / "universe.json"
         )
         self._publish_universe_view()
-        self._refresh_cards()
         self._refresh_market_scope_summary()
         summary = self.universe.summary()
         self._log(
@@ -1548,7 +1470,6 @@ class MainWindow(QMainWindow):
             int(completed / total * 100) if total else 0
         )
         self._publish_history_view()
-        self._refresh_cards()
         self._refresh_market_scope_summary()
         self._log(
             f"本批结束：累计完成 {completed}，"
@@ -1618,7 +1539,6 @@ class MainWindow(QMainWindow):
     def _scan_finished(self, result: object) -> None:
         self.scan = result  # type: ignore[assignment]
         self._publish_scanner_view()
-        self._refresh_cards()
         self._refresh_market_scope_summary()
         summary = self.scan.summary()
         self._log(
@@ -1854,7 +1774,7 @@ class MainWindow(QMainWindow):
         self.artifact_catalog = load_artifact_catalog(
             self.paths.research_results_root
         )
-        self._populate_artifact_table()
+        self._publish_dashboard_view()
         metrics = self.cross_section_report["out_of_sample"]["strategy"]
         self._log(
             f"组合研究完成：OOS {metrics['total_return']:+.1%}，"
@@ -1908,7 +1828,6 @@ class MainWindow(QMainWindow):
                 ),
             )
             self._publish_scanner_view()
-            self._refresh_cards()
         except Exception:
             self.scan = None
 
@@ -2192,7 +2111,6 @@ class MainWindow(QMainWindow):
         )
         self._publish_history_view()
         self._publish_scanner_view()
-        self._refresh_cards()
         self._refresh_market_scope_summary()
         if scheduled:
             self._log(
@@ -4120,48 +4038,12 @@ class MainWindow(QMainWindow):
             ledger_points=points,
             exposure_multipliers=self._configured_exposure_multipliers(),
         )
-        self._populate_dashboard_account_cards(portfolio)
+        self._publish_dashboard_view()
         if self.auto_quant_snapshot is not None:
             self._populate_auto_quant_snapshot(
                 self.auto_quant_snapshot
             )
         self._refresh_target_preflight()
-
-    def _populate_dashboard_account_cards(
-        self,
-        portfolio: BrokerAccountPortfolio | None,
-    ) -> None:
-        """Mirror account truth onto the dashboard's account cards.
-
-        These three cards predate the account page and are the dashboard's
-        summary of the same broker truth -- not a second source of it.
-        """
-
-        if portfolio is None:
-            self.universe_card.set_value(
-                "未读取", "到账户与持仓页执行只读刷新"
-            )
-            self.verified_card.set_value(
-                "不可用", "不会以研究收益代替"
-            )
-            self.history_card.set_value(
-                "未读取", "券商空仓与未读取严格区分"
-            )
-            return
-        account = portfolio.account
-        self.universe_card.set_value(
-            _money(account.net_liquidation),
-            f"IBKR {account.environment.value.title()} · "
-            f"{account.account_alias}",
-        )
-        self.verified_card.set_value(
-            _money(account.daily_pnl, signed=True),
-            "券商 reqPnL；不含回测",
-        )
-        self.history_card.set_value(
-            str(len(portfolio.positions)),
-            "当前券商持仓",
-        )
 
     def _repolish_health_badges(self) -> None:
         for badge in (
@@ -4490,6 +4372,7 @@ class MainWindow(QMainWindow):
         return True
 
     def _invalidate_stream_snapshot(self, reason: str) -> None:
+        self._dashboard_market_stop_reason = reason
         snapshot = self.stream_snapshot
         if snapshot is not None:
             invalid_quotes = tuple(
@@ -4512,8 +4395,8 @@ class MainWindow(QMainWindow):
             self._publish_market_view(snapshot)
         self.market_badge.setText("行情 · 已停止")
         self.market_badge.setProperty("state", "warn")
-        self.signal_card.set_value("不可用", reason)
         self._repolish_health_badges()
+        self._publish_dashboard_view()
 
     def _stream_snapshot_pushed(self, result: object) -> None:
         """Event-driven ingress: a service push (worker listener) delivered a
@@ -4528,6 +4411,7 @@ class MainWindow(QMainWindow):
         if not isinstance(result, MarketSnapshot):
             return
         self.stream_snapshot = result
+        self._dashboard_market_stop_reason = None
         self.workflow_controller.market_account.update(
             account_ready=self.account_portfolio is not None,
             market_ready=result.realtime_ready,
@@ -4554,6 +4438,7 @@ class MainWindow(QMainWindow):
             # recorded again instead of being swallowed by the old key.
             self._last_stream_event_key = None
         self._publish_market_view(result)
+        self._publish_dashboard_view()
         self._populate_auto_quant_candidates()
         self._refresh_target_preflight()
         if (
@@ -4715,11 +4600,12 @@ class MainWindow(QMainWindow):
         )
 
     def _publish_market_health(self, snapshot: MarketSnapshot, readiness) -> None:
-        """Update the badges, the signal card and the throttled status log.
+        """Update the badges and the throttled status log.
 
         These belong to the shell and the window rather than to the page: the
         market and handshake badges speak for the whole workbench, and the status
-        log is a runtime concern the page must not own.
+        log is a runtime concern the page must not own.  The signal card is
+        published separately from the same snapshot by the Dashboard projection.
         """
 
         if snapshot.ready:
@@ -4752,22 +4638,6 @@ class MainWindow(QMainWindow):
         else:
             self.market_badge.setText("行情 · 未达日内门槛")
             self.market_badge.setProperty("state", "warn")
-        self.signal_card.set_value(
-            "可用" if snapshot.realtime_ready else "不可用",
-            (
-                (
-                    (
-                        "Alpaca IEX 单交易所实时"
-                        if snapshot.source_id == SOURCE_ALPACA_IEX
-                        else "Finnhub 实时成交+明确模拟执行带"
-                    )
-                    if snapshot.source_id in PUSH_LISTENER_SOURCES
-                    else "fresh 实时 + bid/ask"
-                )
-                if snapshot.realtime_ready
-                else snapshot.message[:42]
-            ),
-        )
         self._repolish_health_badges()
         status_key = (
             snapshot.source_id,
@@ -5316,42 +5186,6 @@ class MainWindow(QMainWindow):
             self._log("运行期资源已全部释放。")
 
 
-    def _populate_artifact_table(self) -> None:
-        translations = {
-            "research_exploratory": "探索性研究",
-            "legacy_invalidated": "旧结果·已失效",
-            "load_error": "读取失败",
-        }
-        artifacts = self.artifact_catalog.artifacts
-        self.artifact_table.setSortingEnabled(False)
-        self.artifact_table.setRowCount(len(artifacts))
-        for index, artifact in enumerate(artifacts):
-            limitations = "；".join(artifact.limitations[:3]) or "无"
-            values = (
-                artifact.artifact_type,
-                translations.get(artifact.status, artifact.status),
-                artifact.data_as_of or "未知",
-                artifact.generated_at or "未知",
-                artifact.source,
-                artifact.run_id[:12],
-                limitations,
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setToolTip(value)
-                if artifact.status == "legacy_invalidated" and column in {
-                    0,
-                    1,
-                }:
-                    item.setForeground(QColor(self.theme.warning))
-                if artifact.status == "load_error":
-                    item.setForeground(QColor(self.theme.error))
-                self.artifact_table.setItem(index, column, item)
-        self.artifact_table.setSortingEnabled(True)
-
-
-
-
     def _local_history_symbol_count(self) -> int:
         symbols: set[str] = set()
         for root in {
@@ -5409,22 +5243,6 @@ class MainWindow(QMainWindow):
                     f"最近完成评分 {scanned_count:,} · "
                     f"当前实时候选 {len(self.auto_quant_candidates)}。"
                 )
-            )
-
-    def _refresh_cards(self) -> None:
-        if self.account_portfolio is None:
-            self.universe_card.set_value(
-                "未读取", "到账户与持仓页执行只读刷新"
-            )
-            self.verified_card.set_value(
-                "不可用", "不会以研究收益代替"
-            )
-            self.history_card.set_value(
-                "未读取", "券商空仓与未读取严格区分"
-            )
-        if self.stream_snapshot is None:
-            self.signal_card.set_value(
-                "不可用", "尚未启动流行情"
             )
 
     def _start_task(
@@ -5878,10 +5696,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, "execution_page"):
             self.execution_page.set_palette(self.theme)
             self._render_auto_quant_snapshot()
-        for chart_name in ("dashboard_chart",):
-            chart = getattr(self, chart_name, None)
-            if chart is not None:
-                chart.update()
+        if hasattr(self, "dashboard_page"):
+            self.dashboard_page.set_palette(self.theme)
 
     def _apply_style(self) -> None:
         self._apply_theme(self.current_theme_name)

@@ -37,7 +37,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
-    QProgressBar,
     QPushButton,
     QSplashScreen,
     QSizePolicy,
@@ -240,6 +239,14 @@ from us_quant.desktop_v2.pages.research.targeted.models import (
 )
 from us_quant.desktop_v2.pages.research.targeted.session_presenter import (
     session_view,
+)
+from us_quant.desktop_v2.pages.research.universe import UniversePage
+from us_quant.desktop_v2.pages.research.universe.presenter import (
+    build_universe_view,
+)
+from us_quant.desktop_v2.pages.research.history import HistoryPage
+from us_quant.desktop_v2.pages.research.history.presenter import (
+    build_history_view,
 )
 from us_quant.desktop_tasks import DesktopTaskController
 from us_quant.desktop_workers import (
@@ -577,6 +584,7 @@ class MainWindow(QMainWindow):
         self.workers = self.task_controller.workers
         self.universe_refresh_cancel_event: Event | None = None
         self.universe_refresh_worker: TaskThread | None = None
+        self._history_progress_percent = 0
         # Admission gate for new background work.  The runtime supervisor
         # raises it as the first step of teardown so a close cannot race a
         # task that is still being admitted.
@@ -721,10 +729,14 @@ class MainWindow(QMainWindow):
         research.setTabPosition(QTabWidget.North)
         self.targeted_validation_page = TargetedValidationPage(palette=self.theme)
         self._connect_targeted_validation_page()
+        self.universe_page = UniversePage(palette=self.theme)
+        self._connect_universe_page()
+        self.history_page = HistoryPage(palette=self.theme)
+        self._connect_history_page()
         for title, page in (
             ("针对性验证", self.targeted_validation_page),
-            ("广域标的池", self._universe_tab()),
-            ("历史数据", self._data_tab()),
+            ("广域标的池", self.universe_page),
+            ("历史数据", self.history_page),
             ("市场扫描", self._scanner_tab()),
             ("回测", self._backtest_tab()),
             ("横截面研究", self._strategy_tab()),
@@ -863,6 +875,18 @@ class MainWindow(QMainWindow):
         page.robustness_run_selected.connect(self._robustness_run_selected)
         page.review_run_selected.connect(self._review_run_selected)
 
+    def _connect_universe_page(self) -> None:
+        page = self.universe_page
+        page.refresh_requested.connect(self._refresh_universe)
+        page.cancel_refresh_requested.connect(self._cancel_universe_refresh)
+
+    def _connect_history_page(self) -> None:
+        page = self.history_page
+        page.schedule_requested.connect(self._schedule_history)
+        page.run_ibkr_requested.connect(self._run_history)
+        page.run_public_requested.connect(self._run_public_history)
+        page.retry_failed_requested.connect(self._retry_failed)
+
     def _target_symbol_requested(self, symbol: str) -> None:
         self.targeted_validation_page.set_target_symbol(symbol)
         self._apply_target_symbol()
@@ -891,6 +915,32 @@ class MainWindow(QMainWindow):
             shadow_stop_enabled=shadow_active,
             replay_enabled=True,
             robustness_enabled=True,
+        )
+
+    def _publish_universe_view(self) -> None:
+        """Project the universe business state onto the native page."""
+
+        if not hasattr(self, "universe_page"):
+            return
+        cancel_event = self.universe_refresh_cancel_event
+        self.universe_page.render(
+            build_universe_view(
+                self.universe,
+                refreshing=self.universe_refresh_worker is not None,
+                cancel_requested=bool(cancel_event and cancel_event.is_set()),
+            )
+        )
+
+    def _publish_history_view(self) -> None:
+        """Project the history queue state onto the native page."""
+
+        if not hasattr(self, "history_page"):
+            return
+        self.history_page.render(
+            build_history_view(
+                self.history_service.snapshot(),
+                progress_percent=self._history_progress_percent,
+            )
         )
 
     def _publish_targeted_view(self) -> None:
@@ -1111,19 +1161,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(provenance_panel)
 
         toolbar = QHBoxLayout()
-        self.universe_refresh_button = QPushButton("刷新官方标的")
-        self.universe_refresh_button.clicked.connect(self._refresh_universe)
-        self.universe_cancel_button = QPushButton("取消刷新")
-        self.universe_cancel_button.setEnabled(False)
-        self.universe_cancel_button.clicked.connect(
-            self._cancel_universe_refresh
-        )
         scan_button = QPushButton("运行市场扫描")
         scan_button.clicked.connect(self._run_scan)
         gateway_button = QPushButton("仅检查 Gateway 端口")
         gateway_button.clicked.connect(self._probe_gateway)
-        toolbar.addWidget(self.universe_refresh_button)
-        toolbar.addWidget(self.universe_cancel_button)
         toolbar.addWidget(scan_button)
         toolbar.addWidget(gateway_button)
         toolbar.addStretch()
@@ -1156,38 +1197,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(body)
         return page
 
-    def _universe_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        controls = QHBoxLayout()
-        self.universe_search = QLineEdit()
-        self.universe_search.setPlaceholderText("搜索代码、名称或板块")
-        self.universe_search.textChanged.connect(
-            self._populate_universe_table
-        )
-        self.universe_filter = QComboBox()
-        self.universe_filter.addItems(
-            ["非中概研究池", "可交易核心池", "全部官方标的", "已排除"]
-        )
-        self.universe_filter.currentIndexChanged.connect(
-            self._populate_universe_table
-        )
-        self.universe_count_label = QLabel("显示 0 / 0")
-        self.universe_count_label.setObjectName("subtitle")
-        controls.addWidget(self.universe_search)
-        controls.addWidget(self.universe_filter)
-        controls.addWidget(self.universe_count_label)
-        layout.addLayout(controls)
-        self.universe_table = QTableWidget(0, 9)
-        self.universe_table.setHorizontalHeaderLabels(
-            [
-                "代码", "名称", "交易所", "类型", "板块", "层级",
-                "中概/国别证据", "资格", "排除/说明",
-            ]
-        )
-        self._configure_table(self.universe_table)
-        layout.addWidget(self.universe_table)
-        return page
 
     def _scanner_tab(self) -> QWidget:
         page = QWidget()
@@ -1234,46 +1243,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(splitter)
         return page
 
-    def _data_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        controls = QHBoxLayout()
-        schedule_button = QPushButton("将全部非中概研究池加入队列")
-        schedule_button.clicked.connect(self._schedule_history)
-        run_button = QPushButton("下载下一批日 K")
-        run_button.clicked.connect(self._run_history)
-        public_button = QPushButton("备用免费日 K（仅研究）")
-        public_button.clicked.connect(self._run_public_history)
-        retry_button = QPushButton("重试失败任务")
-        retry_button.clicked.connect(self._retry_failed)
-        self.batch_size = QSpinBox()
-        self.batch_size.setRange(1, 100)
-        self.batch_size.setValue(25)
-        self.batch_size.setSuffix(" 个/批")
-        controls.addWidget(schedule_button)
-        controls.addWidget(run_button)
-        controls.addWidget(public_button)
-        controls.addWidget(retry_button)
-        controls.addWidget(self.batch_size)
-        controls.addStretch()
-        layout.addLayout(controls)
-        self.history_queue_summary = QLabel(
-            "队列按龙头、优质二线、其余研究样本排序；下载仍按所选批量执行。"
-        )
-        self.history_queue_summary.setObjectName("subtitle")
-        self.history_queue_summary.setWordWrap(True)
-        layout.addWidget(self.history_queue_summary)
-        self.queue_progress = QProgressBar()
-        self.queue_progress.setRange(0, 100)
-        self.queue_progress.setValue(0)
-        layout.addWidget(self.queue_progress)
-        self.queue_table = QTableWidget(0, 7)
-        self.queue_table.setHorizontalHeaderLabels(
-            ["代码", "周期", "优先级", "状态", "尝试", "K线数", "说明"]
-        )
-        self._configure_table(self.queue_table)
-        layout.addWidget(self.queue_table)
-        return page
 
     def _strategy_tab(self) -> QWidget:
         page = QWidget()
@@ -1614,9 +1583,9 @@ class MainWindow(QMainWindow):
                 )
             except Exception as error:
                 self._log(f"标的快照读取失败：{error}")
-        self._populate_universe_table()
+        self._publish_universe_view()
         self._populate_artifact_table()
-        self._refresh_queue_table()
+        self._publish_history_view()
         self._refresh_cards()
         self._probe_gateway()
         if self.scan_path.exists():
@@ -1714,32 +1683,26 @@ class MainWindow(QMainWindow):
             return
         self.universe_refresh_cancel_event = cancel_event
         self.universe_refresh_worker = self.workers[-1]
-        self.universe_refresh_button.setEnabled(False)
-        self.universe_refresh_button.setText("官方标的刷新中…")
-        self.universe_cancel_button.setEnabled(True)
+        self._publish_universe_view()
 
     def _cancel_universe_refresh(self) -> None:
         if self.universe_refresh_cancel_event is None:
             return
         self.universe_refresh_cancel_event.set()
-        self.universe_cancel_button.setEnabled(False)
-        self.universe_cancel_button.setText("正在取消…")
+        self._publish_universe_view()
         self._log("已请求取消官方标的刷新；当前网络请求最多再等待 8 秒。")
 
     def _reset_universe_refresh_controls(self) -> None:
         self.universe_refresh_cancel_event = None
         self.universe_refresh_worker = None
-        self.universe_refresh_button.setEnabled(True)
-        self.universe_refresh_button.setText("刷新官方标的")
-        self.universe_cancel_button.setEnabled(False)
-        self.universe_cancel_button.setText("取消刷新")
+        self._publish_universe_view()
 
     def _universe_refreshed(self, result: object) -> None:
         self.universe = result  # type: ignore[assignment]
         self.universe_path = (
             self.reference_root / "universe.json"
         )
-        self._populate_universe_table()
+        self._publish_universe_view()
         self._refresh_cards()
         self._refresh_market_scope_summary()
         summary = self.universe.summary()
@@ -1757,7 +1720,7 @@ class MainWindow(QMainWindow):
             )
             return
         result = self.history_service.schedule_universe(self.universe)
-        self._refresh_queue_table()
+        self._publish_history_view()
         self._refresh_market_scope_summary()
         self._log(
             f"全部非中概研究池已加入历史队列：新增 {result.inserted} 个，"
@@ -1765,9 +1728,7 @@ class MainWindow(QMainWindow):
             "下载仍按页面所选批量执行。"
         )
 
-    def _run_history(self) -> None:
-        maximum_jobs = self.batch_size.value()
-
+    def _run_history(self, maximum_jobs: int) -> None:
         def task(progress: Callable[[str], None]) -> dict[str, int]:
             return self.history_service.run_ibkr(
                 self.config.ibkr,
@@ -1777,10 +1738,12 @@ class MainWindow(QMainWindow):
                 ),
             )
 
-        self.queue_progress.setValue(1)
+        self._history_progress_percent = 1
+        self._publish_history_view()
         self._start_task(
             task,
             on_success=self._history_finished,
+            on_failure=self._history_task_failed,
             start_message="IBKR 历史日 K 下载中…",
             resource_group="history",
         )
@@ -1789,10 +1752,10 @@ class MainWindow(QMainWindow):
         counts: dict[str, int] = result  # type: ignore[assignment]
         total = sum(counts.values())
         completed = counts.get("completed", 0)
-        self.queue_progress.setValue(
+        self._history_progress_percent = (
             int(completed / total * 100) if total else 0
         )
-        self._refresh_queue_table()
+        self._publish_history_view()
         self._refresh_cards()
         self._refresh_market_scope_summary()
         self._log(
@@ -1800,9 +1763,11 @@ class MainWindow(QMainWindow):
             f"失败 {counts.get('failed', 0)}。"
         )
 
-    def _run_public_history(self) -> None:
-        maximum_jobs = self.batch_size.value()
+    def _history_task_failed(self, _message: str) -> None:
+        self._history_progress_percent = 0
+        self._publish_history_view()
 
+    def _run_public_history(self, maximum_jobs: int) -> None:
         def task(progress: Callable[[str], None]) -> dict[str, int]:
             return self.history_service.run_public(
                 maximum_jobs=maximum_jobs,
@@ -1811,10 +1776,12 @@ class MainWindow(QMainWindow):
                 ),
             )
 
-        self.queue_progress.setValue(1)
+        self._history_progress_percent = 1
+        self._publish_history_view()
         self._start_task(
             task,
             on_success=self._history_finished,
+            on_failure=self._history_task_failed,
             start_message=(
                 "备用免费日 K 下载中；只用于历史研究，"
                 "不会替代 IBKR 实时行情…"
@@ -1824,7 +1791,7 @@ class MainWindow(QMainWindow):
 
     def _retry_failed(self) -> None:
         count = self.history_service.reset_failed()
-        self._refresh_queue_table()
+        self._publish_history_view()
         self._log(f"已将 {count} 个失败任务放回待处理队列。")
 
     def _run_scan(self) -> None:
@@ -2612,7 +2579,7 @@ class MainWindow(QMainWindow):
             if self.universe is not None
             else ()
         )
-        self._refresh_queue_table()
+        self._publish_history_view()
         self._populate_scan_table()
         self._refresh_cards()
         self._refresh_market_scope_summary()
@@ -5788,62 +5755,6 @@ class MainWindow(QMainWindow):
                 self.artifact_table.setItem(index, column, item)
         self.artifact_table.setSortingEnabled(True)
 
-    def _populate_universe_table(self, *args) -> None:  # type: ignore[no-untyped-def]
-        del args
-        if self.universe is None:
-            self.universe_table.setRowCount(0)
-            self.universe_count_label.setText("显示 0 / 0")
-            return
-        mode = self.universe_filter.currentText()
-        search = self.universe_search.text().strip().lower()
-        rows = []
-        for row in self.universe.records:
-            if mode == "非中概研究池" and not row.eligible_for_research:
-                continue
-            if mode == "可交易核心池" and not row.eligible_for_trading:
-                continue
-            if mode == "已排除" and row.eligible_for_research:
-                continue
-            haystack = f"{row.symbol} {row.name} {row.sector}".lower()
-            if search and search not in haystack:
-                continue
-            rows.append(row)
-        matched_count = len(rows)
-        rows = rows[:2500]
-        self.universe_count_label.setText(
-            f"显示 {len(rows):,} / 匹配 {matched_count:,}"
-            + ("（界面上限 2,500）" if matched_count > 2500 else "")
-        )
-        self.universe_table.setSortingEnabled(False)
-        self.universe_table.setRowCount(len(rows))
-        for index, row in enumerate(rows):
-            values = (
-                row.symbol,
-                row.name,
-                row.exchange,
-                row.security_type,
-                row.sector,
-                str(row.leader_tier or "—"),
-                (
-                    f"{row.country_status} "
-                    f"[{row.country_evidence_level}]"
-                ),
-                (
-                    "研究+交易"
-                    if row.eligible_for_trading
-                    else "仅研究"
-                    if row.eligible_for_research
-                    else "关闭"
-                ),
-                row.exclusion_reason or "已通过",
-            )
-            for column, value in enumerate(values):
-                self.universe_table.setItem(
-                    index,
-                    column,
-                    QTableWidgetItem(value),
-                )
-        self.universe_table.setSortingEnabled(True)
 
     def _populate_scan_table(self, *args) -> None:  # type: ignore[no-untyped-def]
         del args
@@ -5926,46 +5837,6 @@ class MainWindow(QMainWindow):
         except Exception as error:
             self._log(f"{symbol} 图表读取失败：{error}")
 
-    def _refresh_queue_table(self) -> None:
-        snapshot = self.history_service.snapshot()
-        jobs = snapshot.jobs
-        visible_jobs = jobs[:2500]
-        if hasattr(self, "history_queue_summary"):
-            self.history_queue_summary.setText(
-                f"历史队列 {len(jobs):,} · 待处理 "
-                f"{snapshot.pending:,} · 完成 {snapshot.completed:,} · "
-                f"失败 {snapshot.failed:,}。"
-                + (
-                    " 表格仅显示前 2,500 条，任务会全部保留并执行。"
-                    if len(jobs) > 2500
-                    else ""
-                )
-            )
-        self.queue_table.setSortingEnabled(False)
-        self.queue_table.setRowCount(len(visible_jobs))
-        translations = {
-            "pending": "待处理",
-            "running": "运行中",
-            "completed": "完成",
-            "failed": "失败",
-        }
-        for index, job in enumerate(visible_jobs):
-            values = (
-                job.symbol,
-                job.duration,
-                str(job.priority),
-                translations.get(job.status, job.status),
-                str(job.attempts),
-                str(job.row_count or "—"),
-                job.last_error,
-            )
-            for column, value in enumerate(values):
-                self.queue_table.setItem(
-                    index,
-                    column,
-                    QTableWidgetItem(value),
-                )
-        self.queue_table.setSortingEnabled(True)
 
     def _local_history_symbol_count(self) -> int:
         symbols: set[str] = set()
@@ -6112,7 +5983,6 @@ class MainWindow(QMainWindow):
         self._log("任务已取消；已保留上一次完整可用的研究结果。")
 
     def _task_failed(self, message: str) -> None:
-        self.queue_progress.setValue(0)
         # A failed task releases any launch step it was holding; the publish
         # then restores exactly the controls that step had locked.
         self._launch_busy = False
@@ -6613,6 +6483,10 @@ class MainWindow(QMainWindow):
             self.risk_page.set_palette(self.theme)
         if hasattr(self, "targeted_validation_page"):
             self.targeted_validation_page.set_palette(self.theme)
+        if hasattr(self, "universe_page"):
+            self.universe_page.set_palette(self.theme)
+        if hasattr(self, "history_page"):
+            self.history_page.set_palette(self.theme)
         # The execution page colours toned status cells from the palette, and
         # its tables keep the rows they were handed, so it has to be told *and*
         # redrawn: there is no repaint path that would re-read the palette on

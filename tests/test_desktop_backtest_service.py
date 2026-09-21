@@ -287,6 +287,35 @@ TARGETED_RESEARCH_V2_METHODS = (
     "_targeted_robustness_finished",
 )
 
+RESEARCH_DATA_V2_REMOVED_METHODS = (
+    "_universe_tab",
+    "_populate_universe_table",
+    "_data_tab",
+    "_refresh_queue_table",
+)
+RESEARCH_DATA_V2_ADDED_METHODS = (
+    "_connect_universe_page",
+    "_publish_universe_view",
+    "_connect_history_page",
+    "_publish_history_view",
+    "_history_task_failed",
+)
+RESEARCH_DATA_V2_METHODS = (
+    "_dashboard_tab",
+    "_load_local_state",
+    "_refresh_universe",
+    "_cancel_universe_refresh",
+    "_reset_universe_refresh_controls",
+    "_universe_refreshed",
+    "_auto_market_scan_finished",
+    "_schedule_history",
+    "_run_history",
+    "_run_public_history",
+    "_retry_failed",
+    "_history_finished",
+    "_task_failed",
+)
+
 DESKTOP_EXECUTION_V2_REMOVED_METHODS = (
     "_auto_quant_tab",
     "_populate_auto_latency_table",
@@ -1695,6 +1724,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_EXECUTION_V2_REMOVED_METHODS)
         | set(DESKTOP_MARKET_V2_REMOVED_METHODS)
         | set(TARGETED_RESEARCH_V2_REMOVED_METHODS)
+        | set(RESEARCH_DATA_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1703,6 +1733,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_EXECUTION_V2_ADDED_METHODS)
         | set(DESKTOP_MARKET_V2_ADDED_METHODS)
         | set(TARGETED_RESEARCH_V2_ADDED_METHODS)
+        | set(RESEARCH_DATA_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1727,6 +1758,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_EXECUTION_V2_METHODS)
         | set(DESKTOP_MARKET_V2_METHODS)
         | set(TARGETED_RESEARCH_V2_METHODS)
+        | set(RESEARCH_DATA_V2_METHODS)
     )
     # Exact, not a subset: the delta is the declared surface and nothing
     # else, in both directions.
@@ -1739,6 +1771,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(DESKTOP_EXECUTION_V2_METHODS) <= set(changed)
     assert set(DESKTOP_MARKET_V2_METHODS) <= set(changed)
     assert set(TARGETED_RESEARCH_V2_METHODS) <= set(changed)
+    assert set(RESEARCH_DATA_V2_METHODS) <= set(changed)
     assert "_run_backtest_workspace" in changed
 
 

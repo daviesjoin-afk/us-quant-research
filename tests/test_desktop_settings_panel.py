@@ -216,7 +216,6 @@ BROKER_ACCOUNT_V2_METHODS = (
     "_paper_simulation_capital",
     "_refresh_account_snapshot",
     "_refresh_cards",
-    "_refresh_queue_table",
     "_refresh_target_preflight",
     "_refresh_universe",
     "_research_capital_changed",
@@ -327,6 +326,35 @@ TARGETED_RESEARCH_V2_METHODS = (
     "_stop_shadow",
     "_targeted_replay_finished",
     "_targeted_robustness_finished",
+)
+
+RESEARCH_DATA_V2_REMOVED_METHODS = (
+    "_universe_tab",
+    "_populate_universe_table",
+    "_data_tab",
+    "_refresh_queue_table",
+)
+RESEARCH_DATA_V2_ADDED_METHODS = (
+    "_connect_universe_page",
+    "_publish_universe_view",
+    "_connect_history_page",
+    "_publish_history_view",
+    "_history_task_failed",
+)
+RESEARCH_DATA_V2_METHODS = (
+    "_dashboard_tab",
+    "_load_local_state",
+    "_refresh_universe",
+    "_cancel_universe_refresh",
+    "_reset_universe_refresh_controls",
+    "_universe_refreshed",
+    "_auto_market_scan_finished",
+    "_schedule_history",
+    "_run_history",
+    "_run_public_history",
+    "_retry_failed",
+    "_history_finished",
+    "_task_failed",
 )
 
 DESKTOP_EXECUTION_V2_REMOVED_METHODS = (
@@ -1661,6 +1689,7 @@ def test_only_the_settings_tab_was_rewritten() -> None:
         | set(DESKTOP_EXECUTION_V2_REMOVED_METHODS)
         | set(DESKTOP_MARKET_V2_REMOVED_METHODS)
         | set(TARGETED_RESEARCH_V2_REMOVED_METHODS)
+        | set(RESEARCH_DATA_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1669,6 +1698,7 @@ def test_only_the_settings_tab_was_rewritten() -> None:
         | set(DESKTOP_EXECUTION_V2_ADDED_METHODS)
         | set(DESKTOP_MARKET_V2_ADDED_METHODS)
         | set(TARGETED_RESEARCH_V2_ADDED_METHODS)
+        | set(RESEARCH_DATA_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1693,6 +1723,7 @@ def test_only_the_settings_tab_was_rewritten() -> None:
         | set(DESKTOP_EXECUTION_V2_METHODS)
         | set(DESKTOP_MARKET_V2_METHODS)
         | set(TARGETED_RESEARCH_V2_METHODS)
+        | set(RESEARCH_DATA_V2_METHODS)
     )
     # Exact, not a subset: every changed method must be declared, and
     # every declared method must actually have changed.
@@ -1705,6 +1736,7 @@ def test_only_the_settings_tab_was_rewritten() -> None:
     assert set(DESKTOP_EXECUTION_V2_METHODS) <= set(changed)
     assert set(DESKTOP_MARKET_V2_METHODS) <= set(changed)
     assert set(TARGETED_RESEARCH_V2_METHODS) <= set(changed)
+    assert set(RESEARCH_DATA_V2_METHODS) <= set(changed)
     assert "_settings_tab" in changed
 
 

@@ -635,6 +635,14 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "pages/research/targeted/session_panel.py",
         "pages/research/targeted/session_presenter.py",
         "pages/research/targeted/tables.py",
+        "pages/research/universe/__init__.py",
+        "pages/research/universe/models.py",
+        "pages/research/universe/page.py",
+        "pages/research/universe/presenter.py",
+        "pages/research/history/__init__.py",
+        "pages/research/history/models.py",
+        "pages/research/history/page.py",
+        "pages/research/history/presenter.py",
     }
 
 

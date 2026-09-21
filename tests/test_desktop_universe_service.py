@@ -257,6 +257,35 @@ TARGETED_RESEARCH_V2_METHODS = (
     "_targeted_robustness_finished",
 )
 
+RESEARCH_DATA_V2_REMOVED_METHODS = (
+    "_universe_tab",
+    "_populate_universe_table",
+    "_data_tab",
+    "_refresh_queue_table",
+)
+RESEARCH_DATA_V2_ADDED_METHODS = (
+    "_connect_universe_page",
+    "_publish_universe_view",
+    "_connect_history_page",
+    "_publish_history_view",
+    "_history_task_failed",
+)
+RESEARCH_DATA_V2_METHODS = (
+    "_dashboard_tab",
+    "_load_local_state",
+    "_refresh_universe",
+    "_cancel_universe_refresh",
+    "_reset_universe_refresh_controls",
+    "_universe_refreshed",
+    "_auto_market_scan_finished",
+    "_schedule_history",
+    "_run_history",
+    "_run_public_history",
+    "_retry_failed",
+    "_history_finished",
+    "_task_failed",
+)
+
 DESKTOP_EXECUTION_V2_REMOVED_METHODS = (
     "_auto_quant_tab",
     "_populate_auto_latency_table",
@@ -310,13 +339,9 @@ DESKTOP_EXECUTION_V2_METHODS = (
 )
 
 FROZEN_METHODS = (
-    "_cancel_universe_refresh",
-    "_reset_universe_refresh_controls",
-    "_universe_refreshed",
     "_request_worker_stops",
     "_task_cancelled",
     "_scan_finished",
-    "_auto_market_scan_finished",
     "_start_task",
     "closeEvent",
 )
@@ -1207,15 +1232,10 @@ def _captured_task(window, monkeypatch):
         "_start_task",
         lambda task, **kwargs: captured.append((task, kwargs)) or True,
     )
-    monkeypatch.setattr(window, "workers", [object()])
     monkeypatch.setattr(
-        window.universe_refresh_button, "setEnabled", lambda _v: None
-    )
-    monkeypatch.setattr(
-        window.universe_refresh_button, "setText", lambda _v: None
-    )
-    monkeypatch.setattr(
-        window.universe_cancel_button, "setEnabled", lambda _v: None
+        window,
+        "workers",
+        [type("IdleWorker", (), {"isRunning": lambda self: False})()],
     )
     window._refresh_universe()
     return captured[0][0]
@@ -1354,28 +1374,12 @@ def test_a_refused_start_changes_no_ui_state(monkeypatch, tmp_path) -> None:
             window, "_start_task", lambda task, **kwargs: False
         )
 
-        touched: list[str] = []
-        monkeypatch.setattr(
-            window.universe_refresh_button,
-            "setEnabled",
-            lambda _v: touched.append("refresh.setEnabled"),
-        )
-        monkeypatch.setattr(
-            window.universe_refresh_button,
-            "setText",
-            lambda _v: touched.append("refresh.setText"),
-        )
-        monkeypatch.setattr(
-            window.universe_cancel_button,
-            "setEnabled",
-            lambda _v: touched.append("cancel.setEnabled"),
-        )
-
         window._refresh_universe()
 
         assert window.universe_refresh_cancel_event == "SENTINEL"
         assert window.universe_refresh_worker == "SENTINEL"
-        assert touched == []
+        assert window.universe_page.refresh_button.isEnabled() is True
+        assert window.universe_page.cancel_button.isEnabled() is False
     finally:
         window.deleteLater()
 
@@ -1387,38 +1391,19 @@ def test_a_successful_start_sets_the_running_state(
 
     window = _window(monkeypatch, tmp_path)
     try:
-        worker = object()
+        worker = type("IdleWorker", (), {"isRunning": lambda self: False})()
         monkeypatch.setattr(window, "workers", [worker])
         monkeypatch.setattr(
             window, "_start_task", lambda task, **kwargs: True
-        )
-
-        enabled: list[bool] = []
-        text: list[str] = []
-        monkeypatch.setattr(
-            window.universe_refresh_button,
-            "setEnabled",
-            lambda value: enabled.append(value),
-        )
-        monkeypatch.setattr(
-            window.universe_refresh_button,
-            "setText",
-            lambda value: text.append(value),
-        )
-        cancel_enabled: list[bool] = []
-        monkeypatch.setattr(
-            window.universe_cancel_button,
-            "setEnabled",
-            lambda value: cancel_enabled.append(value),
         )
 
         window._refresh_universe()
 
         assert window.universe_refresh_worker is worker
         assert window.universe_refresh_cancel_event is not None
-        assert enabled == [False]
-        assert text == ["官方标的刷新中…"]
-        assert cancel_enabled == [True]
+        assert window.universe_page.refresh_button.isEnabled() is False
+        assert window.universe_page.refresh_button.text() == "官方标的刷新中…"
+        assert window.universe_page.cancel_button.isEnabled() is True
     finally:
         window.deleteLater()
 
@@ -1513,6 +1498,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_EXECUTION_V2_REMOVED_METHODS)
         | set(DESKTOP_MARKET_V2_REMOVED_METHODS)
         | set(TARGETED_RESEARCH_V2_REMOVED_METHODS)
+        | set(RESEARCH_DATA_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1521,6 +1507,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_EXECUTION_V2_ADDED_METHODS)
         | set(DESKTOP_MARKET_V2_ADDED_METHODS)
         | set(TARGETED_RESEARCH_V2_ADDED_METHODS)
+        | set(RESEARCH_DATA_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1546,6 +1533,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_EXECUTION_V2_METHODS)
         | set(DESKTOP_MARKET_V2_METHODS)
         | set(TARGETED_RESEARCH_V2_METHODS)
+        | set(RESEARCH_DATA_V2_METHODS)
     )
     # Exact, not a subset: the delta is the declared surface and nothing
     # else, in both directions.
@@ -1558,6 +1546,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(DESKTOP_EXECUTION_V2_METHODS) <= set(changed)
     assert set(DESKTOP_MARKET_V2_METHODS) <= set(changed)
     assert set(TARGETED_RESEARCH_V2_METHODS) <= set(changed)
+    assert set(RESEARCH_DATA_V2_METHODS) <= set(changed)
     assert "_refresh_universe" in changed
 
 

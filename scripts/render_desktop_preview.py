@@ -21,6 +21,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from us_quant.desktop import MainWindow, configure_chinese_font  # noqa: E402
 from us_quant.desktop_v2.pages.research import ResearchWorkspace  # noqa: E402
+from us_quant.desktop_v2.pages.system import SystemWorkspace  # noqa: E402
 from us_quant.trading.domain.market import (  # noqa: E402
     MarketDataMode,
     MarketQuote,
@@ -58,11 +59,14 @@ def select_research(
     _process_events()
 
 
-def select_system(window, index: int) -> None:
-    """Show one still-transitional System tab by index."""
+def select_system(
+    window,
+    workspace: SystemWorkspace,
+) -> None:
+    """Show one System workspace by its stable semantic key."""
 
     window.shell.navigate_to("system")
-    window.shell.page("system").setCurrentIndex(index)
+    window.system_page.set_active_workspace(workspace)
     _process_events()
 
 
@@ -323,13 +327,13 @@ def main() -> int:
     )
     if not window.grab().save(str(strategy_output)):
         raise RuntimeError("strategy preview could not be saved")
-    select_system(window, 0)
+    select_system(window, SystemWorkspace.RUNTIME_EVENTS)
     runtime_output = (
         ROOT / "research" / "artifacts" / "desktop_runtime_preview.png"
     )
     if not window.grab().save(str(runtime_output)):
         raise RuntimeError("runtime preview could not be saved")
-    select_system(window, 1)
+    select_system(window, SystemWorkspace.SETTINGS)
     application.processEvents()
     settings_output = (
         ROOT / "research" / "artifacts" / "desktop_settings_dark.png"
@@ -337,9 +341,7 @@ def main() -> int:
     if not window.grab().save(str(settings_output)):
         raise RuntimeError("dark settings preview could not be saved")
 
-    window.settings_theme_combo.setCurrentIndex(
-        window.settings_theme_combo.findData("light")
-    )
+    window.settings_page.set_theme("light", emit_change=True)
     select(window, "dashboard")
     light_output = (
         ROOT / "research" / "artifacts" / "desktop_preview_light.png"
@@ -463,7 +465,7 @@ def main() -> int:
         raise RuntimeError(
             "light target preflight preview could not be saved"
         )
-    select_system(window, 1)
+    select_system(window, SystemWorkspace.SETTINGS)
     application.processEvents()
     light_settings_output = (
         ROOT / "research" / "artifacts" / "desktop_settings_light.png"

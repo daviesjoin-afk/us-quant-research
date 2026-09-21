@@ -662,6 +662,20 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "pages/research/cross_section/controls.py",
         "pages/research/cross_section/tables.py",
         "pages/research/cross_section/page.py",
+        "pages/system/__init__.py",
+        "pages/system/navigation.py",
+        "pages/system/page.py",
+        "pages/system/runtime_events/__init__.py",
+        "pages/system/runtime_events/models.py",
+        "pages/system/runtime_events/presenter.py",
+        "pages/system/runtime_events/table.py",
+        "pages/system/runtime_events/page.py",
+        "pages/system/settings/__init__.py",
+        "pages/system/settings/models.py",
+        "pages/system/settings/appearance.py",
+        "pages/system/settings/credentials.py",
+        "pages/system/settings/connection.py",
+        "pages/system/settings/page.py",
     }
 
 

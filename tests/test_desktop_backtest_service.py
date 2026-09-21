@@ -429,6 +429,43 @@ DESKTOP_EXECUTION_V2_METHODS = (
     "_worker_finished",
 )
 
+# System v2: the System route became a native v2 aggregate.  The legacy
+# runtime/settings builders and the selected-row resolve handler are deleted,
+# the settings handlers now take immutable drafts, and the page publishers
+# replace the widget-by-widget updates.  Declared so the guard can assert the
+# delta exactly, in both directions.
+SYSTEM_V2_REMOVED_METHODS = (
+    "_runtime_tab",
+    "_settings_tab",
+    "_resolve_selected_runtime_event",
+    "_refresh_credential_status",
+)
+SYSTEM_V2_ADDED_METHODS = (
+    "_active_stream_provider",
+    "_connect_runtime_events_page",
+    "_connect_settings_page",
+    "_credential_status_text",
+    "_publish_settings_view",
+    "_resolve_runtime_event",
+    "_runtime_info_text",
+    "_settings_draft",
+    "_settings_storage_view",
+)
+SYSTEM_V2_METHODS = (
+    "_preview_theme_changed",
+    "_record_runtime_event",
+    "_refresh_runtime_events",
+    "_paper_order_capability_toggled",
+    "_extended_hours_paper_toggled",
+    "_save_api_credentials",
+    "_clear_saved_finnhub_key",
+    "_set_connection_settings_enabled",
+)
+SYSTEM_V2_CHANGED_MODULES = (
+    # The transitional settings panel is deleted; the page owns its widgets now.
+    "src/us_quant/desktop_settings_panel.py",
+)
+
 FROZEN_METHODS = (
     # ``_backtest_records`` is no longer frozen: Strategy v2 moved it onto
     # ``StrategySelectionService``, which is why it appears in
@@ -1785,6 +1822,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(SCANNER_V2_REMOVED_METHODS)
         | set(BACKTEST_V2_REMOVED_METHODS)
         | set(CROSS_SECTION_V2_REMOVED_METHODS)
+        | set(SYSTEM_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1797,6 +1835,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(SCANNER_V2_ADDED_METHODS)
         | set(BACKTEST_V2_ADDED_METHODS)
         | set(CROSS_SECTION_V2_ADDED_METHODS)
+        | set(SYSTEM_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1825,6 +1864,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(SCANNER_V2_METHODS)
         | set(BACKTEST_V2_METHODS)
         | set(CROSS_SECTION_V2_METHODS)
+        | set(SYSTEM_V2_METHODS)
     )
     # Exact, not a subset: the delta is the declared surface and nothing
     # else, in both directions.
@@ -1841,6 +1881,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(SCANNER_V2_METHODS) <= set(changed)
     assert set(BACKTEST_V2_METHODS) <= set(changed)
     assert set(CROSS_SECTION_V2_METHODS) <= set(changed)
+    assert set(SYSTEM_V2_METHODS) <= set(changed)
     assert "_run_backtest_workspace" in changed
 
 
@@ -1869,6 +1910,7 @@ def test_the_other_frozen_modules_are_untouched() -> None:
         | set(BROKER_ACCOUNT_V2_CHANGED_MODULES)
         | set(EXECUTION_V2_CHANGED_MODULES)
         | set(RUNTIME_V2B_CHANGED_MODULES)
+        | set(SYSTEM_V2_CHANGED_MODULES)
     )
 
 

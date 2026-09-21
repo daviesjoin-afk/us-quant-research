@@ -598,7 +598,7 @@ def _next_client_id(window: MainWindow) -> int:
     cannot silently ignore it.
     """
 
-    current = window.settings_ibkr_client_id.value()
+    current = window.settings_page.current_draft().ibkr_client_id
     return current + 1 if current < 999_999 else current - 1
 
 
@@ -621,8 +621,11 @@ def test_saving_settings_reaches_the_service_before_the_next_stream(
         new_client_id = _next_client_id(window)
         assert new_client_id != startup_config.client_id
 
-        window.settings_ibkr_client_id.setValue(new_client_id)
-        window._save_user_preferences()
+        draft = dataclasses.replace(
+            window.settings_page.current_draft(),
+            ibkr_client_id=new_client_id,
+        )
+        window._save_user_preferences(draft)
 
         # The account application -- not just the window -- carries the
         # new config.  It is the single runtime owner.
@@ -666,8 +669,11 @@ def test_saving_settings_is_refused_while_a_stream_is_live(
         )
         before = window.broker_account.config
 
-        window.settings_ibkr_client_id.setValue(_next_client_id(window))
-        window._save_user_preferences()
+        draft = dataclasses.replace(
+            window.settings_page.current_draft(),
+            ibkr_client_id=_next_client_id(window),
+        )
+        window._save_user_preferences(draft)
 
         assert len(warnings) == 1, "the refusal must be reported"
         # Refused means *nothing* moved: the account application kept its
@@ -700,7 +706,9 @@ def test_saving_identical_settings_while_streaming_is_not_a_refusal(
             MarketDataStartRequest(source_id=SOURCE_IBKR, symbols=("SPY",))
         )
 
-        window._save_user_preferences()  # unchanged values: must not refuse
+        window._save_user_preferences(
+            window.settings_page.current_draft()
+        )  # unchanged values: must not refuse
 
         assert warnings == []
         assert (tmp_path / "settings" / "preferences.json").exists()
@@ -727,7 +735,9 @@ def test_a_failed_settings_write_leaves_the_runtime_untouched(
     window = _window_with_tmp_state(monkeypatch, tmp_path)
     try:
         # Establish a known on-disk baseline first.
-        window._save_user_preferences()
+        window._save_user_preferences(
+            window.settings_page.current_draft()
+        )
         assert warnings == []
         saved_file = tmp_path / "settings" / "preferences.json"
         assert saved_file.exists()
@@ -745,8 +755,11 @@ def test_a_failed_settings_write_leaves_the_runtime_untouched(
         monkeypatch.setattr(
             window.preferences_store, "save", failing_save
         )
-        window.settings_ibkr_client_id.setValue(new_client_id)
-        window._save_user_preferences()
+        draft = dataclasses.replace(
+            window.settings_page.current_draft(),
+            ibkr_client_id=new_client_id,
+        )
+        window._save_user_preferences(draft)
 
         # The operator is told, and told the truth.
         assert len(warnings) == 1
@@ -784,8 +797,11 @@ def test_a_failed_settings_write_does_not_need_a_live_stream(
         monkeypatch.setattr(
             window.preferences_store, "save", failing_save
         )
-        window.settings_ibkr_client_id.setValue(_next_client_id(window))
-        window._save_user_preferences()
+        draft = dataclasses.replace(
+            window.settings_page.current_draft(),
+            ibkr_client_id=_next_client_id(window),
+        )
+        window._save_user_preferences(draft)
 
         assert len(warnings) == 1
         assert not (tmp_path / "settings" / "preferences.json").exists()
@@ -1096,14 +1112,12 @@ def test_clearing_the_active_providers_credentials_is_refused(
         window.stream_worker = _fake_running_worker(
             "finnhub_trades"
         )
-        index = window.settings_api_provider_combo.findData(
-            "finnhub_trades"
-        )
-        assert index >= 0
-        window.settings_api_provider_combo.setCurrentIndex(index)
+        window.settings_page.set_api_provider("finnhub_trades", emit_change=True)
         messages = _capture_messages(monkeypatch)
 
-        window._clear_selected_api_credentials()
+        window._clear_selected_api_credentials(
+            window.settings_page.current_credentials_draft().provider
+        )
 
         assert cleared == []
         assert len(messages) == 1
@@ -1135,14 +1149,12 @@ def test_clearing_an_inactive_providers_credentials_is_allowed(
         window.stream_worker = _fake_running_worker(
             "finnhub_trades"
         )
-        index = window.settings_api_provider_combo.findData(
-            "alpaca_iex"
-        )
-        assert index >= 0
-        window.settings_api_provider_combo.setCurrentIndex(index)
+        window.settings_page.set_api_provider("alpaca_iex", emit_change=True)
         messages = _capture_messages(monkeypatch)
 
-        window._clear_selected_api_credentials()
+        window._clear_selected_api_credentials(
+            window.settings_page.current_credentials_draft().provider
+        )
 
         assert cleared == ["alpaca_iex"]
         assert messages == []
@@ -1164,12 +1176,12 @@ def test_clearing_ibkr_credentials_asks_the_service_for_nothing(
             "clear_provider",
             cleared.append,
         )
-        index = window.settings_api_provider_combo.findData("ibkr")
-        assert index >= 0
-        window.settings_api_provider_combo.setCurrentIndex(index)
+        window.settings_page.set_api_provider("ibkr", emit_change=True)
         messages = _capture_messages(monkeypatch)
 
-        window._clear_selected_api_credentials()
+        window._clear_selected_api_credentials(
+            window.settings_page.current_credentials_draft().provider
+        )
 
         assert cleared == []
         assert len(messages) == 1
@@ -1191,12 +1203,12 @@ def test_saving_ibkr_credentials_asks_the_service_for_nothing(
             "save_provider",
             lambda *args, **kwargs: saved.append((args, kwargs)),
         )
-        index = window.settings_api_provider_combo.findData("ibkr")
-        assert index >= 0
-        window.settings_api_provider_combo.setCurrentIndex(index)
+        window.settings_page.set_api_provider("ibkr", emit_change=True)
         messages = _capture_messages(monkeypatch)
 
-        window._save_api_credentials()
+        window._save_api_credentials(
+            window.settings_page.current_credentials_draft()
+        )
 
         assert saved == []
         assert len(messages) == 1
@@ -1214,11 +1226,7 @@ def test_the_credential_status_line_comes_from_the_service(
 
     window = _window()
     try:
-        index = window.settings_api_provider_combo.findData(
-            "finnhub_trades"
-        )
-        assert index >= 0
-        window.settings_api_provider_combo.setCurrentIndex(index)
+        window.settings_page.set_api_provider("finnhub_trades", emit_change=True)
 
         monkeypatch.setattr(
             window.credential_service,
@@ -1230,9 +1238,9 @@ def test_the_credential_status_line_comes_from_the_service(
                 api_secret_saved=False,
             ),
         )
-        window._refresh_credential_status()
+        window._publish_settings_view()
         assert (
-            window.settings_credential_status.text()
+            window.settings_page.credentials.status_label.text()
             == "Finnhub：已加密保存"
         )
 
@@ -1246,9 +1254,9 @@ def test_the_credential_status_line_comes_from_the_service(
                 api_secret_saved=False,
             ),
         )
-        window._refresh_credential_status()
+        window._publish_settings_view()
         assert (
-            window.settings_credential_status.text()
+            window.settings_page.credentials.status_label.text()
             == "Finnhub：未保存"
         )
     finally:
@@ -1260,9 +1268,7 @@ def test_the_alpaca_status_line_reports_each_half(
 ) -> None:
     window = _window()
     try:
-        index = window.settings_api_provider_combo.findData("alpaca_iex")
-        assert index >= 0
-        window.settings_api_provider_combo.setCurrentIndex(index)
+        window.settings_page.set_api_provider("alpaca_iex", emit_change=True)
 
         monkeypatch.setattr(
             window.credential_service,
@@ -1274,9 +1280,9 @@ def test_the_alpaca_status_line_reports_each_half(
                 api_secret_saved=False,
             ),
         )
-        window._refresh_credential_status()
+        window._publish_settings_view()
 
-        text = window.settings_credential_status.text()
+        text = window.settings_page.credentials.status_label.text()
         assert "Alpaca Key：已加密保存" in text
         assert "Alpaca Secret：未保存" in text
     finally:
@@ -1288,15 +1294,13 @@ def test_the_ibkr_status_line_says_no_key_is_needed(
 ) -> None:
     window = _window()
     try:
-        index = window.settings_api_provider_combo.findData("ibkr")
-        assert index >= 0
-        window.settings_api_provider_combo.setCurrentIndex(index)
+        window.settings_page.set_api_provider("ibkr", emit_change=True)
         messages = _capture_messages(monkeypatch)
 
-        window._refresh_credential_status()
+        window._publish_settings_view()
 
         assert (
-            window.settings_credential_status.text()
+            window.settings_page.credentials.status_label.text()
             == "IBKR Gateway：使用本机 Host / 端口 / Client ID，"
             "无需 API Key"
         )

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from us_quant import desktop
 from us_quant.desktop import MainWindow
+from us_quant.desktop_v2.pages.research import ResearchWorkspace
 from us_quant.desktop_v2.pages.research.targeted.models import (
     TargetedControlView,
 )
@@ -114,8 +115,14 @@ class _Engine:
 # -- route and wiring ----------------------------------------------------
 
 
-def test_research_first_tab_is_the_native_targeted_page(window: MainWindow) -> None:
-    assert window.v2_research_tabs.widget(0) is window.targeted_validation_page
+def test_research_route_is_the_native_aggregate(window: MainWindow) -> None:
+    assert window.shell.page("research") is window.research_page
+    assert (
+        window.research_page.active_workspace()
+        is ResearchWorkspace.TARGETED
+    )
+    window.research_page.set_active_workspace(ResearchWorkspace.BACKTEST)
+    assert window.research_page._tabs.currentWidget() is window.backtest_page
 
 
 def test_every_targeted_intent_reaches_the_window_handler(

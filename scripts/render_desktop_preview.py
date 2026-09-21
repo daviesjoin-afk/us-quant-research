@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from us_quant.desktop import MainWindow, configure_chinese_font  # noqa: E402
+from us_quant.desktop_v2.pages.research import ResearchWorkspace  # noqa: E402
 from us_quant.trading.domain.market import (  # noqa: E402
     MarketDataMode,
     MarketQuote,
@@ -33,6 +34,38 @@ def _start_backtest_preview(window) -> None:
     window._run_backtest_workspace(False, draft)
 
 
+def _process_events() -> None:
+    application = QApplication.instance()
+    if application is not None:
+        application.processEvents()
+
+
+def select(window, route: str) -> None:
+    """Show one first-level Desktop UI v2 route."""
+
+    window.shell.navigate_to(route)
+    _process_events()
+
+
+def select_research(
+    window,
+    workspace: ResearchWorkspace,
+) -> None:
+    """Show one Research workspace by its stable semantic key."""
+
+    window.shell.navigate_to("research")
+    window.research_page.set_active_workspace(workspace)
+    _process_events()
+
+
+def select_system(window, index: int) -> None:
+    """Show one still-transitional System tab by index."""
+
+    window.shell.navigate_to("system")
+    window.shell.page("system").setCurrentIndex(index)
+    _process_events()
+
+
 def main() -> int:
     application = QApplication.instance() or QApplication([])
     configure_chinese_font(application)
@@ -44,14 +77,6 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     if not window.grab().save(str(output)):
         raise RuntimeError("desktop preview could not be saved")
-
-    def select(route: str, sub_index: int | None = None) -> None:
-        """Show one Desktop UI v2 route, optionally a second-level page."""
-
-        window.shell.navigate_to(route)
-        if sub_index is not None:
-            window.shell.page(route).setCurrentIndex(sub_index)
-        application.processEvents()
 
     preview_candidates = []
     if window.scan is not None:
@@ -86,7 +111,7 @@ def main() -> int:
         f"已整理 {len(preview_candidates)} 个广域候选；"
         "等待实时订阅与用户逐会话武装 IBKR Paper。"
     )
-    select("execution")
+    select(window, "execution")
     auto_output = (
         ROOT / "research" / "artifacts" / "desktop_auto_quant_preview.png"
     )
@@ -104,20 +129,20 @@ def main() -> int:
         raise RuntimeError("auto orders preview could not be saved")
     window.auto_detail_tabs.setCurrentIndex(0)
 
-    select("account")
+    select(window, "account")
     application.processEvents()
     account_output = (
         ROOT / "research" / "artifacts" / "desktop_account_preview.png"
     )
     if not window.grab().save(str(account_output)):
         raise RuntimeError("account preview could not be saved")
-    select("market")
+    select(window, "market")
     quotes_output = (
         ROOT / "research" / "artifacts" / "desktop_quotes_preview.png"
     )
     if not window.grab().save(str(quotes_output)):
         raise RuntimeError("quotes preview could not be saved")
-    select("research", 0)
+    select_research(window, ResearchWorkspace.TARGETED)
     window.target_symbol_input.setText("AAPL")
     window._apply_target_symbol()
     replay_start = datetime(
@@ -265,7 +290,7 @@ def main() -> int:
     )
     if not window.grab().save(str(preflight_output)):
         raise RuntimeError("target preflight preview could not be saved")
-    select("strategy")
+    select(window, "strategy")
     manager_output = (
         ROOT
         / "research"
@@ -274,7 +299,7 @@ def main() -> int:
     )
     if not window.grab().save(str(manager_output)):
         raise RuntimeError("strategy manager preview could not be saved")
-    select("research", 4)
+    select_research(window, ResearchWorkspace.BACKTEST)
     _start_backtest_preview(window)
     deadline = monotonic() + 15
     while window.workers and monotonic() < deadline:
@@ -286,25 +311,25 @@ def main() -> int:
     )
     if not window.grab().save(str(backtest_output)):
         raise RuntimeError("backtest preview could not be saved")
-    select("research", 3)
+    select_research(window, ResearchWorkspace.SCANNER)
     scanner_output = (
         ROOT / "research" / "artifacts" / "desktop_scanner_preview.png"
     )
     if not window.grab().save(str(scanner_output)):
         raise RuntimeError("scanner preview could not be saved")
-    select("research", 5)
+    select_research(window, ResearchWorkspace.CROSS_SECTION)
     strategy_output = (
         ROOT / "research" / "artifacts" / "desktop_strategy_preview.png"
     )
     if not window.grab().save(str(strategy_output)):
         raise RuntimeError("strategy preview could not be saved")
-    select("system", 0)
+    select_system(window, 0)
     runtime_output = (
         ROOT / "research" / "artifacts" / "desktop_runtime_preview.png"
     )
     if not window.grab().save(str(runtime_output)):
         raise RuntimeError("runtime preview could not be saved")
-    select("system", 1)
+    select_system(window, 1)
     application.processEvents()
     settings_output = (
         ROOT / "research" / "artifacts" / "desktop_settings_dark.png"
@@ -315,13 +340,13 @@ def main() -> int:
     window.settings_theme_combo.setCurrentIndex(
         window.settings_theme_combo.findData("light")
     )
-    select("dashboard")
+    select(window, "dashboard")
     light_output = (
         ROOT / "research" / "artifacts" / "desktop_preview_light.png"
     )
     if not window.grab().save(str(light_output)):
         raise RuntimeError("light preview could not be saved")
-    select("execution")
+    select(window, "execution")
     light_auto_output = (
         ROOT
         / "research"
@@ -343,7 +368,7 @@ def main() -> int:
             "light auto orders preview could not be saved"
         )
     window.auto_detail_tabs.setCurrentIndex(0)
-    select("market")
+    select(window, "market")
     light_quotes_output = (
         ROOT
         / "research"
@@ -352,7 +377,7 @@ def main() -> int:
     )
     if not window.grab().save(str(light_quotes_output)):
         raise RuntimeError("light quotes preview could not be saved")
-    select("research", 0)
+    select_research(window, ResearchWorkspace.TARGETED)
     window.targeted_workspace_tabs.setCurrentIndex(0)
     window.targeted_research_tabs.setCurrentIndex(0)
     light_shadow_output = (
@@ -438,7 +463,7 @@ def main() -> int:
         raise RuntimeError(
             "light target preflight preview could not be saved"
         )
-    select("system", 1)
+    select_system(window, 1)
     application.processEvents()
     light_settings_output = (
         ROOT / "research" / "artifacts" / "desktop_settings_light.png"

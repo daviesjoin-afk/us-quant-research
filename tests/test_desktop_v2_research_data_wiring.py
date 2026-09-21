@@ -12,8 +12,6 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from us_quant.desktop import MainWindow
 from us_quant.desktop_history_service import HistoryQueueSnapshot
-from us_quant.desktop_v2.pages.research.history.page import HistoryPage
-from us_quant.desktop_v2.pages.research.universe.page import UniversePage
 from us_quant.history_queue import HistoryJob
 from us_quant.paths import STATE_ROOT_ENV
 from us_quant.universe import UniverseRecord, UniverseSnapshot
@@ -66,10 +64,6 @@ def _history_snapshot() -> HistoryQueueSnapshot:
     )
     return HistoryQueueSnapshot((job,), 0, 0, 1, 0)
 
-
-def test_research_tabs_use_native_pages(window: MainWindow) -> None:
-    assert isinstance(window.v2_research_tabs.widget(1), UniversePage)
-    assert isinstance(window.v2_research_tabs.widget(2), HistoryPage)
 
 
 def test_universe_refresh_and_cancel_intents_reach_handlers(

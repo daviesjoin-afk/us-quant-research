@@ -50,6 +50,29 @@ FORBIDDEN_COMPATIBILITY_PROPERTIES = ("account_portfolio",)
 #: What the orchestrator may import.  Each entry is a capability, not merely a
 #: module it happens not to use: an orchestrator that could import the Paper
 #: workflow or the research route could decide their fan-out itself.
+#:
+#: An *allowlist* rather than a denylist, because a denylist only forbids the
+#: couplings someone thought of: ``PaperWorkflowPhase`` lives in
+#: ``trading.runtime.workflow_state``, which no denylist of *capability* names
+#: would have listed, and the mutation sweep found exactly that hole.  A new
+#: dependency now has to be declared here on purpose.
+ALLOWED_ORCHESTRATOR_IMPORTS = (
+    "__future__",
+    "collections.abc",
+    "dataclasses",
+    "datetime",
+    "decimal",
+    "PySide6.QtCore",
+    "us_quant.account_ledger",
+    "us_quant.desktop_v2.orchestration.account",
+    "us_quant.trading.application.accounts",
+    "us_quant.trading.domain.account",
+    "us_quant.trading.domain.common",
+)
+
+#: The same rule stated the other way, kept because it names the capabilities
+#: the spec calls out and gives a more legible failure message.  Both run: the
+#: denylist documents intent, the allowlist closes the set.
 FORBIDDEN_ORCHESTRATOR_IMPORTS = (
     "us_quant.desktop",
     "us_quant.market_data_service",
@@ -78,6 +101,7 @@ FORBIDDEN_ORCHESTRATOR_IMPORTS = (
     "us_quant.trading.runtime.trading",
     "us_quant.trading.runtime.artifacts",
     "us_quant.trading.runtime.models",
+    "us_quant.trading.runtime.workflow_state",
     "us_quant.trading.adapters",
     "us_quant.trading.composition",
     "us_quant.strategy",
@@ -469,6 +493,52 @@ def test_the_orchestrator_imports_no_other_capability() -> None:
     for path in _python_files(_ACCOUNT_DIR):
         for module in _matches(_imports(path), FORBIDDEN_ORCHESTRATOR_IMPORTS):
             offending.append((path.name, module))
+    assert not offending, offending
+
+
+def test_the_orchestrator_imports_nothing_outside_the_allowlist() -> None:
+    """The import set is closed, not merely denylisted.
+
+    A denylist only forbids the couplings someone remembered to name.  The
+    mutation sweep proved the hole: importing ``PaperWorkflowPhase`` from
+    ``trading.runtime.workflow_state`` passed every forbidden-module check,
+    because no *capability* name covers that module.  Closing the set means a
+    new dependency must be added to ``ALLOWED_ORCHESTRATOR_IMPORTS`` on
+    purpose, where a reviewer will see it.
+    """
+
+    offending: list[tuple[str, str]] = []
+    for path in _python_files(_ACCOUNT_DIR):
+        for module in sorted(_imports(path)):
+            allowed = any(
+                module == entry or module.startswith(f"{entry}.")
+                for entry in ALLOWED_ORCHESTRATOR_IMPORTS
+            )
+            if not allowed:
+                offending.append((path.name, module))
+    assert not offending, offending
+
+
+def test_the_orchestrator_never_imports_a_forbidden_symbol() -> None:
+    """Even an allowed module must not supply a forbidden *name*.
+
+    ``from us_quant.trading.runtime import workflow_state`` is covered by the
+    allowlist above, but ``from ... import PaperWorkflowPhase`` would still be
+    the Paper capability reaching into the account route.  This checks the
+    imported names, which module-path guards cannot see.
+    """
+
+    offending: list[tuple[str, str]] = []
+    for path in _python_files(_ACCOUNT_DIR):
+        for node in ast.walk(_tree(path)):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            for alias in node.names:
+                if alias.name in FORBIDDEN_ORCHESTRATOR_CALLS:
+                    offending.append((path.name, alias.name))
+            for alias in node.names:
+                if alias.asname in FORBIDDEN_ORCHESTRATOR_CALLS:
+                    offending.append((path.name, str(alias.asname)))
     assert not offending, offending
 
 

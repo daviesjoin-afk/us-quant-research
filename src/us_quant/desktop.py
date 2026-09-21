@@ -36,7 +36,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplashScreen,
     QSizePolicy,
-    QSpinBox,
     QSplitter,
     QTabWidget,
     QTableWidget,
@@ -257,6 +256,15 @@ from us_quant.desktop_v2.pages.research.backtest.models import (
 from us_quant.desktop_v2.pages.research.backtest.presenter import (
     build_backtest_view,
 )
+from us_quant.desktop_v2.pages.research.cross_section import (
+    CrossSectionResearchPage,
+)
+from us_quant.desktop_v2.pages.research.cross_section.models import (
+    CrossSectionResearchDraft,
+)
+from us_quant.desktop_v2.pages.research.cross_section.presenter import (
+    build_cross_section_view,
+)
 from us_quant.desktop_tasks import DesktopTaskController
 from us_quant.desktop_workers import (
     StreamWorker,
@@ -435,7 +443,7 @@ class MainWindow(QMainWindow):
             fallback_data_root=self.bundled_data_root,
             output_root=self.paths.research_results_root / "backtests",
         )
-        self.strategy_path = (
+        self.cross_section_path = (
             self.paths.research_results_root
             / "cross_sectional_executable_research.json"
         )
@@ -591,7 +599,8 @@ class MainWindow(QMainWindow):
         ] = []
         self.universe: UniverseSnapshot | None = None
         self.scan: MarketScan | None = None
-        self.strategy_report: dict | None = None
+        self.cross_section_report: dict | None = None
+        self._research_capital_value = int(self.config.initial_equity)
         self.task_controller = DesktopTaskController[TaskThread]()
         self.workers = self.task_controller.workers
         self.universe_refresh_cancel_event: Event | None = None
@@ -758,13 +767,19 @@ class MainWindow(QMainWindow):
         self._connect_backtest_page()
         self._publish_backtest_strategy_options()
         self._publish_backtest_view()
+        self.cross_section_page = CrossSectionResearchPage(
+            research_capital=self._research_capital_value,
+            palette=self.theme,
+        )
+        self._connect_cross_section_page()
+        self._publish_cross_section_view()
         for title, page in (
             ("针对性验证", self.targeted_validation_page),
             ("广域标的池", self.universe_page),
             ("历史数据", self.history_page),
             ("市场扫描", self.scanner_page),
             ("回测", self.backtest_page),
-            ("横截面研究", self._strategy_tab()),
+            ("横截面研究", self.cross_section_page),
         ):
             research.addTab(page, title)
         self.v2_research_tabs = research
@@ -789,13 +804,11 @@ class MainWindow(QMainWindow):
         # no service to call and no control that could widen a ceiling.
         self.risk_page = RiskPage(palette=self.theme)
         self.risk_page.render(self.config.risk_limits)
-        # The research-capital input lives on the research page and updates a
-        # card on the account page.  The page owns the card; the window owns
-        # the wiring, so the card is never reached for by attribute name from
-        # a handler that does not know which page it is on.
-        self.research_capital_input.valueChanged.connect(
-            self._research_capital_changed
-        )
+        # The research-capital widget lives on the Cross Section page; the
+        # window owns the scalar truth and paints the Account card from it.
+        # Initialising through the same handler keeps the first paint and every
+        # later change on one path.
+        self._research_capital_changed(self._research_capital_value)
 
         # The strategy page renders and reports intent; every decision it
         # reports is executed here by the application service.  The page holds
@@ -916,6 +929,16 @@ class MainWindow(QMainWindow):
         page = self.scanner_page
         page.scan_requested.connect(self._run_scan)
         page.symbol_selected.connect(self._scanner_symbol_selected)
+
+    def _connect_cross_section_page(self) -> None:
+        page = self.cross_section_page
+        page.run_requested.connect(self._run_cross_section_research)
+        page.capital_changed.connect(self._research_capital_changed)
+
+    def _publish_cross_section_view(self) -> None:
+        self.cross_section_page.render(
+            build_cross_section_view(self.cross_section_report)
+        )
 
     def _target_symbol_requested(self, symbol: str) -> None:
         self.targeted_validation_page.set_target_symbol(symbol)
@@ -1260,81 +1283,6 @@ class MainWindow(QMainWindow):
 
 
 
-    def _strategy_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        cards = QHBoxLayout()
-        self.strategy_gate_card = MetricCard(
-            "晋级门", "硬阻断", "研究代理不得进入影子或实盘"
-        )
-        self.strategy_return_card = MetricCard(
-            "复权价 OOS 代理", "—", "不是历史整股可执行收益"
-        )
-        self.strategy_dd_card = MetricCard(
-            "代理最大回撤", "—", "复权价研究曲线"
-        )
-        self.spy_return_card = MetricCard(
-            "2×成本压力", "—", "佣金与滑点同时翻倍"
-        )
-        self.strategy_fold_card = MetricCard(
-            "测试折数", "—", "锚定走样本外"
-        )
-        for card in (
-            self.strategy_gate_card,
-            self.strategy_return_card,
-            self.strategy_dd_card,
-            self.spy_return_card,
-            self.strategy_fold_card,
-        ):
-            cards.addWidget(card)
-        layout.addLayout(cards)
-        controls = QHBoxLayout()
-        self.research_capital_input = QSpinBox()
-        self.research_capital_input.setRange(100, 100_000_000)
-        self.research_capital_input.setValue(
-            int(self.config.initial_equity)
-        )
-        self.research_capital_input.setPrefix("$")
-        self.research_capital_input.setSuffix(" 历史研究情景")
-        self.research_capital_input.valueChanged.connect(
-            self._research_capital_changed
-        )
-        run_button = QPushButton("运行复权价研究代理")
-        run_button.clicked.connect(self._run_strategy_research)
-        warning = QLabel(
-            "⚠ 事后复权价 + 当前上市池；结果仅供研究，晋级门硬阻断"
-        )
-        warning.setObjectName("subtitle")
-        controls.addWidget(self.research_capital_input)
-        controls.addWidget(run_button)
-        controls.addWidget(warning)
-        controls.addStretch()
-        layout.addLayout(controls)
-        splitter = QSplitter(Qt.Vertical)
-        self.strategy_chart = EquityComparisonChart()
-        splitter.addWidget(self.strategy_chart)
-        tables = QSplitter(Qt.Horizontal)
-        self.candidate_table = QTableWidget(0, 6)
-        self.candidate_table.setHorizontalHeaderLabels(
-            ["参数", "收益", "回撤", "Sharpe", "交易数", "佣金"]
-        )
-        self._configure_table(self.candidate_table)
-        self.fold_table = QTableWidget(0, 7)
-        self.fold_table.setHorizontalHeaderLabels(
-            [
-                "折", "测试区间", "选中参数", "策略", "SPY",
-                "回撤", "交易数",
-            ]
-        )
-        self._configure_table(self.fold_table)
-        tables.addWidget(self.candidate_table)
-        tables.addWidget(self.fold_table)
-        tables.setSizes([600, 760])
-        splitter.addWidget(tables)
-        splitter.setSizes([330, 280])
-        layout.addWidget(splitter)
-        return page
-
     def _settings_tab(self) -> QWidget:
         """Compose the Settings page from the presentation panel.
 
@@ -1426,8 +1374,8 @@ class MainWindow(QMainWindow):
         if self.scan_path.exists():
             self._load_scan_file()
         self._refresh_market_scope_summary()
-        if self.strategy_path.exists():
-            self._load_strategy_report()
+        if self.cross_section_path.exists():
+            self._load_cross_section_report()
         for symbol in ("SPY", "QQQ", "DIA"):
             try:
                 points = load_close_series(
@@ -1846,7 +1794,10 @@ class MainWindow(QMainWindow):
             f"回测完成：{len(runs)} 个不可变 run 已保存到用户研究目录"
         )
 
-    def _run_strategy_research(self) -> None:
+    def _run_cross_section_research(
+        self,
+        draft: CrossSectionResearchDraft,
+    ) -> None:
         if self.universe is None:
             QMessageBox.information(
                 self,
@@ -1855,7 +1806,8 @@ class MainWindow(QMainWindow):
             )
             return
 
-        research_capital = self._research_scenario_capital()
+        self._research_capital_value = draft.research_capital
+        research_capital = Decimal(draft.research_capital)
 
         def task(progress: Callable[[str], None]) -> dict:
             progress(
@@ -1876,133 +1828,42 @@ class MainWindow(QMainWindow):
             )
             save_executable_research(
                 result,
-                Path(self.strategy_path),
+                Path(self.cross_section_path),
             )
             return result
 
         self._start_task(
             task,
-            on_success=self._strategy_finished,
+            on_success=self._cross_section_finished,
             start_message="组合走样本外研究开始…",
             resource_group="strategy",
         )
 
-    def _strategy_finished(self, result: object) -> None:
-        self.strategy_report = result  # type: ignore[assignment]
-        self._populate_strategy_report()
+    def _cross_section_finished(self, result: object) -> None:
+        self.cross_section_report = result  # type: ignore[assignment]
+        self._publish_cross_section_view()
         self.artifact_catalog = load_artifact_catalog(
             self.paths.research_results_root
         )
         self._populate_artifact_table()
-        metrics = self.strategy_report["out_of_sample"]["strategy"]
+        metrics = self.cross_section_report["out_of_sample"]["strategy"]
         self._log(
             f"组合研究完成：OOS {metrics['total_return']:+.1%}，"
             f"最大回撤 {metrics['max_drawdown']:.1%}。"
         )
 
-    def _load_strategy_report(self) -> None:
+    def _load_cross_section_report(self) -> None:
         try:
-            self.strategy_report = json.loads(
-                self.strategy_path.read_text(encoding="utf-8")
+            self.cross_section_report = json.loads(
+                self.cross_section_path.read_text(encoding="utf-8")
             )
-            self._populate_strategy_report()
         except Exception as error:
-            self.strategy_report = None
+            self.cross_section_report = None
             self._log(
                 f"风险一致研究产物读取失败："
                 f"{type(error).__name__}: {error}"
             )
-
-    def _populate_strategy_report(self) -> None:
-        if self.strategy_report is None:
-            return
-        out = self.strategy_report["out_of_sample"]
-        strategy = out["strategy"]
-        stress = out["cost_2x"]
-        folds = out["folds"]
-        scenario_equity = self.strategy_report.get(
-            "scope", {}
-        ).get("initial_equity")
-        self.strategy_return_card.set_value(
-            f"{strategy['total_return']:+.1%}",
-            (
-                f"情景资金 ${scenario_equity:,.0f} · "
-                f"期末 ${strategy['final_equity']:,.0f} · 仍属探索性"
-                if isinstance(scenario_equity, (int, float))
-                else f"期末 ${strategy['final_equity']:,.0f} · 仍属探索性"
-            ),
-        )
-        gate = self.strategy_report.get("promotion_gate", {})
-        gate_reasons = gate.get("reasons", [])
-        self.strategy_gate_card.set_value(
-            "通过" if gate.get("passed") else "硬阻断",
-            (
-                "；".join(str(reason) for reason in gate_reasons[:2])
-                or "缺少可验证的晋级证据"
-            ),
-        )
-        self.strategy_dd_card.set_value(
-            f"{strategy['max_drawdown']:.1%}",
-            f"最差日 {strategy['worst_day']:.1%}",
-        )
-        self.spy_return_card.set_value(
-            f"{stress['total_return']:+.1%}",
-            f"期末 ${stress['final_equity']:,.0f}",
-        )
-        self.strategy_fold_card.set_value(
-            str(len(folds)),
-            "只计完整 126 日测试折",
-        )
-        self.strategy_chart.set_rows(
-            list(self.strategy_report["chart_data"])
-        )
-        self.candidate_table.setHorizontalHeaderLabels(
-            ["选中参数", "OOS", "回撤", "训练Sharpe", "交易数", "2×成本"]
-        )
-        candidates = folds
-        self.candidate_table.setSortingEnabled(False)
-        self.candidate_table.setRowCount(len(candidates))
-        for index, row in enumerate(candidates):
-            values = (
-                row["selected"],
-                f"{row['oos_return']:+.1%}",
-                f"{row['oos_max_drawdown']:.1%}",
-                f"{row['training_sharpe']:.2f}",
-                str(row["oos_trade_count"]),
-                f"{row['cost_2x_return']:+.1%}",
-            )
-            for column, value in enumerate(values):
-                self.candidate_table.setItem(
-                    index,
-                    column,
-                    QTableWidgetItem(value),
-                )
-        self.candidate_table.setSortingEnabled(True)
-        self.fold_table.setHorizontalHeaderLabels(
-            [
-                "折", "测试区间", "选中参数", "OOS", "2×成本",
-                "最高风险", "平均现金",
-            ]
-        )
-        self.fold_table.setSortingEnabled(False)
-        self.fold_table.setRowCount(len(folds))
-        for index, row in enumerate(folds):
-            values = (
-                str(row["fold"]),
-                f"{row['test_start']} → {row['test_end']}",
-                row["selected"],
-                f"{row['oos_return']:+.1%}",
-                f"{row['cost_2x_return']:+.1%}",
-                f"{row['max_risk_exposure_pct']:.1%}",
-                f"{row['average_cash_pct']:.1%}",
-            )
-            for column, value in enumerate(values):
-                self.fold_table.setItem(
-                    index,
-                    column,
-                    QTableWidgetItem(value),
-                )
-        self.fold_table.setSortingEnabled(True)
+        self._publish_cross_section_view()
 
     def _load_scan_file(self) -> None:
         try:
@@ -3829,12 +3690,10 @@ class MainWindow(QMainWindow):
         )
 
     def _research_scenario_capital(self) -> Decimal:
-        control = getattr(self, "research_capital_input", None)
-        if control is None:
-            return self.config.initial_equity
-        return Decimal(control.value())
+        return Decimal(self._research_capital_value)
 
     def _research_capital_changed(self, value: int) -> None:
+        self._research_capital_value = int(value)
         if not hasattr(self, "account_page"):
             return
         self.account_page.research_capital_card.set_value(
@@ -6145,6 +6004,8 @@ class MainWindow(QMainWindow):
             self.scanner_page.set_palette(self.theme)
         if hasattr(self, "backtest_page"):
             self.backtest_page.set_palette(self.theme)
+        if hasattr(self, "cross_section_page"):
+            self.cross_section_page.set_palette(self.theme)
         # The execution page colours toned status cells from the palette, and
         # its tables keep the rows they were handed, so it has to be told *and*
         # redrawn: there is no repaint path that would re-read the palette on
@@ -6153,7 +6014,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "execution_page"):
             self.execution_page.set_palette(self.theme)
             self._render_auto_quant_snapshot()
-        for chart_name in ("dashboard_chart", "strategy_chart"):
+        for chart_name in ("dashboard_chart",):
             chart = getattr(self, chart_name, None)
             if chart is not None:
                 chart.update()

@@ -77,6 +77,14 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 > `_backtest_busy`、StrategySelectionService、BacktestRequest construction 与
 > DesktopBacktestService 仍由 MainWindow 持有。Research aggregate 仍是 transitional，
 > 一级 native 计数仍为 **5 / 8**。见 §8.7。
+>
+> **进度更新（Desktop Research v2E）**：Research 的“横截面研究”二级页已迁成原生
+> `CrossSectionResearchPage`，旧 `_strategy_tab()` / `_populate_strategy_report()` 及
+> `_run_strategy_research()` / `_strategy_finished()` / `_load_strategy_report()` 已退休。
+> Research capital 真值仍在 MainWindow，Page 只持有 spinbox 并发 `capital_changed`，
+> run 信号携带 immutable `CrossSectionResearchDraft`。Report truth、文件读写、算法调用、
+> task orchestration 与 artifact refresh 仍在 MainWindow。Research aggregate 仍是
+> transitional，一级 native 计数仍为 **5 / 8**。见 §8.8。
 
 ## 迁移状态一览
 
@@ -98,7 +106,7 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Desktop HistoryPage | MIGRATED |
 | Desktop ScannerPage | MIGRATED |
 | Desktop BacktestPage | MIGRATED |
-| Desktop CrossSectionResearchPage | TRANSITIONAL |
+| Desktop CrossSectionResearchPage | MIGRATED |
 | Desktop Dashboard | TRANSITIONAL |
 | Desktop Research aggregate | TRANSITIONAL |
 | Desktop System | TRANSITIONAL |
@@ -961,7 +969,7 @@ ScannerPage       local search/filter/table/chart + scan/symbol intent
 MainWindow widget ownership、Dashboard scan action、executor imports/calls、
 Qt-free models/presenter、lazy package initializer、MainWindow public surface、
 业务路径不读取显示行与 per-file line budgets。一级 native route 计数仍为 **5 / 8**；
-Research aggregate 与 Cross Section 仍是后续 v2E-F 的范围；Backtest 的完成情况见 §8.7。
+Research aggregate 仍是后续 v2R-F 的范围；Cross Section 见 §8.8，Backtest 见 §8.7。
 
 ### 8.7 backtest 页已完成（Desktop Research v2D）
 
@@ -1006,6 +1014,54 @@ BacktestPage      render + hold UI draft + emit intent
 MainWindow widget ownership、executor imports/calls、`BacktestRequest` construction、
 Qt-free models/presenter、lazy package initializer、MainWindow public surface、worker
 coupling 与 per-file line budgets。一级 native route 计数仍为 **5 / 8**。
+
+### 8.8 cross-section research 页已完成（Desktop Research v2E）
+
+`MainWindow._strategy_tab()` 与 `_populate_strategy_report()` 已删除，没有兼容 shim；
+`_run_strategy_research()` / `_strategy_finished()` / `_load_strategy_report()` 已分别
+改名为 `_run_cross_section_research()` / `_cross_section_finished()` /
+`_load_cross_section_report()`，避免和 Strategy governance 混淆。新页面位于：
+
+```text
+desktop_v2/pages/research/cross_section/
+  __init__.py   lazy export CrossSectionResearchPage
+  models.py     immutable draft / metric / chart / candidate / fold / page views
+  presenter.py  raw report → immutable display view（Qt-free）
+  controls.py   research capital spinbox + run button + warning + draft intent
+  tables.py     candidate / fold tables + frozen headers + numeric sorting
+  page.py       five metric cards / controls / comparison chart / tables
+```
+
+职责边界：
+
+```text
+MainWindow        central research capital、`self.cross_section_report`、report path、
+                  AppConfig replacement、executable research invocation、save file、
+                  task orchestration、artifact refresh
+presenter         raw report → immutable strings / floats（Qt-free）
+CrossSectionPage  render + hold UI controls + emit capital/run intent
+```
+
+- **research capital ownership 已收口。** `_research_capital_value` 是 MainWindow 的
+  唯一标量真值；`_research_scenario_capital()` 不再读取任何 QWidget。CrossSection
+  spinbox 通过 `capital_changed` 同步该标量，Account research-capital card 由同一
+  handler 刷新；Scanner、Targeted、AutoQuant 等路径继续消费 MainWindow 真值。
+- **run intent 带 immutable draft。** `run_requested` 负载是
+  `CrossSectionResearchDraft(research_capital=...)`；MainWindow 收到后构造 research
+  config，算法、`resource_group="strategy"`、进度文案与 report schema 均不变。
+- **报告真值没有迁移。** `self.cross_section_report`、`self.cross_section_path`、
+  JSON 读写、失败清空与 Dashboard artifact refresh 仍由 MainWindow 持有；Page 只接收
+  presenter 投影出的 `CrossSectionResearchView`。
+- **命名收口。** MainWindow 不再出现 `strategy_report` / `strategy_path` /
+  `research_capital_input` / `strategy_chart` 或旧 Cross Section builder/materialiser。
+- **冻结行为。** 五张 metric card 文案、empty headers 与 report headers、numeric
+  sorting、chart adapter、候选表仍按 fold 投影、artifact refresh 均保持。
+
+新增守卫位于 `tests/test_desktop_v2_cross_section_architecture.py`，覆盖 legacy surface、
+ambiguous state names、MainWindow widget ownership、executor imports/calls、Qt-free
+models/presenter、lazy package initializer、MainWindow public surface、central capital
+dependency 与 per-file line budgets。一级 native route 计数仍为 **5 / 8**；v2R-F 完成
+Research aggregate 后才变为 6 / 8。
 
 ## 9. 已删除的旧架构
 
@@ -1804,10 +1860,11 @@ Shadow v2     shadow_paper.py 拆成 shadow package 并删除（§10.7）
 v2。**Desktop Research v2B 已完成**（§8.5），Universe/History 两个二级页也已 native
 v2。**Desktop Research v2C 已完成**（§8.6），ScannerPage 已 native v2，Dashboard
 人工扫描入口已退休。**Desktop Research v2D 已完成**（§8.7），BacktestPage 已 native
-v2；Research aggregate 仍 transitional。阶段 2 剩余：
+v2。**Desktop Research v2E 已完成**（§8.8），CrossSectionResearchPage 已 native v2；
+Research aggregate 仍 transitional。阶段 2 剩余：
 
 ```text
-Desktop Research v2E-F   （必须继续拆多个 PR，禁止一次搬成一个巨大 ResearchPage）
+Desktop Research v2R-F   （只做 ResearchPage aggregate，禁止重写六个 secondary page）
 Desktop System v2
 Desktop Dashboard v2
 ```

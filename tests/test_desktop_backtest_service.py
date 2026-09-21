@@ -356,6 +356,27 @@ BACKTEST_V2_METHODS = (
     "_apply_theme",
 )
 
+CROSS_SECTION_V2_REMOVED_METHODS = (
+    "_strategy_tab",
+    "_populate_strategy_report",
+    "_run_strategy_research",
+    "_strategy_finished",
+    "_load_strategy_report",
+)
+CROSS_SECTION_V2_ADDED_METHODS = (
+    "_connect_cross_section_page",
+    "_publish_cross_section_view",
+    "_run_cross_section_research",
+    "_cross_section_finished",
+    "_load_cross_section_report",
+)
+CROSS_SECTION_V2_METHODS = (
+    "_load_local_state",
+    "_research_scenario_capital",
+    "_research_capital_changed",
+    "_apply_theme",
+)
+
 DESKTOP_EXECUTION_V2_REMOVED_METHODS = (
     "_auto_quant_tab",
     "_populate_auto_latency_table",
@@ -411,9 +432,8 @@ DESKTOP_EXECUTION_V2_METHODS = (
 FROZEN_METHODS = (
     # ``_backtest_records`` is no longer frozen: Strategy v2 moved it onto
     # ``StrategySelectionService``, which is why it appears in
-    # ``STRATEGY_V2_METHODS`` above.
-    "_run_strategy_research",
-    "_strategy_finished",
+    # ``STRATEGY_V2_METHODS`` above.  The Cross Section research handlers
+    # were renamed by v2E and are declared there instead.
     "_start_task",
     "closeEvent",
 )
@@ -1764,6 +1784,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(RESEARCH_DATA_V2_REMOVED_METHODS)
         | set(SCANNER_V2_REMOVED_METHODS)
         | set(BACKTEST_V2_REMOVED_METHODS)
+        | set(CROSS_SECTION_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1775,6 +1796,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(RESEARCH_DATA_V2_ADDED_METHODS)
         | set(SCANNER_V2_ADDED_METHODS)
         | set(BACKTEST_V2_ADDED_METHODS)
+        | set(CROSS_SECTION_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1802,6 +1824,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(RESEARCH_DATA_V2_METHODS)
         | set(SCANNER_V2_METHODS)
         | set(BACKTEST_V2_METHODS)
+        | set(CROSS_SECTION_V2_METHODS)
     )
     # Exact, not a subset: the delta is the declared surface and nothing
     # else, in both directions.
@@ -1817,6 +1840,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(RESEARCH_DATA_V2_METHODS) <= set(changed)
     assert set(SCANNER_V2_METHODS) <= set(changed)
     assert set(BACKTEST_V2_METHODS) <= set(changed)
+    assert set(CROSS_SECTION_V2_METHODS) <= set(changed)
     assert "_run_backtest_workspace" in changed
 
 
@@ -1848,13 +1872,23 @@ def test_the_other_frozen_modules_are_untouched() -> None:
     )
 
 
-def test_strategy_research_is_frozen() -> None:
-    """Spec 53: the Strategy Research path is explicitly untouched."""
+def test_cross_section_legacy_handlers_are_retired() -> None:
+    """v2E renames the Cross Section handlers and removes the old names."""
 
-    base = _require_base("src/us_quant/desktop.py")
     current = (_REPO_ROOT / "src/us_quant/desktop.py").read_text(
         encoding="utf-8"
     )
-
-    for name in ("_run_strategy_research", "_strategy_finished"):
-        assert _find_method(current, name) == _find_method(base, name), name
+    current_window = _class_named(ast.parse(current), "MainWindow")
+    methods = {
+        node.name
+        for node in current_window.body
+        if isinstance(node, ast.FunctionDef)
+    }
+    for name in (
+        "_strategy_tab",
+        "_populate_strategy_report",
+        "_run_strategy_research",
+        "_strategy_finished",
+        "_load_strategy_report",
+    ):
+        assert name not in methods, name

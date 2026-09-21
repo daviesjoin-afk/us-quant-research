@@ -15,7 +15,6 @@ from time import monotonic
 from typing import Callable
 
 from PySide6.QtCore import (
-    QDate,
     Qt,
     QTimer,
 )
@@ -28,13 +27,10 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
-    QDateEdit,
-    QDoubleSpinBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -253,6 +249,14 @@ from us_quant.desktop_v2.pages.research.scanner.models import ScannerChartView
 from us_quant.desktop_v2.pages.research.scanner.presenter import (
     build_scanner_view,
 )
+from us_quant.desktop_v2.pages.research.backtest import BacktestPage
+from us_quant.desktop_v2.pages.research.backtest.models import (
+    BacktestFormDraft,
+    BacktestStrategyOption,
+)
+from us_quant.desktop_v2.pages.research.backtest.presenter import (
+    build_backtest_view,
+)
 from us_quant.desktop_tasks import DesktopTaskController
 from us_quant.desktop_workers import (
     StreamWorker,
@@ -459,6 +463,9 @@ class MainWindow(QMainWindow):
             baseline_config,
             ibkr=ibkr_config_from_preferences(self.preferences),
         )
+        self.backtest_runs: list[BacktestRun] = []
+        self._selected_backtest_run_id: str | None = None
+        self._backtest_busy = False
         self.artifact_catalog: ArtifactCatalog = load_artifact_catalog(
             self.paths.research_results_root
         )
@@ -740,12 +747,23 @@ class MainWindow(QMainWindow):
         self._connect_history_page()
         self.scanner_page = ScannerPage(palette=self.theme)
         self._connect_scanner_page()
+        self.backtest_page = BacktestPage(
+            per_share_commission=(
+                self.config.execution.per_share_commission
+            ),
+            minimum_commission=self.config.execution.minimum_commission,
+            slippage_bps=self.config.execution.slippage_bps,
+            palette=self.theme,
+        )
+        self._connect_backtest_page()
+        self._publish_backtest_strategy_options()
+        self._publish_backtest_view()
         for title, page in (
             ("针对性验证", self.targeted_validation_page),
             ("广域标的池", self.universe_page),
             ("历史数据", self.history_page),
             ("市场扫描", self.scanner_page),
-            ("回测", self._backtest_tab()),
+            ("回测", self.backtest_page),
             ("横截面研究", self._strategy_tab()),
         ):
             research.addTab(page, title)
@@ -1317,187 +1335,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(splitter)
         return page
 
-    def _backtest_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        cards = QHBoxLayout()
-        self.backtest_return_card = MetricCard(
-            "总收益", "—", "运行后显示"
-        )
-        self.backtest_cagr_card = MetricCard(
-            "年化收益", "—", "按 252 个交易日估算"
-        )
-        self.backtest_sharpe_card = MetricCard(
-            "年化 Sharpe", "—", "无风险利率暂按 0"
-        )
-        self.backtest_drawdown_card = MetricCard(
-            "最大回撤", "—", "收盘权益序列"
-        )
-        self.backtest_trade_card = MetricCard(
-            "交易与成本", "—", "整股、佣金与滑点"
-        )
-        for card in (
-            self.backtest_return_card,
-            self.backtest_cagr_card,
-            self.backtest_sharpe_card,
-            self.backtest_drawdown_card,
-            self.backtest_trade_card,
-        ):
-            cards.addWidget(card)
-        layout.addLayout(cards)
-
-        controls = QGridLayout()
-        controls.setHorizontalSpacing(10)
-        controls.setVerticalSpacing(6)
-        self.backtest_strategy_combo = QComboBox()
-        self._refresh_backtest_strategy_combo()
-        self._configure_combo_width(
-            self.backtest_strategy_combo,
-            minimum_width=430,
-            minimum_contents=26,
-        )
-        self.backtest_symbol = QLineEdit("XLF")
-        self.backtest_symbol.setMinimumWidth(90)
-        self.backtest_symbol.setMaximumWidth(140)
-        self.backtest_symbol.setClearButtonEnabled(True)
-        self.backtest_start = QDateEdit(QDate(2018, 1, 1))
-        self.backtest_start.setCalendarPopup(True)
-        self.backtest_start.setMinimumWidth(200)
-        self.backtest_end = QDateEdit(QDate.currentDate())
-        self.backtest_end.setCalendarPopup(True)
-        self.backtest_end.setMinimumWidth(200)
-        self.backtest_capital = QSpinBox()
-        self.backtest_capital.setRange(100, 100_000_000)
-        self.backtest_capital.setValue(1_500)
-        self.backtest_capital.setPrefix("$")
-        self.backtest_capital.setMinimumWidth(220)
-        self.backtest_weight = QSpinBox()
-        self.backtest_weight.setRange(1, 100)
-        self.backtest_weight.setValue(100)
-        self.backtest_weight.setSuffix("% 仓位")
-        self.backtest_weight.setMinimumWidth(130)
-        self.backtest_run_button = QPushButton("运行所选版本")
-        self.backtest_run_button.clicked.connect(
-            lambda: self._run_backtest_workspace(False)
-        )
-        self.backtest_compare_button = QPushButton("运行全部策略对比")
-        self.backtest_compare_button.clicked.connect(
-            lambda: self._run_backtest_workspace(True)
-        )
-        controls.addWidget(
-            self._field_label("策略版本"),
-            0,
-            0,
-        )
-        controls.addWidget(
-            self._field_label("代码"),
-            0,
-            1,
-        )
-        controls.addWidget(
-            self._field_label("研究资金"),
-            0,
-            2,
-        )
-        controls.addWidget(
-            self._field_label("目标仓位"),
-            0,
-            3,
-        )
-        controls.addWidget(self.backtest_strategy_combo, 1, 0)
-        controls.addWidget(self.backtest_symbol, 1, 1)
-        controls.addWidget(self.backtest_capital, 1, 2)
-        controls.addWidget(self.backtest_weight, 1, 3)
-        controls.addWidget(
-            self._field_label("起始日期"),
-            2,
-            0,
-        )
-        controls.addWidget(
-            self._field_label("结束日期"),
-            2,
-            1,
-        )
-        controls.addWidget(self.backtest_start, 3, 0)
-        controls.addWidget(self.backtest_end, 3, 1)
-        controls.addWidget(self.backtest_run_button, 3, 2)
-        controls.addWidget(self.backtest_compare_button, 3, 3)
-        controls.setColumnStretch(0, 4)
-        controls.setColumnStretch(1, 2)
-        controls.setColumnStretch(2, 2)
-        controls.setColumnStretch(3, 2)
-        layout.addLayout(controls)
-
-        cost_row = QHBoxLayout()
-        self.backtest_per_share_cost = QDoubleSpinBox()
-        self.backtest_per_share_cost.setRange(0, 10)
-        self.backtest_per_share_cost.setDecimals(4)
-        self.backtest_per_share_cost.setValue(
-            float(self.config.execution.per_share_commission)
-        )
-        self.backtest_minimum_cost = QDoubleSpinBox()
-        self.backtest_minimum_cost.setRange(0, 100)
-        self.backtest_minimum_cost.setDecimals(2)
-        self.backtest_minimum_cost.setValue(
-            float(self.config.execution.minimum_commission)
-        )
-        self.backtest_slippage = QDoubleSpinBox()
-        self.backtest_slippage.setRange(0, 500)
-        self.backtest_slippage.setDecimals(1)
-        self.backtest_slippage.setValue(
-            float(self.config.execution.slippage_bps)
-        )
-        cost_row.addWidget(QLabel("每股佣金"))
-        cost_row.addWidget(self.backtest_per_share_cost)
-        cost_row.addWidget(QLabel("最低佣金"))
-        cost_row.addWidget(self.backtest_minimum_cost)
-        cost_row.addWidget(QLabel("单边滑点(bps)"))
-        cost_row.addWidget(self.backtest_slippage)
-        self.backtest_evidence = QLabel(
-            "研究代理：信号在收盘生成、次日开盘成交；默认复权日 K，"
-            "不等于历史可执行整股成交。"
-        )
-        self.backtest_evidence.setObjectName("subtitle")
-        self.backtest_evidence.setWordWrap(True)
-        layout.addLayout(cost_row)
-        layout.addWidget(self.backtest_evidence)
-
-        splitter = QSplitter(Qt.Vertical)
-        self.backtest_chart = PriceChart()
-        self.backtest_chart.empty_message = "运行回测后显示最近 180 个交易日权益曲线"
-        splitter.addWidget(self.backtest_chart)
-        tables = QSplitter(Qt.Horizontal)
-        self.backtest_comparison_table = QTableWidget(0, 13)
-        self.backtest_comparison_table.setHorizontalHeaderLabels(
-            [
-                "Run ID", "策略版本", "代码", "区间", "总收益",
-                "年化", "Sharpe", "Sortino", "Calmar", "最大回撤",
-                "换手", "交易数", "成本",
-            ]
-        )
-        self._configure_table(self.backtest_comparison_table)
-        self.backtest_comparison_table.itemSelectionChanged.connect(
-            self._backtest_result_selection_changed
-        )
-        self.backtest_trades_table = QTableWidget(0, 13)
-        self.backtest_trades_table.setHorizontalHeaderLabels(
-            [
-                "信号时间", "成交时间", "信号代码", "执行代码",
-                "方向", "整股数量", "原始开盘", "成交价",
-                "滑点成本", "佣金", "成交后持仓", "成交后现金",
-                "原因",
-            ]
-        )
-        self._configure_table(self.backtest_trades_table)
-        tables.addWidget(self.backtest_comparison_table)
-        tables.addWidget(self.backtest_trades_table)
-        tables.setSizes([840, 520])
-        splitter.addWidget(tables)
-        splitter.setSizes([300, 330])
-        layout.addWidget(splitter)
-        self.backtest_runs: list[BacktestRun] = []
-        return page
-
     def _settings_tab(self) -> QWidget:
         """Compose the Settings page from the presentation panel.
 
@@ -1832,22 +1669,15 @@ class MainWindow(QMainWindow):
             f"趋势候选 {summary['positive_signal']} 个。"
         )
 
-    def _refresh_backtest_strategy_combo(self) -> None:
-        """Repopulate the backtest combo from the BACKTEST selection policy.
+    def _connect_backtest_page(self) -> None:
+        page = self.backtest_page
+        page.run_selected_requested.connect(self._run_selected_backtest)
+        page.compare_all_requested.connect(self._run_all_backtests)
+        page.run_selected.connect(self._backtest_run_selected)
 
-        Which versions are eligible is the selection service's answer, not the
-        window's.  The window still chooses *display* order, because that is a
-        presentation choice -- the executable order the factory declares.
-
-        The current choice is preserved across a refill so a governance action
-        (a clone, a stop) does not silently move the operator onto another
-        strategy; if the chosen version just stopped being eligible, the first
-        remaining option is selected instead of leaving a stale entry.
-        """
-
-        if not hasattr(self, "backtest_strategy_combo"):
+    def _publish_backtest_strategy_options(self) -> None:
+        if not hasattr(self, "backtest_page"):
             return
-        previous = self.backtest_strategy_combo.currentData()
         versions = self.strategy_selection.options(
             StrategySelectionPurpose.BACKTEST
         )
@@ -1855,34 +1685,43 @@ class MainWindow(QMainWindow):
             spec.strategy_id: index
             for index, spec in enumerate(STRATEGY_SPECS)
         }
-        self.backtest_strategy_combo.blockSignals(True)
-        try:
-            self.backtest_strategy_combo.clear()
-            for version in sorted(
-                versions,
-                key=lambda item: (
-                    order.get(item.strategy_id, 999),
-                    item.semver,
-                ),
-            ):
-                self.backtest_strategy_combo.addItem(
-                    f"{version.name} · {version.semver}",
+        ordered = sorted(
+            versions,
+            key=lambda item: (
+                order.get(item.strategy_id, 999),
+                item.semver,
+            ),
+        )
+        self.backtest_page.set_strategy_options(
+            tuple(
+                BacktestStrategyOption(
                     version.version_id,
+                    f"{version.name} · {version.semver}",
                 )
-            index = self.backtest_strategy_combo.findData(previous)
-            self.backtest_strategy_combo.setCurrentIndex(max(0, index))
-        finally:
-            self.backtest_strategy_combo.blockSignals(False)
+                for version in ordered
+            )
+        )
 
-    def _backtest_records(self, compare_all: bool) -> list[StrategyVersion]:
-        """The research versions this run should execute.
+    def _publish_backtest_view(self) -> None:
+        if not hasattr(self, "backtest_page"):
+            return
+        self.backtest_page.render(
+            build_backtest_view(
+                tuple(self.backtest_runs),
+                self._selected_backtest_run_id,
+                busy=self._backtest_busy,
+            )
+        )
 
-        ``options`` returns newest-first, so "latest per strategy" is the
-        first one seen rather than whichever row the store happened to return
-        first -- the historical behaviour depended on query order, which is
-        not something a selection should be built on.
-        """
+    def _backtest_run_selected(self, run_id: str) -> None:
+        self._selected_backtest_run_id = run_id
+        self._publish_backtest_view()
 
+    def _backtest_records(
+        self,
+        compare_all: bool,
+        selected_version_id: str,
+    ) -> list[StrategyVersion]:
         versions = self.strategy_selection.options(
             StrategySelectionPurpose.BACKTEST
         )
@@ -1895,16 +1734,23 @@ class MainWindow(QMainWindow):
                 for spec in STRATEGY_SPECS
                 if spec.strategy_id in latest
             ]
-        version_id = str(
-            self.backtest_strategy_combo.currentData() or ""
-        )
         return [
             version
             for version in versions
-            if version.version_id == version_id
+            if version.version_id == selected_version_id
         ]
 
-    def _run_backtest_workspace(self, compare_all: bool) -> None:
+    def _run_selected_backtest(self, draft: BacktestFormDraft) -> None:
+        self._run_backtest_workspace(False, draft)
+
+    def _run_all_backtests(self, draft: BacktestFormDraft) -> None:
+        self._run_backtest_workspace(True, draft)
+
+    def _run_backtest_workspace(
+        self,
+        compare_all: bool,
+        draft: BacktestFormDraft,
+    ) -> None:
         if any(
             worker.isRunning()
             and worker.resource_group == "backtest"
@@ -1916,7 +1762,10 @@ class MainWindow(QMainWindow):
                 "请等待当前数据或研究任务完成后再运行回测。",
             )
             return
-        records = self._backtest_records(compare_all)
+        records = self._backtest_records(
+            compare_all,
+            draft.strategy_version_id,
+        )
         if not records:
             QMessageBox.warning(
                 self,
@@ -1924,10 +1773,7 @@ class MainWindow(QMainWindow):
                 "策略目录中没有与回测工厂匹配的研究版本。",
             )
             return
-        symbol = self.backtest_symbol.text().strip().upper()
-        start_date = self.backtest_start.date().toPython()
-        end_date = self.backtest_end.date().toPython()
-        if start_date > end_date:
+        if draft.start_date > draft.end_date:
             QMessageBox.warning(
                 self, "日期无效", "起始日期不能晚于结束日期。"
             )
@@ -1939,30 +1785,28 @@ class MainWindow(QMainWindow):
                 parameter_hash=record.parameter_hash,
                 code_hash=record.code_hash,
                 parameters=record.parameters,
-                symbol=symbol,
-                start_date=start_date,
-                end_date=end_date,
-                initial_equity=Decimal(
-                    self.backtest_capital.value()
-                ),
+                symbol=draft.symbol,
+                start_date=draft.start_date,
+                end_date=draft.end_date,
+                initial_equity=Decimal(draft.initial_equity),
                 target_weight=(
-                    Decimal(self.backtest_weight.value())
+                    Decimal(draft.target_weight_percent)
                     / Decimal("100")
                 ),
                 per_share_commission=Decimal(
-                    str(self.backtest_per_share_cost.value())
+                    draft.per_share_commission
                 ),
                 minimum_commission=Decimal(
-                    str(self.backtest_minimum_cost.value())
+                    draft.minimum_commission
                 ),
-                slippage_bps=Decimal(
-                    str(self.backtest_slippage.value())
-                ),
+                slippage_bps=Decimal(draft.slippage_bps),
             )
             for record in records
         ]
 
-        def task(progress: Callable[[str], None]) -> tuple[BacktestRun, ...]:
+        def task(
+            progress: Callable[[str], None],
+        ) -> tuple[BacktestRun, ...]:
             return self.backtest_service.run(
                 requests,
                 on_progress=lambda index, total, request: progress(
@@ -1971,140 +1815,35 @@ class MainWindow(QMainWindow):
                 ),
             )
 
-        self.backtest_run_button.setEnabled(False)
-        self.backtest_compare_button.setEnabled(False)
-        self._start_task(
+        self._backtest_busy = True
+        self._publish_backtest_view()
+        started = self._start_task(
             task,
             on_success=self._backtest_workspace_finished,
+            on_failure=self._backtest_task_failed,
             start_message=(
                 f"正在运行 {len(requests)} 个版本绑定回测…"
             ),
             resource_group="backtest",
         )
+        if not started:
+            self._backtest_busy = False
+            self._publish_backtest_view()
+
+    def _backtest_task_failed(self, _message: str) -> None:
+        self._backtest_busy = False
+        self._publish_backtest_view()
 
     def _backtest_workspace_finished(self, result: object) -> None:
-        self.backtest_run_button.setEnabled(True)
-        self.backtest_compare_button.setEnabled(True)
+        self._backtest_busy = False
         runs = list(result)  # type: ignore[arg-type]
         self.backtest_runs = runs
-        self.backtest_comparison_table.setSortingEnabled(False)
-        self.backtest_comparison_table.setRowCount(len(runs))
-        for row, run in enumerate(runs):
-            values = (
-                run.run_id[:8],
-                (
-                    f"{run.strategy.name} · "
-                    f"{run.request.strategy_version_id[:8]}"
-                ),
-                run.request.symbol,
-                f"{run.first_date} → {run.last_date}",
-                f"{run.result.total_return:+.2%}",
-                f"{run.metrics.annualized_return:+.2%}",
-                f"{run.metrics.annualized_sharpe:.2f}",
-                f"{run.metrics.annualized_sortino:.2f}",
-                f"{run.metrics.calmar_ratio:.2f}",
-                f"{run.result.max_drawdown:.2%}",
-                f"{run.metrics.turnover:.2f}x",
-                str(len(run.result.trades)),
-                f"${run.result.total_commission:,.2f}",
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                if column == 0:
-                    item.setData(Qt.UserRole, run.run_id)
-                self.backtest_comparison_table.setItem(
-                    row, column, item
-                )
-        self.backtest_comparison_table.setSortingEnabled(True)
-        if runs:
-            self.backtest_comparison_table.selectRow(0)
-            self._show_backtest_run(runs[0])
+        self._selected_backtest_run_id = (
+            runs[0].run_id if runs else None
+        )
+        self._publish_backtest_view()
         self._log(
             f"回测完成：{len(runs)} 个不可变 run 已保存到用户研究目录"
-        )
-
-    def _backtest_result_selection_changed(self) -> None:
-        selected = self.backtest_comparison_table.selectedItems()
-        if not selected:
-            return
-        row = selected[0].row()
-        item = self.backtest_comparison_table.item(row, 0)
-        run_id = item.data(Qt.UserRole) if item else None
-        for run in self.backtest_runs:
-            if run.run_id == run_id:
-                self._show_backtest_run(run)
-                break
-
-    def _show_backtest_run(self, run: BacktestRun) -> None:
-        self.backtest_return_card.set_value(
-            f"{run.result.total_return:+.2%}",
-            f"期末 ${run.result.final_equity:,.2f}",
-        )
-        self.backtest_cagr_card.set_value(
-            f"{run.metrics.annualized_return:+.2%}",
-            f"{run.first_date} → {run.last_date}",
-        )
-        self.backtest_sharpe_card.set_value(
-            f"{run.metrics.annualized_sharpe:.2f}",
-            f"最差日 {run.metrics.worst_day:.2%}",
-        )
-        self.backtest_drawdown_card.set_value(
-            f"{run.result.max_drawdown:.2%}",
-            f"正收益日 {run.metrics.positive_day_ratio:.1%}",
-        )
-        self.backtest_trade_card.set_value(
-            str(len(run.result.trades)),
-            f"佣金 ${run.result.total_commission:,.2f}",
-        )
-        points = tuple(
-            (timestamp.date(), float(equity))
-            for timestamp, equity in run.result.equity_curve
-        )
-        self.backtest_chart.set_series(
-            run.request.symbol,
-            points,
-            title=(
-                f"{run.strategy.name} · 权益曲线 · "
-                f"Run {run.run_id[:8]}"
-            ),
-        )
-        self.backtest_trades_table.setSortingEnabled(False)
-        self.backtest_trades_table.setRowCount(
-            len(run.result.trades)
-        )
-        for row, trade in enumerate(run.result.trades):
-            values = (
-                trade.signal_timestamp.date().isoformat(),
-                trade.timestamp.date().isoformat(),
-                trade.signal_symbol,
-                trade.execution_symbol,
-                "买入" if trade.side.value == "buy" else "卖出",
-                str(trade.quantity),
-                f"${trade.raw_price:,.4f}",
-                f"${trade.fill_price:,.4f}",
-                f"${trade.slippage_cost:,.2f}",
-                f"${trade.commission:,.2f}",
-                str(trade.position_after),
-                f"${trade.cash_after:,.2f}",
-                (
-                    f"{trade.reason}"
-                    + (
-                        " · 替代映射"
-                        if trade.used_substitution
-                        else ""
-                    )
-                ),
-            )
-            for column, value in enumerate(values):
-                self.backtest_trades_table.setItem(
-                    row, column, QTableWidgetItem(value)
-                )
-        self.backtest_trades_table.setSortingEnabled(True)
-        self.backtest_evidence.setText(
-            f"数据：{run.data_source} · {run.price_basis} · "
-            f"data hash {run.data_hash[:12]} · "
-            f"parameter hash {run.request.parameter_hash[:12]}；"
-            "研究代理，不代表历史可成交表现。"
         )
 
     def _run_strategy_research(self) -> None:
@@ -4211,8 +3950,8 @@ class MainWindow(QMainWindow):
     def _populate_strategy_selection_combos(self) -> None:
         """Point every runtime-selection combo at the selection service."""
 
-        if hasattr(self, "backtest_strategy_combo"):
-            self._refresh_backtest_strategy_combo()
+        if hasattr(self, "backtest_page"):
+            self._publish_backtest_strategy_options()
         if hasattr(self, "targeted_validation_page"):
             purpose = StrategySelectionPurpose.TARGETED_SHADOW
             selected = self.strategy_selection.restore_or_default(purpose)
@@ -5892,9 +5631,6 @@ class MainWindow(QMainWindow):
             self.runtime_task_card.set_value(
                 str(len(self.workers)), "后台任务"
             )
-        if hasattr(self, "backtest_run_button"):
-            self.backtest_run_button.setEnabled(True)
-            self.backtest_compare_button.setEnabled(True)
         self._publish_execution_controls()
 
     def _task_cancelled(self) -> None:
@@ -6407,6 +6143,8 @@ class MainWindow(QMainWindow):
             self.history_page.set_palette(self.theme)
         if hasattr(self, "scanner_page"):
             self.scanner_page.set_palette(self.theme)
+        if hasattr(self, "backtest_page"):
+            self.backtest_page.set_palette(self.theme)
         # The execution page colours toned status cells from the palette, and
         # its tables keep the rows they were handed, so it has to be told *and*
         # redrawn: there is no repaint path that would re-read the palette on

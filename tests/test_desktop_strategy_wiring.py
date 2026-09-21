@@ -410,8 +410,8 @@ def test_a_governance_action_does_not_retarget_the_runtime(window) -> None:
 
 def test_the_backtest_combo_only_offers_research_versions(window) -> None:
     version_ids = {
-        window.backtest_strategy_combo.itemData(index)
-        for index in range(window.backtest_strategy_combo.count())
+        window.backtest_page.controls.strategy_combo.itemData(index)
+        for index in range(window.backtest_page.controls.strategy_combo.count())
     }
     assert version_ids
     for version_id in version_ids:
@@ -428,9 +428,9 @@ def test_the_backtest_combo_excludes_the_other_families(window) -> None:
         version.strategy_id
         for version in (
             window.strategies.get_version(
-                window.backtest_strategy_combo.itemData(index)
+                window.backtest_page.controls.strategy_combo.itemData(index)
             )
-            for index in range(window.backtest_strategy_combo.count())
+            for index in range(window.backtest_page.controls.strategy_combo.count())
         )
     }
     assert offered == {
@@ -440,7 +440,7 @@ def test_the_backtest_combo_excludes_the_other_families(window) -> None:
 
 
 def test_the_compare_all_branch_picks_one_version_per_family(window) -> None:
-    records = window._backtest_records(compare_all=True)
+    records = window._backtest_records(True, "")
 
     assert records
     assert len({record.strategy_id for record in records}) == len(records)
@@ -462,23 +462,23 @@ def test_the_single_branch_resolves_the_combo_choice(window) -> None:
     which is the half a combo-only assertion would not exercise.
     """
 
-    window.backtest_strategy_combo.setCurrentIndex(0)
-    chosen = window.backtest_strategy_combo.currentData()
+    window.backtest_page.controls.strategy_combo.setCurrentIndex(0)
+    chosen = window.backtest_page.controls.strategy_combo.currentData()
 
-    records = window._backtest_records(compare_all=False)
+    records = window._backtest_records(False, str(chosen))
 
     assert len(records) == 1
     assert records[0].version_id == chosen
 
 
 def test_the_single_branch_returns_nothing_for_a_blank_combo(window) -> None:
-    window.backtest_strategy_combo.clear()
-    assert window._backtest_records(compare_all=False) == []
+    window.backtest_page.controls.strategy_combo.clear()
+    assert window._backtest_records(False, "") == []
 
 
 def test_a_stopped_version_drops_out_of_the_backtest_combo(window) -> None:
-    chosen = window.backtest_strategy_combo.currentData()
-    before = window.backtest_strategy_combo.count()
+    chosen = window.backtest_page.controls.strategy_combo.currentData()
+    before = window.backtest_page.controls.strategy_combo.count()
 
     window.strategies.transition(
         chosen, StrategyStatus.STOPPED, reason="test"
@@ -486,8 +486,8 @@ def test_a_stopped_version_drops_out_of_the_backtest_combo(window) -> None:
     window._refresh_strategy_page()
 
     offered = {
-        window.backtest_strategy_combo.itemData(index)
-        for index in range(window.backtest_strategy_combo.count())
+        window.backtest_page.controls.strategy_combo.itemData(index)
+        for index in range(window.backtest_page.controls.strategy_combo.count())
     }
     assert chosen not in offered
     assert len(offered) == before - 1

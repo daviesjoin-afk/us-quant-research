@@ -145,7 +145,6 @@ STRATEGY_V2_METHODS = frozenset(
         "_auto_order_service_connected",
         "_auto_quant_preflight",
         "_backtest_records",
-        "_refresh_backtest_strategy_combo",
         "_selected_auto_strategy_record",
         "_selected_shadow_strategy_record",
     }
@@ -334,6 +333,29 @@ SCANNER_V2_METHODS = (
     "_apply_theme",
 )
 
+BACKTEST_V2_REMOVED_METHODS = (
+    "_backtest_tab",
+    "_refresh_backtest_strategy_combo",
+    "_backtest_result_selection_changed",
+    "_show_backtest_run",
+)
+BACKTEST_V2_ADDED_METHODS = (
+    "_connect_backtest_page",
+    "_publish_backtest_strategy_options",
+    "_publish_backtest_view",
+    "_backtest_run_selected",
+    "_run_selected_backtest",
+    "_run_all_backtests",
+    "_backtest_task_failed",
+)
+BACKTEST_V2_METHODS = (
+    "_backtest_records",
+    "_run_backtest_workspace",
+    "_backtest_workspace_finished",
+    "_worker_finished",
+    "_apply_theme",
+)
+
 DESKTOP_EXECUTION_V2_REMOVED_METHODS = (
     "_auto_quant_tab",
     "_populate_auto_latency_table",
@@ -387,9 +409,6 @@ DESKTOP_EXECUTION_V2_METHODS = (
 )
 
 FROZEN_METHODS = (
-    "_backtest_workspace_finished",
-    "_backtest_result_selection_changed",
-    "_show_backtest_run",
     # ``_backtest_records`` is no longer frozen: Strategy v2 moved it onto
     # ``StrategySelectionService``, which is why it appears in
     # ``STRATEGY_V2_METHODS`` above.
@@ -1368,6 +1387,10 @@ def test_the_domain_module_still_owns_the_run_helpers() -> None:
 # -- 49/50/51: the window's validation, requests and progress ----------
 
 
+def _draft(window):
+    return window.backtest_page.controls.draft()
+
+
 def _capture_task(window, monkeypatch):
     """Run ``_run_backtest_workspace`` and hand back the started task.
 
@@ -1386,13 +1409,7 @@ def _capture_task(window, monkeypatch):
         "_start_task",
         lambda task, **kwargs: captured.append((task, kwargs)) or True,
     )
-    monkeypatch.setattr(
-        window.backtest_run_button, "setEnabled", lambda _v: None
-    )
-    monkeypatch.setattr(
-        window.backtest_compare_button, "setEnabled", lambda _v: None
-    )
-    window._run_backtest_workspace(False)
+    window._run_backtest_workspace(False, _draft(window))
     return captured[0] if captured else None
 
 
@@ -1426,7 +1443,7 @@ def test_a_busy_backtest_worker_blocks_the_run(monkeypatch, tmp_path) -> None:
             lambda *a, **k: ran.append(a) or (),
         )
 
-        window._run_backtest_workspace(False)
+        window._run_backtest_workspace(False, _draft(window))
 
         assert started == []
         assert ran == []
@@ -1443,7 +1460,7 @@ def test_no_records_blocks_the_run(monkeypatch, tmp_path) -> None:
 
     window = _window(monkeypatch, tmp_path)
     try:
-        monkeypatch.setattr(window, "_backtest_records", lambda _all: [])
+        monkeypatch.setattr(window, "_backtest_records", lambda _all, _id: [])
 
         shown: list[tuple] = []
         monkeypatch.setattr(
@@ -1460,7 +1477,7 @@ def test_no_records_blocks_the_run(monkeypatch, tmp_path) -> None:
             lambda *a, **k: ran.append(a) or (),
         )
 
-        window._run_backtest_workspace(False)
+        window._run_backtest_workspace(False, _draft(window))
 
         assert started == []
         assert ran == []
@@ -1479,11 +1496,11 @@ def test_an_invalid_date_range_blocks_the_run(monkeypatch, tmp_path) -> None:
     try:
         record = _Record()
         monkeypatch.setattr(
-            window, "_backtest_records", lambda _all: [record]
+            window, "_backtest_records", lambda _all, _id: [record]
         )
         # Start strictly after end, whatever "today" happens to be.
-        window.backtest_start.setDate(
-            window.backtest_end.date().addDays(10)
+        window.backtest_page.controls.start_date.setDate(
+            window.backtest_page.controls.end_date.date().addDays(10)
         )
 
         shown: list[tuple] = []
@@ -1501,7 +1518,7 @@ def test_an_invalid_date_range_blocks_the_run(monkeypatch, tmp_path) -> None:
             lambda *a, **k: ran.append(a) or (),
         )
 
-        window._run_backtest_workspace(False)
+        window._run_backtest_workspace(False, _draft(window))
 
         assert started == []
         assert ran == []
@@ -1529,14 +1546,14 @@ def test_the_requests_come_from_the_form_controls(
     window = _window(monkeypatch, tmp_path)
     try:
         monkeypatch.setattr(
-            window, "_backtest_records", lambda _all: [_Record(), _Record()]
+            window, "_backtest_records", lambda _all, _id: [_Record(), _Record()]
         )
-        window.backtest_symbol.setText("aapl")
-        window.backtest_capital.setValue(2500)
-        window.backtest_weight.setValue(30)
-        window.backtest_per_share_cost.setValue(0.005)
-        window.backtest_minimum_cost.setValue(1.25)
-        window.backtest_slippage.setValue(4)
+        window.backtest_page.controls.symbol_input.setText("aapl")
+        window.backtest_page.controls.capital_spin.setValue(2500)
+        window.backtest_page.controls.weight_spin.setValue(30)
+        window.backtest_page.controls.per_share_commission_spin.setValue(0.005)
+        window.backtest_page.controls.minimum_commission_spin.setValue(1.25)
+        window.backtest_page.controls.slippage_spin.setValue(4)
 
         captured = _capture_task(window, monkeypatch)
         assert captured is not None
@@ -1580,7 +1597,7 @@ def test_the_progress_copy_is_verbatim(monkeypatch, tmp_path) -> None:
     window = _window(monkeypatch, tmp_path)
     try:
         monkeypatch.setattr(
-            window, "_backtest_records", lambda _all: [_Record()]
+            window, "_backtest_records", lambda _all, _id: [_Record()]
         )
         captured = _capture_task(window, monkeypatch)
         assert captured is not None
@@ -1612,7 +1629,7 @@ def test_the_start_task_contract_is_unchanged(monkeypatch, tmp_path) -> None:
     window = _window(monkeypatch, tmp_path)
     try:
         monkeypatch.setattr(
-            window, "_backtest_records", lambda _all: [_Record(), _Record()]
+            window, "_backtest_records", lambda _all, _id: [_Record(), _Record()]
         )
         captured = _capture_task(window, monkeypatch)
         assert captured is not None
@@ -1621,8 +1638,10 @@ def test_the_start_task_contract_is_unchanged(monkeypatch, tmp_path) -> None:
         assert kwargs["on_success"] == window._backtest_workspace_finished
         assert kwargs["start_message"] == "正在运行 2 个版本绑定回测…"
         assert kwargs["resource_group"] == "backtest"
+        assert kwargs["on_failure"] == window._backtest_task_failed
         assert set(kwargs) == {
             "on_success",
+            "on_failure",
             "start_message",
             "resource_group",
         }
@@ -1630,15 +1649,17 @@ def test_the_start_task_contract_is_unchanged(monkeypatch, tmp_path) -> None:
         window.deleteLater()
 
 
-def test_the_run_buttons_are_disabled_before_the_task_starts(
+def test_publish_disables_run_buttons_before_the_task_starts(
     monkeypatch, tmp_path
 ) -> None:
-    """Spec 20: both buttons are disabled, in order, before _start_task."""
+    """Spec 25/28: busy is published before _start_task, never by workers."""
 
     window = _window(monkeypatch, tmp_path)
     try:
         monkeypatch.setattr(
-            window, "_backtest_records", lambda _all: [_Record()]
+            window,
+            "_backtest_records",
+            lambda _all, _id: [_Record()],
         )
 
         from PySide6.QtWidgets import QMessageBox
@@ -1647,29 +1668,27 @@ def test_the_run_buttons_are_disabled_before_the_task_starts(
         monkeypatch.setattr(QMessageBox, "warning", lambda *a: None)
 
         order: list[str] = []
-        monkeypatch.setattr(
-            window.backtest_run_button,
-            "setEnabled",
-            lambda _v: order.append("run.setEnabled"),
-        )
-        monkeypatch.setattr(
-            window.backtest_compare_button,
-            "setEnabled",
-            lambda _v: order.append("compare.setEnabled"),
-        )
-        monkeypatch.setattr(
-            window,
-            "_start_task",
-            lambda task, **kwargs: order.append("start_task") or True,
-        )
+        original_publish = window._publish_backtest_view
 
-        window._run_backtest_workspace(False)
+        def publish() -> None:
+            original_publish()
+            order.append(
+                "publish-disabled"
+                if not window.backtest_page.controls.run_selected_button.isEnabled()
+                else "publish-enabled"
+            )
 
-        assert order == [
-            "run.setEnabled",
-            "compare.setEnabled",
-            "start_task",
-        ]
+        def start_task(task, **kwargs):
+            del task, kwargs
+            order.append("start_task")
+            return True
+
+        monkeypatch.setattr(window, "_publish_backtest_view", publish)
+        monkeypatch.setattr(window, "_start_task", start_task)
+
+        window._run_backtest_workspace(False, _draft(window))
+
+        assert order == ["publish-disabled", "start_task"]
     finally:
         window.deleteLater()
 
@@ -1744,6 +1763,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(TARGETED_RESEARCH_V2_REMOVED_METHODS)
         | set(RESEARCH_DATA_V2_REMOVED_METHODS)
         | set(SCANNER_V2_REMOVED_METHODS)
+        | set(BACKTEST_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1754,6 +1774,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(TARGETED_RESEARCH_V2_ADDED_METHODS)
         | set(RESEARCH_DATA_V2_ADDED_METHODS)
         | set(SCANNER_V2_ADDED_METHODS)
+        | set(BACKTEST_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1780,6 +1801,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(TARGETED_RESEARCH_V2_METHODS)
         | set(RESEARCH_DATA_V2_METHODS)
         | set(SCANNER_V2_METHODS)
+        | set(BACKTEST_V2_METHODS)
     )
     # Exact, not a subset: the delta is the declared surface and nothing
     # else, in both directions.
@@ -1794,6 +1816,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(TARGETED_RESEARCH_V2_METHODS) <= set(changed)
     assert set(RESEARCH_DATA_V2_METHODS) <= set(changed)
     assert set(SCANNER_V2_METHODS) <= set(changed)
+    assert set(BACKTEST_V2_METHODS) <= set(changed)
     assert "_run_backtest_workspace" in changed
 
 

@@ -17,12 +17,12 @@ def test_normal_paper_ingress_delegates_once_to_workflow_controller() -> None:
         "_resume_auto_quant_entries": "paper_workflow.set_entries_paused(False)",
         "_stop_auto_quant": "paper_workflow.request_stop",
         "_poll_auto_quant_orders": "paper_workflow.poll()",
-        "_stream_snapshot_received": "paper_workflow.on_stream(result)",
+        "_on_market_snapshot_changed": "paper_workflow.on_stream(snapshot)",
     }
     for name, delegation in expected.items():
         source = _source(name)
         assert source.count(delegation) == 1
-    stream_source = _source("_stream_snapshot_received")
+    stream_source = _source("_on_market_snapshot_changed")
     assert "_poll_auto_quant_orders()" not in stream_source
 
 
@@ -111,10 +111,10 @@ def test_finalization_proves_zero_state_before_disconnect_and_lease_release() ->
 
 def test_finalization_suppresses_desktop_poll_and_stream_ingress() -> None:
     poll_source = _source("_poll_auto_quant_orders")
-    stream_source = _source("_stream_snapshot_received")
+    stream_source = _source("_on_market_snapshot_changed")
     assert poll_source.index("_paper_finalization_inflight") < poll_source.index(
         "paper_workflow.poll()"
     )
     assert stream_source.index("_paper_finalization_inflight") < stream_source.index(
-        "paper_workflow.on_stream(result)"
+        "paper_workflow.on_stream(snapshot)"
     )

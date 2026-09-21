@@ -77,7 +77,7 @@ def test_paper_order_watchdog_heartbeat_is_wired() -> None:
         # The heartbeat callback must be safe to invoke in any phase.
         window._poll_auto_quant_orders()
         # Stream ingress must refresh the watchdog liveness stamp.
-        source = inspect.getsource(MainWindow._stream_snapshot_received)
+        source = inspect.getsource(MainWindow._on_market_snapshot_changed)
         assert "_last_stream_ingress_monotonic = monotonic()" in source
         # The heartbeat skips when stream ticks drove the watchdog recently.
         poll_source = inspect.getsource(MainWindow._poll_auto_quant_orders)

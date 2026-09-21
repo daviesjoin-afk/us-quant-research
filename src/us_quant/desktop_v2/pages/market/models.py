@@ -116,6 +116,27 @@ class MarketReadinessFacts:
     subscription_current_count: int
     subscription_recent_count: int
 
+    @classmethod
+    def from_breakdown(cls, breakdown: object) -> "MarketReadinessFacts":
+        """Re-shape the trading layer's breakdown into these display facts.
+
+        The counting rules stay in the trading layer; this only flattens the
+        result, which is why it belongs with the type it constructs rather than
+        with the page or the orchestrator.
+        """
+
+        return cls(
+            candidate_count=breakdown.candidate_count,
+            candidate_current_count=breakdown.candidate_current_count,
+            candidate_recent_count=breakdown.candidate_recent_count,
+            reference_count=breakdown.reference_count,
+            reference_current_count=breakdown.reference_current_count,
+            reference_recent_count=breakdown.reference_recent_count,
+            subscription_count=breakdown.subscription_count,
+            subscription_current_count=breakdown.subscription_current_count,
+            subscription_recent_count=breakdown.subscription_recent_count,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class MarketConnectingFacts:

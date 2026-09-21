@@ -1339,12 +1339,24 @@ def test_desktop_no_longer_imports_a_concrete_adapter() -> None:
 
 
 def test_desktop_delegates_venue_routing_to_the_application() -> None:
-    desktop = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "us_quant"
-        / "desktop.py"
+    """The venue choice is the application's; the market orchestrator asks it.
+
+    v2O-A moved the IBKR 5x24 session check out of ``MainWindow`` into
+    ``MarketOrchestrator``, so the call site moved with it.  The property under
+    test is unchanged: nobody computes the exchange locally, the application is
+    asked.
+    """
+
+    root = Path(__file__).resolve().parents[1] / "src" / "us_quant"
+    desktop = (root / "desktop.py").read_text(encoding="utf-8")
+    orchestrator = (
+        root
+        / "desktop_v2"
+        / "orchestration"
+        / "market"
+        / "orchestrator.py"
     ).read_text(encoding="utf-8")
 
     assert "ibkr_market_data_exchange" not in desktop
-    assert "desired_market_exchange" in desktop
+    assert "ibkr_market_data_exchange" not in orchestrator
+    assert "desired_market_exchange" in orchestrator

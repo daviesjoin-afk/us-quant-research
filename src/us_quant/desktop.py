@@ -65,13 +65,6 @@ from us_quant.desktop_universe_service import (
 from us_quant.desktop_market_scan_service import DesktopMarketScanService
 from us_quant.desktop_backtest_service import DesktopBacktestService
 from us_quant.ibkr import IBKRConnectionConfig, probe_ibkr_socket
-from us_quant.trading.application.market_data import (
-    PUSH_LISTENER_SOURCES,
-    SOURCE_ALPACA_IEX,
-    SOURCE_IBKR_EXTENDED,
-    MarketDataCredentials,
-    MarketDataStartRequest,
-)
 from us_quant.trading.composition.accounts import (
     build_broker_account_application,
 )
@@ -93,7 +86,6 @@ from us_quant.trading.ports.broker_account import (
 )
 from us_quant.trading.ports.market_data import (
     MarketDataActiveError,
-    MarketDataCredentialsError,
 )
 from us_quant.desktop_settings import (
     DesktopSettingsService,
@@ -186,6 +178,10 @@ from us_quant.trading.runtime.workflow_state import (
     PaperWorkflowPhase,
     WorkflowStateError,
 )
+from us_quant.desktop_v2.orchestration.market import (
+    MarketOrchestrator,
+    MarketReadinessInputs,
+)
 from us_quant.desktop_v2.pages.execution import ExecutionPage
 from us_quant.desktop_v2.pages.execution.presenter import (
     build_candidates_view,
@@ -193,17 +189,6 @@ from us_quant.desktop_v2.pages.execution.presenter import (
     control_state,
 )
 from us_quant.desktop_v2.pages.market import MarketPage
-from us_quant.desktop_v2.pages.market.controls import VALID_MARKET_SOURCES
-from us_quant.desktop_v2.pages.market.models import (
-    MarketConnectingFacts,
-    MarketReadinessFacts,
-)
-from us_quant.desktop_v2.pages.market.presenter import (
-    build_connecting_view,
-    build_market_view,
-    control_view,
-)
-from us_quant.desktop_v2.pages.market.rows import quote_rows
 from us_quant.desktop_v2.pages.research.targeted import TargetedValidationPage
 from us_quant.desktop_v2.pages.research.targeted.evidence_presenter import (
     evidence_view,
@@ -269,10 +254,7 @@ from us_quant.desktop_v2.pages.system.settings.models import (
     SettingsStorageView,
 )
 from us_quant.desktop_tasks import DesktopTaskController
-from us_quant.desktop_workers import (
-    StreamWorker,
-    TaskThread,
-)
+from us_quant.desktop_workers import TaskThread
 from us_quant.desktop_widgets import (
     EquityComparisonChart,
     MetricCard,
@@ -510,14 +492,7 @@ class MainWindow(QMainWindow):
         self._minute_recorded_keys: dict[
             tuple[str, str, str], bool
         ] = {}
-        self._last_stream_event_key: (
-            tuple[str, int] | None
-        ) = None
-        self._quote_last_ready_monotonic: dict[str, float] = {}
-        self._last_stream_status_key: tuple[object, ...] | None = None
-        self._last_stream_status_log_at = 0.0
         self._last_stream_ingress_monotonic = 0.0
-        self._last_stream_push_monotonic = 0.0
         self._paper_finalization_inflight = False
         self._last_paper_finalization_started: float | None = None
         self._last_runtime_events_refresh = 0.0
@@ -535,17 +510,11 @@ class MainWindow(QMainWindow):
         # They live here because only the window knows a local step is running;
         # the page is told the resulting booleans, never these flags.
         self._launch_busy = False
-        self._stream_stop_pending = False
         # The channel probe is a launch step too, but it is owned by its own
         # worker rather than by the shared launch flag: the broker resource
         # group serializes it, so an unrelated task finishing must not be able
         # to release the route on the probe's behalf.
         self._channel_check_inflight = False
-        # The market route's scope line and watchlist note are computed here --
-        # the scope needs the universe and the scan, the note records which
-        # workflow last set the subscription -- and handed to the page as text.
-        self._market_scope = ""
-        self._market_watchlist_note: str | None = None
         # Targeted workspace facts the page renders but does not own.
         self._target_status = "未指定"
         self._minute_status = (
@@ -557,12 +526,6 @@ class MainWindow(QMainWindow):
         self._targeted_active_evidence_tab: int | None = None
         self.account_portfolio: BrokerAccountPortfolio | None = None
         self._dashboard_chart_view = DashboardChartView(None, ())
-        self._dashboard_market_stop_reason: str | None = None
-        self.stream_worker: StreamWorker | None = None
-        self._pending_stream_switch: (
-            tuple[str, tuple[str, ...]] | None
-        ) = None
-        self.stream_snapshot: MarketSnapshot | None = None
         self.shadow_engine: ShadowPaperEngine | None = None
         self.shadow_snapshot: ShadowSnapshot | None = None
         self.target_preflight_result: TargetPreflightResult | None = None
@@ -718,11 +681,6 @@ class MainWindow(QMainWindow):
         )
         root_layout.addWidget(self.status_label)
         self.setCentralWidget(central)
-        self.stream_timer = QTimer(self)
-        self.stream_timer.setInterval(500)
-        self.stream_timer.timeout.connect(
-            self._poll_stream_snapshot
-        )
         # H-1 fix: independent Paper order watchdog heartbeat.  The order
         # lifecycle (stale-BUY cancel, SELL intervention, health evaluation)
         # must keep running even when the market stream is down or stopped;
@@ -756,7 +714,31 @@ class MainWindow(QMainWindow):
         ``research`` and ``system`` are native aggregates that own their fixed
         secondary workspace tabs.  Research is deliberately not part of the
         trading runtime navigation.
+
+        The market route is composed first: its orchestrator is the window's
+        market runtime owner, and the settings view asks it which source holds
+        the connection while the rest of the routes are still being built.
         """
+
+        # The market page owns its widgets and reports intent.  The market
+        # *runtime* -- the worker, the snapshot, the poll timer, the pending
+        # switch and the page's rendering -- belongs to ``market_orchestrator``,
+        # which is constructed here with its dependencies injected.  What stays
+        # on the window is the cross-workflow part: the Paper and Shadow
+        # interlocks that decide whether a stop or a switch is allowed, and the
+        # fan-out of market facts to the other workflows.
+        self.market_page = MarketPage(
+            palette=self.theme,
+            theme_name=self.current_theme_name,
+            selected_provider=self.preferences.market_provider,
+        )
+        self.market_orchestrator = MarketOrchestrator(
+            market_data=self.market_data,
+            credential_service=self.credential_service,
+            page=self.market_page,
+        )
+        self._connect_market_page()
+
         self.targeted_validation_page = TargetedValidationPage(palette=self.theme)
         self._connect_targeted_validation_page()
         self.universe_page = UniversePage(palette=self.theme)
@@ -846,16 +828,6 @@ class MainWindow(QMainWindow):
         # or start anything, so the launch confirmation below stays the window's.
         self.execution_page = ExecutionPage(palette=self.theme)
         self._connect_execution_page()
-
-        # The market page owns its widgets and reports intent; the stream
-        # lifecycle, the credentials and the safety gates stay here.  It is told
-        # which controls are open rather than deciding that itself.
-        self.market_page = MarketPage(
-            palette=self.theme,
-            theme_name=self.current_theme_name,
-            selected_provider=self.preferences.market_provider,
-        )
-        self._connect_market_page()
 
         self.dashboard_page = DashboardPage(palette=self.theme)
         self._connect_dashboard_page()
@@ -949,13 +921,6 @@ class MainWindow(QMainWindow):
             exports_path=str(self.paths.exports_root),
         )
 
-    def _active_stream_provider(self) -> str | None:
-        """The provider whose stream is live, or ``None`` when idle."""
-
-        worker = self.stream_worker
-        if worker is not None and worker.isRunning():
-            return worker.source_id
-        return None
 
     def _publish_settings_view(self) -> None:
         """Render one consistent settings view from the window's facts."""
@@ -972,7 +937,7 @@ class MainWindow(QMainWindow):
                 credential_save_enabled=has_credentials,
                 credential_clear_enabled=(
                     has_credentials
-                    and provider != self._active_stream_provider()
+                    and provider != self.market_orchestrator.active_source_id
                 ),
                 connection_settings_enabled=(
                     self._connection_settings_enabled
@@ -1038,19 +1003,225 @@ class MainWindow(QMainWindow):
         )
 
     def _connect_market_page(self) -> None:
-        """Wire the market page's intents to the handlers that act on them.
+        """Wire the market page's intents and the orchestrator's publications.
 
-        The provider signal is the one entry that fires for an *operator* change
-        only: the programmatic setter used to restore a saved preference and to
-        sync the settings panel is deliberately silent, so the two combos cannot
-        drive each other.
+        The page signals reach the *window*, not the orchestrator directly,
+        because every market request still has to pass a cross-workflow gate
+        first: a stop is refused while a Paper session holds positions, and a
+        switch is refused for the same reason.  The gates are thin -- they read
+        the Paper and Shadow facts, decide, and then call the orchestrator.
+
+        The orchestrator's own signals are connected here too, because the
+        window is still the fan-out point: market facts go on to the dashboard,
+        the minute recorder, the auto-quant shortlist, the Paper workflow and
+        the Shadow book, and none of those belong to the market route.
         """
 
         page = self.market_page
+        orchestrator = self.market_orchestrator
         page.provider_selected.connect(self._stream_provider_selected)
-        page.start_requested.connect(self._start_stream)
-        page.stop_requested.connect(self._stop_stream)
+        page.start_requested.connect(self._request_market_start)
+        page.stop_requested.connect(self._request_market_stop)
         page.load_scan_watchlist_requested.connect(self._apply_intraday_watchlist)
+
+        orchestrator.snapshot_changed.connect(self._on_market_snapshot_changed)
+        orchestrator.snapshot_invalidated.connect(
+            self._on_market_snapshot_invalidated
+        )
+        orchestrator.shell_health_changed.connect(
+            self._render_market_shell_health
+        )
+        orchestrator.controls_changed.connect(self._publish_execution_controls)
+        orchestrator.connection_settings_enabled_changed.connect(
+            self._set_connection_settings_enabled
+        )
+        orchestrator.log_requested.connect(self._log)
+        orchestrator.runtime_event_requested.connect(
+            self._record_market_runtime_event
+        )
+        orchestrator.task_failure_requested.connect(self._task_failed)
+        orchestrator.refused.connect(self._report_market_refusal)
+        orchestrator.automatic_switch_requested.connect(
+            self._request_automatic_market_switch
+        )
+
+    # -- the cross-workflow market bridges ------------------------------
+    #
+    # These three are composition-level interlocks, not compatibility wrappers.
+    # Whether a market stop or switch is allowed depends on the Paper session
+    # and the Shadow book, which the market orchestrator may not name; so the
+    # window reads those facts, decides, and only then calls in.  None of them
+    # touches the worker, the snapshot, the page or the poll timer -- that
+    # ownership moved, and these must not take it back.
+
+    def _request_market_start(self) -> None:
+        """Start the feed; the orchestrator owns everything past this point."""
+
+        self.market_orchestrator.start()
+
+    def _request_market_stop(self, *_args: object) -> None:
+        """Stop the feed, unless a Paper session or the Shadow book forbids it."""
+
+        self._stop_market_data()
+
+    def _request_market_switch(
+        self,
+        provider: str,
+        *,
+        allow_auto_session_switch: bool = False,
+    ) -> None:
+        """Switch the feed, unless a Paper session forbids it.
+
+        The Paper interlock is the reason this bridge exists at all: the
+        orchestrator may not import the Paper workflow, so the refusal decision
+        stays here and the market layer is only asked once it is allowed.
+        """
+
+        if (
+            self.auto_quant_snapshot is not None
+            and (
+                self.auto_quant_snapshot.active
+                or self.auto_quant_snapshot.positions
+                or self.auto_quant_snapshot.pending_orders
+            )
+            and not allow_auto_session_switch
+        ):
+            QMessageBox.warning(
+                self,
+                "自动量化会话仍在运行",
+                "Paper 持仓或在途订单存在时禁止切换行情源。"
+                "请先停止自动量化并完成券商对账。",
+            )
+            return
+        self.market_orchestrator.request_switch(provider)
+
+    def _request_automatic_market_switch(self, provider: str) -> None:
+        """An IBKR 5×24 session rotation, which is allowed to bypass the interlock."""
+
+        self._request_market_switch(provider, allow_auto_session_switch=True)
+
+    def _stop_market_data(self) -> bool:
+        """The market stop, with the Paper and Shadow interlocks applied.
+
+        Returns False when a refusal left the feed running, so the supervisor's
+        join verdict and the switch path both see the truth.
+        """
+
+        if (
+            self.auto_quant_snapshot is not None
+            and (
+                self.auto_quant_snapshot.active
+                or self.auto_quant_snapshot.positions
+                or self.auto_quant_snapshot.pending_orders
+            )
+        ):
+            QMessageBox.warning(
+                self,
+                "自动量化会话仍在运行",
+                "必须先在“自动量化”点击停止，并等待 Paper 持仓和"
+                "在途订单完成对账后才能停止行情。",
+            )
+            return False
+        if self.shadow_engine is not None and self.shadow_engine.active:
+            self._stop_shadow()
+        return self.market_orchestrator.stop()
+
+    def _report_market_refusal(self, title: str, message: str) -> None:
+        """Surface a request the market layer refused before touching the feed."""
+
+        QMessageBox.warning(self, title, message)
+
+    def _record_market_runtime_event(self, event: object) -> None:
+        """Record one market runtime event; the store is the window's."""
+
+        self._record_runtime_event(
+            severity=event.severity,
+            component=event.component,
+            code=event.code,
+            message=event.message,
+        )
+
+    def _render_market_shell_health(self, health: object) -> None:
+        """Paint the shell header from the market layer's published facts.
+
+        The badges belong to the whole workbench, so the orchestrator publishes
+        text and state and the window paints them.  A handshake of ``None``
+        means "leave the badge alone": the legacy rule only ever promoted it.
+        """
+
+        if health.handshake_text is not None:
+            self.handshake_badge.setText(health.handshake_text)
+            self.handshake_badge.setProperty(
+                "state", health.handshake_state
+            )
+        self.market_badge.setText(health.market_text)
+        self.market_badge.setProperty("state", health.market_state)
+        self._repolish_health_badges()
+        if health.status_log is not None:
+            self._log(health.status_log)
+
+    def _on_market_snapshot_changed(self, snapshot: object) -> None:
+        """Fan one market fact out to the workflows that still consume it.
+
+        This is the temporary cross-workflow bridge the extraction leaves
+        behind.  Each consumer below is a *different* capability that a later
+        round will own: minute evidence, auto-quant candidates, execution
+        preflight, Paper and Shadow.  What this method must never do again is
+        render the market page, touch the worker or maintain the readiness
+        cache -- those moved into the orchestrator, and a guard pins that.
+        """
+
+        self.workflow_controller.market_account.update(
+            account_ready=self.account_portfolio is not None,
+            market_ready=snapshot.realtime_ready,
+            message=snapshot.message,
+        )
+        self._record_minute_snapshot(snapshot)
+        self._publish_dashboard_view()
+        self._populate_auto_quant_candidates()
+        self._refresh_target_preflight()
+        if (
+            not getattr(self, "_paper_finalization_inflight", False)
+            and self.paper_trading.phase() in {
+            PaperWorkflowPhase.RUNNING,
+            PaperWorkflowPhase.PAUSED,
+            PaperWorkflowPhase.STOPPING,
+            }
+        ):
+            self._last_stream_ingress_monotonic = monotonic()
+            try:
+                self._apply_paper_workflow_result(
+                    self.paper_workflow.on_stream(snapshot)
+                )
+            except WorkflowStateError as error:
+                self._log(str(error))
+        if self.shadow_engine is not None and self.shadow_engine.active:
+            self.shadow_snapshot = self.shadow_engine.on_stream(snapshot)
+            self._publish_targeted_view()
+
+    def _on_market_snapshot_invalidated(self) -> None:
+        """The feed's snapshot was invalidated; the dashboard card must follow."""
+
+        self._publish_dashboard_view()
+
+    def _publish_market_readiness_inputs(self) -> None:
+        """Hand the market layer the cross-domain symbols it must classify.
+
+        The readiness breakdown counts how many candidates and reference
+        symbols are fresh, but the candidate shortlist is the execution route's
+        and the reference symbols come from the selected strategy.  Neither is
+        market data this window's market layer may look up, so they are pushed
+        in as finished data whenever either one changes.
+        """
+
+        self.market_orchestrator.set_readiness_inputs(
+            MarketReadinessInputs(
+                candidate_symbols=tuple(
+                    row.symbol for row in self.auto_quant_candidates
+                ),
+                reference_symbols=self._auto_quant_market_reference_symbols(),
+            )
+        )
 
     def _connect_dashboard_page(self) -> None:
         """Wire the Dashboard's only user intent to its business handler."""
@@ -1067,10 +1238,10 @@ class MainWindow(QMainWindow):
         self.dashboard_page.render(
             build_dashboard_view(
                 portfolio=self.account_portfolio,
-                snapshot=self.stream_snapshot,
+                snapshot=self.market_orchestrator.snapshot,
                 artifacts=self.artifact_catalog.artifacts,
                 chart=self._dashboard_chart_view,
-                market_stop_reason=self._dashboard_market_stop_reason,
+                market_stop_reason=self.market_orchestrator.stop_reason,
             )
         )
 
@@ -1834,10 +2005,7 @@ class MainWindow(QMainWindow):
     def _apply_intraday_watchlist(self) -> None:
         if self.scan is None:
             return
-        if (
-            self.stream_worker is not None
-            and self.stream_worker.isRunning()
-        ):
+        if self.market_orchestrator.is_live:
             return
         paper_capital = self._paper_simulation_capital()
         selection_capital = (
@@ -1848,9 +2016,10 @@ class MainWindow(QMainWindow):
             capital=selection_capital,
         )
         if symbols:
-            self.market_page.set_subscription_symbols(symbols)
-            self._market_watchlist_note = "实时订阅子集；不限制研究或交易范围"
-            self._publish_market_controls()
+            self.market_orchestrator.set_subscription_symbols(
+                symbols,
+                note="实时订阅子集；不限制研究或交易范围",
+            )
             self._log(
                 f"已从 {len(self.scan.results):,} 个最近扫描结果中选出 "
                 f"{len(symbols)} 个实时订阅代码；"
@@ -1877,18 +2046,15 @@ class MainWindow(QMainWindow):
             if strategy is not None
             else "请选择自动轮动策略版本"
         )
+        snapshot = self.market_orchestrator.snapshot
         readiness = calculate_quote_readiness_breakdown(
-            self.stream_snapshot
-            if self.stream_snapshot is not None
-            else (),
+            snapshot if snapshot is not None else (),
             candidate_symbols=(
                 row.symbol for row in self.auto_quant_candidates
             ),
             reference_symbols=self._auto_quant_market_reference_symbols(),
             recently_ready_symbols=(
-                symbol
-                for symbol in self._quote_last_ready_monotonic
-                if self._quote_was_recently_ready(symbol)
+                self.market_orchestrator.recently_ready_symbols()
             ),
         )
         minimum_realtime_quotes = (
@@ -1929,6 +2095,10 @@ class MainWindow(QMainWindow):
     ) -> None:
         if not hasattr(self, "execution_page"):
             return
+        # The selected strategy is what supplies the reference symbols, so this
+        # is the moment they change; the market layer needs them for its
+        # readiness card and may not look them up itself.
+        self._publish_market_readiness_inputs()
         result = self._auto_quant_preflight()
         displayed_checks = [
             row
@@ -2224,21 +2394,18 @@ class MainWindow(QMainWindow):
             ),
         )
         stream_symbols = tuple(dict.fromkeys(symbols + market_references))
-        self.market_page.set_subscription_symbols(stream_symbols)
+        self.market_orchestrator.set_subscription_symbols(stream_symbols)
         self._set_launch_busy(False)
         self._populate_auto_quant_candidates()
-        if (
-            self.stream_worker is not None
-            and self.stream_worker.isRunning()
-        ):
+        if self.market_orchestrator.is_live:
             self.execution_page.render_context(
                 summary=f"已整理 {len(symbols)} 个候选，正在安全停止旧行情并切换。"
             )
-            self._request_stream_switch(
-                str(self.market_page.selected_provider() or "finnhub_trades")
+            self._request_market_switch(
+                self.market_orchestrator.selected_provider() or "finnhub_trades"
             )
             return
-        self._start_stream()
+        self.market_orchestrator.start()
 
     def _stop_auto_market_data(self) -> None:
         if (
@@ -2257,7 +2424,7 @@ class MainWindow(QMainWindow):
                 "才能停止行情。",
             )
             return
-        if self._stop_stream():
+        if self._stop_market_data():
             self.execution_page.render_context(
                 summary="当前行情已停止。可重新点击第 1 步准备新的候选。"
             )
@@ -2776,7 +2943,11 @@ class MainWindow(QMainWindow):
 
     def _stop_auto_quant(self) -> None:
         try:
-            self._apply_paper_workflow_result(self.paper_workflow.request_stop(self.stream_snapshot))
+            self._apply_paper_workflow_result(
+                self.paper_workflow.request_stop(
+                    self.market_orchestrator.snapshot
+                )
+            )
         except WorkflowStateError as error:
             self._log(str(error))
 
@@ -2950,20 +3121,17 @@ class MainWindow(QMainWindow):
 
         if not hasattr(self, "execution_page"):
             return
+        stream = self.market_orchestrator.snapshot
         quotes = {
             quote.symbol: quote
-            for quote in (
-                self.stream_snapshot.quotes
-                if self.stream_snapshot is not None
-                else ()
-            )
+            for quote in (stream.quotes if stream is not None else ())
         }
         candidates = self.auto_quant_candidates
         self.execution_page.render_candidates(
             build_candidates_view(
                 candidates=candidates,
                 quotes=quotes,
-                recently_ready=self._quote_was_recently_ready,
+                recently_ready=self.market_orchestrator.was_recently_ready,
             )
         )
         snapshot = self.auto_quant_snapshot
@@ -3016,7 +3184,7 @@ class MainWindow(QMainWindow):
                 reconciliations=reconciliations,
                 audit_by_intent=audit_by_intent,
                 candidates=candidates,
-                recently_ready=self._quote_was_recently_ready,
+                recently_ready=self.market_orchestrator.was_recently_ready,
             )
         )
 
@@ -3048,18 +3216,8 @@ class MainWindow(QMainWindow):
                     phase is PaperWorkflowPhase.RECONCILING_READY
                     and self.paper_trading.reconciliation_status().awaiting_confirmation
                 ),
-                stream_running=self._stream_is_live(),
+                stream_running=self.market_orchestrator.is_live,
             )
-        )
-
-    def _stream_is_live(self) -> bool:
-        """Whether a usable feed is owned: running, and not stuck stopping."""
-
-        worker = self.stream_worker
-        return (
-            not self._stream_stop_pending
-            and worker is not None
-            and worker.isRunning()
         )
 
     def _launch_locked(self) -> bool:
@@ -3127,11 +3285,8 @@ class MainWindow(QMainWindow):
             )
         else:
             self._target_status = f"{symbol} · 订阅、回放、评估和影子做 T 共用"
-        if (
-            self.stream_worker is None
-            or not self.stream_worker.isRunning()
-        ):
-            self.market_page.set_subscription_symbols((symbol,))
+        if not self.market_orchestrator.is_live:
+            self.market_orchestrator.set_subscription_symbols((symbol,))
         self._refresh_minute_data_status(symbol)
         self._refresh_target_preflight()
         self._log(
@@ -3148,10 +3303,7 @@ class MainWindow(QMainWindow):
                 "请输入一个有效的美股或 ETF 代码。",
             )
             return
-        if (
-            self.stream_worker is not None
-            and self.stream_worker.isRunning()
-        ):
+        if self.market_orchestrator.is_live:
             QMessageBox.information(
                 self,
                 "请先停止当前行情流",
@@ -3159,16 +3311,16 @@ class MainWindow(QMainWindow):
             )
             return
         self.targeted_validation_page.set_target_symbol(symbol)
-        self.market_page.set_subscription_symbols((symbol,))
-        self._market_watchlist_note = f"针对性日内 T：{symbol}"
-        self._publish_market_controls()
+        self.market_orchestrator.set_subscription_symbols(
+            (symbol,), note=f"针对性日内 T：{symbol}"
+        )
         self._log(
             f"本次针对性日内 T 标的设为 {symbol}；"
             "启动行情后仍需通过实时性与中概排除门。"
         )
         self._refresh_minute_data_status(symbol)
         self._refresh_target_preflight()
-        self._start_stream()
+        self.market_orchestrator.start()
 
     def _refresh_minute_data_status(
         self, symbol: str | None = None
@@ -3209,14 +3361,15 @@ class MainWindow(QMainWindow):
             ),
             None,
         ) if self.universe is not None else None
+        stream = self.market_orchestrator.snapshot
         quote = next(
             (
                 row
-                for row in self.stream_snapshot.quotes
+                for row in (stream.quotes if stream is not None else ())
                 if row.symbol == symbol
             ),
             None,
-        ) if self.stream_snapshot is not None else None
+        )
         account: BrokerAccountSnapshot | None = (
             self.account_portfolio.account
             if self.account_portfolio is not None
@@ -4055,16 +4208,13 @@ class MainWindow(QMainWindow):
             badge.style().unpolish(badge)
             badge.style().polish(badge)
 
-    def _stream_symbols_from_input(self) -> tuple[str, ...]:
-        """The operator's subscription input, parsed at the page's boundary."""
-
-        return self.market_page.subscription_symbols()
 
     def _settings_provider_selected(self, provider: str) -> None:
         # Programmatic: the settings combo is not the operator choosing on this
         # route, and the setter is silent so the two combos cannot drive each
-        # other.
-        self.market_page.set_selected_provider(provider)
+        # other.  The write goes through the orchestrator because pointing the
+        # route's combo is the market layer's, not the window's.
+        self.market_orchestrator.set_selected_provider(provider)
         api_provider = (
             "ibkr" if provider == "ibkr_extended" else provider
         )
@@ -4075,7 +4225,7 @@ class MainWindow(QMainWindow):
 
     def _stream_provider_selected(self, *_args: object) -> None:
         provider = str(
-            self.market_page.selected_provider() or "finnhub_trades"
+            self.market_orchestrator.selected_provider() or "finnhub_trades"
         )
         self.settings_page.set_market_provider(
             provider, emit_change=False
@@ -4087,109 +4237,25 @@ class MainWindow(QMainWindow):
     ) -> None:
         provider = draft.market_provider
         self._save_user_preferences(draft)
-        if not self._stream_symbols_from_input():
-            self.market_page.set_selected_provider(provider)
-            self._pending_stream_switch = None
+        if not self.market_orchestrator.subscription_symbols():
+            self.market_orchestrator.set_selected_provider(provider)
             self._log(
                 "默认行情源已切换；当前没有订阅代码。"
                 "请在“监控台 → 行情监控”输入任意股票或 ETF 后启动行情。"
             )
             return
-        self._request_stream_switch(provider)
-
-    def _request_stream_switch(
-        self,
-        provider: str,
-        *,
-        allow_auto_session_switch: bool = False,
-    ) -> None:
-        symbols = self._stream_symbols_from_input()
-        if not symbols:
-            QMessageBox.warning(
-                self,
-                "无法切换行情",
-                "请先在“监控台 → 实时行情”填写至少一个代码，"
-                "或从广域扫描载入候选。",
-            )
-            return
-        if len(symbols) > 30:
-            QMessageBox.warning(
-                self, "无法切换行情", "首期最多订阅 30 个代码"
-            )
-            return
-        if (
-            self.auto_quant_snapshot is not None
-            and (
-                self.auto_quant_snapshot.active
-                or self.auto_quant_snapshot.positions
-                or self.auto_quant_snapshot.pending_orders
-            )
-            and not allow_auto_session_switch
-        ):
-            QMessageBox.warning(
-                self,
-                "自动量化会话仍在运行",
-                "Paper 持仓或在途订单存在时禁止切换行情源。"
-                "请先停止自动量化并完成券商对账。",
-            )
-            return
-        if provider not in VALID_MARKET_SOURCES:
-            QMessageBox.warning(
-                self, "无法切换行情", f"不支持的数据源：{provider}"
-            )
-            return
-        self.market_page.set_selected_provider(provider)
-        self._pending_stream_switch = (provider, symbols)
-        worker = self.stream_worker
-        if worker is not None and worker.isRunning():
-            self._log(
-                f"正在停止 {worker.source_id}，随后切换到 {provider}…"
-            )
-            if not self._stop_stream(
-                preserve_pending=True,
-                allow_auto_session_switch=allow_auto_session_switch,
-            ):
-                return
-        self._activate_pending_stream_switch()
-
-    def _activate_pending_stream_switch(self) -> None:
-        pending = self._pending_stream_switch
-        if pending is None:
-            return
-        if (
-            self.stream_worker is not None
-            and self.stream_worker.isRunning()
-        ):
-            return
-        provider, symbols = pending
-        self._pending_stream_switch = None
-        self.market_page.set_selected_provider(provider)
-        self.market_page.set_subscription_symbols(symbols)
-        self._start_stream()
+        self._request_market_switch(provider)
 
     def _maybe_rotate_extended_ibkr_session(self) -> None:
+        """Refresh the session context, then let the market layer decide.
+
+        The rotation itself is the market orchestrator's: it owns the active
+        source and the venue the adapter was built for.  It emits a request
+        rather than switching, so the Paper interlock below still applies.
+        """
+
         self._refresh_extended_hours_status()
-        worker = self.stream_worker
-        if (
-            worker is None
-            or not worker.isRunning()
-            or worker.source_id != SOURCE_IBKR_EXTENDED
-            or self._pending_stream_switch is not None
-        ):
-            return
-        desired_exchange = self.market_data.desired_market_exchange(
-            worker.source_id
-        )
-        if desired_exchange == worker.market_exchange:
-            return
-        self._log(
-            "美东时段切换：正在把 IBKR 5×24 行情从 "
-            f"{worker.market_exchange} 切换到 {desired_exchange}…"
-        )
-        self._request_stream_switch(
-            "ibkr_extended",
-            allow_auto_session_switch=True,
-        )
+        self.market_orchestrator.maybe_request_extended_session_rotation()
 
     def _refresh_extended_hours_status(self) -> None:
         if not hasattr(self, "execution_page"):
@@ -4210,255 +4276,10 @@ class MainWindow(QMainWindow):
             )
         )
 
-    def _start_stream(self) -> None:
-        if (
-            self.stream_worker is not None
-            and self.stream_worker.isRunning()
-        ):
-            self._request_stream_switch(
-                str(
-                    self.market_page.selected_provider()
-                    or "finnhub_trades"
-                )
-            )
-            return
-        symbols = self._stream_symbols_from_input()
-        if not symbols:
-            QMessageBox.warning(
-                self, "无法启动", "至少填写一个行情代码"
-            )
-            return
-        if len(symbols) > 30:
-            QMessageBox.warning(
-                self, "无法启动", "首期最多订阅 30 个代码"
-            )
-            return
-        provider = str(self.market_page.selected_provider() or "ibkr")
-        try:
-            credentials = (
-                self.credential_service.resolve_stream_credentials()
-            )
-            # The UI knows *what the operator selected* (source id,
-            # watchlist, credential store values).  Everything else --
-            # constructor, timeouts, venue, labels, coverage -- is the
-            # application's business.
-            request = MarketDataStartRequest(
-                source_id=provider,
-                symbols=symbols,
-                credentials=MarketDataCredentials(
-                    alpaca_api_key=credentials.alpaca_api_key,
-                    alpaca_api_secret=credentials.alpaca_api_secret,
-                    finnhub_api_key=credentials.finnhub_api_key,
-                ),
-            )
-            worker = StreamWorker(self.market_data, request)
-            market_exchange = worker.market_exchange
-        except (
-            MarketDataCredentialsError,
-            MarketDataActiveError,
-            ValueError,
-        ) as error:
-            # ``MarketDataActiveError`` is a ``RuntimeError``, so it has to
-            # be named here: the application refuses to prepare while it
-            # still holds a live feed, and an uncaught exception escaping a Qt
-            # slot would abort the process instead of telling the operator.
-            self._task_failed(str(error))
-            return
-        self.stream_worker = worker
-        self._quote_last_ready_monotonic.clear()
-        self._last_stream_status_key = None
-        self._last_stream_status_log_at = 0.0
-        worker.snapshot_ready.connect(self._stream_snapshot_pushed)
-        worker.failed.connect(self._stream_failed)
-        worker.finished.connect(self._stream_finished)
-        self._set_connection_settings_enabled(False)
-        # The cards are drawn from the page's own render, so the "connecting"
-        # state is published as a view rather than by writing widgets here.
-        self.market_page.render(
-            build_connecting_view(
-                facts=MarketConnectingFacts(
-                    source_id=provider,
-                    symbol_count=len(symbols),
-                ),
-                scope=self._market_scope,
-                controls=self._market_controls(),
-                watchlist_note="Level I 持续订阅",
-            )
-        )
-        worker.start()
-        self.stream_timer.start()
-        # Published *after* the thread starts: the route's stop-stream control
-        # reads "is a worker running", so publishing before ``start()`` would
-        # leave it disabled for every direct start from the market page.
-        self._publish_market_controls()
-        self._publish_execution_controls()
-        self._record_runtime_event(
-            severity="info",
-            component="market_data",
-            code="STREAM_START",
-            message=(
-                f"{provider} 只读流启动；{len(symbols)} 个代码；"
-                f"IBKR 路由 {market_exchange}"
-            ),
-        )
-        route_note = (
-            f" · 当前 IBKR 行情路由 {market_exchange}"
-            if provider == "ibkr_extended"
-            else ""
-        )
-        self._log(f"{provider} 只读流行情正在连接…{route_note}")
 
-    def _stop_stream(
-        self,
-        *_args: object,
-        preserve_pending: bool = False,
-        allow_auto_session_switch: bool = False,
-    ) -> bool:
-        if not preserve_pending:
-            self._pending_stream_switch = None
-        worker = self.stream_worker
-        if worker is None:
-            return True
-        if (
-            self.auto_quant_snapshot is not None
-            and (
-                self.auto_quant_snapshot.active
-                or self.auto_quant_snapshot.positions
-                or self.auto_quant_snapshot.pending_orders
-            )
-            and not allow_auto_session_switch
-        ):
-            QMessageBox.warning(
-                self,
-                "自动量化会话仍在运行",
-                "必须先在“自动量化”点击停止，并等待 Paper 持仓和"
-                "在途订单完成对账后才能停止行情。",
-            )
-            return False
-        if self.shadow_engine is not None and self.shadow_engine.active:
-            self._stop_shadow()
-        self._invalidate_stream_snapshot("行情流正在停止")
-        worker.request_stop()
-        if not worker.wait(3000):
-            self._log("流服务正在退出；等待网络线程关闭…")
-            self.stream_timer.stop()
-            self._stream_stop_pending = True
-            self._publish_market_controls()
-            self.market_page.render_health(
-                "停止中：网络线程尚未确认退出；禁止重复启动"
-            )
-            self._publish_execution_controls()
-            self._record_runtime_event(
-                severity="warning",
-                component="market_data",
-                code="STREAM_STOP_PENDING",
-                message="流行情停止超过3秒，保持启动门关闭",
-            )
-            return False
-        self.stream_timer.stop()
-        if self.stream_worker is worker:
-            self.stream_worker = None
-        self._stream_stop_pending = False
-        self._publish_market_controls()
-        self.market_page.render_health("已停止：最后行情保留为 stale")
-        self._publish_execution_controls()
-        self._set_connection_settings_enabled(True)
-        self._record_runtime_event(
-            severity="info",
-            component="market_data",
-            code="STREAM_STOP",
-            message="流行情已请求停止",
-        )
-        return True
 
-    def _invalidate_stream_snapshot(self, reason: str) -> None:
-        self._dashboard_market_stop_reason = reason
-        snapshot = self.stream_snapshot
-        if snapshot is not None:
-            invalid_quotes = tuple(
-                replace(
-                    quote,
-                    stale=True,
-                    stale_reason=reason,
-                )
-                for quote in snapshot.quotes
-            )
-            snapshot = replace(
-                snapshot,
-                connected=False,
-                ready=False,
-                quotes=invalid_quotes,
-                message=reason,
-                observed_at=datetime.now(timezone.utc),
-            )
-            self.stream_snapshot = snapshot
-            self._publish_market_view(snapshot)
-        self.market_badge.setText("行情 · 已停止")
-        self.market_badge.setProperty("state", "warn")
-        self._repolish_health_badges()
-        self._publish_dashboard_view()
 
-    def _stream_snapshot_pushed(self, result: object) -> None:
-        """Event-driven ingress: a service push (worker listener) delivered a
-        fresh snapshot; record its liveness so the timer poll stays idle and
-        latency is bounded by the feed, not the poll interval."""
-        if not isinstance(result, MarketSnapshot):
-            return
-        self._last_stream_push_monotonic = monotonic()
-        self._stream_snapshot_received(result)
 
-    def _stream_snapshot_received(self, result: object) -> None:
-        if not isinstance(result, MarketSnapshot):
-            return
-        self.stream_snapshot = result
-        self._dashboard_market_stop_reason = None
-        self.workflow_controller.market_account.update(
-            account_ready=self.account_portfolio is not None,
-            market_ready=result.realtime_ready,
-            message=result.message,
-        )
-        self._record_minute_snapshot(result)
-        if result.error_code is not None:
-            # Key by provider+error code only: reconnect generations must not
-            # flood the event log with one error entry per retry attempt.
-            event_key = (
-                result.source_id,
-                result.error_code,
-            )
-            if event_key != self._last_stream_event_key:
-                self._last_stream_event_key = event_key
-                self._record_runtime_event(
-                    severity="error",
-                    component="market_data",
-                    code=str(result.error_code),
-                    message=result.message,
-                )
-        else:
-            # Recovered: allow the next outage of the same kind to be
-            # recorded again instead of being swallowed by the old key.
-            self._last_stream_event_key = None
-        self._publish_market_view(result)
-        self._publish_dashboard_view()
-        self._populate_auto_quant_candidates()
-        self._refresh_target_preflight()
-        if (
-            not getattr(self, "_paper_finalization_inflight", False)
-            and self.paper_trading.phase() in {
-            PaperWorkflowPhase.RUNNING,
-            PaperWorkflowPhase.PAUSED,
-            PaperWorkflowPhase.STOPPING,
-            }
-        ):
-            self._last_stream_ingress_monotonic = monotonic()
-            try:
-                self._apply_paper_workflow_result(
-                    self.paper_workflow.on_stream(result)
-                )
-            except WorkflowStateError as error:
-                self._log(str(error))
-        if self.shadow_engine is not None and self.shadow_engine.active:
-            self.shadow_snapshot = self.shadow_engine.on_stream(result)
-            self._publish_targeted_view()
 
     def _record_minute_snapshot(
         self, snapshot: MarketSnapshot
@@ -4502,203 +4323,12 @@ class MainWindow(QMainWindow):
         if target in symbols_to_record:
             self._refresh_minute_data_status(target)
 
-    def _poll_stream_snapshot(self) -> None:
-        worker = self.stream_worker
-        if worker is None or not worker.isRunning():
-            return
-        if (
-            monotonic() - self._last_stream_push_monotonic < 1.0
-        ):
-            # Event-driven pushes are flowing (Finnhub/Alpaca); the timer is
-            # only a fallback for services without a push listener (IBKR).
-            return
-        self._stream_snapshot_received(self.market_data.snapshot())
 
-    def _publish_market_view(self, snapshot: MarketSnapshot) -> None:
-        """Gather the market facts and hand them to the page as one view.
 
-        This is the window's whole part in the market route's rendering: fetch,
-        project, draw, and then update the pieces that are *not* the page's --
-        the shell's global badges, the signal card and the throttled status log.
 
-        The readiness counts and the scope line are computed here rather than on
-        the page because they depend on subsystems this route does not own: auto
-        quant candidates, market reference symbols, the universe and the scan.
-        The page is handed the finished numbers and the finished line.
-        """
 
-        if not hasattr(self, "market_page"):
-            return
-        self._update_quote_readiness(snapshot)
-        readiness = calculate_quote_readiness_breakdown(
-            snapshot,
-            candidate_symbols=(
-                row.symbol for row in self.auto_quant_candidates
-            ),
-            reference_symbols=self._auto_quant_market_reference_symbols(),
-            recently_ready_symbols=self._quote_last_ready_monotonic,
-        )
-        self.market_page.render(
-            build_market_view(
-                snapshot=snapshot,
-                readiness=MarketReadinessFacts(
-                    candidate_count=readiness.candidate_count,
-                    candidate_current_count=(
-                        readiness.candidate_current_count
-                    ),
-                    candidate_recent_count=(
-                        readiness.candidate_recent_count
-                    ),
-                    reference_count=readiness.reference_count,
-                    reference_current_count=(
-                        readiness.reference_current_count
-                    ),
-                    reference_recent_count=(
-                        readiness.reference_recent_count
-                    ),
-                    subscription_count=readiness.subscription_count,
-                    subscription_current_count=(
-                        readiness.subscription_current_count
-                    ),
-                    subscription_recent_count=(
-                        readiness.subscription_recent_count
-                    ),
-                ),
-                scope=self._market_scope,
-                rows=quote_rows(snapshot),
-                controls=self._market_controls(),
-                watchlist_note=self._market_watchlist_note,
-            )
-        )
-        self._publish_market_health(snapshot, readiness)
 
-    def _market_controls(self):
-        """The control state the page may offer, from the window's own facts."""
 
-        live = self._stream_is_live()
-        return control_view(
-            worker_running=live,
-            stop_pending=self._stream_stop_pending,
-            symbols_enabled=not live,
-            provider_enabled=True,
-        )
-
-    def _publish_market_controls(self) -> None:
-        """Publish just the control state and the watchlist card.
-
-        Used by the start/stop and subscription paths, which change what the
-        route may offer without having a snapshot to render.  The watchlist card
-        is included because its note records *why* the subscription is what it
-        is, and that is a view fact.
-        """
-
-        if not hasattr(self, "market_page"):
-            return
-        self.market_page.render_controls(
-            self._market_controls(),
-            watchlist=self._market_watchlist_note,
-        )
-
-    def _publish_market_health(self, snapshot: MarketSnapshot, readiness) -> None:
-        """Update the badges and the throttled status log.
-
-        These belong to the shell and the window rather than to the page: the
-        market and handshake badges speak for the whole workbench, and the status
-        log is a runtime concern the page must not own.  The signal card is
-        published separately from the same snapshot by the Dashboard projection.
-        """
-
-        if snapshot.ready:
-            self.handshake_badge.setText(
-                (
-                    f"{snapshot.source_label} · 已认证"
-                    if snapshot.source_id in PUSH_LISTENER_SOURCES
-                    else "协议 · 已握手"
-                )
-            )
-            self.handshake_badge.setProperty("state", "ok")
-        if snapshot.realtime_ready:
-            self.market_badge.setText(
-                (
-                    (
-                        "行情 · IEX 实时"
-                        if snapshot.source_id == SOURCE_ALPACA_IEX
-                        else "行情 · Finnhub 成交"
-                    )
-                    if snapshot.source_id in PUSH_LISTENER_SOURCES
-                    else "行情 · 实时"
-                )
-            )
-            self.market_badge.setProperty("state", "ok")
-        elif snapshot.error_code is not None:
-            self.market_badge.setText(
-                f"行情 · 错误 {snapshot.error_code}"
-            )
-            self.market_badge.setProperty("state", "error")
-        else:
-            self.market_badge.setText("行情 · 未达日内门槛")
-            self.market_badge.setProperty("state", "warn")
-        self._repolish_health_badges()
-        status_key = (
-            snapshot.source_id,
-            snapshot.generation,
-            snapshot.ready,
-            snapshot.error_code,
-        )
-        now_monotonic = monotonic()
-        if (
-            status_key != self._last_stream_status_key
-            or now_monotonic - self._last_stream_status_log_at >= 30
-        ):
-            self._last_stream_status_key = status_key
-            self._last_stream_status_log_at = now_monotonic
-            if snapshot.error_code is not None:
-                self._log(
-                    f"{snapshot.source_label} 行情错误 "
-                    f"{snapshot.error_code}：{snapshot.message}"
-                )
-            elif snapshot.ready:
-                self._log(
-                    f"{snapshot.source_label} 已连接 · 可下单候选 "
-                    f"{readiness.candidate_current_count}/"
-                    f"{readiness.candidate_count} · 市场参考 "
-                    f"{readiness.reference_current_count}/"
-                    f"{readiness.reference_count} · 订阅合计 "
-                    f"{readiness.subscription_current_count}/"
-                    f"{readiness.subscription_count}"
-                )
-            else:
-                self._log(
-                    f"{snapshot.source_label} 正在连接（第 "
-                    f"{snapshot.reconnect_attempt} 次）…"
-                )
-
-    def _update_quote_readiness(
-        self, snapshot: MarketSnapshot
-    ) -> tuple[int, int]:
-        now_monotonic = monotonic()
-        current_symbols = {
-            quote.symbol
-            for quote in snapshot.quotes
-            if quote.realtime_ready
-        }
-        for symbol in current_symbols:
-            self._quote_last_ready_monotonic[symbol] = now_monotonic
-        subscribed = {quote.symbol for quote in snapshot.quotes}
-        self._quote_last_ready_monotonic = {
-            symbol: observed
-            for symbol, observed in self._quote_last_ready_monotonic.items()
-            if symbol in subscribed
-            and now_monotonic - observed <= 30
-        }
-        return (
-            len(current_symbols),
-            len(self._quote_last_ready_monotonic),
-        )
-
-    def _quote_was_recently_ready(self, symbol: str) -> bool:
-        observed = self._quote_last_ready_monotonic.get(symbol)
-        return observed is not None and monotonic() - observed <= 30
 
     def _start_shadow(self) -> None:
         if (
@@ -4760,13 +4390,9 @@ class MainWindow(QMainWindow):
                 ),
             )
             return
-        stream = self.stream_snapshot
-        stream_running = (
-            self.stream_worker is not None
-            and self.stream_worker.isRunning()
-        )
+        stream = self.market_orchestrator.snapshot
         if (
-            not stream_running
+            not self.market_orchestrator.is_live
             or stream is None
             or not stream.realtime_ready
         ):
@@ -4892,34 +4518,7 @@ class MainWindow(QMainWindow):
         )
 
 
-    def _stream_failed(self, message: str) -> None:
-        self.market_page.render_failure(message)
-        self.market_badge.setText("行情 · 流服务失败")
-        self.market_badge.setProperty("state", "error")
-        self._repolish_health_badges()
-        self._log(f"流服务失败：{message}")
-        self._record_runtime_event(
-            severity="error",
-            component="market_data",
-            code="STREAM_FAILED",
-            message=message,
-        )
 
-    def _stream_finished(self) -> None:
-        sender = self.sender()
-        if (
-            self.stream_worker is not None
-            and sender is not self.stream_worker
-        ):
-            return
-        self.stream_worker = None
-        self._invalidate_stream_snapshot("行情流已停止")
-        self.stream_timer.stop()
-        self._stream_stop_pending = False
-        self._publish_market_controls()
-        self._publish_execution_controls()
-        self._set_connection_settings_enabled(True)
-        self._activate_pending_stream_switch()
 
     def _register_runtime_components(self) -> None:
         """Hand generic runtime lifecycle to the supervisor.
@@ -4962,25 +4561,20 @@ class MainWindow(QMainWindow):
         )
         supervisor.register(
             "stream_snapshot_timer",
-            stop=self.stream_timer.stop,
-            is_running=self.stream_timer.isActive,
+            stop=self.market_orchestrator.stop_polling,
+            is_running=lambda: self.market_orchestrator.polling_active,
             order=30,
         )
-        # Order 100+: release the market data stream.  ``_stop_stream`` owns
-        # the trading-safety guards (it refuses while a Paper session holds
-        # positions) and returns False rather than raising, so the return
-        # value is mapped to a join verdict for the supervisor.
+        # Order 100+: release the market data stream.  The market orchestrator
+        # owns the worker; ``_stop_market_data`` is the window's thin bridge that
+        # applies the Paper and Shadow interlocks before asking it to stop, and
+        # returns False rather than raising, so the return value is mapped to a
+        # join verdict for the supervisor.
         supervisor.register(
             "market_data_stream",
-            stop=self._stop_stream,
-            join=lambda: not (
-                self.stream_worker is not None
-                and self.stream_worker.isRunning()
-            ),
-            is_running=lambda: (
-                self.stream_worker is not None
-                and self.stream_worker.isRunning()
-            ),
+            stop=self._stop_market_data,
+            join=lambda: not self.market_orchestrator.is_live,
+            is_running=lambda: self.market_orchestrator.is_live,
             order=100,
         )
         # Order 200+: background research/data workers.  ``wait`` is the Qt
@@ -5144,10 +4738,7 @@ class MainWindow(QMainWindow):
         # the supervisor only runs after the Paper session is finalized.
         snapshot = self.runtime_supervisor.shutdown()
         self._report_runtime_shutdown(snapshot)
-        if (
-            self.stream_worker is not None
-            and self.stream_worker.isRunning()
-        ):
+        if self.market_orchestrator.is_live:
             event.ignore()
             QMessageBox.information(
                 self,
@@ -5221,7 +4812,7 @@ class MainWindow(QMainWindow):
         missing_count = (
             len(self.scan.skipped) if self.scan is not None else 0
         )
-        self._market_scope = (
+        scope = (
             f"范围分层 · 官方美股/ETF {total_count:,} · "
             f"排除中概后的研究池 {research_count:,} · "
             f"已有日 K {history_count:,} · 最近扫描 "
@@ -5233,7 +4824,9 @@ class MainWindow(QMainWindow):
             )
             + " · 上方实时订阅最多 30，只是行情窗口。"
         )
-        self.market_page.render_scope(self._market_scope)
+        # The scope line needs the universe and the scan, so the window builds
+        # it; the orchestrator only draws it on the page it owns.
+        self.market_orchestrator.set_scope(scope)
         if hasattr(self, "execution_page"):
             self.execution_page.render_context(
                 scope=(
@@ -5386,7 +4979,7 @@ class MainWindow(QMainWindow):
             target = export_terminal_bundle(
                 self.paths.exports_root,
                 portfolio=self.account_portfolio,
-                stream=self.stream_snapshot,
+                stream=self.market_orchestrator.snapshot,
                 strategies=self.strategies.list_versions(),
                 events=self.runtime_events.list_recent(500),
                 shadow_fills=self.shadow_store.recent_fills(500),
@@ -5608,7 +5201,7 @@ class MainWindow(QMainWindow):
         self._log("API 凭据已使用 Windows 当前用户 DPAPI 加密保存")
 
     def _clear_selected_api_credentials(self, provider: str) -> None:
-        if self._active_stream_provider() == provider:
+        if self.market_orchestrator.active_source_id == provider:
             QMessageBox.warning(
                 self,
                 "行情运行中",

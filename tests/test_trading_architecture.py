@@ -594,6 +594,13 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
     that composes the four workflow controllers behind one execution lease is
     desktop/application orchestration, so its home is here rather than in a root
     module beside the trading core.
+
+    ``orchestration/`` arrived with v2O-A Market orchestration extraction: the
+    market route's runtime truth (worker, snapshot, poll timer, pending switch,
+    readiness cache and the page render) moved out of ``MainWindow`` into
+    ``MarketOrchestrator``.  It lives under ``desktop_v2`` because it is desktop
+    orchestration, not trading logic, and it is a package because the runtime
+    owner and its shell-health publisher are separate jobs.
     """
 
     desktop_v2 = _SRC / "desktop_v2"
@@ -606,6 +613,12 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "navigation.py",
         "shell.py",
         "workflows.py",
+        "orchestration/__init__.py",
+        "orchestration/market/__init__.py",
+        "orchestration/market/health.py",
+        "orchestration/market/models.py",
+        "orchestration/market/orchestrator.py",
+        "orchestration/market/renderer.py",
         "pages/__init__.py",
         "pages/account.py",
         "pages/risk.py",

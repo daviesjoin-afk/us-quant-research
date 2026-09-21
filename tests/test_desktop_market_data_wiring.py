@@ -27,12 +27,13 @@ import dataclasses
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from us_quant.desktop import MainWindow, StreamWorker
+from us_quant.desktop import MainWindow
 from us_quant.desktop_credentials import (
     CredentialStatus,
     DesktopCredentialService,
     StreamCredentials,
 )
+from us_quant.desktop_workers import StreamWorker
 from us_quant.desktop_v2.pages.market.controls import VALID_MARKET_SOURCES
 from us_quant.ibkr import IBKRConnectionConfig
 from us_quant.trading.application.market_data import (
@@ -396,18 +397,21 @@ def test_session_rotation_fires_when_the_venue_moves_on(monkeypatch) -> None:
 
     window = _window()
     try:
-        # Replace the composed application with one whose resolver flips.
+        # Replace the composed application with one whose resolver flips.  The
+        # orchestrator holds the application it was injected with, so the swap
+        # has to reach both -- otherwise the test would exercise the original.
         window.market_data = MarketDataApplication(
             factories={SOURCE_IBKR_EXTENDED: factory},
             exchange_resolver=resolver,
         )
+        window.market_orchestrator._market_data = window.market_data
         assert SOURCE_IBKR_EXTENDED in VALID_MARKET_SOURCES
         window.market_page.set_selected_provider(SOURCE_IBKR_EXTENDED)
         window.market_page.set_subscription_symbols(("SPY",))
 
-        window._start_stream()
+        window.market_orchestrator.start()
 
-        worker = window.stream_worker
+        worker = window.market_orchestrator._worker
         assert worker is not None
         # The adapter was built for SMART and the worker reports SMART, even
         # though the resolver now returns OVERNIGHT.
@@ -424,23 +428,23 @@ def test_session_rotation_fires_when_the_venue_moves_on(monkeypatch) -> None:
         switches: list[tuple] = []
         monkeypatch.setattr(
             window,
-            "_request_stream_switch",
+            "_request_market_switch",
             lambda provider, **kwargs: switches.append(
                 (provider, kwargs)
             ),
         )
         monkeypatch.setattr(
-            window.stream_worker, "isRunning", lambda: True
+            window.market_orchestrator._worker, "isRunning", lambda: True
         )
 
-        window._maybe_rotate_extended_ibkr_session()
+        window.market_orchestrator.maybe_request_extended_session_rotation()
 
         assert len(switches) == 1, "the session rotation did not fire"
         provider, kwargs = switches[0]
         assert provider == SOURCE_IBKR_EXTENDED
         assert kwargs.get("allow_auto_session_switch") is True
     finally:
-        window._stop_stream()
+        window._stop_market_data()
         window.deleteLater()
 
 
@@ -460,27 +464,28 @@ def test_no_rotation_when_the_venue_is_unchanged(monkeypatch) -> None:
             factories={SOURCE_IBKR_EXTENDED: factory},
             exchange_resolver=lambda: "SMART",
         )
+        window.market_orchestrator._market_data = window.market_data
         window.market_page.set_selected_provider(SOURCE_IBKR_EXTENDED)
         window.market_page.set_subscription_symbols(("SPY",))
-        window._start_stream()
+        window.market_orchestrator.start()
 
         switches: list[tuple] = []
         monkeypatch.setattr(
             window,
-            "_request_stream_switch",
+            "_request_market_switch",
             lambda provider, **kwargs: switches.append(
                 (provider, kwargs)
             ),
         )
         monkeypatch.setattr(
-            window.stream_worker, "isRunning", lambda: True
+            window.market_orchestrator._worker, "isRunning", lambda: True
         )
 
-        window._maybe_rotate_extended_ibkr_session()
+        window.market_orchestrator.maybe_request_extended_session_rotation()
 
         assert switches == []
     finally:
-        window._stop_stream()
+        window._stop_market_data()
         window.deleteLater()
 
 
@@ -634,7 +639,7 @@ def test_saving_settings_reaches_the_service_before_the_next_stream(
 
         window.market_page.set_selected_provider(SOURCE_IBKR)
         window.market_page.set_subscription_symbols(("SPY",))
-        window._start_stream()
+        window.market_orchestrator.start()
 
         assert len(created) == 1
         # The adapter is constructed with the *saved* config, and it is a
@@ -644,7 +649,7 @@ def test_saving_settings_reaches_the_service_before_the_next_stream(
         assert built_with is not startup_config
         assert built_with.client_id == new_client_id
     finally:
-        window._stop_stream()
+        window._stop_market_data()
         window.deleteLater()
 
 
@@ -683,7 +688,7 @@ def test_saving_settings_is_refused_while_a_stream_is_live(
         assert window.config.ibkr == before
         assert not (tmp_path / "settings" / "preferences.json").exists()
     finally:
-        window._stop_stream()
+        window._stop_market_data()
         window.deleteLater()
 
 
@@ -713,7 +718,7 @@ def test_saving_identical_settings_while_streaming_is_not_a_refusal(
         assert warnings == []
         assert (tmp_path / "settings" / "preferences.json").exists()
     finally:
-        window._stop_stream()
+        window._stop_market_data()
         window.deleteLater()
 
 
@@ -770,7 +775,7 @@ def test_a_failed_settings_write_leaves_the_runtime_untouched(
         assert window.preferences == preferences_before
         assert saved_file.read_text(encoding="utf-8") == on_disk
     finally:
-        window._stop_stream()
+        window._stop_market_data()
         window.deleteLater()
 
 
@@ -789,7 +794,7 @@ def test_a_failed_settings_write_does_not_need_a_live_stream(
     warnings = _capture_warnings(monkeypatch)
     window = _window_with_tmp_state(monkeypatch, tmp_path)
     try:
-        assert window.stream_worker is None
+        assert window.market_orchestrator._worker is None
 
         def failing_save(preferences):
             raise UserSettingsError("disk is full")
@@ -818,10 +823,10 @@ def test_starting_the_stream_uses_the_service_built_adapter(
         window.market_page.set_selected_provider(SOURCE_IBKR)
         window.market_page.set_subscription_symbols(("SPY", "QQQ"))
 
-        window._start_stream()
+        window.market_orchestrator.start()
 
         assert len(created) == 1
-        worker = window.stream_worker
+        worker = window.market_orchestrator._worker
         assert worker is not None
         # The worker drives the application, which owns the adapter; the
         # UI never holds the adapter itself.  This is the boundary under test.
@@ -833,7 +838,7 @@ def test_starting_the_stream_uses_the_service_built_adapter(
         assert created[0].kwargs["symbols"] == ("SPY", "QQQ")
         assert created[0].kwargs["provider_label"] == "IBKR"
     finally:
-        window._stop_stream()
+        window._stop_market_data()
         window.deleteLater()
 
 
@@ -858,15 +863,15 @@ def test_a_refused_build_is_reported_instead_of_escaping(
         window.market_page.set_selected_provider(SOURCE_IBKR)
         window.market_page.set_subscription_symbols(("SPY",))
 
-        window._start_stream()  # must not raise
+        window.market_orchestrator.start()  # must not raise
 
         # The operator is told, rather than the process dying.
         assert len(warnings) == 1
         # No second stream was built, and nothing was adopted as a worker.
-        assert window.stream_worker is None
+        assert window.market_orchestrator._worker is None
         assert window.market_data.lifecycle().running is True
     finally:
-        window._stop_stream()
+        window._stop_market_data()
         window.deleteLater()
 
 
@@ -897,9 +902,9 @@ def test_the_desktop_hands_the_adapter_the_queued_signal(
             ),
         )
 
-        window._start_stream()
+        window.market_orchestrator.start()
 
-        worker = window.stream_worker
+        worker = window.market_orchestrator._worker
         assert worker is not None
         listener = created[0].kwargs["listener"]
         assert listener is not None
@@ -912,7 +917,7 @@ def test_the_desktop_hands_the_adapter_the_queued_signal(
 
         assert delivered == [payload]
     finally:
-        window._stop_stream()
+        window._stop_market_data()
         window.deleteLater()
 
 
@@ -933,10 +938,10 @@ def test_starting_an_unknown_provider_fails_closed(
         )
         window.market_page.set_subscription_symbols(("SPY",))
 
-        window._start_stream()
+        window.market_orchestrator.start()
 
         assert created == []
-        assert window.stream_worker is None
+        assert window.market_orchestrator._worker is None
         assert failures and "ibkr_extened" in failures[0]
     finally:
         window.deleteLater()
@@ -1045,7 +1050,7 @@ def test_the_stream_request_carries_the_services_credentials(
         )
         monkeypatch.setattr(window.market_data, "prepare", prepare)
 
-        window._start_stream()
+        window.market_orchestrator.start()
 
         assert len(requests) == 1
         request = requests[0]
@@ -1053,7 +1058,7 @@ def test_the_stream_request_carries_the_services_credentials(
         assert request.credentials.alpaca_api_secret == "SENTINEL-SECRET"
         assert request.credentials.finnhub_api_key == "SENTINEL-FINNHUB"
     finally:
-        window._stop_stream()
+        window._stop_market_data()
         window.deleteLater()
 
 
@@ -1109,7 +1114,7 @@ def test_clearing_the_active_providers_credentials_is_refused(
             "clear_provider",
             cleared.append,
         )
-        window.stream_worker = _fake_running_worker(
+        window.market_orchestrator._worker = _fake_running_worker(
             "finnhub_trades"
         )
         window.settings_page.set_api_provider("finnhub_trades", emit_change=True)
@@ -1125,7 +1130,7 @@ def test_clearing_the_active_providers_credentials_is_refused(
         assert kind == "warning"
         assert "行情运行中" in args[1]
     finally:
-        window.stream_worker = None
+        window.market_orchestrator._worker = None
         window.deleteLater()
 
 
@@ -1146,7 +1151,7 @@ def test_clearing_an_inactive_providers_credentials_is_allowed(
             "clear_provider",
             cleared.append,
         )
-        window.stream_worker = _fake_running_worker(
+        window.market_orchestrator._worker = _fake_running_worker(
             "finnhub_trades"
         )
         window.settings_page.set_api_provider("alpaca_iex", emit_change=True)
@@ -1159,7 +1164,7 @@ def test_clearing_an_inactive_providers_credentials_is_allowed(
         assert cleared == ["alpaca_iex"]
         assert messages == []
     finally:
-        window.stream_worker = None
+        window.market_orchestrator._worker = None
         window.deleteLater()
 
 

@@ -88,9 +88,20 @@ LATER_ROUND_REMOVED_METHODS = (
     "_workspace_tabs",
 )
 LATER_ROUND_ADDED_METHODS = (
-    "_populate_dashboard_account_cards",
     "_refresh_account_surfaces",
 "_build_v2_pages",)
+
+# Dashboard v2 retired the last legacy first-level builder and widget
+# writers, replacing them with one projection and one page-level publish.
+DASHBOARD_V2_REMOVED_METHODS = (
+    "_dashboard_tab",
+    "_populate_artifact_table",
+    "_refresh_cards",
+)
+DASHBOARD_V2_ADDED_METHODS = (
+    "_connect_dashboard_page",
+    "_publish_dashboard_view",
+)
 
 # Trading Core v2 also rewrote these two: `_build_ui` now composes the v2
 # shell, and `_targeted_robustness_finished` navigates through it.
@@ -184,7 +195,6 @@ BROKER_ACCOUNT_V2_METHODS = (
     "_export_terminal_state",
     "_paper_simulation_capital",
     "_refresh_account_snapshot",
-    "_refresh_cards",
     "_refresh_target_preflight",
     "_research_capital_changed",
     "_start_shadow",
@@ -303,7 +313,6 @@ RESEARCH_DATA_V2_ADDED_METHODS = (
     "_history_task_failed",
 )
 RESEARCH_DATA_V2_METHODS = (
-    "_dashboard_tab",
     "_load_local_state",
     "_refresh_universe",
     "_cancel_universe_refresh",
@@ -332,7 +341,6 @@ SCANNER_V2_METHODS = (
     "_scan_finished",
     "_load_scan_file",
     "_auto_market_scan_finished",
-    "_dashboard_tab",
     "_apply_theme",
 )
 
@@ -1393,6 +1401,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(BACKTEST_V2_REMOVED_METHODS)
         | set(CROSS_SECTION_V2_REMOVED_METHODS)
         | set(SYSTEM_V2_REMOVED_METHODS)
+        | set(DASHBOARD_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1406,6 +1415,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(BACKTEST_V2_ADDED_METHODS)
         | set(CROSS_SECTION_V2_ADDED_METHODS)
         | set(SYSTEM_V2_ADDED_METHODS)
+        | set(DASHBOARD_V2_ADDED_METHODS)
     )
 
     changed = []

@@ -178,7 +178,9 @@ def test_window_no_longer_owns_history_widget(attribute: str) -> None:
 
 
 def test_dashboard_no_longer_owns_universe_actions() -> None:
-    source = _method_source(_DESKTOP_PATH, "_dashboard_tab")
+    source = (
+        _SRC / "desktop_v2" / "pages" / "dashboard" / "page.py"
+    ).read_text(encoding="utf-8")
     for forbidden in (
         "universe_refresh_button",
         "universe_cancel_button",

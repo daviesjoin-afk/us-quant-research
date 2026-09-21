@@ -143,7 +143,6 @@ def test_chart_load_failure_only_logs(window: MainWindow, monkeypatch) -> None:
 def test_scan_finished_refreshes_scanner_page(
     window: MainWindow, monkeypatch
 ) -> None:
-    monkeypatch.setattr(window, "_refresh_cards", lambda: None)
     monkeypatch.setattr(window, "_refresh_market_scope_summary", lambda: None)
     window._scan_finished(_scan())
     assert window.scan is not None
@@ -153,7 +152,6 @@ def test_scan_finished_refreshes_scanner_page(
 def test_load_scan_file_refreshes_scanner_page(
     window: MainWindow, monkeypatch, tmp_path
 ) -> None:
-    monkeypatch.setattr(window, "_refresh_cards", lambda: None)
     scan = _scan()
     window.scan_path = tmp_path / "market_scan.json"
     save_market_scan(scan, window.scan_path)
@@ -166,7 +164,6 @@ def test_auto_market_scan_finished_refreshes_scanner_page(
     window: MainWindow, monkeypatch
 ) -> None:
     window.universe = _universe()
-    monkeypatch.setattr(window, "_refresh_cards", lambda: None)
     monkeypatch.setattr(window, "_refresh_market_scope_summary", lambda: None)
     monkeypatch.setattr(window, "_select_auto_quant_candidates", lambda: None)
     window._auto_market_scan_finished(_scan())

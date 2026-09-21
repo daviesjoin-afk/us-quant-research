@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -37,7 +36,6 @@ from PySide6.QtWidgets import (
     QSplashScreen,
     QSizePolicy,
     QSplitter,
-    QTabWidget,
     QTableWidget,
     QTableWidgetItem as _QTableWidgetItem,
     QTableView,
@@ -120,10 +118,6 @@ from us_quant.trading.ports.market_data import (
 from us_quant.desktop_settings import (
     DesktopSettingsService,
     ibkr_config_from_preferences,
-)
-from us_quant.desktop_settings_panel import (
-    DesktopSettingsCallbacks,
-    DesktopSettingsPanel,
 )
 from us_quant.extended_hours import (
     USEquitySession,
@@ -268,6 +262,24 @@ from us_quant.desktop_v2.pages.research.cross_section.presenter import (
 from us_quant.desktop_v2.pages.research import (
     ResearchPage,
     ResearchWorkspace,
+)
+from us_quant.desktop_v2.pages.system import (
+    SystemPage,
+    SystemWorkspace,
+)
+from us_quant.desktop_v2.pages.system.runtime_events import (
+    RuntimeEventsPage,
+)
+from us_quant.desktop_v2.pages.system.runtime_events.presenter import (
+    build_runtime_events_view,
+    runtime_info_text,
+)
+from us_quant.desktop_v2.pages.system.settings import SettingsPage
+from us_quant.desktop_v2.pages.system.settings.models import (
+    CredentialDraft,
+    SettingsDraft,
+    SettingsPageView,
+    SettingsStorageView,
 )
 from us_quant.desktop_tasks import DesktopTaskController
 from us_quant.desktop_workers import (
@@ -523,6 +535,15 @@ class MainWindow(QMainWindow):
         self._last_paper_finalization_started: float | None = None
         self._last_runtime_events_refresh = 0.0
         self._runtime_events_refresh_pending = False
+        self._last_runtime_export: tuple[str, str] | None = None
+        # Settings presentation facts the window owns: the selected API
+        # provider and whether the Gateway controls are currently open.
+        self._settings_api_provider = (
+            "ibkr"
+            if self.preferences.market_provider == "ibkr_extended"
+            else self.preferences.market_provider
+        )
+        self._connection_settings_enabled = True
         # Two local in-flight facts the execution route's control state reads.
         # They live here because only the window knows a local step is running;
         # the page is told the resulting booleans, never these flags.
@@ -743,10 +764,9 @@ class MainWindow(QMainWindow):
         route and must cover ``ROUTES`` exactly -- the shell fails closed on a
         missing or unknown route.
 
-        ``research`` is a native aggregate that owns the fixed secondary
-        workspace tabs.  ``system`` is still a transitional ``QTabWidget``
-        that collects operations and settings.  Research is deliberately not
-        part of the trading runtime navigation.
+        ``research`` and ``system`` are native aggregates that own their fixed
+        secondary workspace tabs.  Research is deliberately not part of the
+        trading runtime navigation.
         """
         self.targeted_validation_page = TargetedValidationPage(palette=self.theme)
         self._connect_targeted_validation_page()
@@ -784,16 +804,24 @@ class MainWindow(QMainWindow):
             }
         )
 
-        system = QTabWidget()
-        system.setObjectName("workflowSecondaryTabs")
-        system.setDocumentMode(True)
-        system.setTabPosition(QTabWidget.North)
-        for title, page in (
-            ("运行事件", self._runtime_tab()),
-            ("系统设置", self._settings_tab()),
-        ):
-            system.addTab(page, title)
-        self.v2_system_tabs = system
+        # The System aggregate is containment only: the two workspaces are
+        # built and wired here, then handed to the page as finished widgets.
+        self.runtime_events_page = RuntimeEventsPage(palette=self.theme)
+        self._connect_runtime_events_page()
+        self._refresh_runtime_events()
+        self.settings_page = SettingsPage(
+            draft=self._settings_draft(),
+            storage=self._settings_storage_view(),
+        )
+        self._connect_settings_page()
+        self._publish_settings_view()
+        self.system_page = SystemPage(
+            {
+                SystemWorkspace.RUNTIME_EVENTS:
+                    self.runtime_events_page,
+                SystemWorkspace.SETTINGS: self.settings_page,
+            }
+        )
 
         self.account_page = AccountPage()
         self.account_page.refresh_requested.connect(
@@ -848,7 +876,7 @@ class MainWindow(QMainWindow):
             "risk": self.risk_page,
             "execution": self.execution_page,
             "research": self.research_page,
-            "system": system,
+            "system": self.system_page,
         }
         assert set(pages) == set(ROUTES)
         # Paint strategy last, once every page exists.  Both runtime-selection
@@ -859,6 +887,138 @@ class MainWindow(QMainWindow):
         # empty: it had not been created yet.
         self._refresh_strategy_page()
         return pages
+
+    def _connect_runtime_events_page(self) -> None:
+        """Wire the runtime-events page's intents to the window handlers."""
+
+        page = self.runtime_events_page
+        page.refresh_requested.connect(self._refresh_runtime_events)
+        page.resolve_requested.connect(self._resolve_runtime_event)
+        page.export_requested.connect(self._export_terminal_state)
+
+    def _connect_settings_page(self) -> None:
+        """Wire the settings page's nine intent signals to the window."""
+
+        page = self.settings_page
+        page.theme_preview_requested.connect(self._preview_theme_changed)
+        page.market_provider_selected.connect(
+            self._settings_provider_selected
+        )
+        page.switch_provider_requested.connect(
+            self._switch_to_settings_provider
+        )
+        page.api_provider_selected.connect(self._api_provider_changed)
+        page.save_credentials_requested.connect(
+            self._save_api_credentials
+        )
+        page.clear_credentials_requested.connect(
+            self._clear_selected_api_credentials
+        )
+        page.paper_order_capability_toggled.connect(
+            self._paper_order_capability_toggled
+        )
+        page.extended_hours_paper_toggled.connect(
+            self._extended_hours_paper_toggled
+        )
+        page.save_preferences_requested.connect(
+            self._save_user_preferences
+        )
+
+    def _settings_draft(self) -> SettingsDraft:
+        """The window's current preferences as the page's initial draft."""
+
+        preferences = self.preferences
+        return SettingsDraft(
+            theme=preferences.theme,
+            market_provider=preferences.market_provider,
+            ibkr_host=preferences.ibkr_host,
+            ibkr_port=preferences.ibkr_port,
+            ibkr_client_id=preferences.ibkr_client_id,
+            connection_timeout_seconds=(
+                preferences.connection_timeout_seconds
+            ),
+            paper_order_capability_enabled=(
+                preferences.paper_order_capability_enabled
+            ),
+            extended_hours_paper_enabled=(
+                preferences.extended_hours_paper_enabled
+            ),
+        )
+
+    def _settings_storage_view(self) -> SettingsStorageView:
+        """The four paths the storage section prints, already formatted."""
+
+        state_root = self.paths.state_root
+        return SettingsStorageView(
+            settings_path=str(state_root / "settings"),
+            credentials_path=str(state_root / "credentials"),
+            runtime_path=str(self.paths.runtime_root),
+            exports_path=str(self.paths.exports_root),
+        )
+
+    def _active_stream_provider(self) -> str | None:
+        """The provider whose stream is live, or ``None`` when idle."""
+
+        worker = self.stream_worker
+        if worker is not None and worker.isRunning():
+            return worker.source_id
+        return None
+
+    def _publish_settings_view(self) -> None:
+        """Render one consistent settings view from the window's facts."""
+
+        if not hasattr(self, "settings_page"):
+            return
+        provider = self._settings_api_provider
+        has_credentials = provider in {"finnhub_trades", "alpaca_iex"}
+        self.settings_page.render(
+            SettingsPageView(
+                credential_status_text=self._credential_status_text(
+                    provider
+                ),
+                credential_save_enabled=has_credentials,
+                credential_clear_enabled=(
+                    has_credentials
+                    and provider != self._active_stream_provider()
+                ),
+                connection_settings_enabled=(
+                    self._connection_settings_enabled
+                ),
+            )
+        )
+
+    def _credential_status_text(self, provider: str) -> str:
+        """The frozen credential status line for the selected API provider."""
+
+        status = self.credential_service.status(provider)
+        if provider == "finnhub_trades":
+            return (
+                "Finnhub：已加密保存"
+                if status.api_key_saved
+                else "Finnhub：未保存"
+            )
+        if provider == "alpaca_iex":
+            return (
+                "Alpaca Key："
+                f"{'已加密保存' if status.api_key_saved else '未保存'}"
+                " · Alpaca Secret："
+                f"{'已加密保存' if status.api_secret_saved else '未保存'}"
+            )
+        return (
+            "IBKR Gateway：使用本机 Host / 端口 / Client ID，"
+            "无需 API Key"
+        )
+
+    def _runtime_info_text(self) -> str:
+        """The read-only environment panel the runtime-events page renders."""
+
+        return runtime_info_text(
+            version="0.19.0",
+            resource_root=self.paths.resource_root,
+            state_root=self.paths.state_root,
+            runtime_root=self.paths.runtime_root,
+            exports_root=self.paths.exports_root,
+        )
 
     def _connect_execution_page(self) -> None:
         """Wire the execution page's intents to the handlers that act on them.
@@ -1104,92 +1264,6 @@ class MainWindow(QMainWindow):
 
 
 
-    def _runtime_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        cards = QHBoxLayout()
-        self.runtime_error_card = MetricCard(
-            "错误事件", "0", "未解决与历史事件"
-        )
-        self.runtime_warning_card = MetricCard(
-            "警告事件", "0", "行情、数据和策略门"
-        )
-        self.runtime_task_card = MetricCard(
-            "活动任务", "0", "关闭时安全等待"
-        )
-        self.runtime_export_card = MetricCard(
-            "最近导出", "无", "脱敏 CSV / JSON"
-        )
-        for card in (
-            self.runtime_error_card,
-            self.runtime_warning_card,
-            self.runtime_task_card,
-            self.runtime_export_card,
-        ):
-            cards.addWidget(card)
-        layout.addLayout(cards)
-
-        controls = QHBoxLayout()
-        refresh_button = QPushButton("刷新事件")
-        refresh_button.clicked.connect(self._refresh_runtime_events)
-        resolve_button = QPushButton("确认所选事件")
-        resolve_button.clicked.connect(
-            self._resolve_selected_runtime_event
-        )
-        export_button = QPushButton("导出当前终端状态")
-        export_button.clicked.connect(self._export_terminal_state)
-        controls.addWidget(refresh_button)
-        controls.addWidget(resolve_button)
-        controls.addWidget(export_button)
-        controls.addStretch()
-        layout.addLayout(controls)
-
-        self.runtime_empty_label = QLabel(
-            "暂无运行事件。启动行情、刷新账户或运行研究后，"
-            "故障与恢复记录会在此保留并可确认。"
-        )
-        self.runtime_empty_label.setObjectName("emptyState")
-        self.runtime_empty_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.runtime_empty_label)
-
-        splitter = QSplitter(Qt.Vertical)
-        self.runtime_event_table = QTableWidget(0, 7)
-        self.runtime_event_table.setHorizontalHeaderLabels(
-            [
-                "ID",
-                "时间",
-                "级别",
-                "组件",
-                "代码",
-                "消息",
-                "状态",
-            ]
-        )
-        self._configure_table(self.runtime_event_table)
-        splitter.addWidget(self.runtime_event_table)
-        info_panel = QFrame()
-        info_panel.setObjectName("panel")
-        info_layout = QVBoxLayout(info_panel)
-        info_title = QLabel("版本、路径与恢复信息")
-        info_title.setObjectName("sectionTitle")
-        self.runtime_info_text = QTextEdit()
-        self.runtime_info_text.setReadOnly(True)
-        self.runtime_info_text.setPlainText(
-            "版本：0.19.0\n"
-            f"只读资源：{self.paths.resource_root}\n"
-            f"用户状态：{self.paths.state_root}\n"
-            f"日志/数据库：{self.paths.runtime_root}\n"
-            f"脱敏导出：{self.paths.exports_root}\n\n"
-            "关闭流程：停止行情流 → 等待网络线程 → 保存本地数据库。"
-        )
-        info_layout.addWidget(info_title)
-        info_layout.addWidget(self.runtime_info_text)
-        splitter.addWidget(info_panel)
-        splitter.setSizes([480, 180])
-        layout.addWidget(splitter)
-        self._refresh_runtime_events()
-        return page
-
     def _dashboard_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -1282,71 +1356,6 @@ class MainWindow(QMainWindow):
         return page
 
 
-
-    def _settings_tab(self) -> QWidget:
-        """Compose the Settings page from the presentation panel.
-
-        The widgets, their layout and their signal wiring live in
-        :class:`DesktopSettingsPanel`.  The window keeps the seventeen
-        ``settings_*`` attributes it has always exposed, each one an
-        alias of the panel's own widget rather than a copy, because
-        the rest of the window still reads them by name.
-
-        The two initial refreshes run *here*, after the aliases exist:
-        both handlers read ``self.settings_*``, so running them inside
-        the panel constructor would fire them against a window that
-        does not have those attributes yet.
-        """
-        panel = DesktopSettingsPanel(
-            preferences=self.preferences,
-            paths=self.paths,
-            callbacks=DesktopSettingsCallbacks(
-                preview_theme_changed=self._preview_theme_changed,
-                settings_provider_selected=(
-                    self._settings_provider_selected
-                ),
-                switch_to_settings_provider=(
-                    self._switch_to_settings_provider
-                ),
-                api_provider_changed=self._api_provider_changed,
-                save_api_credentials=self._save_api_credentials,
-                clear_api_credentials=(
-                    self._clear_selected_api_credentials
-                ),
-                paper_order_capability_toggled=(
-                    self._paper_order_capability_toggled
-                ),
-                extended_hours_paper_toggled=(
-                    self._extended_hours_paper_toggled
-                ),
-                save_user_preferences=self._save_user_preferences,
-            ),
-            field_label=self._field_label,
-            configure_combo_width=self._configure_combo_width,
-        )
-        self.settings_panel = panel
-
-        self.settings_theme_combo = panel.settings_theme_combo
-        self.settings_provider_combo = panel.settings_provider_combo
-        self.settings_switch_provider_button = panel.settings_switch_provider_button
-        self.settings_api_provider_combo = panel.settings_api_provider_combo
-        self.settings_finnhub_key = panel.settings_finnhub_key
-        self.settings_alpaca_key = panel.settings_alpaca_key
-        self.settings_alpaca_secret = panel.settings_alpaca_secret
-        self.settings_save_credentials_button = panel.settings_save_credentials_button
-        self.settings_clear_credentials_button = panel.settings_clear_credentials_button
-        self.settings_credential_status = panel.settings_credential_status
-        self.settings_ibkr_host = panel.settings_ibkr_host
-        self.settings_ibkr_port = panel.settings_ibkr_port
-        self.settings_ibkr_client_id = panel.settings_ibkr_client_id
-        self.settings_ibkr_timeout = panel.settings_ibkr_timeout
-        self.settings_paper_order_capability = panel.settings_paper_order_capability
-        self.settings_extended_hours_paper = panel.settings_extended_hours_paper
-        self.settings_save_button = panel.settings_save_button
-
-        self._api_provider_changed()
-        self._refresh_credential_status()
-        return panel
 
     def _configure_table(self, table: QTableWidget) -> None:
         """Apply the workbench's shared read-only table behaviour."""
@@ -4169,13 +4178,7 @@ class MainWindow(QMainWindow):
 
         return self.market_page.subscription_symbols()
 
-    def _settings_provider_selected(
-        self, *_args: object
-    ) -> None:
-        provider = str(
-            self.settings_provider_combo.currentData()
-            or "finnhub_trades"
-        )
+    def _settings_provider_selected(self, provider: str) -> None:
         # Programmatic: the settings combo is not the operator choosing on this
         # route, and the setter is silent so the two combos cannot drive each
         # other.
@@ -4183,36 +4186,25 @@ class MainWindow(QMainWindow):
         api_provider = (
             "ibkr" if provider == "ibkr_extended" else provider
         )
-        api_index = self.settings_api_provider_combo.findData(api_provider)
-        if api_index >= 0:
-            self.settings_api_provider_combo.setCurrentIndex(api_index)
+        self.settings_page.set_api_provider(
+            api_provider, emit_change=False
+        )
+        self._api_provider_changed(api_provider)
 
-    def _stream_provider_selected(
-        self, *_args: object
-    ) -> None:
+    def _stream_provider_selected(self, *_args: object) -> None:
         provider = str(
             self.market_page.selected_provider() or "finnhub_trades"
         )
-        settings_index = self.settings_provider_combo.findData(
-            provider
+        self.settings_page.set_market_provider(
+            provider, emit_change=False
         )
-        if (
-            settings_index >= 0
-            and self.settings_provider_combo.currentIndex()
-            != settings_index
-        ):
-            self.settings_provider_combo.blockSignals(True)
-            self.settings_provider_combo.setCurrentIndex(
-                settings_index
-            )
-            self.settings_provider_combo.blockSignals(False)
 
-    def _switch_to_settings_provider(self) -> None:
-        provider = str(
-            self.settings_provider_combo.currentData()
-            or "finnhub_trades"
-        )
-        self._save_user_preferences()
+    def _switch_to_settings_provider(
+        self,
+        draft: SettingsDraft,
+    ) -> None:
+        provider = draft.market_provider
+        self._save_user_preferences(draft)
         if not self._stream_symbols_from_input():
             self.market_page.set_selected_provider(provider)
             self._pending_stream_switch = None
@@ -5466,10 +5458,8 @@ class MainWindow(QMainWindow):
             return False
         worker = TaskThread(task, resource_group=resource_group)
         self.task_controller.register(worker)
-        if hasattr(self, "runtime_task_card"):
-            self.runtime_task_card.set_value(
-                str(len(self.workers)), start_message
-            )
+        if hasattr(self, "runtime_events_page"):
+            self._schedule_runtime_events_refresh()
         worker.progress.connect(self._log)
         if on_failure is None:
             worker.failed.connect(self._task_failed)
@@ -5490,12 +5480,10 @@ class MainWindow(QMainWindow):
 
     def _worker_finished(self, worker: TaskThread) -> None:
         self.task_controller.finish(worker)
+        if hasattr(self, "runtime_events_page"):
+            self._schedule_runtime_events_refresh()
         if worker is self.universe_refresh_worker:
             self._reset_universe_refresh_controls()
-        if hasattr(self, "runtime_task_card"):
-            self.runtime_task_card.set_value(
-                str(len(self.workers)), "后台任务"
-            )
         self._publish_execution_controls()
 
     def _task_cancelled(self) -> None:
@@ -5530,7 +5518,7 @@ class MainWindow(QMainWindow):
             code=code,
             message=message,
         )
-        if hasattr(self, "runtime_event_table"):
+        if hasattr(self, "runtime_events_page"):
             self._schedule_runtime_events_refresh()
 
     def _schedule_runtime_events_refresh(self) -> None:
@@ -5549,59 +5537,30 @@ class MainWindow(QMainWindow):
 
     def _refresh_runtime_events(self) -> None:
         events = self.runtime_events.list_recent(500)
-        unresolved = [row for row in events if not row.resolved]
-        counts = Counter(row.severity for row in unresolved)
-        self.runtime_error_card.set_value(
-            str(counts["error"]), "未确认错误"
+        view = build_runtime_events_view(
+            events=events,
+            active_task_count=len(self.workers),
+            last_export=self._last_runtime_export,
+            info_text=self._runtime_info_text(),
         )
-        self.runtime_warning_card.set_value(
-            str(counts["warning"]), "未确认警告"
-        )
-        self.runtime_task_card.set_value(
-            str(len(self.workers)), "当前后台任务"
-        )
-        self.runtime_event_table.setSortingEnabled(False)
-        self.runtime_event_table.setRowCount(len(events))
-        self.runtime_empty_label.setVisible(not events)
-        translations = {
-            "info": "信息",
-            "warning": "警告",
-            "error": "错误",
-        }
-        for index, event in enumerate(events):
-            values = (
-                str(event.event_id),
-                event.occurred_at,
-                translations.get(event.severity, event.severity),
-                event.component,
-                event.code,
-                event.message,
-                "已确认" if event.resolved else "待确认",
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setToolTip(value)
-                if event.severity == "error":
-                    item.setForeground(QColor(self.theme.error))
-                elif event.severity == "warning":
-                    item.setForeground(QColor(self.theme.warning))
-                self.runtime_event_table.setItem(
-                    index, column, item
-                )
-        self.runtime_event_table.setSortingEnabled(True)
+        self.runtime_events_page.render(view)
 
-    def _resolve_selected_runtime_event(self) -> None:
-        selected = self.runtime_event_table.selectedItems()
-        if not selected:
+    def _resolve_runtime_event(
+        self,
+        event_id: int | None,
+    ) -> None:
+        """Resolve the event the page reported, by its full integer id.
+
+        The page reports ``None`` when nothing is selected; the decision to
+        prompt belongs here, where the message box and the store already are.
+        """
+
+        if event_id is None:
             QMessageBox.information(
                 self, "未选择事件", "请先选择一条运行事件。"
             )
             return
-        row = selected[0].row()
-        event_id_item = self.runtime_event_table.item(row, 0)
-        if event_id_item is None:
-            return
-        self.runtime_events.resolve(int(event_id_item.text()))
+        self.runtime_events.resolve(event_id)
         self._refresh_runtime_events()
 
     def _export_terminal_state(self) -> None:
@@ -5644,9 +5603,11 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError) as error:
             QMessageBox.warning(self, "导出失败", str(error))
             return
-        self.runtime_export_card.set_value(
-            target.name, str(target)
+        self._last_runtime_export = (
+            target.name,
+            str(target),
         )
+        self._refresh_runtime_events()
         self._record_runtime_event(
             severity="info",
             component="export",
@@ -5662,10 +5623,7 @@ class MainWindow(QMainWindow):
     def _log(self, message: str) -> None:
         self.status_label.setText(message)
 
-    def _preview_theme_changed(self) -> None:
-        theme_name = str(
-            self.settings_theme_combo.currentData() or "dark"
-        )
+    def _preview_theme_changed(self, theme_name: str) -> None:
         self._apply_theme(theme_name)
 
     def _paper_order_capability_toggled(self, checked: bool) -> None:
@@ -5685,9 +5643,9 @@ class MainWindow(QMainWindow):
             QMessageBox.No,
         )
         if answer != QMessageBox.Yes:
-            self.settings_paper_order_capability.blockSignals(True)
-            self.settings_paper_order_capability.setChecked(False)
-            self.settings_paper_order_capability.blockSignals(False)
+            self.settings_page.set_paper_order_capability(
+                False, emit_change=False
+            )
 
     def _extended_hours_paper_toggled(self, checked: bool) -> None:
         if not checked:
@@ -5704,39 +5662,34 @@ class MainWindow(QMainWindow):
             QMessageBox.No,
         )
         if answer != QMessageBox.Yes:
-            self.settings_extended_hours_paper.blockSignals(True)
-            self.settings_extended_hours_paper.setChecked(False)
-            self.settings_extended_hours_paper.blockSignals(False)
+            self.settings_page.set_extended_hours_paper(
+                False, emit_change=False
+            )
 
-    def _save_user_preferences(self) -> None:
+    def _save_user_preferences(self, draft: SettingsDraft) -> None:
         """UI adapter around :meth:`DesktopSettingsService.commit`.
 
-        Reads the controls and reports failures; the transaction itself --
-        validate, preflight, persist, apply -- belongs to the service.  The
-        widget work below runs only after the commit succeeded, and in the
-        order it always has.
+        Turns the page's immutable draft into a ``UserPreferences`` and reports
+        failures; the transaction itself -- validate, preflight, persist, apply
+        -- belongs to the service.  The widget work below runs only after the
+        commit succeeded, and in the order it always has.
         """
 
         try:
             preferences = UserPreferences(
-                theme=str(
-                    self.settings_theme_combo.currentData() or "dark"
-                ),
-                market_provider=str(
-                    self.settings_provider_combo.currentData()
-                    or "finnhub_trades"
-                ),
-                ibkr_host=self.settings_ibkr_host.text(),
-                ibkr_port=self.settings_ibkr_port.value(),
-                ibkr_client_id=self.settings_ibkr_client_id.value(),
-                connection_timeout_seconds=float(
-                    self.settings_ibkr_timeout.value()
+                theme=draft.theme,
+                market_provider=draft.market_provider,
+                ibkr_host=draft.ibkr_host,
+                ibkr_port=draft.ibkr_port,
+                ibkr_client_id=draft.ibkr_client_id,
+                connection_timeout_seconds=(
+                    draft.connection_timeout_seconds
                 ),
                 paper_order_capability_enabled=(
-                    self.settings_paper_order_capability.isChecked()
+                    draft.paper_order_capability_enabled
                 ),
                 extended_hours_paper_enabled=(
-                    self.settings_extended_hours_paper.isChecked()
+                    draft.extended_hours_paper_enabled
                 ),
             )
             commit = self.settings_service.commit(
@@ -5785,25 +5738,14 @@ class MainWindow(QMainWindow):
         self._refresh_auto_quant_preflight()
         self._refresh_extended_hours_status()
 
-    def _save_api_credentials(self) -> None:
-        provider = str(
-            self.settings_api_provider_combo.currentData()
-            or "finnhub_trades"
-        )
+    def _save_api_credentials(self, draft: CredentialDraft) -> None:
+        provider = draft.provider
         if provider == "finnhub_trades":
-            supplied = {
-                "finnhub_api_key": (
-                    self.settings_finnhub_key.text().strip()
-                )
-            }
+            supplied = {"finnhub_api_key": draft.api_key.strip()}
         elif provider == "alpaca_iex":
             supplied = {
-                "alpaca_api_key": (
-                    self.settings_alpaca_key.text().strip()
-                ),
-                "alpaca_api_secret": (
-                    self.settings_alpaca_secret.text().strip()
-                ),
+                "alpaca_api_key": draft.api_key.strip(),
+                "alpaca_api_secret": draft.api_secret.strip(),
             }
         else:
             QMessageBox.information(
@@ -5843,25 +5785,12 @@ class MainWindow(QMainWindow):
         except (CredentialStoreError, OSError, ValueError) as error:
             QMessageBox.warning(self, "凭据保存失败", str(error))
             return
-        for field in (
-            self.settings_finnhub_key,
-            self.settings_alpaca_key,
-            self.settings_alpaca_secret,
-        ):
-            field.clear()
-        self._refresh_credential_status()
+        self.settings_page.clear_credential_inputs()
+        self._publish_settings_view()
         self._log("API 凭据已使用 Windows 当前用户 DPAPI 加密保存")
 
-    def _clear_selected_api_credentials(self) -> None:
-        provider = str(
-            self.settings_api_provider_combo.currentData()
-            or "finnhub_trades"
-        )
-        if (
-            self.stream_worker is not None
-            and self.stream_worker.isRunning()
-            and self.stream_worker.source_id == provider
-        ):
+    def _clear_selected_api_credentials(self, provider: str) -> None:
+        if self._active_stream_provider() == provider:
             QMessageBox.warning(
                 self,
                 "行情运行中",
@@ -5885,13 +5814,8 @@ class MainWindow(QMainWindow):
         except (CredentialStoreError, OSError, ValueError) as error:
             QMessageBox.warning(self, "凭据清除失败", str(error))
             return
-        for field in (
-            self.settings_finnhub_key,
-            self.settings_alpaca_key,
-            self.settings_alpaca_secret,
-        ):
-            field.clear()
-        self._refresh_credential_status()
+        self.settings_page.clear_credential_inputs()
+        self._publish_settings_view()
         self._log(
             f"已清除当前 Windows 用户保存的 {label} 行情凭据"
         )
@@ -5902,84 +5826,16 @@ class MainWindow(QMainWindow):
         except (CredentialStoreError, OSError, ValueError) as error:
             QMessageBox.warning(self, "Finnhub Key 清除失败", str(error))
             return
-        self._refresh_credential_status()
+        self._publish_settings_view()
         self._log("已清除当前 Windows 用户保存的 Finnhub Key")
 
-    def _refresh_credential_status(self) -> None:
-        if not hasattr(self, "settings_credential_status"):
-            return
-        provider = str(
-            self.settings_api_provider_combo.currentData()
-            or "finnhub_trades"
-        )
-        status = self.credential_service.status(provider)
-        if provider == "finnhub_trades":
-            text = (
-                "Finnhub：已加密保存"
-                if status.api_key_saved
-                else "Finnhub：未保存"
-            )
-        elif provider == "alpaca_iex":
-            text = (
-                "Alpaca Key："
-                f"{'已加密保存' if status.api_key_saved else '未保存'}"
-                " · Alpaca Secret："
-                f"{'已加密保存' if status.api_secret_saved else '未保存'}"
-            )
-        else:
-            text = (
-                "IBKR Gateway：使用本机 Host / 端口 / Client ID，"
-                "无需 API Key"
-            )
-        self.settings_credential_status.setText(text)
-
-    def _api_provider_changed(self, *_args: object) -> None:
-        provider = str(
-            self.settings_api_provider_combo.currentData()
-            or "finnhub_trades"
-        )
-        is_finnhub = provider == "finnhub_trades"
-        is_alpaca = provider == "alpaca_iex"
-        self.settings_finnhub_key.setVisible(is_finnhub)
-        self.settings_alpaca_key.setVisible(is_alpaca)
-        self.settings_alpaca_secret.setVisible(is_alpaca)
-        stream_running = (
-            self.stream_worker is not None
-            and self.stream_worker.isRunning()
-        )
-        active_provider = (
-            self.stream_worker.source_id
-            if stream_running and self.stream_worker is not None
-            else None
-        )
-        has_api_credentials = is_finnhub or is_alpaca
-        self.settings_save_credentials_button.setEnabled(
-            has_api_credentials
-        )
-        self.settings_clear_credentials_button.setEnabled(
-            has_api_credentials and provider != active_provider
-        )
-        self._refresh_credential_status()
+    def _api_provider_changed(self, provider: str) -> None:
+        self._settings_api_provider = provider
+        self._publish_settings_view()
 
     def _set_connection_settings_enabled(self, enabled: bool) -> None:
-        for control_name in (
-            "settings_ibkr_host",
-            "settings_ibkr_port",
-            "settings_ibkr_client_id",
-            "settings_ibkr_timeout",
-            "settings_paper_order_capability",
-            "settings_extended_hours_paper",
-        ):
-            control = getattr(self, control_name, None)
-            if control is not None:
-                control.setEnabled(enabled)
-        self.settings_provider_combo.setEnabled(True)
-        self.settings_switch_provider_button.setEnabled(True)
-        self.settings_api_provider_combo.setEnabled(True)
-        self.settings_finnhub_key.setEnabled(True)
-        self.settings_alpaca_key.setEnabled(True)
-        self.settings_alpaca_secret.setEnabled(True)
-        self._api_provider_changed()
+        self._connection_settings_enabled = enabled
+        self._publish_settings_view()
 
     def _apply_theme(self, theme_name: str) -> None:
         self.current_theme_name = (
@@ -5992,6 +5848,8 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(build_stylesheet(self.theme))
         if hasattr(self, "market_page"):
             self.market_page.set_palette(self.theme)
+        if hasattr(self, "runtime_events_page"):
+            self.runtime_events_page.set_palette(self.theme)
         # The strategy page colours gate-blocked rows from the palette, so it
         # has to be told when the palette changes.  It re-renders its own rows.
         if hasattr(self, "strategy_page"):

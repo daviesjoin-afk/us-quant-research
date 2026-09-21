@@ -92,6 +92,12 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 > MainWindow 仍创建、接线并编排六个 child pages。一级 native route 计数变为
 > **6 / 8**。见 §8.9。
 
+> **进度更新（Desktop System v2）**：System 一级 route 已迁成原生 `SystemPage`
+> aggregate，二级导航由 `SystemWorkspace` 语义 identity 驱动；`_runtime_tab()`、
+> `_settings_tab()`、`v2_system_tabs` 与 `desktop_settings_panel.py` 均已删除，
+> 17 个 `settings_*` alias 与 7 个 runtime widget 归属全部退休。一级 native route
+> 计数变为 **7 / 8**。见 §8.10。
+
 ## 迁移状态一览
 
 | 链 | 状态 |
@@ -613,12 +619,12 @@ strategy   → desktop_v2/pages/strategy.py           ✅ native v2
 risk       → desktop_v2/pages/risk.py               ✅ native v2
 execution  → desktop_v2/pages/execution/            ✅ native v2
 research   → desktop_v2/pages/research/           ✅ native v2 aggregate
-system     → QTabWidget（运行事件 / 系统设置）
+system     → desktop_v2/pages/system/             ✅ native v2 aggregate
 ```
 
-前端进度：**6 / 8 native v2**。Research 一级 route 已由原生 `ResearchPage`
-aggregate 承接，六个二级 workspace 均已纳入；剩余 Dashboard、System 仍是
-transitional。Research orchestration 仍暂留在 MainWindow，后续统一拆分。
+前端进度：**7 / 8 native v2**。Research 与 System 一级 route 均已由原生 aggregate
+承接；只剩 Dashboard 仍是 transitional。Research / System orchestration 仍暂留在
+MainWindow，后续统一拆分。
 
 ### 8.2 execution 页已完成（Desktop Execution v2）
 
@@ -1103,6 +1109,69 @@ navigation.py    stable semantic identity + fixed order / labels
 `tests/test_desktop_v2_research_architecture.py`，覆盖 navigation order/labels、child
 identity/state、fail-closed behavior、MainWindow route ownership、preview semantic
 navigation、no child-page imports、Qt-free contract、lazy initializer 与 line budgets。
+
+### 8.10 system aggregate 页已完成（Desktop System v2）
+
+System 一级 route 已由 `SystemPage` aggregate 承接，旧的 MainWindow-owned System
+`QTabWidget`、`v2_system_tabs`、`_runtime_tab()` 与 `_settings_tab()` 已删除。
+`src/us_quant/desktop_settings_panel.py`（452 行）也随本轮删除，不保留任何
+compatibility shim。
+
+```text
+desktop_v2/pages/system/
+  __init__.py        lazy export SystemPage / SystemWorkspace
+  navigation.py      Qt-free SystemWorkspace + frozen navigation table
+  page.py            receive two existing QWidget instances and own QTabWidget
+  runtime_events/
+    models.py        frozen RuntimeEventRowView / RuntimeEventsPageView
+    presenter.py     Qt-free projection（错误/警告/任务计数、导出事实、行）
+    table.py         numeric ID sort、tone、stable event_id selection
+    page.py          owns cards / buttons / table / info panel
+  settings/
+    models.py        frozen SettingsDraft / CredentialDraft / views
+    appearance.py    theme + default market provider + switch
+    credentials.py   API provider + secret inputs + actions
+    connection.py    IBKR host/port/client/timeout + Paper capability toggles
+    page.py          compose sections + storage text + save button
+```
+
+契约边界：
+
+```text
+RuntimeEventsPage   owns widgets / table / cards
+MainWindow          owns RuntimeEventStore / export / refresh coalescing
+runtime presenter   facts → immutable view → RuntimeEventsPage.render()
+
+SettingsPage        owns every Settings widget
+MainWindow          owns transaction / credential service / safety gates
+settings view       SettingsPageView → SettingsPage.render()
+```
+
+- **语义导航。** 生产与预览统一使用
+  `system_page.set_active_workspace(SystemWorkspace.SETTINGS)`；System secondary
+  navigation 不再依赖 magic index。
+- **两类 UI 耦合清零。** `MainWindow → runtime_event_table` 与
+  `MainWindow → 17 个 settings_* widget alias` 已全部退休；`SystemPage` 只做
+  containment / navigation。
+- **intent 是 immutable。** Runtime page 发 `refresh_requested` /
+  `resolve_requested(int | None)` / `export_requested`；Settings page 发
+  `SettingsDraft` / `CredentialDraft` / provider string / bool。
+- **业务边界。** RuntimeEventsPage 不碰 `RuntimeEventStore`；SettingsPage 不碰
+  `DesktopSettingsService` / credential service / Market / Broker application；
+  Page 不构造 `UserPreferences`。
+- **冻结不变。** `runtime_events.py` 的 SQLite schema、`desktop_settings.py` 的
+  validate→derive→preflight→guard→persist→apply 顺序、IBKR 端口 4002、Paper 安全
+  确认、active-provider credential clear gate 与 1 秒 refresh coalescing 全部未改。
+- **编排仍暂留 MainWindow。** System UI ownership = migrated；System orchestration
+  = still MainWindow transitional。MainWindow 仍持有 store、settings service、
+  credential service 与全部 handler。
+
+新增守卫位于 `tests/test_desktop_v2_system_page.py`、
+`tests/test_desktop_v2_system_architecture.py`、`tests/test_desktop_v2_settings_*.py`
+与 `tests/test_desktop_v2_runtime_events_*.py`，覆盖 navigation order / labels、
+child identity / state、fail-closed behavior、route ownership、preview semantic
+navigation、no store / service imports、Qt-free contract、lazy initializer、
+stable-id resolve、programmatic-setter silence、render 只写外部事实与 line budgets。
 
 ## 9. 已删除的旧架构
 
@@ -1903,10 +1972,11 @@ v2。**Desktop Research v2C 已完成**（§8.6），ScannerPage 已 native v2�
 人工扫描入口已退休。**Desktop Research v2D 已完成**（§8.7），BacktestPage 已 native
 v2。**Desktop Research v2E 已完成**（§8.8），CrossSectionResearchPage 已 native v2；
 **Desktop Research v2R-F 已完成**（§8.9），Research aggregate 已 native v2，
-但 Research orchestration 仍暂留在 MainWindow。阶段 2 剩余：
+但 Research orchestration 仍暂留在 MainWindow。**Desktop System v2 已完成**（§8.10），
+System aggregate 已 native v2 且两类大 UI 耦合已清零；System orchestration 仍暂留在
+MainWindow。阶段 2 剩余：
 
 ```text
-Desktop System v2
 Desktop Dashboard v2
 ```
 

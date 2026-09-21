@@ -399,6 +399,61 @@ DESKTOP_EXECUTION_V2_METHODS = (
     "_worker_finished",
 )
 
+# System v2: the System route became a native v2 aggregate.  The legacy
+# runtime/settings builders and the selected-row resolve handler are deleted,
+# the settings handlers now take immutable drafts, and the page publishers
+# replace the widget-by-widget updates.  Declared so the guard can assert the
+# delta exactly, in both directions.
+SYSTEM_V2_REMOVED_METHODS = (
+    "_runtime_tab",
+    "_settings_tab",
+    "_resolve_selected_runtime_event",
+    "_refresh_credential_status",
+)
+SYSTEM_V2_ADDED_METHODS = (
+    "_active_stream_provider",
+    "_connect_runtime_events_page",
+    "_connect_settings_page",
+    "_credential_status_text",
+    "_publish_settings_view",
+    "_resolve_runtime_event",
+    "_runtime_info_text",
+    "_settings_draft",
+    "_settings_storage_view",
+)
+SYSTEM_V2_METHODS = (
+    "_preview_theme_changed",
+    "_record_runtime_event",
+    "_refresh_runtime_events",
+    "_paper_order_capability_toggled",
+    "_extended_hours_paper_toggled",
+    "_save_api_credentials",
+    "_clear_saved_finnhub_key",
+    "_set_connection_settings_enabled",
+)
+
+# System v2 repair: the worker lifecycle now republishes the Runtime Events
+# view, so ``_start_task``'s retired activity-card update became a scheduled
+# page refresh.  Declared here so the byte-equivalence guard asserts exactly
+# that delta and nothing else.
+SYSTEM_V2_REPAIR_METHODS = ("_start_task",)
+
+_SYSTEM_V2_REPAIR_BASE_BLOCK = (
+    '        if hasattr(self, "runtime_task_card"):\n'
+    '            self.runtime_task_card.set_value(\n'
+    '                str(len(self.workers)), start_message\n'
+    '            )\n'
+)
+_SYSTEM_V2_REPAIR_DELTA_BLOCK = (
+    '        if hasattr(self, "runtime_events_page"):\n'
+    '            self._schedule_runtime_events_refresh()\n'
+)
+
+SYSTEM_V2_CHANGED_MODULES = (
+    # The transitional settings panel is deleted; the page owns its widgets now.
+    "src/us_quant/desktop_settings_panel.py",
+)
+
 FROZEN_METHODS = (
     "_request_worker_stops",
     "_task_cancelled",
@@ -1506,6 +1561,14 @@ def test_the_frozen_method_is_byte_identical(name: str) -> None:
     base_method = _find_method(base, name)
     current_method = _find_method(current, name)
 
+    if name in SYSTEM_V2_REPAIR_METHODS:
+        # System v2 repair: only the declared lifecycle publication delta may
+        # differ from the base bytes; anything else still fails here.
+        assert current_method.count(_SYSTEM_V2_REPAIR_DELTA_BLOCK) == 1, name
+        current_method = current_method.replace(
+            _SYSTEM_V2_REPAIR_DELTA_BLOCK, _SYSTEM_V2_REPAIR_BASE_BLOCK
+        )
+
     assert current_method == base_method, name
 
 
@@ -1562,6 +1625,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(SCANNER_V2_REMOVED_METHODS)
         | set(BACKTEST_V2_REMOVED_METHODS)
         | set(CROSS_SECTION_V2_REMOVED_METHODS)
+        | set(SYSTEM_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1574,6 +1638,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(SCANNER_V2_ADDED_METHODS)
         | set(BACKTEST_V2_ADDED_METHODS)
         | set(CROSS_SECTION_V2_ADDED_METHODS)
+        | set(SYSTEM_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1603,6 +1668,8 @@ def test_only_the_declared_methods_changed() -> None:
         | set(SCANNER_V2_METHODS)
         | set(BACKTEST_V2_METHODS)
         | set(CROSS_SECTION_V2_METHODS)
+        | set(SYSTEM_V2_METHODS)
+        | set(SYSTEM_V2_REPAIR_METHODS)
     )
     # Exact, not a subset: the delta is the declared surface and nothing
     # else, in both directions.
@@ -1619,6 +1686,8 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(SCANNER_V2_METHODS) <= set(changed)
     assert set(BACKTEST_V2_METHODS) <= set(changed)
     assert set(CROSS_SECTION_V2_METHODS) <= set(changed)
+    assert set(SYSTEM_V2_METHODS) <= set(changed)
+    assert set(SYSTEM_V2_REPAIR_METHODS) <= set(changed)
     assert "_refresh_universe" in changed
 
 
@@ -1647,6 +1716,7 @@ def test_the_other_frozen_modules_are_untouched() -> None:
         | set(BROKER_ACCOUNT_V2_CHANGED_MODULES)
         | set(EXECUTION_V2_CHANGED_MODULES)
         | set(RUNTIME_V2B_CHANGED_MODULES)
+        | set(SYSTEM_V2_CHANGED_MODULES)
     )
 
 

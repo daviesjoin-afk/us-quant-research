@@ -143,7 +143,10 @@ def test_a_page_provider_choice_syncs_the_settings_combo() -> None:
         combo.setCurrentIndex(combo.findData("alpaca_iex"))
         _APP.processEvents()
 
-        assert window.settings_provider_combo.currentData() == "alpaca_iex"
+        assert (
+            window.settings_page.current_draft().market_provider
+            == "alpaca_iex"
+        )
     finally:
         window.close()
         window.deleteLater()
@@ -161,9 +164,10 @@ def test_a_settings_provider_choice_syncs_the_page_without_recursing() -> None:
         seen: list[str] = []
         window.market_page.provider_selected.connect(seen.append)
 
-        index = window.settings_provider_combo.findData("ibkr_extended")
+        combo = window.settings_page.appearance.provider_combo
+        index = combo.findData("ibkr_extended")
         assert index >= 0
-        window.settings_provider_combo.setCurrentIndex(index)
+        combo.setCurrentIndex(index)
         _APP.processEvents()
 
         assert window.market_page.selected_provider() == "ibkr_extended"
@@ -191,10 +195,13 @@ def test_a_saved_settings_preference_lands_on_the_page(
         seen: list[str] = []
         window.market_page.provider_selected.connect(seen.append)
 
-        index = window.settings_provider_combo.findData("alpaca_iex")
+        combo = window.settings_page.appearance.provider_combo
+        index = combo.findData("alpaca_iex")
         assert index >= 0
-        window.settings_provider_combo.setCurrentIndex(index)
-        window._save_user_preferences()
+        combo.setCurrentIndex(index)
+        window._save_user_preferences(
+            window.settings_page.current_draft()
+        )
 
         assert window.market_page.selected_provider() == "alpaca_iex"
         assert seen == []

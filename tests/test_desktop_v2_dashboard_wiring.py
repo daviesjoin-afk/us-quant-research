@@ -141,14 +141,15 @@ def test_dashboard_route_is_native_and_owns_no_legacy_widget_alias(window) -> No
 
 
 def test_account_publish_is_visible_on_the_real_dashboard_cards(window) -> None:
-    window.account_portfolio = None
+    window.broker_account._portfolio = None
     window._publish_dashboard_view()
     assert window.dashboard_page._net_liquidation_card.value_label.text() == "未读取"
     assert window.dashboard_page._daily_pnl_card.value_label.text() == "不可用"
     assert window.dashboard_page._positions_card.value_label.text() == "未读取"
 
-    window.account_portfolio = _portfolio()
-    window._refresh_account_surfaces()
+    window.broker_account._portfolio = _portfolio()
+    window.account_orchestrator.render_current()
+    window._on_account_portfolio_changed(window.account_orchestrator.portfolio)
     assert window.dashboard_page._net_liquidation_card.value_label.text() == "$12,345.67"
     assert window.dashboard_page._daily_pnl_card.value_label.text() == "$-12.50"
     assert window.dashboard_page._positions_card.value_label.text() == "1"

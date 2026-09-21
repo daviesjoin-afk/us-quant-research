@@ -9,9 +9,9 @@ of a v2 route.
 Two boundaries are load-bearing:
 
 * **it renders, it does not fetch.**  It has no application service, no
-  adapter and no ``ibapi``; the window owns the refresh and hands this page
-  an already-built :class:`BrokerAccountPortfolio`.  A page that could start
-  a read would be an orchestrator again.
+  adapter and no ``ibapi``; ``AccountOrchestrator`` owns the refresh and hands
+  this page an already-built :class:`BrokerAccountPortfolio`.  A page that
+  could start a read would be an orchestrator again.
 * **it shows no market-data state.**  There is no quote type, no mark source
   and no stale/fresh column, because the account path does not request
   market data at all.  Whether quotes are real-time is owned by Market Data
@@ -360,6 +360,23 @@ class AccountPage(QWidget):
 
         self.notice_label.setText(text)
         self.notice_label.setVisible(bool(text))
+
+    def set_research_capital(self, value: str, note: str) -> None:
+        """Write the research-capital card.
+
+        Research capital is *not* account truth -- it is a historical research
+        scenario the operator can edit, shown on this route only because that
+        is where an account-shaped number belongs visually.  It reaches the
+        page through a named method rather than a widget attribute so the
+        window cannot reach through to ``research_capital_card`` and so the
+        card's formatting stays this page's business.
+
+        The window still owns the scalar and still decides when it changed;
+        which cross-workflow owner finally publishes it is v2O-C Research's
+        question, not this round's.
+        """
+
+        self.research_capital_card.set_value(value, note)
 
     @property
     def portfolio(self) -> BrokerAccountPortfolio | None:

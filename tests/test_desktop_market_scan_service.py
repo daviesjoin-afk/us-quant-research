@@ -39,10 +39,7 @@ MARKET_DATA_V2_METHODS = (
 # to the domain ``BrokerAccountPortfolio``, and because the account
 # page became a native Desktop UI v2 page.
 BROKER_ACCOUNT_V2_METHODS = (
-    "_account_snapshot_finished",
     "_export_terminal_state",
-    "_paper_simulation_capital",
-    "_refresh_account_snapshot",
     "_refresh_target_preflight",
     "_research_capital_changed",
     "_start_shadow",
@@ -130,7 +127,6 @@ LATER_ROUND_REMOVED_METHODS = (
     "_workspace_tabs",
 )
 LATER_ROUND_ADDED_METHODS = (
-    "_refresh_account_surfaces",
 "_build_v2_pages",)
 
 # Dashboard v2 retired the last legacy first-level builder and widget
@@ -312,6 +308,30 @@ _DESKTOP_MARKET_ORCHESTRATION_V2_CLOSE_EVENT_DELTA = (
     '        # already made the *feed* unavailable without ending the thread.  Asking\n'
     '        # the business fact would let the application exit over a live worker.\n'
     '        if self.market_orchestrator.worker_running:\n'
+)
+
+DESKTOP_ACCOUNT_ORCHESTRATION_V2_REMOVED_METHODS = (
+    "_account_snapshot_finished",
+    "_paper_simulation_capital",
+    "_refresh_account_snapshot",
+)
+
+DESKTOP_ACCOUNT_ORCHESTRATION_V2_ADDED_METHODS = (
+    "_on_account_portfolio_changed",
+    "_publish_account_presentation_inputs",
+    "_record_account_runtime_event",
+    "_render_account_shell_health",
+)
+
+DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS = (
+    "__init__",
+    "_apply_intraday_watchlist",
+    "_auto_quant_preflight",
+    "_export_terminal_state",
+    "_refresh_target_preflight",
+    "_research_capital_changed",
+    "_select_auto_quant_candidates",
+    "_start_shadow",
 )
 
 TARGETED_RESEARCH_V2_REMOVED_METHODS = (
@@ -1520,6 +1540,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(SYSTEM_V2_REMOVED_METHODS)
         | set(DASHBOARD_V2_REMOVED_METHODS)
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_REMOVED_METHODS)
+        | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1535,6 +1556,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(SYSTEM_V2_ADDED_METHODS)
         | set(DASHBOARD_V2_ADDED_METHODS)
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_ADDED_METHODS)
+        | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1569,6 +1591,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(SYSTEM_V2_METHODS)
         | set(SYSTEM_V2_REPAIR_METHODS)
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_METHODS)
+        | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS)
     )
     assert set(changed) <= allowed
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)
@@ -1586,6 +1609,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(SYSTEM_V2_METHODS) <= set(changed)
     assert set(SYSTEM_V2_REPAIR_METHODS) <= set(changed)
     assert set(DESKTOP_MARKET_ORCHESTRATION_V2_METHODS) <= set(changed)
+    assert set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS) <= set(changed)
     assert "_run_scan" in changed
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from decimal import Decimal
 import json
 import os
@@ -74,9 +74,7 @@ from us_quant.trading.composition.market_data import (
 from us_quant.trading.domain.account import (
     BrokerAccountPortfolio,
     BrokerAccountSnapshot,
-    BrokerPositionSnapshot,
 )
-from us_quant.trading.domain.common import Environment
 from us_quant.trading.domain.market import (
     MarketDataMode,
     MarketSnapshot,
@@ -177,6 +175,10 @@ from us_quant.trading.application.paper import PaperTradingService
 from us_quant.trading.runtime.workflow_state import (
     PaperWorkflowPhase,
     WorkflowStateError,
+)
+from us_quant.desktop_v2.orchestration.account import (
+    AccountOrchestrator,
+    AccountPresentationInputs,
 )
 from us_quant.desktop_v2.orchestration.market import (
     MarketOrchestrator,
@@ -524,7 +526,6 @@ class MainWindow(QMainWindow):
         self._selected_review_run_id: str | None = None
         self._targeted_active_workspace: int | None = None
         self._targeted_active_evidence_tab: int | None = None
-        self.account_portfolio: BrokerAccountPortfolio | None = None
         self._dashboard_chart_view = DashboardChartView(None, ())
         self.shadow_engine: ShadowPaperEngine | None = None
         self.shadow_snapshot: ShadowSnapshot | None = None
@@ -795,9 +796,34 @@ class MainWindow(QMainWindow):
         )
 
         self.account_page = AccountPage()
-        self.account_page.refresh_requested.connect(
-            self._refresh_account_snapshot
+        # The account route's desktop runtime -- the refresh request, the
+        # ledger append, the page render and the header facts -- belongs to
+        # ``account_orchestrator``, constructed here with its dependencies
+        # injected.  What stays on the window is composition and the
+        # cross-workflow fan-out of the published portfolio.  Note what is
+        # *not* stored: there is no ``self.account_portfolio``, because
+        # ``broker_account`` is the canonical truth and the orchestrator only
+        # delegates to it.
+        self.account_orchestrator = AccountOrchestrator(
+            application=self.broker_account,
+            ledger=self.account_ledger,
+            page=self.account_page,
+            submit_task=self._start_task,
         )
+        self.account_page.refresh_requested.connect(
+            self.account_orchestrator.request_refresh
+        )
+        self.account_orchestrator.portfolio_changed.connect(
+            self._on_account_portfolio_changed
+        )
+        self.account_orchestrator.shell_health_changed.connect(
+            self._render_account_shell_health
+        )
+        self.account_orchestrator.runtime_event_requested.connect(
+            self._record_account_runtime_event
+        )
+        self.account_orchestrator.log_requested.connect(self._log)
+        self._publish_account_presentation_inputs()
         # The risk page renders the limits the risk layer enforces and the
         # standing safety boundaries.  It is read-only by construction: it has
         # no service to call and no control that could widen a ceiling.
@@ -808,6 +834,10 @@ class MainWindow(QMainWindow):
         # Initialising through the same handler keeps the first paint and every
         # later change on one path.
         self._research_capital_changed(self._research_capital_value)
+        # The page's first paint goes through the same render entry point every
+        # later refresh uses, so "never read" and "read" cannot diverge into two
+        # rendering paths.
+        self.account_orchestrator.render_current()
 
         # The strategy page renders and reports intent; every decision it
         # reports is executed here by the application service.  The page holds
@@ -1172,7 +1202,7 @@ class MainWindow(QMainWindow):
         """
 
         self.workflow_controller.market_account.update(
-            account_ready=self.account_portfolio is not None,
+            account_ready=self.account_orchestrator.portfolio is not None,
             market_ready=snapshot.realtime_ready,
             message=snapshot.message,
         )
@@ -1237,7 +1267,7 @@ class MainWindow(QMainWindow):
             return
         self.dashboard_page.render(
             build_dashboard_view(
-                portfolio=self.account_portfolio,
+                portfolio=self.account_orchestrator.portfolio,
                 snapshot=self.market_orchestrator.snapshot,
                 artifacts=self.artifact_catalog.artifacts,
                 chart=self._dashboard_chart_view,
@@ -2007,7 +2037,7 @@ class MainWindow(QMainWindow):
             return
         if self.market_orchestrator.is_live:
             return
-        paper_capital = self._paper_simulation_capital()
+        paper_capital = self.account_orchestrator.fresh_paper_net_liquidation()
         selection_capital = (
             paper_capital or self._research_scenario_capital()
         )
@@ -2071,7 +2101,7 @@ class MainWindow(QMainWindow):
             strategy_detail=strategy_detail,
             candidate_count=readiness.candidate_count,
             realtime_ready_count=readiness.candidate_current_count,
-            paper_capital=self._paper_simulation_capital(),
+            paper_capital=self.account_orchestrator.fresh_paper_net_liquidation(),
             recent_ready_count=readiness.candidate_recent_count,
             minimum_realtime_quotes=minimum_realtime_quotes,
         )
@@ -2296,7 +2326,7 @@ class MainWindow(QMainWindow):
             self._set_launch_busy(False)
             return
         limit = self.execution_page.candidate_limit()
-        paper_capital = self._paper_simulation_capital()
+        paper_capital = self.account_orchestrator.fresh_paper_net_liquidation()
         if paper_capital is None:
             if self.paper_trading.phase() is PaperWorkflowPhase.PREPARING:
                 self.paper_workflow.cancel_preparing()
@@ -3166,8 +3196,8 @@ class MainWindow(QMainWindow):
             build_runtime_view(
                 snapshot=snapshot,
                 account=(
-                    self.account_portfolio.account
-                    if self.account_portfolio is not None
+                    self.account_orchestrator.portfolio.account
+                    if self.account_orchestrator.portfolio is not None
                     else None
                 ),
                 broker_state=broker_state,
@@ -3371,8 +3401,8 @@ class MainWindow(QMainWindow):
             None,
         )
         account: BrokerAccountSnapshot | None = (
-            self.account_portfolio.account
-            if self.account_portfolio is not None
+            self.account_orchestrator.portfolio.account
+            if self.account_orchestrator.portfolio is not None
             else None
         )
         summary = self.minute_quote_store.summary(symbol)
@@ -3782,40 +3812,30 @@ class MainWindow(QMainWindow):
         self._research_capital_value = int(value)
         if not hasattr(self, "account_page"):
             return
-        self.account_page.research_capital_card.set_value(
+        # Through the page's named method, never ``research_capital_card``: the
+        # card is the page's widget, and reaching into it from here is the
+        # widget reach-through this round removes.  Research capital is still
+        # *not* account truth -- the window owns the scalar and only publishes
+        # it here; v2O-C Research decides who finally owns this fan-out.
+        self.account_page.set_research_capital(
             f"${value:,.0f}",
             "历史研究情景；不是 Paper/Live 账户余额",
         )
 
-    def _paper_simulation_capital(self) -> Decimal | None:
-        """Fresh Paper net liquidation, or ``None`` if it is not usable.
+    def _publish_account_presentation_inputs(self) -> None:
+        """Push the configured exposure multipliers to the account route.
 
-        The 300-second freshness rule and the positive-NLV rule are the same
-        ones the preflight applies, so internal simulation can never be sized
-        from an account the preflight would reject.  ``observed_at`` is
-        already a timezone-aware ``datetime`` from the domain, so there is no
-        string parsing here.
+        The multiplier is a *risk* fact: it comes from the substitution rules in
+        the app config, which the account orchestrator may not import.  The
+        window knows where it comes from and hands over a frozen snapshot, so
+        the account route only ever learns "symbol -> presentation multiplier".
         """
 
-        portfolio = self.account_portfolio
-        if portfolio is None:
-            return None
-        account = portfolio.account
-        if account.environment is not Environment.PAPER:
-            return None
-        observed = account.observed_at
-        if observed.tzinfo is None:
-            observed = observed.replace(tzinfo=timezone.utc)
-        age_seconds = (
-            datetime.now(timezone.utc)
-            - observed.astimezone(timezone.utc)
-        ).total_seconds()
-        if age_seconds < 0 or age_seconds > 300:
-            return None
-        value = account.net_liquidation
-        if value is None or value <= 0:
-            return None
-        return value
+        self.account_orchestrator.set_presentation_inputs(
+            AccountPresentationInputs.of(
+                self._configured_exposure_multipliers()
+            )
+        )
 
     def _probe_gateway(self) -> None:
         result = probe_ibkr_socket(self.config.ibkr)
@@ -3828,31 +3848,70 @@ class MainWindow(QMainWindow):
         self.gateway_badge.style().unpolish(self.gateway_badge)
         self.gateway_badge.style().polish(self.gateway_badge)
 
-    def _refresh_account_snapshot(self) -> None:
-        """Read broker account truth through the account application.
+    # -- the cross-workflow account bridges -----------------------------
+    #
+    # These are composition-level fan-out, not compatibility wrappers.  The
+    # account orchestrator owns the refresh, the ledger, the page and the
+    # header facts; what it may *not* own is what the rest of the workbench
+    # does when an account fact changes -- the dashboard card, the auto-quant
+    # preflight and runtime view, and the targeted preflight are three other
+    # capabilities.  So the orchestrator publishes ``portfolio_changed`` and
+    # the window routes it.
+    #
+    # None of these bridges renders the account page, appends to the ledger or
+    # asks for a refresh: that ownership moved, and a guard pins that.
 
-        The account path requests no market data.  The v1 collector took a
-        symbol list and ran a SPY/QQQ readiness check on the same socket;
-        both are gone, because whether quotes are real-time is Market Data
-        v2's answer to give, not the account chain's.
+    def _on_account_portfolio_changed(
+        self, portfolio: BrokerAccountPortfolio
+    ) -> None:
+        """Fan one finished account fact out to its existing consumers.
+
+        This preserves exactly the downstream side effects the retired
+        ``_account_snapshot_finished`` performed, in the same order.  It adds
+        no new behaviour: a readiness this round's account refresh did not
+        already refresh is still not refreshed here.
         """
 
-        def task(
-            progress: Callable[[str], None],
-        ) -> BrokerAccountPortfolio:
-            progress(
-                "正在进行 IBKR 只读握手并读取账户、持仓和 P&L…"
+        self._publish_dashboard_view()
+        if self.auto_quant_snapshot is not None:
+            self._render_auto_quant_snapshot()
+        self._refresh_target_preflight()
+        self._refresh_auto_quant_preflight()
+
+    def _render_account_shell_health(self, view: object) -> None:
+        """Paint the shell header from the account layer's published facts.
+
+        The badges belong to the whole workbench, so the orchestrator publishes
+        text and state and the window paints them.  A field of ``None`` means
+        "leave that badge alone": an account read only ever *promotes* the
+        handshake badge, and a later failure must not demote it.
+
+        This method reads nothing but the view: no portfolio, no page, no
+        broker application.  The market badge is deliberately untouched --
+        whether quotes are real-time is Market Data v2's answer to give.
+        """
+
+        if view.handshake_text is not None:
+            self.handshake_badge.setText(view.handshake_text)
+            self.handshake_badge.setProperty(
+                "state", view.handshake_state
             )
-            return self.broker_account.refresh(timeout_seconds=20)
+        if view.handshake_tooltip is not None:
+            self.handshake_badge.setToolTip(view.handshake_tooltip)
+        if view.account_text is not None:
+            self.account_badge.setText(view.account_text)
+            self.account_badge.setProperty("state", view.account_state)
+        self._repolish_health_badges()
 
-        self._start_task(
-            task,
-            on_success=self._account_snapshot_finished,
-            start_message="IBKR 只读账户刷新开始…",
-            resource_group="broker",
+    def _record_account_runtime_event(self, event: object) -> None:
+        """Record one account runtime event; the store is the window's."""
+
+        self._record_runtime_event(
+            severity=event.severity,
+            component=event.component,
+            code=event.code,
+            message=event.message,
         )
-
-
 
     # -- strategy governance wiring -------------------------------------
     #
@@ -4125,79 +4184,6 @@ class MainWindow(QMainWindow):
             StrategySelectionPurpose.AUTO_ROTATION
         )
 
-    def _account_snapshot_finished(self, result: object) -> None:
-        """Store account truth and repaint the account surfaces.
-
-        This handler touches *only* account state.  It deliberately does not
-        set ``market_badge``: the v1 version derived a market-readiness
-        verdict from the account snapshot's quotes, which meant an account
-        refresh could relabel the market as "实时 Type 1".  Market state now
-        comes exclusively from ``MarketSnapshot`` via the stream path, so an
-        account read can neither claim nor deny that quotes are real-time.
-        """
-
-        if not isinstance(result, BrokerAccountPortfolio):
-            raise TypeError("unexpected broker account portfolio")
-        self.account_portfolio = result
-        account = result.account
-        self.account_ledger.append(account)
-        self._record_runtime_event(
-            severity="info",
-            component="account",
-            code="SNAPSHOT_OK",
-            message=(
-                f"{account.account_alias} 只读快照完成；"
-                f"{len(result.positions)} 个持仓"
-            ),
-        )
-        self._refresh_account_surfaces()
-        self._refresh_auto_quant_preflight()
-        # "已握手" describes the most recent account refresh, not a socket
-        # that is still open: the read is a one-shot connect/read/disconnect.
-        self.handshake_badge.setText("协议 · 已握手")
-        self.handshake_badge.setToolTip("最近一次账户刷新握手成功")
-        self.handshake_badge.setProperty("state", "ok")
-        self.account_badge.setText(
-            f"Paper · {account.account_alias}"
-        )
-        self.account_badge.setProperty("state", "ok")
-        self._repolish_health_badges()
-        self._log(
-            f"已读取 {account.account_alias}："
-            f"{len(result.positions)} 个持仓"
-        )
-
-    def _refresh_account_surfaces(self) -> None:
-        """Repaint every account surface from the stored portfolio.
-
-        The page owns the widgets; the window owns the data.  Ledger points
-        and the presentation-only exposure multipliers are passed in rather
-        than looked up by the page, which keeps the page free of the ledger
-        store and of any application service.
-        """
-
-        if not hasattr(self, "account_page"):
-            return
-        portfolio = self.account_portfolio
-        points: tuple = ()
-        if portfolio is not None:
-            points = self.account_ledger.list_points(
-                environment=portfolio.account.environment.value,
-                account_alias=portfolio.account.account_alias,
-                limit=100,
-            )
-        self.account_page.render(
-            portfolio,
-            ledger_points=points,
-            exposure_multipliers=self._configured_exposure_multipliers(),
-        )
-        self._publish_dashboard_view()
-        if self.auto_quant_snapshot is not None:
-            self._populate_auto_quant_snapshot(
-                self.auto_quant_snapshot
-            )
-        self._refresh_target_preflight()
-
     def _repolish_health_badges(self) -> None:
         for badge in (
             self.gateway_badge,
@@ -4378,7 +4364,7 @@ class MainWindow(QMainWindow):
                 ),
             )
             return
-        paper_capital = self._paper_simulation_capital()
+        paper_capital = self.account_orchestrator.fresh_paper_net_liquidation()
         if paper_capital is None:
             QMessageBox.warning(
                 self,
@@ -4462,7 +4448,7 @@ class MainWindow(QMainWindow):
                 initial_cash=paper_capital,
                 capital_source=(
                     "IBKR Paper "
-                    f"{self.account_portfolio.account.account_alias} "
+                    f"{self.account_orchestrator.portfolio.account.account_alias} "
                     "NetLiquidation"
                 ),
                 daily_loss_limit=paper_capital * Decimal("0.01"),
@@ -4988,7 +4974,7 @@ class MainWindow(QMainWindow):
         try:
             target = export_terminal_bundle(
                 self.paths.exports_root,
-                portfolio=self.account_portfolio,
+                portfolio=self.account_orchestrator.portfolio,
                 stream=self.market_orchestrator.snapshot,
                 strategies=self.strategies.list_versions(),
                 events=self.runtime_events.list_recent(500),

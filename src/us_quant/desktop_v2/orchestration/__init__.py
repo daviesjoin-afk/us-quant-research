@@ -10,7 +10,8 @@ Each one takes injected dependencies and exposes a small read-only surface, so
 the window's remaining job is composition: build the object, wire its signals,
 and route its published facts to whoever still consumes them.
 
-Only ``market`` exists today.  The remaining extractions are tracked in
+Two capabilities live here today -- ``market`` (v2O-A) and ``account``
+(v2O-B).  The remaining extractions are tracked in
 ``docs/TRADING_ARCHITECTURE_V2.md``.
 """
 

@@ -648,6 +648,12 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "pages/research/scanner/page.py",
         "pages/research/scanner/presenter.py",
         "pages/research/scanner/table.py",
+        "pages/research/backtest/__init__.py",
+        "pages/research/backtest/models.py",
+        "pages/research/backtest/presenter.py",
+        "pages/research/backtest/controls.py",
+        "pages/research/backtest/tables.py",
+        "pages/research/backtest/page.py",
     }
 
 

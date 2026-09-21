@@ -148,7 +148,6 @@ STRATEGY_V2_METHODS = frozenset(
         "_auto_order_service_connected",
         "_auto_quant_preflight",
         "_backtest_records",
-        "_refresh_backtest_strategy_combo",
         "_selected_auto_strategy_record",
         "_selected_shadow_strategy_record",
     }
@@ -334,6 +333,29 @@ SCANNER_V2_METHODS = (
     "_load_scan_file",
     "_auto_market_scan_finished",
     "_dashboard_tab",
+    "_apply_theme",
+)
+
+BACKTEST_V2_REMOVED_METHODS = (
+    "_backtest_tab",
+    "_refresh_backtest_strategy_combo",
+    "_backtest_result_selection_changed",
+    "_show_backtest_run",
+)
+BACKTEST_V2_ADDED_METHODS = (
+    "_connect_backtest_page",
+    "_publish_backtest_strategy_options",
+    "_publish_backtest_view",
+    "_backtest_run_selected",
+    "_run_selected_backtest",
+    "_run_all_backtests",
+    "_backtest_task_failed",
+)
+BACKTEST_V2_METHODS = (
+    "_backtest_records",
+    "_run_backtest_workspace",
+    "_backtest_workspace_finished",
+    "_worker_finished",
     "_apply_theme",
 )
 
@@ -1283,6 +1305,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(TARGETED_RESEARCH_V2_REMOVED_METHODS)
         | set(RESEARCH_DATA_V2_REMOVED_METHODS)
         | set(SCANNER_V2_REMOVED_METHODS)
+        | set(BACKTEST_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1293,6 +1316,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(TARGETED_RESEARCH_V2_ADDED_METHODS)
         | set(RESEARCH_DATA_V2_ADDED_METHODS)
         | set(SCANNER_V2_ADDED_METHODS)
+        | set(BACKTEST_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1323,6 +1347,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(TARGETED_RESEARCH_V2_METHODS)
         | set(RESEARCH_DATA_V2_METHODS)
         | set(SCANNER_V2_METHODS)
+        | set(BACKTEST_V2_METHODS)
     )
     assert set(changed) <= declared
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)
@@ -1335,6 +1360,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(TARGETED_RESEARCH_V2_METHODS) <= set(changed)
     assert set(RESEARCH_DATA_V2_METHODS) <= set(changed)
     assert set(SCANNER_V2_METHODS) <= set(changed)
+    assert set(BACKTEST_V2_METHODS) <= set(changed)
     for name in REFACTORED_METHODS:
         if name != "__init__":
             assert name in changed, name

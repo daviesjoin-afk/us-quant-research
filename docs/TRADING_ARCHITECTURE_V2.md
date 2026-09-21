@@ -69,6 +69,14 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 > `_scan_selection_changed()` 已删除，Dashboard 的“运行市场扫描”按钮也已退休。
 > 手动扫描 service、任务编排、`self.scan` 真值和图表文件读取仍由 MainWindow 持有。
 > Research aggregate 仍是 transitional，一级 native 计数仍为 **5 / 8**。见 §8.6。
+>
+> **进度更新（Desktop Research v2D）**：Research 的“回测”二级页已迁成原生
+> `BacktestPage`，旧 `_backtest_tab()` / `_refresh_backtest_strategy_combo()` /
+> `_backtest_result_selection_changed()` / `_show_backtest_run()` 已删除，
+> MainWindow 不再持有任何 Backtest widget。`self.backtest_runs`、selected run id、
+> `_backtest_busy`、StrategySelectionService、BacktestRequest construction 与
+> DesktopBacktestService 仍由 MainWindow 持有。Research aggregate 仍是 transitional，
+> 一级 native 计数仍为 **5 / 8**。见 §8.7。
 
 ## 迁移状态一览
 
@@ -89,7 +97,7 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Desktop UniversePage | MIGRATED |
 | Desktop HistoryPage | MIGRATED |
 | Desktop ScannerPage | MIGRATED |
-| Desktop BacktestPage | TRANSITIONAL |
+| Desktop BacktestPage | MIGRATED |
 | Desktop CrossSectionResearchPage | TRANSITIONAL |
 | Desktop Dashboard | TRANSITIONAL |
 | Desktop Research aggregate | TRANSITIONAL |
@@ -590,12 +598,12 @@ account    → desktop_v2/pages/account.py            ✅ native v2
 strategy   → desktop_v2/pages/strategy.py           ✅ native v2
 risk       → desktop_v2/pages/risk.py               ✅ native v2
 execution  → desktop_v2/pages/execution/            ✅ native v2
-research   → QTabWidget（TargetedValidationPage / UniversePage / HistoryPage / ScannerPage / 回测 / 横截面研究）
+research   → QTabWidget（TargetedValidationPage / UniversePage / HistoryPage / ScannerPage / BacktestPage / 横截面研究）
 system     → QTabWidget（运行事件 / 系统设置）
 ```
 
-前端进度：**5 / 8 native v2**。Research 的前四个二级页已 native v2，
-但一级 Research aggregate 仍算 transitional；Backtest / Cross Section 两个二级页、
+前端进度：**5 / 8 native v2**。Research 的前五个二级页已 native v2，
+但一级 Research aggregate 仍算 transitional；Cross Section 二级页、
 剩余 Dashboard、Research、System 仍是 transitional，`Market` 已于 Desktop Market v2
 迁完。
 
@@ -953,7 +961,51 @@ ScannerPage       local search/filter/table/chart + scan/symbol intent
 MainWindow widget ownership、Dashboard scan action、executor imports/calls、
 Qt-free models/presenter、lazy package initializer、MainWindow public surface、
 业务路径不读取显示行与 per-file line budgets。一级 native route 计数仍为 **5 / 8**；
-Research aggregate 与 Backtest / Cross Section 仍是后续 v2D-F 的范围。
+Research aggregate 与 Cross Section 仍是后续 v2E-F 的范围；Backtest 的完成情况见 §8.7。
+
+### 8.7 backtest 页已完成（Desktop Research v2D）
+
+`MainWindow._backtest_tab()`、`_refresh_backtest_strategy_combo()`、
+`_backtest_result_selection_changed()` 与 `_show_backtest_run()` 已删除，没有
+compatibility shim。新的原生页面位于：
+
+```text
+desktop_v2/pages/research/backtest/
+  __init__.py   lazy export BacktestPage
+  models.py     immutable strategy/form/metric/table/chart/page views
+  presenter.py  BacktestRun → immutable display views（Qt-free）
+  controls.py   strategy / form / cost widgets + BacktestFormDraft intent
+  tables.py     comparison / trades tables + numeric sorting + run-id selection
+  page.py       five metric cards / controls / evidence / chart / tables
+```
+
+职责边界：
+
+```text
+MainWindow        StrategySelectionService、BacktestRun truth、selected run id、
+                  busy fact、BacktestRequest construction、DesktopBacktestService、TaskThread
+presenter         BacktestRun → immutable strings / points（Qt-free）
+BacktestPage      render + hold UI draft + emit intent
+```
+
+- **form ownership 已迁移。** 策略 combo、symbol/date/capital/weight、费用字段、
+  两个 run buttons 都由 `BacktestControls` 持有；Page 只捕获 `BacktestFormDraft`，
+  真正的 `BacktestRequest` 仍在 MainWindow 构造。
+- **run truth 没有迁移。** `self.backtest_runs`、`_selected_backtest_run_id` 和
+  `_backtest_busy` 仍由 MainWindow 持有；run selection 使用完整 run id，不依赖 row index。
+- **业务语义保持。** BACKTEST eligibility、single/combo selection、compare-all latest
+  per strategy、日期/空策略 gate、Decimal cost conversion、service partial-commit
+  与 metrics/trade/evidence formatting 均未改变。
+- **冻结行为。** 13 列 comparison/trades headers、numeric sorting、空结果 metric
+  notes、chart 最近 180 points、BUY/SELL 中文显示、substitution suffix、theme
+  switch 不触发 run selection 均保持。
+- **generic worker 已解耦。** `_worker_finished()` 不再触碰任何 Backtest widget；
+  unrelated worker finish 不会改变 `_backtest_busy` 或解锁 run buttons。
+
+新增守卫位于 `tests/test_desktop_v2_backtest_architecture.py`，覆盖 legacy surface、
+MainWindow widget ownership、executor imports/calls、`BacktestRequest` construction、
+Qt-free models/presenter、lazy package initializer、MainWindow public surface、worker
+coupling 与 per-file line budgets。一级 native route 计数仍为 **5 / 8**。
 
 ## 9. 已删除的旧架构
 
@@ -1578,7 +1630,8 @@ Desktop Market v2        ✅（§8.3）
 Desktop Research v2A     ✅（§8.4）
 Desktop Research v2B     ✅（§8.5）
 Desktop Research v2C     ✅（§8.6）
-Desktop Research v2D-F
+Desktop Research v2D     ✅（§8.7）
+Desktop Research v2E-F
 Desktop System v2
 Desktop Dashboard v2
 ```
@@ -1750,10 +1803,11 @@ Shadow v2     shadow_paper.py 拆成 shadow package 并删除（§10.7）
 **Desktop Research v2A 已完成**（§8.4），Research 的“针对性验证”二级页已 native
 v2。**Desktop Research v2B 已完成**（§8.5），Universe/History 两个二级页也已 native
 v2。**Desktop Research v2C 已完成**（§8.6），ScannerPage 已 native v2，Dashboard
-人工扫描入口已退休；Research aggregate 仍 transitional。阶段 2 剩余：
+人工扫描入口已退休。**Desktop Research v2D 已完成**（§8.7），BacktestPage 已 native
+v2；Research aggregate 仍 transitional。阶段 2 剩余：
 
 ```text
-Desktop Research v2D-F   （必须继续拆多个 PR，禁止一次搬成一个巨大 ResearchPage）
+Desktop Research v2E-F   （必须继续拆多个 PR，禁止一次搬成一个巨大 ResearchPage）
 Desktop System v2
 Desktop Dashboard v2
 ```

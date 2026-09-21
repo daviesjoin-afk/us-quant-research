@@ -28,6 +28,11 @@ from us_quant.trading.domain.market import (  # noqa: E402
 from us_quant.trading.runtime.models import AutoQuantCandidate  # noqa: E402
 
 
+def _start_backtest_preview(window) -> None:
+    draft = window.backtest_page.current_draft()
+    window._run_backtest_workspace(False, draft)
+
+
 def main() -> int:
     application = QApplication.instance() or QApplication([])
     configure_chinese_font(application)
@@ -270,7 +275,7 @@ def main() -> int:
     if not window.grab().save(str(manager_output)):
         raise RuntimeError("strategy manager preview could not be saved")
     select("research", 4)
-    window._run_backtest_workspace(False)
+    _start_backtest_preview(window)
     deadline = monotonic() + 15
     while window.workers and monotonic() < deadline:
         application.processEvents()

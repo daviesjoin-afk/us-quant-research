@@ -397,6 +397,27 @@ BACKTEST_V2_METHODS = (
     "_apply_theme",
 )
 
+CROSS_SECTION_V2_REMOVED_METHODS = (
+    "_strategy_tab",
+    "_populate_strategy_report",
+    "_run_strategy_research",
+    "_strategy_finished",
+    "_load_strategy_report",
+)
+CROSS_SECTION_V2_ADDED_METHODS = (
+    "_connect_cross_section_page",
+    "_publish_cross_section_view",
+    "_run_cross_section_research",
+    "_cross_section_finished",
+    "_load_cross_section_report",
+)
+CROSS_SECTION_V2_METHODS = (
+    "_load_local_state",
+    "_research_scenario_capital",
+    "_research_capital_changed",
+    "_apply_theme",
+)
+
 DESKTOP_EXECUTION_V2_REMOVED_METHODS = (
     "_auto_quant_tab",
     "_populate_auto_latency_table",
@@ -1732,6 +1753,7 @@ def test_only_the_settings_tab_was_rewritten() -> None:
         | set(RESEARCH_DATA_V2_REMOVED_METHODS)
         | set(SCANNER_V2_REMOVED_METHODS)
         | set(BACKTEST_V2_REMOVED_METHODS)
+        | set(CROSS_SECTION_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1743,6 +1765,7 @@ def test_only_the_settings_tab_was_rewritten() -> None:
         | set(RESEARCH_DATA_V2_ADDED_METHODS)
         | set(SCANNER_V2_ADDED_METHODS)
         | set(BACKTEST_V2_ADDED_METHODS)
+        | set(CROSS_SECTION_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1770,6 +1793,7 @@ def test_only_the_settings_tab_was_rewritten() -> None:
         | set(RESEARCH_DATA_V2_METHODS)
         | set(SCANNER_V2_METHODS)
         | set(BACKTEST_V2_METHODS)
+        | set(CROSS_SECTION_V2_METHODS)
     )
     # Exact, not a subset: every changed method must be declared, and
     # every declared method must actually have changed.
@@ -1785,6 +1809,7 @@ def test_only_the_settings_tab_was_rewritten() -> None:
     assert set(RESEARCH_DATA_V2_METHODS) <= set(changed)
     assert set(SCANNER_V2_METHODS) <= set(changed)
     assert set(BACKTEST_V2_METHODS) <= set(changed)
+    assert set(CROSS_SECTION_V2_METHODS) <= set(changed)
     assert "_settings_tab" in changed
 
 

@@ -654,6 +654,12 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "pages/research/backtest/controls.py",
         "pages/research/backtest/tables.py",
         "pages/research/backtest/page.py",
+        "pages/research/cross_section/__init__.py",
+        "pages/research/cross_section/models.py",
+        "pages/research/cross_section/presenter.py",
+        "pages/research/cross_section/controls.py",
+        "pages/research/cross_section/tables.py",
+        "pages/research/cross_section/page.py",
     }
 
 

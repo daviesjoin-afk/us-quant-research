@@ -63,6 +63,12 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 > 已删除。Universe 刷新/取消控件已从 Dashboard 搬回 UniversePage；History 队列下载、
 > 进度和失败状态仍由 MainWindow 编排。Research aggregate 仍是 transitional，一级 native
 > 计数仍为 **5 / 8**。见 §8.5。
+>
+> **进度更新（Desktop Research v2C）**：Research 的“市场扫描”二级页已迁成原生
+> `ScannerPage`，旧 `_scanner_tab()` / `_populate_scan_table()` /
+> `_scan_selection_changed()` 已删除，Dashboard 的“运行市场扫描”按钮也已退休。
+> 手动扫描 service、任务编排、`self.scan` 真值和图表文件读取仍由 MainWindow 持有。
+> Research aggregate 仍是 transitional，一级 native 计数仍为 **5 / 8**。见 §8.6。
 
 ## 迁移状态一览
 
@@ -82,6 +88,9 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Desktop TargetedValidationPage | MIGRATED |
 | Desktop UniversePage | MIGRATED |
 | Desktop HistoryPage | MIGRATED |
+| Desktop ScannerPage | MIGRATED |
+| Desktop BacktestPage | TRANSITIONAL |
+| Desktop CrossSectionResearchPage | TRANSITIONAL |
 | Desktop Dashboard | TRANSITIONAL |
 | Desktop Research aggregate | TRANSITIONAL |
 | Desktop System | TRANSITIONAL |
@@ -581,13 +590,14 @@ account    → desktop_v2/pages/account.py            ✅ native v2
 strategy   → desktop_v2/pages/strategy.py           ✅ native v2
 risk       → desktop_v2/pages/risk.py               ✅ native v2
 execution  → desktop_v2/pages/execution/            ✅ native v2
-research   → QTabWidget（TargetedValidationPage / UniversePage / HistoryPage / 市场扫描 / 回测 / 横截面研究）
+research   → QTabWidget（TargetedValidationPage / UniversePage / HistoryPage / ScannerPage / 回测 / 横截面研究）
 system     → QTabWidget（运行事件 / 系统设置）
 ```
 
-前端进度：**5 / 8 native v2**。Research 的前三个二级页已 native v2，
-但一级 Research aggregate 仍算 transitional；剩余 Dashboard、Research、System
-仍是 transitional，`Market` 已于 Desktop Market v2 迁完。
+前端进度：**5 / 8 native v2**。Research 的前四个二级页已 native v2，
+但一级 Research aggregate 仍算 transitional；Backtest / Cross Section 两个二级页、
+剩余 Dashboard、Research、System 仍是 transitional，`Market` 已于 Desktop Market v2
+迁完。
 
 ### 8.2 execution 页已完成（Desktop Execution v2）
 
@@ -890,7 +900,8 @@ HistoryPage                batch draft / buttons / progress / table
 - **表格列与排序冻结。** Universe 9 列、History 7 列、`configure_table(...)` 的
   read-only / row selection / sorting 行为保持；2500 行只截断 UI，不截断任务队列。
 - **研究内容没有改变。** Universe service、History service、queue store、IBKR/public
-  history 执行器、Scanner、Backtest、Cross Section 与 Targeted v2A 均未被重写。
+  history 执行器与 Targeted v2A 均未被重写；Scanner 本轮只迁 UI，Backtest 与
+  Cross Section 保持 legacy。
 
 新增守卫位于 `tests/test_desktop_v2_research_data_architecture.py`，覆盖：
 
@@ -903,6 +914,46 @@ presenters are Qt-free
 MainWindow uses only render/set_palette
 per-file line budgets
 ```
+
+### 8.6 scanner 页已完成（Desktop Research v2C）
+
+`MainWindow._scanner_tab()`、`_populate_scan_table()` 与
+`_scan_selection_changed()` 已删除，没有 compatibility shim。新的原生页面位于：
+
+```text
+desktop_v2/pages/research/scanner/
+  __init__.py   lazy export ScannerPage
+  models.py     不可变展示模型（ScannerFilterMode / ScannerRowView / ScannerPageView）
+  presenter.py  ScanResult → immutable rows / coverage（Qt-free）
+  table.py      ScannerTable：headers / numeric sorting / trend tone / symbol selection
+  page.py       search / filter / scan intent / coverage / table / chart
+```
+
+职责边界：
+
+```text
+MainWindow        self.scan、DesktopMarketScanService、TaskThread、图表文件读取
+presenter / rows  ScanResult → strings + booleans（Qt-free）
+ScannerPage       local search/filter/table/chart + scan/symbol intent
+```
+
+- **Dashboard 的人工扫描按钮已退休。** Dashboard 保留 Gateway 检查、cards、chart、
+  artifact table 与 notes；Scanner 唯一人工入口是 `ScannerPage → 重新扫描`。
+- **扫描真值没有改变。** `_run_scan()` 仍负责 universe 检查、research capital、
+  risk limit、substitutions 与 `resource_group="scan"`；service 和 scanner domain
+  未被修改。
+- **UI filter 只改显示。** Market watchlist 与 AutoQuant candidate 路径继续读取完整
+  `self.scan`，不读取 ScannerPage 的当前显示行。
+- **图表仍由窗口取数。** 页面 selection 发 `symbol_selected(symbol)`，MainWindow
+  调用 `load_close_series()` 后通过 `render_chart()` 回填；页面不读 filesystem。
+- **冻结行为。** 13 列表头、numeric sorting、趋势候选仅 0/4/5 列 success tone、
+  score descending、首行选择与自动图表加载、空结果不发空 symbol 均保持。
+
+新增守卫位于 `tests/test_desktop_v2_scanner_architecture.py`，覆盖 legacy surface、
+MainWindow widget ownership、Dashboard scan action、executor imports/calls、
+Qt-free models/presenter、lazy package initializer、MainWindow public surface、
+业务路径不读取显示行与 per-file line budgets。一级 native route 计数仍为 **5 / 8**；
+Research aggregate 与 Backtest / Cross Section 仍是后续 v2D-F 的范围。
 
 ## 9. 已删除的旧架构
 
@@ -1526,7 +1577,8 @@ Desktop Market v2 已完成（§8.3）：
 Desktop Market v2        ✅（§8.3）
 Desktop Research v2A     ✅（§8.4）
 Desktop Research v2B     ✅（§8.5）
-Desktop Research v2C-F
+Desktop Research v2C     ✅（§8.6）
+Desktop Research v2D-F
 Desktop System v2
 Desktop Dashboard v2
 ```
@@ -1697,10 +1749,11 @@ Shadow v2     shadow_paper.py 拆成 shadow package 并删除（§10.7）
 **Desktop Market v2 已完成**（§8.3），market route 变成原生 v2 page。
 **Desktop Research v2A 已完成**（§8.4），Research 的“针对性验证”二级页已 native
 v2。**Desktop Research v2B 已完成**（§8.5），Universe/History 两个二级页也已 native
-v2；Research aggregate 仍 transitional。阶段 2 剩余：
+v2。**Desktop Research v2C 已完成**（§8.6），ScannerPage 已 native v2，Dashboard
+人工扫描入口已退休；Research aggregate 仍 transitional。阶段 2 剩余：
 
 ```text
-Desktop Research v2C-F   （必须继续拆多个 PR，禁止一次搬成一个巨大 ResearchPage）
+Desktop Research v2D-F   （必须继续拆多个 PR，禁止一次搬成一个巨大 ResearchPage）
 Desktop System v2
 Desktop Dashboard v2
 ```

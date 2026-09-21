@@ -643,6 +643,11 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "pages/research/history/models.py",
         "pages/research/history/page.py",
         "pages/research/history/presenter.py",
+        "pages/research/scanner/__init__.py",
+        "pages/research/scanner/models.py",
+        "pages/research/scanner/page.py",
+        "pages/research/scanner/presenter.py",
+        "pages/research/scanner/table.py",
     }
 
 

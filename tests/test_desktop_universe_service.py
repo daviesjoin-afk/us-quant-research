@@ -286,6 +286,24 @@ RESEARCH_DATA_V2_METHODS = (
     "_task_failed",
 )
 
+SCANNER_V2_REMOVED_METHODS = (
+    "_scanner_tab",
+    "_populate_scan_table",
+    "_scan_selection_changed",
+)
+SCANNER_V2_ADDED_METHODS = (
+    "_connect_scanner_page",
+    "_publish_scanner_view",
+    "_scanner_symbol_selected",
+)
+SCANNER_V2_METHODS = (
+    "_scan_finished",
+    "_load_scan_file",
+    "_auto_market_scan_finished",
+    "_dashboard_tab",
+    "_apply_theme",
+)
+
 DESKTOP_EXECUTION_V2_REMOVED_METHODS = (
     "_auto_quant_tab",
     "_populate_auto_latency_table",
@@ -341,7 +359,6 @@ DESKTOP_EXECUTION_V2_METHODS = (
 FROZEN_METHODS = (
     "_request_worker_stops",
     "_task_cancelled",
-    "_scan_finished",
     "_start_task",
     "closeEvent",
 )
@@ -1499,6 +1516,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_MARKET_V2_REMOVED_METHODS)
         | set(TARGETED_RESEARCH_V2_REMOVED_METHODS)
         | set(RESEARCH_DATA_V2_REMOVED_METHODS)
+        | set(SCANNER_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1508,6 +1526,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_MARKET_V2_ADDED_METHODS)
         | set(TARGETED_RESEARCH_V2_ADDED_METHODS)
         | set(RESEARCH_DATA_V2_ADDED_METHODS)
+        | set(SCANNER_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1534,6 +1553,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_MARKET_V2_METHODS)
         | set(TARGETED_RESEARCH_V2_METHODS)
         | set(RESEARCH_DATA_V2_METHODS)
+        | set(SCANNER_V2_METHODS)
     )
     # Exact, not a subset: the delta is the declared surface and nothing
     # else, in both directions.
@@ -1547,6 +1567,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(DESKTOP_MARKET_V2_METHODS) <= set(changed)
     assert set(TARGETED_RESEARCH_V2_METHODS) <= set(changed)
     assert set(RESEARCH_DATA_V2_METHODS) <= set(changed)
+    assert set(SCANNER_V2_METHODS) <= set(changed)
     assert "_refresh_universe" in changed
 
 

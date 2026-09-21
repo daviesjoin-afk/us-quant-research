@@ -499,20 +499,33 @@ def test_the_terminal_export_reads_the_canonical_portfolio(
 # -- the line-count delta ----------------------------------------------
 
 
+#: The commit this round is measured against.  Recorded as the **full** SHA
+#: on purpose: ``git fetch <sha>`` refuses a short one ("couldn't find remote
+#: ref"), so a shallow CI checkout could never resolve it and the guard would
+#: fail there while passing locally -- which is exactly what happened the first
+#: time this was written.
+ACCOUNT_ORCHESTRATION_BASE_COMMIT = (
+    "99049f09318f1eb8246f1160b933dcaf4d06229f"
+)
+
+
 def _base_desktop_source(root) -> str:
     """Read ``desktop.py`` at the v2O-B base commit, fetching if shallow.
 
-    Mirrors the repo's existing base-commit helper: a shallow CI checkout may
-    not have the commit, so it is fetched rather than skipped -- a skipped
+    Mirrors the repo's existing base-commit helper: a shallow CI checkout does
+    not contain the commit, so it is fetched rather than skipped -- a skipped
     line-count guard would silently stop guarding.
     """
 
     import subprocess
 
-    base_commit = "99049f0"
     for attempt in (0, 1):
         result = subprocess.run(
-            ["git", "show", f"{base_commit}:src/us_quant/desktop.py"],
+            [
+                "git",
+                "show",
+                f"{ACCOUNT_ORCHESTRATION_BASE_COMMIT}:src/us_quant/desktop.py",
+            ],
             cwd=root,
             capture_output=True,
             text=True,
@@ -523,12 +536,22 @@ def _base_desktop_source(root) -> str:
             return result.stdout
         if attempt == 0:
             subprocess.run(
-                ["git", "fetch", "--depth", "1", "-q", "origin", base_commit],
+                [
+                    "git",
+                    "fetch",
+                    "--depth",
+                    "1",
+                    "-q",
+                    "origin",
+                    ACCOUNT_ORCHESTRATION_BASE_COMMIT,
+                ],
                 cwd=root,
                 capture_output=True,
                 check=False,
             )
-    pytest.fail(f"base commit {base_commit} is unreachable")
+    pytest.fail(
+        f"base commit {ACCOUNT_ORCHESTRATION_BASE_COMMIT} is unreachable"
+    )
 
 
 def test_the_account_extraction_net_reduced_the_window() -> None:

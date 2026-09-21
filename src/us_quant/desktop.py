@@ -5458,10 +5458,8 @@ class MainWindow(QMainWindow):
             return False
         worker = TaskThread(task, resource_group=resource_group)
         self.task_controller.register(worker)
-        if hasattr(self, "runtime_task_card"):
-            self.runtime_task_card.set_value(
-                str(len(self.workers)), start_message
-            )
+        if hasattr(self, "runtime_events_page"):
+            self._schedule_runtime_events_refresh()
         worker.progress.connect(self._log)
         if on_failure is None:
             worker.failed.connect(self._task_failed)
@@ -5482,12 +5480,10 @@ class MainWindow(QMainWindow):
 
     def _worker_finished(self, worker: TaskThread) -> None:
         self.task_controller.finish(worker)
+        if hasattr(self, "runtime_events_page"):
+            self._schedule_runtime_events_refresh()
         if worker is self.universe_refresh_worker:
             self._reset_universe_refresh_controls()
-        if hasattr(self, "runtime_task_card"):
-            self.runtime_task_card.set_value(
-                str(len(self.workers)), "后台任务"
-            )
         self._publish_execution_controls()
 
     def _task_cancelled(self) -> None:
@@ -5832,55 +5828,6 @@ class MainWindow(QMainWindow):
             return
         self._publish_settings_view()
         self._log("已清除当前 Windows 用户保存的 Finnhub Key")
-
-    def _publish_settings_view(self) -> None:
-        """Render one consistent settings view from the window's facts.
-
-        Credential status, button availability and the connection-control state
-        all come from one publish, so they cannot disagree with each other.
-        """
-
-        if not hasattr(self, "settings_page"):
-            return
-        provider = self._settings_api_provider
-        has_credentials = provider in {"finnhub_trades", "alpaca_iex"}
-        self.settings_page.render(
-            SettingsPageView(
-                credential_status_text=self._credential_status_text(
-                    provider
-                ),
-                credential_save_enabled=has_credentials,
-                credential_clear_enabled=(
-                    has_credentials
-                    and provider != self._active_stream_provider()
-                ),
-                connection_settings_enabled=(
-                    self._connection_settings_enabled
-                ),
-            )
-        )
-
-    def _credential_status_text(self, provider: str) -> str:
-        """The frozen credential status line for the selected API provider."""
-
-        status = self.credential_service.status(provider)
-        if provider == "finnhub_trades":
-            return (
-                "Finnhub：已加密保存"
-                if status.api_key_saved
-                else "Finnhub：未保存"
-            )
-        if provider == "alpaca_iex":
-            return (
-                "Alpaca Key："
-                f"{'已加密保存' if status.api_key_saved else '未保存'}"
-                " · Alpaca Secret："
-                f"{'已加密保存' if status.api_secret_saved else '未保存'}"
-            )
-        return (
-            "IBKR Gateway：使用本机 Host / 端口 / Client ID，"
-            "无需 API Key"
-        )
 
     def _api_provider_changed(self, provider: str) -> None:
         self._settings_api_provider = provider

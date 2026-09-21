@@ -278,6 +278,31 @@ def test_legacy_system_builders_are_deleted() -> None:
     assert _RETIRED_ROUTE_ATTR not in source
 
 
+def test_main_window_has_no_duplicate_method_definitions() -> None:
+    """Blocker B: a name defined twice silently shadows the first copy.
+
+    Python keeps the last definition, so tests can pass while a dead copy
+    rots.  This AST guard reads ``MainWindow`` itself and fails on any
+    duplicate method name, not just the two this round retired.
+    """
+
+    source = _DESKTOP_PATH.read_text(encoding="utf-8")
+    window = next(
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.ClassDef) and node.name == "MainWindow"
+    )
+    names = [
+        member.name
+        for member in window.body
+        if isinstance(member, ast.FunctionDef)
+    ]
+    duplicates = sorted(
+        {name for name in names if names.count(name) > 1}
+    )
+    assert duplicates == []
+
+
 def test_build_v2_pages_has_no_raw_system_tabs() -> None:
     method = _method_source(_DESKTOP_PATH, "_build_v2_pages")
     assert "system = QTabWidget()" not in method

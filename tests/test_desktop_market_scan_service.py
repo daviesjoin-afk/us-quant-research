@@ -468,6 +468,24 @@ SYSTEM_V2_METHODS = (
     "_clear_saved_finnhub_key",
     "_set_connection_settings_enabled",
 )
+
+# System v2 repair: the worker lifecycle now republishes the Runtime Events
+# view, so ``_start_task``'s retired activity-card update became a scheduled
+# page refresh.  Declared here so the byte-equivalence guard asserts exactly
+# that delta and nothing else.
+SYSTEM_V2_REPAIR_METHODS = ("_start_task",)
+
+_SYSTEM_V2_REPAIR_BASE_BLOCK = (
+    '        if hasattr(self, "runtime_task_card"):\n'
+    '            self.runtime_task_card.set_value(\n'
+    '                str(len(self.workers)), start_message\n'
+    '            )\n'
+)
+_SYSTEM_V2_REPAIR_DELTA_BLOCK = (
+    '        if hasattr(self, "runtime_events_page"):\n'
+    '            self._schedule_runtime_events_refresh()\n'
+)
+
 SYSTEM_V2_CHANGED_MODULES = (
     # The transitional settings panel is deleted; the page owns its widgets now.
     "src/us_quant/desktop_settings_panel.py",
@@ -1492,6 +1510,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(BACKTEST_V2_METHODS)
         | set(CROSS_SECTION_V2_METHODS)
         | set(SYSTEM_V2_METHODS)
+        | set(SYSTEM_V2_REPAIR_METHODS)
     )
     assert set(changed) <= allowed
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)
@@ -1507,6 +1526,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(BACKTEST_V2_METHODS) <= set(changed)
     assert set(CROSS_SECTION_V2_METHODS) <= set(changed)
     assert set(SYSTEM_V2_METHODS) <= set(changed)
+    assert set(SYSTEM_V2_REPAIR_METHODS) <= set(changed)
     assert "_run_scan" in changed
 
 

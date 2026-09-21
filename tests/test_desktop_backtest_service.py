@@ -461,6 +461,24 @@ SYSTEM_V2_METHODS = (
     "_clear_saved_finnhub_key",
     "_set_connection_settings_enabled",
 )
+
+# System v2 repair: the worker lifecycle now republishes the Runtime Events
+# view, so ``_start_task``'s retired activity-card update became a scheduled
+# page refresh.  Declared here so the byte-equivalence guard asserts exactly
+# that delta and nothing else.
+SYSTEM_V2_REPAIR_METHODS = ("_start_task",)
+
+_SYSTEM_V2_REPAIR_BASE_BLOCK = (
+    '        if hasattr(self, "runtime_task_card"):\n'
+    '            self.runtime_task_card.set_value(\n'
+    '                str(len(self.workers)), start_message\n'
+    '            )\n'
+)
+_SYSTEM_V2_REPAIR_DELTA_BLOCK = (
+    '        if hasattr(self, "runtime_events_page"):\n'
+    '            self._schedule_runtime_events_refresh()\n'
+)
+
 SYSTEM_V2_CHANGED_MODULES = (
     # The transitional settings panel is deleted; the page owns its widgets now.
     "src/us_quant/desktop_settings_panel.py",
@@ -1778,7 +1796,18 @@ def test_the_frozen_method_is_byte_identical(name: str) -> None:
         encoding="utf-8"
     )
 
-    assert _find_method(current, name) == _find_method(base, name), name
+    base_body = _find_method(base, name)
+    current_body = _find_method(current, name)
+
+    if name in SYSTEM_V2_REPAIR_METHODS:
+        # System v2 repair: only the declared lifecycle publication delta may
+        # differ from the base bytes; anything else still fails here.
+        assert current_body.count(_SYSTEM_V2_REPAIR_DELTA_BLOCK) == 1, name
+        current_body = current_body.replace(
+            _SYSTEM_V2_REPAIR_DELTA_BLOCK, _SYSTEM_V2_REPAIR_BASE_BLOCK
+        )
+
+    assert current_body == base_body, name
 
 
 def test_only_the_declared_methods_changed() -> None:
@@ -1865,6 +1894,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(BACKTEST_V2_METHODS)
         | set(CROSS_SECTION_V2_METHODS)
         | set(SYSTEM_V2_METHODS)
+        | set(SYSTEM_V2_REPAIR_METHODS)
     )
     # Exact, not a subset: the delta is the declared surface and nothing
     # else, in both directions.
@@ -1882,6 +1912,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(BACKTEST_V2_METHODS) <= set(changed)
     assert set(CROSS_SECTION_V2_METHODS) <= set(changed)
     assert set(SYSTEM_V2_METHODS) <= set(changed)
+    assert set(SYSTEM_V2_REPAIR_METHODS) <= set(changed)
     assert "_run_backtest_workspace" in changed
 
 

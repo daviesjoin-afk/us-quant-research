@@ -217,6 +217,27 @@ def test_set_api_provider_emits_when_asked() -> None:
     assert seen == ["alpaca_iex"]
 
 
+def test_set_theme_is_silent_by_default() -> None:
+    page = _page()
+    seen: list[str] = []
+    page.theme_preview_requested.connect(seen.append)
+
+    page.set_theme("light")
+
+    assert page.current_draft().theme == "light"
+    assert seen == []
+
+
+def test_set_theme_emits_when_explicitly_requested() -> None:
+    page = _page()
+    seen: list[str] = []
+    page.theme_preview_requested.connect(seen.append)
+
+    page.set_theme("light", emit_change=True)
+
+    assert seen == ["light"]
+
+
 def test_capability_setters_are_silent_and_can_emit() -> None:
     page = _page()
     seen: list[bool] = []

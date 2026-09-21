@@ -103,6 +103,48 @@ def test_recording_an_event_refreshes_the_page(monkeypatch, tmp_path) -> None:
         window.deleteLater()
 
 
+def test_task_lifecycle_republishes_active_task_count(
+    monkeypatch, tmp_path
+) -> None:
+    """Blocker A: a real worker lifecycle must republish the active count.
+
+    This drives the window's own ``_start_task`` / ``_worker_finished`` and
+    reads the count back off the rendered page, so deleting either lifecycle
+    refresh turns the test red instead of merely asserting a call happened.
+    """
+
+    window = _window(monkeypatch, tmp_path)
+    try:
+        monkeypatch.setattr(
+            "us_quant.desktop.TaskThread.start", lambda self: None
+        )
+
+        # The coalescing window starts cold, so each projection is immediate.
+        window._last_runtime_events_refresh = 0.0
+        assert window.runtime_events_page.task_card.value_label.text() == "0"
+
+        accepted = window._start_task(
+            lambda _report: None,
+            on_success=lambda _result: None,
+            start_message="单元测试后台任务",
+            resource_group="unit-test",
+        )
+        assert accepted is True
+        assert (
+            window.runtime_events_page.task_card.value_label.text() == "1"
+        )
+
+        worker = window.workers[0]
+        window._last_runtime_events_refresh = 0.0
+        window._worker_finished(worker)
+        assert (
+            window.runtime_events_page.task_card.value_label.text() == "0"
+        )
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_resolve_targets_the_exact_event_id(monkeypatch, tmp_path) -> None:
     window = _window(monkeypatch, tmp_path)
     try:

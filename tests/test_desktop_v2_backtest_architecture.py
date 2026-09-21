@@ -13,6 +13,7 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _SRC = _REPO_ROOT / "src" / "us_quant"
 _DESKTOP_PATH = _SRC / "desktop.py"
 _BACKTEST_DIR = _SRC / "desktop_v2" / "pages" / "research" / "backtest"
+_PREVIEW_PATH = _REPO_ROOT / "scripts" / "render_desktop_preview.py"
 
 LEGACY_METHODS = (
     "_backtest_tab",
@@ -269,6 +270,18 @@ def test_window_uses_only_backtest_page_surface() -> None:
         "compare_all_requested",
         "run_selected",
     }
+
+
+def test_preview_tooling_uses_only_public_backtest_page_api() -> None:
+    source = _PREVIEW_PATH.read_text(encoding="utf-8")
+    assert "_run_backtest_workspace(False)" not in source
+    assert "backtest_page.current_draft()" in source
+    for private_surface in (
+        "backtest_page.controls",
+        "backtest_page.comparison_table",
+        "backtest_page.chart",
+    ):
+        assert private_surface not in source
 
 
 def test_backtest_files_stay_inside_budgets() -> None:

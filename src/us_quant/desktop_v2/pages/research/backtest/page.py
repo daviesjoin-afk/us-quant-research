@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 
 from us_quant.desktop_v2.pages.research.backtest.controls import BacktestControls
 from us_quant.desktop_v2.pages.research.backtest.models import (
+    BacktestFormDraft,
     BacktestPageView,
     BacktestStrategyOption,
 )
@@ -149,6 +150,10 @@ class BacktestPage(QWidget):
                 title=chart.title,
             )
         self.evidence_label.setText(view.detail.evidence)
+
+    def current_draft(self) -> BacktestFormDraft:
+        """Return the current immutable backtest form state."""
+        return self.controls.draft()
 
     def set_strategy_options(
         self,

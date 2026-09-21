@@ -194,6 +194,34 @@ def test_controls_forward_form_intent() -> None:
     assert compared[0].strategy_version_id == "version-A"
 
 
+def test_current_draft_exposes_form_state_without_emitting_intent() -> None:
+    page = _page()
+    page.set_strategy_options(
+        (BacktestStrategyOption("version-A", "A · 1.0.0"),)
+    )
+    page.controls.symbol_input.setText("msft")
+    page.controls.capital_spin.setValue(2500)
+    page.controls.weight_spin.setValue(30)
+    selected: list[BacktestFormDraft] = []
+    compared: list[BacktestFormDraft] = []
+    selections: list[str] = []
+    page.run_selected_requested.connect(selected.append)
+    page.compare_all_requested.connect(compared.append)
+    page.run_selected.connect(selections.append)
+
+    first = page.current_draft()
+    second = page.current_draft()
+
+    assert first == second
+    assert first.strategy_version_id == "version-A"
+    assert first.symbol == "MSFT"
+    assert first.initial_equity == 2500
+    assert first.target_weight_percent == 30
+    assert selected == []
+    assert compared == []
+    assert selections == []
+
+
 def test_busy_render_disables_only_run_buttons() -> None:
     page = _page()
     page.render(_view(busy=True))

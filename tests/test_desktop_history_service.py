@@ -294,14 +294,21 @@ DESKTOP_MARKET_ORCHESTRATION_V2_METHODS = (
     "closeEvent",
 )
 
-# v2O-A: ``closeEvent`` asks the market orchestrator whether a feed is live
-# instead of reaching for the worker.  Declared as a byte-level delta so the
-# frozen-method guard still proves nothing else moved.
+# v2O-A: ``closeEvent`` asks the market orchestrator whether the market
+# *thread* is still alive instead of reaching for the worker.  The fact is
+# ``worker_running`` rather than ``is_live``: a stop that timed out makes the
+# feed unusable while the network thread is still running, so ``is_live``
+# would let the application exit over a live worker.  Declared as a
+# byte-level delta so the frozen-method guard still proves nothing else moved.
 _DESKTOP_MARKET_ORCHESTRATION_V2_CLOSE_EVENT_BASE = (
     '        if (\n            self.stream_worker is not None\n            and self.stream_worker.isRunning()\n        ):\n'
 )
 _DESKTOP_MARKET_ORCHESTRATION_V2_CLOSE_EVENT_DELTA = (
-    '        if self.market_orchestrator.is_live:\n'
+    '        # ``worker_running``, not ``is_live``: the question here is whether the\n'
+    '        # network thread has actually exited, and a stop that timed out has\n'
+    '        # already made the *feed* unavailable without ending the thread.  Asking\n'
+    '        # the business fact would let the application exit over a live worker.\n'
+    '        if self.market_orchestrator.worker_running:\n'
 )
 
 TARGETED_RESEARCH_V2_REMOVED_METHODS = (
@@ -1393,7 +1400,7 @@ def test_the_frozen_method_is_byte_identical(name: str) -> None:
         )
 
     if name == "closeEvent":
-        # v2O-A: the live-feed check asks the market orchestrator instead of
+        # v2O-A: the live-worker check asks the market orchestrator instead of
         # reading the worker attribute.  Only that declared delta may differ.
         assert (
             current_body.count(

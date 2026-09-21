@@ -430,25 +430,163 @@ def test_the_market_readiness_inputs_come_from_the_window(window) -> None:
 # -- shutdown ------------------------------------------------------------
 
 
-def test_shutdown_asks_the_orchestrator_not_the_worker(window) -> None:
-    """The supervisor's release pass must go through the public API."""
+class _StuckWorker:
+    """A worker whose thread never confirms exit, then does.
 
-    window.market_orchestrator._worker = _RunningWorker()
+    ``alive`` is the switch the recovery test flips: the same worker object
+    stays installed while its thread finally ends, which is exactly the state
+    the close path has to be able to leave.
+    """
+
+    def __init__(self, source_id: str = "ibkr") -> None:
+        self.source_id = source_id
+        self.market_exchange = "SMART"
+        self.alive = True
+        self.stop_requests = 0
+
+    def isRunning(self) -> bool:  # noqa: N802 - Qt spelling
+        return self.alive
+
+    def request_stop(self) -> None:
+        self.stop_requests += 1
+
+    def wait(self, _timeout: int) -> bool:
+        return False
+
+
+def _silence_dialogs(monkeypatch) -> list[tuple]:
+    """The close path reports to the operator; offscreen must not block on it."""
+
+    calls: list[tuple] = []
+
+    def recorder(kind: str):
+        def message(*args, **kwargs):
+            calls.append((kind, args, kwargs))
+            return None
+
+        return staticmethod(message)
+
+    monkeypatch.setattr(
+        "us_quant.desktop.QMessageBox.warning", recorder("warning")
+    )
+    monkeypatch.setattr(
+        "us_quant.desktop.QMessageBox.information",
+        recorder("information"),
+    )
+    return calls
+
+
+def _close_verdict(window) -> bool:
+    """Run the real ``closeEvent`` and report whether it accepted the close."""
+
+    from PySide6.QtGui import QCloseEvent
+
+    event = QCloseEvent()
+    window.closeEvent(event)
+    return bool(event.isAccepted())
+
+
+def test_a_stuck_market_worker_is_not_reported_as_a_clean_release(
+    window, monkeypatch
+) -> None:
+    """The blocker this round repairs, pinned as behaviour.
+
+    A stop that does not confirm leaves the feed unusable while the network
+    thread is still alive.  Wiring the supervisor's probe to ``is_live`` makes
+    it read that as "nothing to release", so shutdown reports success over a
+    running worker.
+    """
+
+    _silence_dialogs(monkeypatch)
+    worker = _StuckWorker()
+    window.market_orchestrator._worker = worker
     try:
         assert window.market_orchestrator.is_live
-        # ``join`` and ``is_running`` are what the supervisor reads.
-        assert window.runtime_supervisor is not None
-        assert window.market_orchestrator.polling_active is False
+        assert window.market_orchestrator.worker_running
+
+        assert window._stop_market_data() is False
+
+        # The two facts have now diverged: no usable feed, live thread.
+        assert window.market_orchestrator.is_live is False
+        assert window.market_orchestrator.worker_running is True
+
+        snapshot = window.runtime_supervisor.shutdown()
+        component = {
+            item.name: item for item in snapshot.components
+        }["market_data_stream"]
+
+        assert component.exit_ok is False
+        assert component.state == "failed"
+        assert component.last_error is not None
+        assert "did not exit" in component.last_error
+        assert window.runtime_supervisor.errors()
     finally:
         window.market_orchestrator._worker = None
+        window.market_orchestrator._stop_pending = False
+
+
+def test_close_is_refused_while_the_market_thread_is_still_alive(
+    window, monkeypatch
+) -> None:
+    """The close gate is thread liveness, not feed availability.
+
+    Paper is already finalized and nothing is running in the background, so
+    the only thing that can refuse this close is the market worker.  The
+    dialog is asserted too: a refusal from some other branch would otherwise
+    look identical from the outside.
+    """
+
+    calls = _silence_dialogs(monkeypatch)
+    worker = _StuckWorker()
+    window.market_orchestrator._worker = worker
+    try:
+        accepted = _close_verdict(window)
+
+        assert accepted is False
+        assert window.market_orchestrator.worker_running is True
+        assert window.market_orchestrator.is_live is False
+        titles = [
+            args[1] for kind, args, _kwargs in calls if kind == "information"
+        ]
+        assert "行情线程正在停止" in titles, titles
+    finally:
+        window.market_orchestrator._worker = None
+        window.market_orchestrator._stop_pending = False
+
+
+def test_close_completes_once_the_market_thread_has_really_ended(
+    window, monkeypatch
+) -> None:
+    """The repair must not wedge the exit behind a permanent stop-pending flag.
+
+    Same worker object, same pending stop, thread finally gone: the next close
+    has to go through.
+    """
+
+    _silence_dialogs(monkeypatch)
+    worker = _StuckWorker()
+    window.market_orchestrator._worker = worker
+    try:
+        assert _close_verdict(window) is False
+        assert window.market_orchestrator._stop_pending is True
+
+        worker.alive = False
+
+        assert window.market_orchestrator.worker_running is False
+        assert _close_verdict(window) is True
+    finally:
+        window.market_orchestrator._worker = None
+        window.market_orchestrator._stop_pending = False
 
 
 def test_closing_with_a_live_feed_asks_the_orchestrator(window) -> None:
     """The last check in ``closeEvent`` must not name a worker."""
 
-    source = window.closeEvent.__func__.__code__
-    names = source.co_names
+    names = window.closeEvent.__func__.__code__.co_names
     assert "market_orchestrator" in names
+    # The gate reads thread liveness, not the business "feed is usable" fact.
+    assert "worker_running" in names
+    assert "is_live" not in names
     assert "stream_worker" not in names
 
 

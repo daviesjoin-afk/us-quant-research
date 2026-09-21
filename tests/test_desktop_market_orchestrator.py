@@ -563,6 +563,48 @@ def test_a_stop_that_does_not_confirm_exit_keeps_the_gate_closed(
     assert harness.worker in harness.workers
 
 
+def test_a_timed_out_stop_separates_the_feed_from_the_thread(harness) -> None:
+    """Two liveness facts, and the timeout is exactly where they diverge.
+
+    A stop that did not confirm leaves the feed unusable while the network
+    thread is still alive.  If ``is_live`` were also the thread's answer, the
+    supervisor's liveness probe and ``closeEvent``'s last check would both
+    report a clean shutdown over a running worker.
+    """
+
+    harness.orchestrator.start()
+    harness.worker.stop_confirms = False
+
+    assert harness.orchestrator.stop() is False
+
+    assert not harness.orchestrator.is_live
+    assert harness.orchestrator.worker_running
+
+
+def test_the_worker_fact_starts_false_and_follows_the_thread(harness) -> None:
+    """The worker fact is about the thread, and only about the thread."""
+
+    assert not harness.orchestrator.worker_running
+
+    harness.orchestrator.start()
+
+    assert harness.orchestrator.worker_running
+    assert harness.orchestrator.is_live
+
+
+def test_the_worker_fact_clears_when_the_thread_really_ends(harness) -> None:
+    """A thread that exits on its own clears the fact with no stop involved."""
+
+    harness.orchestrator.start()
+    harness.worker._running = False
+
+    harness.worker.finished.emit()
+    _APP.processEvents()
+
+    assert not harness.orchestrator.worker_running
+    assert not harness.orchestrator.is_live
+
+
 def test_a_stuck_stop_leaves_the_worker_installed(harness) -> None:
     """A stop that did not confirm must not pretend the worker is gone.
 

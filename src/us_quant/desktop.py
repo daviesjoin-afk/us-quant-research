@@ -4570,11 +4570,17 @@ class MainWindow(QMainWindow):
         # applies the Paper and Shadow interlocks before asking it to stop, and
         # returns False rather than raising, so the return value is mapped to a
         # join verdict for the supervisor.
+        #
+        # ``worker_running``, not ``is_live``: a stop that timed out already
+        # makes ``is_live`` false while the network thread is still alive, so
+        # asking the business fact here would report a clean release over a
+        # thread that never exited.  ``is_live`` stays the answer for "is the
+        # feed usable", which is what the business gates ask.
         supervisor.register(
             "market_data_stream",
             stop=self._stop_market_data,
-            join=lambda: not self.market_orchestrator.is_live,
-            is_running=lambda: self.market_orchestrator.is_live,
+            join=lambda: not self.market_orchestrator.worker_running,
+            is_running=lambda: self.market_orchestrator.worker_running,
             order=100,
         )
         # Order 200+: background research/data workers.  ``wait`` is the Qt
@@ -4738,7 +4744,11 @@ class MainWindow(QMainWindow):
         # the supervisor only runs after the Paper session is finalized.
         snapshot = self.runtime_supervisor.shutdown()
         self._report_runtime_shutdown(snapshot)
-        if self.market_orchestrator.is_live:
+        # ``worker_running``, not ``is_live``: the question here is whether the
+        # network thread has actually exited, and a stop that timed out has
+        # already made the *feed* unavailable without ending the thread.  Asking
+        # the business fact would let the application exit over a live worker.
+        if self.market_orchestrator.worker_running:
             event.ignore()
             QMessageBox.information(
                 self,

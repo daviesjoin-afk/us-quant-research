@@ -1212,11 +1212,19 @@ ShellHealthPublisher  market / handshake badge 文本与状态、节流后的状
   `_last_stream_status_key` / `_last_stream_status_log_at` /
   `_last_stream_push_monotonic` 已从 `MainWindow` 全部消失，且**没有**任何
   compatibility property 或镜像 state。
-- **公开读取面。** 只有 `snapshot` / `is_live` / `active_source_id` /
-  `active_market_exchange` / `stop_reason` / `polling_active` /
-  `was_recently_ready()` / `recently_ready_symbols()`；worker、timer、pending
-  switch 与 readiness dict 保持私有，window 不允许 reach-through
-  `market_orchestrator._*`。
+- **公开读取面。** 只有 `snapshot` / `is_live` / `worker_running` /
+  `active_source_id` / `active_market_exchange` / `stop_reason` /
+  `polling_active` / `was_recently_ready()` / `recently_ready_symbols()`；
+  worker、timer、pending switch 与 readiness dict 保持私有，window 不允许
+  reach-through `market_orchestrator._*`。
+- **两个 liveness 事实，语义不同，不可互换。** `is_live` = **feed 可用性**：
+  `not _stop_pending and _worker_running`，stop 一旦 pending 就为 False，
+  业务门（market controls / execution stop-stream / preflight / Shadow
+  launch gate）继续读它。`worker_running` = **底层 StreamWorker 线程是否真的
+  还在跑**：stop 超时（`worker.wait(3000)` 返回 False）时 `is_live == False`
+  而 `worker_running == True`，shutdown 必须读这一个。它是只读 bool，**不是**
+  worker handle：`market_orchestrator.worker` / `._worker` 与任何
+  QThread/StreamWorker 对象仍然禁止泄露到 MainWindow。
 - **跨 workflow gate 暂留窗口。** 停止 / 切换仍要先读 Paper 持仓、在途订单与
   Shadow 是否 active，所以 `_request_market_start` / `_request_market_stop` /
   `_request_market_switch` / `_request_market_switch(allow_auto_session_switch=True)` /
@@ -1229,8 +1237,11 @@ ShellHealthPublisher  market / handshake badge 文本与状态、节流后的状
 - **shell 与事件是请求，不是写入。** badge 由 `MarketShellHealthView` 描述后由窗口
   绘制；runtime event 通过 `runtime_event_requested` 请求窗口记录，因此不存在
   `Market → System` 反向依赖。
-- **shutdown 顺序不变。** supervisor 与 `closeEvent` 只使用
-  `stop_polling` / `polling_active` / `is_live`；Paper shutdown ordering 未动。
+- **shutdown 顺序不变。** supervisor 与 `closeEvent` 使用
+  `stop_polling` / `polling_active` / `worker_running`（**不是** `is_live`，
+  否则超时停止会被判成 clean release）；Paper shutdown ordering 未动。
+  `closeEvent` 最终检查同样是 `worker_running`：只要行情网络线程没真正退出就
+  `event.ignore()`，即使 `is_live` 已经是 False 也不放行。
 - **IBKR 时段轮换仍是请求。** orchestrator 检测 venue 变化后 emit
   `automatic_switch_requested`，由窗口以 `allow_auto_session_switch=True` 走
   interlock，不会自行绕过 Paper gate。

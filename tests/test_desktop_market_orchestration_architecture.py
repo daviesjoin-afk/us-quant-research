@@ -132,6 +132,12 @@ FORBIDDEN_ORCHESTRATOR_CALLS = (
 
 #: The orchestrator's public read surface.  Anything else it exposes is a leak
 #: of runtime state, so this is asserted as an exact set rather than a subset.
+#:
+#: ``is_live`` and ``worker_running`` are both booleans and they answer
+#: different questions: ``is_live`` is feed availability (false as soon as a
+#: stop is pending), ``worker_running`` is actual thread liveness.  Shutdown
+#: reads the second one.  Neither exposes the worker: ``worker_running`` is a
+#: *fact about* the runtime, not a handle to it.
 PUBLIC_READ_SURFACE = (
     "active_market_exchange",
     "active_source_id",
@@ -141,6 +147,7 @@ PUBLIC_READ_SURFACE = (
     "snapshot",
     "stop_reason",
     "was_recently_ready",
+    "worker_running",
 )
 
 #: The orchestrator's public write/lifecycle surface.
@@ -170,6 +177,16 @@ FORBIDDEN_PUBLIC_RUNTIME_STATE = (
     "_pending",
     "_stop_pending",
     "_snapshot",
+)
+
+#: The worker *handle* names.  ``worker_running`` is a boolean fact and is
+#: allowed (it is in ``PUBLIC_READ_SURFACE``); a member that hands back the
+#: ``StreamWorker``/``QThread`` object is not, under any spelling.  Checked as
+#: an exact set so the accessor guard below can name every leak it knows.
+FORBIDDEN_WORKER_HANDLE_MEMBERS = (
+    "worker",
+    "stream_worker",
+    "_worker",
 )
 
 #: Per-file line caps.  The orchestrator's is the spec's hard ceiling: a file
@@ -496,6 +513,47 @@ def test_the_orchestrator_exposes_exactly_the_declared_surface() -> None:
     assert public == declared, sorted(public ^ declared)
 
 
+def test_the_orchestrator_exposes_no_worker_handle() -> None:
+    """``worker_running`` is a boolean; the worker object stays unreachable.
+
+    Two shapes are refused, because they leak differently:
+
+    * a member *named* for the handle (``worker`` / ``stream_worker`` /
+      ``_worker``) -- ``PUBLIC_READ_SURFACE`` also rejects an undeclared
+      public member, but this states the rule where a reader looks for it;
+    * a public member whose return value *is* the handle (``return
+      self._worker``).  A private helper reading ``self._worker`` into a local
+      is fine and unavoidable -- ``worker_running`` does exactly that -- so
+      the check is on what is handed back, not on what is read.
+    """
+
+    source = _ORCHESTRATOR_PATH.read_text(encoding="utf-8")
+    defined = {
+        node.name
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef)
+    }
+    for forbidden in FORBIDDEN_WORKER_HANDLE_MEMBERS:
+        assert forbidden not in defined, forbidden
+
+    leaked: list[tuple[str, int]] = []
+    for node in _class_of(_ORCHESTRATOR_PATH, "MarketOrchestrator").body:
+        if not isinstance(node, ast.FunctionDef) or node.name.startswith("_"):
+            continue
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Return) or child.value is None:
+                continue
+            for inner in ast.walk(child.value):
+                if (
+                    isinstance(inner, ast.Attribute)
+                    and isinstance(inner.value, ast.Name)
+                    and inner.value.id == "self"
+                    and inner.attr in {"_worker", "worker", "stream_worker"}
+                ):
+                    leaked.append((node.name, child.lineno))
+    assert not leaked, leaked
+
+
 def test_the_orchestrator_exposes_no_runtime_state() -> None:
     """The runtime half must stay private, in both naming conventions."""
 
@@ -590,12 +648,17 @@ def test_the_window_registers_the_orchestrators_lifecycle() -> None:
     register = _method_source(_DESKTOP_PATH, "_register_runtime_components")
     assert "market_orchestrator.stop_polling" in register
     assert "market_orchestrator.polling_active" in register
-    assert "market_orchestrator.is_live" in register
+    # The market component's liveness probe is *thread* liveness.  ``is_live``
+    # is false as soon as a stop is pending, so wiring it here would let a
+    # timed-out stop report a clean release over a live network thread.
+    assert "market_orchestrator.worker_running" in register
+    assert "market_orchestrator.is_live" not in register
     assert "market_orchestrator._worker" not in register
     assert "self.stream_worker" not in register
 
     close = _method_source(_DESKTOP_PATH, "closeEvent")
-    assert "self.market_orchestrator.is_live" in close
+    assert "self.market_orchestrator.worker_running" in close
+    assert "self.market_orchestrator.is_live" not in close
     assert "StreamWorker" not in close
 
 

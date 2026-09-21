@@ -20,10 +20,11 @@ The boundary it draws is the point of the extraction:
   dependency.
 
 The window injects exactly three things (see ``__init__``) and reads back only
-finished facts: ``snapshot``, ``is_live``, ``active_source_id``,
-``active_market_exchange``, ``stop_reason`` and ``was_recently_ready``.  The
-worker, the timer, the pending switch and the readiness dict are private --
-a caller that could reach the worker would be a second owner of the feed.
+finished facts: ``snapshot``, ``is_live``, ``worker_running``,
+``active_source_id``, ``active_market_exchange``, ``stop_reason`` and
+``was_recently_ready``.  The worker, the timer, the pending switch and the
+readiness dict stay private -- a caller that could reach the worker would be
+a second owner of the feed.
 """
 
 from __future__ import annotations
@@ -140,7 +141,20 @@ class MarketOrchestrator(QObject):
     def is_live(self) -> bool:
         """Whether a usable feed is owned: running, and not stuck stopping."""
 
-        return not self._stop_pending and self._worker_running
+        return not self._stop_pending and self.worker_running
+
+    @property
+    def worker_running(self) -> bool:
+        """Whether the ``StreamWorker`` thread is actually still running.
+
+        Thread liveness, a different question from feed availability
+        (:attr:`is_live`): a stop that timed out leaves ``is_live`` false
+        while this stays true, and shutdown reads this one.  A boolean,
+        never a worker handle.
+        """
+
+        worker = self._worker
+        return worker is not None and worker.isRunning()
 
     @property
     def active_source_id(self) -> str | None:
@@ -181,11 +195,6 @@ class MarketOrchestrator(QObject):
         """The symbols inside the recency window, as finished data."""
 
         return self._render.recently_ready_symbols()
-
-    @property
-    def _worker_running(self) -> bool:
-        worker = self._worker
-        return worker is not None and worker.isRunning()
 
     # -- inputs the composition root pushes in ---------------------------
 
@@ -241,7 +250,7 @@ class MarketOrchestrator(QObject):
     def start(self) -> None:
         """Build the feed, draw the connecting state and start the worker."""
 
-        if self._worker_running:
+        if self.worker_running:
             # The start control doubles as "switch / reconnect" once a feed is
             # live, so a second start is a switch to the selected provider.
             self.request_switch(
@@ -430,7 +439,7 @@ class MarketOrchestrator(QObject):
     def _poll(self) -> None:
         """Timer fallback for feeds that have no push listener (IBKR)."""
 
-        if not self._worker_running:
+        if not self.worker_running:
             return
         if monotonic() - self._last_push_at < PUSH_IDLE_SECONDS:
             return
@@ -473,11 +482,7 @@ class MarketOrchestrator(QObject):
     def _emit_event(
         self, code: str, message: str, *, severity: str = "info"
     ) -> None:
-        """Ask the window to record one market runtime event.
-
-        The store is the window's, so this *requests* rather than writes --
-        otherwise ``Market -> System`` would become a dependency.
-        """
+        """Ask the window to record one market runtime event."""
 
         self.runtime_event_requested.emit(
             MarketRuntimeEvent(
@@ -507,7 +512,7 @@ class MarketOrchestrator(QObject):
         pending = self._pending
         if pending is None:
             return
-        if self._worker_running:
+        if self.worker_running:
             return
         provider, symbols = pending
         self._pending = None

@@ -1857,13 +1857,17 @@ class MainWindow(QMainWindow):
             self.cross_section_report = json.loads(
                 self.cross_section_path.read_text(encoding="utf-8")
             )
+            # Projection is part of the load guard: valid JSON can still be a
+            # partially written or incompatible report, and startup must not
+            # fail because of one bad research artifact.
+            self._publish_cross_section_view()
         except Exception as error:
             self.cross_section_report = None
             self._log(
                 f"风险一致研究产物读取失败："
                 f"{type(error).__name__}: {error}"
             )
-        self._publish_cross_section_view()
+            self._publish_cross_section_view()
 
     def _load_scan_file(self) -> None:
         try:

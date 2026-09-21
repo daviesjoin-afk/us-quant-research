@@ -226,6 +226,21 @@ def test_load_failure_clears_report_logs_and_publishes_empty(
     assert logged and "风险一致研究产物读取失败" in logged[0]
 
 
+def test_valid_json_but_malformed_schema_falls_back_to_empty(
+    window: MainWindow, monkeypatch
+) -> None:
+    window.cross_section_report = {"old": True}
+    window.cross_section_path.write_text(
+        json.dumps({"status": "research_exploratory"}), encoding="utf-8"
+    )
+    logged: list[str] = []
+    monkeypatch.setattr(window, "_log", logged.append)
+    window._load_cross_section_report()
+    assert window.cross_section_report is None
+    assert window.cross_section_page.return_card.value_label.text() == "—"
+    assert window.cross_section_page.candidate_table.rowCount() == 0
+    assert logged and "风险一致研究产物读取失败" in logged[0]
+
 def test_scanner_reads_the_updated_central_capital(
     window: MainWindow, monkeypatch
 ) -> None:

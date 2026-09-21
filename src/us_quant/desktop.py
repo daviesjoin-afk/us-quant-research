@@ -248,6 +248,11 @@ from us_quant.desktop_v2.pages.research.history import HistoryPage
 from us_quant.desktop_v2.pages.research.history.presenter import (
     build_history_view,
 )
+from us_quant.desktop_v2.pages.research.scanner import ScannerPage
+from us_quant.desktop_v2.pages.research.scanner.models import ScannerChartView
+from us_quant.desktop_v2.pages.research.scanner.presenter import (
+    build_scanner_view,
+)
 from us_quant.desktop_tasks import DesktopTaskController
 from us_quant.desktop_workers import (
     StreamWorker,
@@ -733,11 +738,13 @@ class MainWindow(QMainWindow):
         self._connect_universe_page()
         self.history_page = HistoryPage(palette=self.theme)
         self._connect_history_page()
+        self.scanner_page = ScannerPage(palette=self.theme)
+        self._connect_scanner_page()
         for title, page in (
             ("针对性验证", self.targeted_validation_page),
             ("广域标的池", self.universe_page),
             ("历史数据", self.history_page),
-            ("市场扫描", self._scanner_tab()),
+            ("市场扫描", self.scanner_page),
             ("回测", self._backtest_tab()),
             ("横截面研究", self._strategy_tab()),
         ):
@@ -887,6 +894,11 @@ class MainWindow(QMainWindow):
         page.run_public_requested.connect(self._run_public_history)
         page.retry_failed_requested.connect(self._retry_failed)
 
+    def _connect_scanner_page(self) -> None:
+        page = self.scanner_page
+        page.scan_requested.connect(self._run_scan)
+        page.symbol_selected.connect(self._scanner_symbol_selected)
+
     def _target_symbol_requested(self, symbol: str) -> None:
         self.targeted_validation_page.set_target_symbol(symbol)
         self._apply_target_symbol()
@@ -941,6 +953,40 @@ class MainWindow(QMainWindow):
                 self.history_service.snapshot(),
                 progress_percent=self._history_progress_percent,
             )
+        )
+
+    def _publish_scanner_view(self) -> None:
+        """Project the scan truth onto the native scanner page."""
+
+        if not hasattr(self, "scanner_page"):
+            return
+        if self.universe is not None:
+            research_count = int(
+                self.universe.summary()["research_eligible"]
+            )
+        elif self.scan is not None:
+            research_count = len(self.scan.results) + len(self.scan.skipped)
+        else:
+            research_count = 0
+        self.scanner_page.render(
+            build_scanner_view(
+                self.scan,
+                research_count=research_count,
+            )
+        )
+
+    def _scanner_symbol_selected(self, symbol: str) -> None:
+        try:
+            points = load_close_series(
+                symbol,
+                data_root=self.data_root,
+                fallback_data_root=self.bundled_data_root,
+            )
+        except Exception as error:
+            self._log(f"{symbol} 图表读取失败：{error}")
+            return
+        self.scanner_page.render_chart(
+            ScannerChartView(symbol=symbol, points=points)
         )
 
     def _publish_targeted_view(self) -> None:
@@ -1161,11 +1207,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(provenance_panel)
 
         toolbar = QHBoxLayout()
-        scan_button = QPushButton("运行市场扫描")
-        scan_button.clicked.connect(self._run_scan)
         gateway_button = QPushButton("仅检查 Gateway 端口")
         gateway_button.clicked.connect(self._probe_gateway)
-        toolbar.addWidget(scan_button)
         toolbar.addWidget(gateway_button)
         toolbar.addStretch()
         layout.addLayout(toolbar)
@@ -1197,51 +1240,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(body)
         return page
 
-
-    def _scanner_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        controls = QHBoxLayout()
-        self.scan_search = QLineEdit()
-        self.scan_search.setPlaceholderText("筛选代码、名称或板块")
-        self.scan_search.textChanged.connect(self._populate_scan_table)
-        self.scan_filter = QComboBox()
-        self.scan_filter.addItems(["全部", "趋势候选", "可交易资格", "仅龙头"])
-        self.scan_filter.setCurrentIndex(0)
-        self.scan_filter.currentIndexChanged.connect(
-            self._populate_scan_table
-        )
-        scan_button = QPushButton("重新扫描")
-        scan_button.clicked.connect(self._run_scan)
-        controls.addWidget(self.scan_search)
-        controls.addWidget(self.scan_filter)
-        controls.addWidget(scan_button)
-        layout.addLayout(controls)
-        self.scan_coverage_label = QLabel(
-            "等待读取研究池和历史日 K 覆盖"
-        )
-        self.scan_coverage_label.setObjectName("subtitle")
-        self.scan_coverage_label.setWordWrap(True)
-        layout.addWidget(self.scan_coverage_label)
-        splitter = QSplitter(Qt.Vertical)
-        self.scan_table = QTableWidget(0, 13)
-        self.scan_table.setHorizontalHeaderLabels(
-            [
-                "代码", "执行", "板块", "层级", "信号", "评分",
-                "收盘", "整股容量", "20日", "63日", "年化波动",
-                "RSI14", "原因",
-            ]
-        )
-        self._configure_table(self.scan_table)
-        self.scan_table.itemSelectionChanged.connect(
-            self._scan_selection_changed
-        )
-        splitter.addWidget(self.scan_table)
-        self.scan_chart = PriceChart()
-        splitter.addWidget(self.scan_chart)
-        splitter.setSizes([380, 300])
-        layout.addWidget(splitter)
-        return page
 
 
     def _strategy_tab(self) -> QWidget:
@@ -1825,7 +1823,7 @@ class MainWindow(QMainWindow):
 
     def _scan_finished(self, result: object) -> None:
         self.scan = result  # type: ignore[assignment]
-        self._populate_scan_table()
+        self._publish_scanner_view()
         self._refresh_cards()
         self._refresh_market_scope_summary()
         summary = self.scan.summary()
@@ -2296,7 +2294,7 @@ class MainWindow(QMainWindow):
                     payload.get("max_position_risk_pct", 0.10)
                 ),
             )
-            self._populate_scan_table()
+            self._publish_scanner_view()
             self._refresh_cards()
         except Exception:
             self.scan = None
@@ -2580,7 +2578,7 @@ class MainWindow(QMainWindow):
             else ()
         )
         self._publish_history_view()
-        self._populate_scan_table()
+        self._publish_scanner_view()
         self._refresh_cards()
         self._refresh_market_scope_summary()
         if scheduled:
@@ -5756,86 +5754,6 @@ class MainWindow(QMainWindow):
         self.artifact_table.setSortingEnabled(True)
 
 
-    def _populate_scan_table(self, *args) -> None:  # type: ignore[no-untyped-def]
-        del args
-        if self.scan is None:
-            self.scan_table.setRowCount(0)
-            if hasattr(self, "scan_coverage_label"):
-                self.scan_coverage_label.setText(
-                    "尚无扫描结果。先在“数据任务”把全部研究池加入"
-                    "历史队列并分批补齐日 K，再运行扫描。"
-                )
-            return
-        mode = self.scan_filter.currentText()
-        search = self.scan_search.text().strip().lower()
-        rows = []
-        for row in self.scan.results:
-            if mode == "趋势候选" and row.signal != "趋势候选":
-                continue
-            if mode == "可交易资格" and not row.trade_eligible:
-                continue
-            if mode == "仅龙头" and row.leader_tier != 1:
-                continue
-            haystack = f"{row.symbol} {row.name} {row.sector}".lower()
-            if search and search not in haystack:
-                continue
-            rows.append(row)
-        research_count = (
-            int(self.universe.summary()["research_eligible"])
-            if self.universe is not None
-            else len(self.scan.results) + len(self.scan.skipped)
-        )
-        if hasattr(self, "scan_coverage_label"):
-            self.scan_coverage_label.setText(
-                f"当前显示 {len(rows):,} · 最近实际扫描 "
-                f"{len(self.scan.results):,} · 缺少/不足 200 根日 K "
-                f"{len(self.scan.skipped):,} · 非中概研究池 "
-                f"{research_count:,}。筛选器只改变显示，不改变扫描范围。"
-            )
-        self.scan_table.setSortingEnabled(False)
-        self.scan_table.setRowCount(len(rows))
-        for index, row in enumerate(rows):
-            values = (
-                row.symbol,
-                row.execution_symbol,
-                row.sector,
-                str(row.leader_tier),
-                row.signal,
-                f"{row.score:.1f}",
-                f"${row.close:,.2f}",
-                str(row.whole_share_capacity),
-                f"{row.return_20d:+.1%}",
-                f"{row.return_63d:+.1%}",
-                f"{row.volatility_20d:.1%}",
-                f"{row.rsi_14d:.1f}",
-                row.reason,
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                if row.signal == "趋势候选" and column in {0, 4, 5}:
-                    item.setForeground(QColor(self.theme.success))
-                self.scan_table.setItem(index, column, item)
-        self.scan_table.setSortingEnabled(True)
-        self.scan_table.sortItems(5, Qt.DescendingOrder)
-        if rows:
-            self.scan_table.selectRow(0)
-
-    def _scan_selection_changed(self) -> None:
-        selected = self.scan_table.selectedItems()
-        if not selected:
-            return
-        symbol = self.scan_table.item(
-            selected[0].row(), 0
-        ).text()
-        try:
-            points = load_close_series(
-                symbol,
-                data_root=self.data_root,
-                fallback_data_root=self.bundled_data_root,
-            )
-            self.scan_chart.set_series(symbol, points)
-        except Exception as error:
-            self._log(f"{symbol} 图表读取失败：{error}")
 
 
     def _local_history_symbol_count(self) -> int:
@@ -6487,6 +6405,8 @@ class MainWindow(QMainWindow):
             self.universe_page.set_palette(self.theme)
         if hasattr(self, "history_page"):
             self.history_page.set_palette(self.theme)
+        if hasattr(self, "scanner_page"):
+            self.scanner_page.set_palette(self.theme)
         # The execution page colours toned status cells from the palette, and
         # its tables keep the rows they were handed, so it has to be told *and*
         # redrawn: there is no repaint path that would re-read the palette on

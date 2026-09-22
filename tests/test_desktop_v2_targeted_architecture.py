@@ -50,6 +50,13 @@ RETIRED_WINDOW_ATTRIBUTES = (
     "targeted_review_summary",
     "targeted_review_history_table",
     "targeted_review_gate_table",
+    # The four tab widgets the window used to hold and the preview script used to
+    # reach for by name.  The page owns them now, and names them only through
+    # its semantic navigation API.
+    "targeted_workspace_tabs",
+    "targeted_research_tabs",
+    "targeted_robustness_detail_tabs",
+    "targeted_review_detail_tabs",
 )
 
 FORBIDDEN_TARGETED_IMPORTS = (
@@ -107,6 +114,19 @@ ALLOWED_PAGE_METHODS = {
     "selected_strategy_version_id",
     "target_symbol",
 }
+
+#: Names that must not reappear on ``MainWindow`` in any form -- not as an
+#: attribute, not as a compatibility property, not as a method.  Each was a
+#: surface a migration retired; a property forwarding to the new owner would
+#: restore the second control path the migration removed, which is why the check
+#: is on *declared names* and not only on attribute uses.
+RETIRED_WINDOW_DECLARED_NAMES = (
+    "target_symbol_input",
+    "targeted_workspace_tabs",
+    "targeted_research_tabs",
+    "targeted_robustness_detail_tabs",
+    "targeted_review_detail_tabs",
+)
 
 FORBIDDEN_TRADING_NAMES = (
     "PlaceOrder",
@@ -214,6 +234,36 @@ def test_the_legacy_simulation_tab_builder_is_retired() -> None:
 @pytest.mark.parametrize("attribute", RETIRED_WINDOW_ATTRIBUTES)
 def test_the_window_no_longer_owns_a_targeted_widget(attribute: str) -> None:
     assert attribute not in _self_attributes(_main_window(_DESKTOP_PATH))
+
+
+def _declared_names(path: pathlib.Path) -> set[str]:
+    """Every name ``MainWindow`` declares: methods, properties and assignments.
+
+    A compatibility property returning the page's widget would keep the retired
+    control path alive without ever appearing as ``self.<name>``, so the guard
+    checks what the class *declares* rather than only what it uses.
+    """
+
+    declared: set[str] = set()
+    for node in _main_window(path).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            declared.add(node.name)
+    for node in ast.walk(_main_window(path)):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id == "self":
+                declared.add(node.attr)
+        elif isinstance(node, ast.AnnAssign) and isinstance(
+            node.target, ast.Name
+        ):
+            declared.add(node.target.id)
+    return declared
+
+
+@pytest.mark.parametrize("name", RETIRED_WINDOW_DECLARED_NAMES)
+def test_the_window_declares_no_retired_targeted_name(name: str) -> None:
+    """No compatibility alias, property or method restores the old surface."""
+
+    assert name not in _declared_names(_DESKTOP_PATH), name
 
 
 # -- Guard C/E: the package has no business/runtime edge ----------------

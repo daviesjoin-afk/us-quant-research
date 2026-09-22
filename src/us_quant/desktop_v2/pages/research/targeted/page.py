@@ -17,8 +17,12 @@ from us_quant.desktop_v2.pages.research.targeted.evidence_panel import (
 from us_quant.desktop_v2.pages.research.targeted.models import (
     TargetPreflightView,
     TargetedControlView,
+    TargetedEvidenceWorkspace,
+    TargetedReviewDetail,
+    TargetedRobustnessDetail,
     TargetedStrategyOption,
     TargetedValidationView,
+    TargetedWorkspace,
 )
 from us_quant.desktop_v2.pages.research.targeted.session_panel import (
     TargetedSessionPanel,
@@ -134,6 +138,38 @@ class TargetedValidationPage(QWidget):
     def _render_preflight(self, preflight: TargetPreflightView) -> None:
         self.preflight_summary.setText(preflight.summary)
         self.preflight_table.render_rows(preflight.rows)
+
+    # -- navigation -----------------------------------------------------
+    #
+    # Presentation navigation, in the page's own vocabulary.  A caller that
+    # wants to *look* at the evidence workspace, or at one robustness detail,
+    # names it here instead of knowing which ``QTabWidget`` holds it and at what
+    # index.  None of these methods runs anything: an evaluation still starts
+    # only from the operator intents the page publishes as signals.
+
+    def set_active_workspace(self, workspace: TargetedWorkspace) -> None:
+        """Show one top-level workspace by its semantic key."""
+
+        self.workspace_tabs.setCurrentIndex(int(workspace))
+
+    def set_active_evidence_workspace(
+        self, workspace: TargetedEvidenceWorkspace
+    ) -> None:
+        """Show one evidence section by its semantic key."""
+
+        self.evidence_panel.set_active_workspace(workspace)
+
+    def set_active_robustness_detail(
+        self, detail: TargetedRobustnessDetail
+    ) -> None:
+        """Show one robustness detail view by its semantic key."""
+
+        self.evidence_panel.set_active_robustness_detail(detail)
+
+    def set_active_review_detail(self, detail: TargetedReviewDetail) -> None:
+        """Show one review detail view by its semantic key."""
+
+        self.evidence_panel.set_active_review_detail(detail)
 
     def set_palette(self, palette: ThemePalette) -> None:
         self._palette = palette

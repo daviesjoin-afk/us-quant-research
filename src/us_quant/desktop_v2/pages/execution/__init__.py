@@ -14,6 +14,9 @@ whole package for exactly those.
 
 from __future__ import annotations
 
+from us_quant.desktop_v2.pages.execution.models import (
+    ExecutionDetailWorkspace,
+)
 from us_quant.desktop_v2.pages.execution.page import ExecutionPage
 
-__all__ = ["ExecutionPage"]
+__all__ = ["ExecutionDetailWorkspace", "ExecutionPage"]

@@ -3446,6 +3446,35 @@ def test_the_window_no_longer_names_an_execution_widget() -> None:
         assert required in source, required
 
 
+def test_the_window_declares_no_retired_execution_widget() -> None:
+    """No compatibility alias, property or method restores the old surface.
+
+    The attribute-use guard above would miss a property forwarding to the page's
+    widget, because the body never spells ``self.<retired_name>``.  This checks
+    the *declared* names, which is what a re-added alias would be.
+    """
+
+    tree = ast.parse((_SRC / "desktop.py").read_text(encoding="utf-8"))
+    main_window = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "MainWindow"
+    )
+
+    declared: set[str] = {
+        node.name
+        for node in main_window.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for node in ast.walk(main_window):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id == "self":
+                declared.add(node.attr)
+
+    offenders = declared & set(RETIRED_EXECUTION_WIDGETS)
+    assert not offenders, sorted(offenders)
+
+
 def test_the_execution_page_package_knows_no_business_service() -> None:
     """Guard C: the page renders and reports intent; it decides nothing."""
 

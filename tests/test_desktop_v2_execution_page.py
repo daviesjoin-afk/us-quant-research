@@ -20,6 +20,7 @@ from __future__ import annotations
 import ast
 import os
 import pathlib
+from enum import IntEnum
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -34,6 +35,7 @@ from us_quant.desktop_v2.pages.execution.models import (
     CandidateRow,
     ExecutionCandidatesView,
     ExecutionControlState,
+    ExecutionDetailWorkspace,
     ExecutionRuntimeView,
     FillRow,
     LatencyRow,
@@ -417,6 +419,130 @@ def test_the_execution_health_line_is_rendered(page) -> None:
     page.render_execution_health("执行对账：未连接。")
 
     assert page.details.execution_health_text == "执行对账：未连接。"
+
+
+# -- semantic detail navigation -------------------------------------------
+#
+# ``set_active_detail`` is the page's own vocabulary for "show me this
+# section".  It exists so a caller -- tooling, a test, a future shortcut -- does
+# not have to know which ``QTabWidget`` holds the section or at what index.
+# These tests check the two halves of that contract: the key selects the right
+# section, and the key is not a lifecycle verb.
+
+
+def test_the_detail_workspace_keys_are_the_documented_sections(page) -> None:
+    assert [workspace.name for workspace in ExecutionDetailWorkspace] == [
+        "PORTFOLIO",
+        "SHADOW",
+        "LATENCY",
+        "CANDIDATES",
+        "ORDERS",
+    ]
+    # And the page really has that many sections, so a key cannot silently
+    # address a tab that is not there.
+    assert page.details.tabs.count() == len(ExecutionDetailWorkspace)
+
+
+def _shows(panel_widget, table) -> bool:
+    """Does the visible section carry ``table``, directly or as its child?
+
+    Sections differ in whether they add the table straight as the tab or wrap
+    it in a page, so the test asks what the operator is looking at rather than
+    pinning the wrapper.
+    """
+
+    return panel_widget is table or panel_widget.isAncestorOf(table)
+
+
+def test_selecting_the_orders_detail_shows_the_order_table(page) -> None:
+    page.set_active_detail(ExecutionDetailWorkspace.ORDERS)
+
+    assert page.details.tabs.currentIndex() == int(
+        ExecutionDetailWorkspace.ORDERS
+    )
+    assert _shows(page.details.tabs.currentWidget(), page.details.order_table)
+
+
+def test_selecting_the_portfolio_detail_shows_the_position_table(page) -> None:
+    page.set_active_detail(ExecutionDetailWorkspace.ORDERS)
+    page.set_active_detail(ExecutionDetailWorkspace.PORTFOLIO)
+
+    assert page.details.tabs.currentIndex() == int(
+        ExecutionDetailWorkspace.PORTFOLIO
+    )
+    assert _shows(
+        page.details.tabs.currentWidget(), page.details.position_table
+    )
+
+
+@pytest.mark.parametrize("workspace", list(ExecutionDetailWorkspace))
+def test_every_detail_key_selects_its_own_section(page, workspace) -> None:
+    """Each key addresses exactly one distinct section, and no two collide."""
+
+    page.set_active_detail(workspace)
+    assert page.details.tabs.currentIndex() == int(workspace)
+    assert page.details.tabs.currentIndex() == workspace
+
+
+def test_navigation_does_not_run_anything(page) -> None:
+    """Selecting a section is presentation; it cannot arm or start a session."""
+
+    seen: list[str] = []
+    for name in (
+        "prepare_requested",
+        "start_requested",
+        "channel_check_requested",
+        "pause_requested",
+        "resume_requested",
+        "stop_requested",
+        "reconcile_requested",
+        "resume_reconciliation_requested",
+    ):
+        getattr(page, name).connect(lambda _name=name: seen.append(_name))
+
+    for workspace in ExecutionDetailWorkspace:
+        page.set_active_detail(workspace)
+
+    assert seen == []
+
+
+def test_the_detail_keys_are_pinned_to_their_sections(page) -> None:
+    """The mapping from key to section, not just "index equals index".
+
+    Without this, a key pointed at the wrong tab would still satisfy every
+    "``currentIndex() == int(workspace)``" assertion above.
+    """
+
+    expected = {
+        ExecutionDetailWorkspace.PORTFOLIO: "组合与盈亏",
+        ExecutionDetailWorkspace.SHADOW: "影子执行带",
+        ExecutionDetailWorkspace.LATENCY: "提交延迟",
+        ExecutionDetailWorkspace.CANDIDATES: "候选与信号",
+        ExecutionDetailWorkspace.ORDERS: "Paper订单",
+    }
+    for workspace, label in expected.items():
+        page.set_active_detail(workspace)
+        assert page.details.tabs.tabText(page.details.tabs.currentIndex()) == label
+
+
+def test_the_detail_keys_carry_no_behaviour() -> None:
+    """An ``IntEnum`` of positions, not a state machine with methods."""
+
+    assert issubclass(ExecutionDetailWorkspace, IntEnum)
+    assert set(ExecutionDetailWorkspace.__members__) == {
+        "PORTFOLIO",
+        "SHADOW",
+        "LATENCY",
+        "CANDIDATES",
+        "ORDERS",
+    }
+    for member in ExecutionDetailWorkspace:
+        own = {
+            name
+            for name in vars(member)
+            if not name.startswith("_") and name not in vars(IntEnum)
+        }
+        assert not own, (member.name, own)
 
 
 # -- the page is a renderer ------------------------------------------------

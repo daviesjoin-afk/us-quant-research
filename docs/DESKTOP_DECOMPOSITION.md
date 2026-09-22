@@ -2204,3 +2204,42 @@ Cross Section（含 `research capital`）、Targeted、Shadow、Paper。
 **突变结果：见 PR 描述（15/15，全部由对应具名测试捕获）。**
 
 维护导航见 `docs/DESKTOP_CAPABILITY_MAP.md`。
+
+## 21. Maintenance：preview tooling 修复（不计作 capability 阶段）
+
+C1–C3 的三次迁移各自退休了一批 `MainWindow` widget 属性与 private handler，
+`scripts/render_desktop_preview.py` 仍引用它们，因此已无法完整运行（`window.scan`
+早于 Scanner orchestration 完成即消失，`auto_summary_label` / `auto_detail_tabs`
+早于 Backtest PR）。本轮不恢复任何 compatibility alias，而是让 tooling 改用它本该
+使用的 public/semantic boundary：
+
+| preview 原先引用 | 现在引用 |
+| --- | --- |
+| `window.scan` | `window.scanner_orchestrator.scan`（只读一次进局部变量） |
+| `window.auto_summary_label.setText(...)` | `window.execution_page.render_context(summary=...)` |
+| `window.auto_detail_tabs.setCurrentIndex(2)` | `window.execution_page.set_active_detail(ExecutionDetailWorkspace.ORDERS)` |
+| `window.target_symbol_input.setText(...)` + `window._apply_target_symbol()` | `window.targeted_validation_page.target_apply_requested.emit("AAPL")` |
+| `window._run_targeted_replay()` / `_run_targeted_robustness()` | 同名 page signal 的 `emit()` |
+| `window.targeted_*_tabs.setCurrentIndex(N)` | `set_active_workspace` / `set_active_evidence_workspace` / `set_active_robustness_detail` / `set_active_review_detail` |
+| `window.workers` | `window.task_controller.active_count`（超时改为 fail loudly） |
+
+为此新增的全部 production 代码是 **presentation navigation**，没有一条携带业务语义：
+
+* `execution/models.py`：`ExecutionDetailWorkspace`（5 个 `IntEnum` key）；
+* `execution/page.py`：`set_active_detail(...)`；
+* `targeted/models.py`：`TargetedWorkspace`、`TargetedEvidenceWorkspace`、
+  `TargetedRobustnessDetail`、`TargetedReviewDetail`；
+* `targeted/page.py`：四个 `set_active_*` 转发方法；
+* `targeted/evidence_panel.py`：robustness/review 的 detail `QTabWidget` 由局部变量
+  改为 panel 自持字段，并暴露同名语义方法（panel 仍是 page 的 implementation detail）。
+
+这些 enum 只决定**哪个 tab 显示**，不能成为 workflow phase，也不进入任何 business
+code。`desktop.py` 本轮 **0 行改动**：目标正是让 tooling 适配已经存在的正确边界。
+
+留作 bridge（对应 capability 尚未轮到，不提前拆）：`_populate_auto_quant_candidates`
+（Execution/Paper → v2O-E）、`_refresh_minute_data_status`（Targeted → v2O-C5）。
+
+ownership、roadmap 与 capability map 均未改变；preview 的 fixture 数据、Scanner 候选
+选择算法、Targeted 研究算法与 Execution/Paper 状态机全部冻结。下一刀仍是
+**v2O-C4 Cross Section**。
+

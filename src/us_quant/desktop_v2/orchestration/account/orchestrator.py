@@ -29,9 +29,12 @@ What it deliberately does not own:
 * **cross-workflow fan-out.**  Whether the dashboard, the auto-quant preflight
   or the targeted preflight react to a new account is not an account decision:
   the window subscribes to :attr:`portfolio_changed` and routes it;
-* **the risk/strategy configuration.**  The exposure multiplier shown next to a
-  position is a *presentation* input pushed in by the composition root, so this
-  module never imports Risk, Strategy or the app config.
+* **the risk/strategy configuration, and the research scenario figure.**  The
+  exposure multiplier shown next to a position is a *presentation* input pushed
+  in by the composition root, and so is the research scenario capital the page
+  displays beside the broker numbers.  Both are pushed rather than fetched, so
+  this module never imports Risk, Strategy, the app config, or the capability
+  that edits the research scalar.
 """
 
 from __future__ import annotations
@@ -143,6 +146,10 @@ class AccountOrchestrator(QObject):
         must not go looking for them: that would make the account route depend
         on ``RiskApplication`` and the app config.  The composition root knows
         where they come from and pushes the frozen result.
+
+        The research scenario capital arrives the same way, and for the same
+        reason: the capability that edits it is the Cross Section workspace, and
+        the account route must not learn that it exists.
         """
 
         self._inputs = inputs
@@ -195,6 +202,7 @@ class AccountOrchestrator(QObject):
             portfolio,
             ledger_points=points,
             exposure_multipliers=self._inputs.as_mapping(),
+            research_capital=self._inputs.research_capital,
         )
 
     # -- success path ----------------------------------------------------

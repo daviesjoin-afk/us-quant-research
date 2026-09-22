@@ -44,7 +44,6 @@ MARKET_DATA_V2_METHODS = (
 BROKER_ACCOUNT_V2_METHODS = (
     "_export_terminal_state",
     "_refresh_target_preflight",
-    "_research_capital_changed",
     "_start_shadow",
 )
 
@@ -339,7 +338,6 @@ DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS = (
     "_auto_quant_preflight",
     "_export_terminal_state",
     "_refresh_target_preflight",
-    "_research_capital_changed",
     "_select_auto_quant_candidates",
     "_start_shadow",
 )
@@ -533,16 +531,56 @@ CROSS_SECTION_V2_REMOVED_METHODS = (
 )
 CROSS_SECTION_V2_ADDED_METHODS = (
     "_connect_cross_section_page",
+)
+CROSS_SECTION_V2_METHODS = (
+    "_load_local_state",
+    "_apply_theme",
+)
+
+# v2O-C4 moved the Cross Section workspace's desktop runtime into
+# ``CrossSectionOrchestrator``: the report truth, the report artifact boundary,
+# the run request and the page render.  ``_research_scenario_capital`` and
+# ``_research_capital_changed`` are the two methods this file has declared as
+# *changed* since an earlier round -- they existed at this file base commit and
+# they are gone now, so they move from the changed declaration to this removal
+# one.  The window keeps composition (``_connect_cross_section_page``), the
+# three cross-workflow bridges and the account presentation push.
+DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_REMOVED_METHODS = (
+    "_research_scenario_capital",
+    "_research_capital_changed",
+)
+DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_ADDED_METHODS = (
+    "_on_research_scenario_capital_changed",
+    "_on_cross_section_report_changed",
+    "_report_cross_section_refusal",
+)
+#: Net zero relative to this file base commit: the CrossSectionPage round *added*
+#: these four window handlers and v2O-C4 *deleted* them, so they exist at neither
+#: revision.  Declared separately because dropping them from
+#: ``CROSS_SECTION_V2_ADDED_METHODS`` without a record would hide a real
+#: deletion -- the same treatment the Scanner and Backtest net-zero sets got.
+DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_NET_ZERO_METHODS = (
     "_publish_cross_section_view",
     "_run_cross_section_research",
     "_cross_section_finished",
     "_load_cross_section_report",
 )
-CROSS_SECTION_V2_METHODS = (
+#: The methods this round changed *in place*: composition, the startup restore
+#: that delegates to the capability, and the five consumers that now read the
+#: canonical research scenario capital instead of the retired window scalar.
+#:
+#: ``_build_v2_pages``, ``_connect_cross_section_page``,
+#: ``_publish_account_presentation_inputs`` and ``_scanner_run_inputs`` also
+#: moved, but they do not exist at this file base commit -- an earlier round
+#: added them -- so they belong to that round added declaration and asserting
+#: them here too would double-count them.
+DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_METHODS = (
+    "__init__",
+    "_apply_intraday_watchlist",
     "_load_local_state",
-    "_research_scenario_capital",
-    "_research_capital_changed",
-    "_apply_theme",
+    "_prepare_auto_quant_candidates",
+    "_run_targeted_replay",
+    "_run_targeted_robustness",
 )
 
 DESKTOP_EXECUTION_V2_REMOVED_METHODS = (
@@ -1683,6 +1721,11 @@ def test_the_evaluation_timing_is_preserved(monkeypatch, tmp_path) -> None:
     refresh that landed while this task queued is the universe that gets
     scanned.  Both halves are asserted, because the whole point is that they
     are deliberately opposite.
+
+    v2O-C4 moved the capital's owner from a window scalar to
+    ``ResearchScenarioCapitalState``, so the freeze is proved by *editing the
+    canonical state after the capture* rather than by a second read: the worker
+    runs with ``CAPITAL_A`` while the state already says ``CAPITAL_B``.
     """
 
     from dataclasses import replace
@@ -1693,19 +1736,13 @@ def test_the_evaluation_timing_is_preserved(monkeypatch, tmp_path) -> None:
         universe_b = _universe("BBB")
         window.universe_orchestrator.restore_snapshot(universe_a)
 
-        # The capital is computed once, on the UI thread.  Returning a
-        # *different* value on a second call is what proves the worker does
-        # not compute it: a constant would look the same either way.
-        capitals = ["CAPITAL_A", "CAPITAL_B"]
-        monkeypatch.setattr(
-            window,
-            "_research_scenario_capital",
-            lambda: capitals.pop(0) if capitals else "CAPITAL_LATE",
-        )
+        # The canonical capital the operator is looking at when they click.
+        window.research_scenario_capital.set(2500)
 
         task, _kwargs = _capture_task(window, monkeypatch)
 
         # Everything the worker will read is replaced *after* the capture.
+        window.research_scenario_capital.set(9999)
         window.universe_orchestrator.restore_snapshot(universe_b)
         new_rules = {"MSFT": object()}
         window.config = replace(
@@ -1733,7 +1770,7 @@ def test_the_evaluation_timing_is_preserved(monkeypatch, tmp_path) -> None:
         # The three run inputs are the frozen ones: the capital is the value
         # the operator saw, and the risk/rules are the values that were
         # configured when they clicked, not the ones edited afterwards.
-        assert seen["capital"] == "CAPITAL_A"
+        assert seen["capital"] == Decimal("2500")
         assert seen["max_position_risk_pct"] == Decimal("0.10")
         assert seen["substitutions"] == {}
     finally:
@@ -1794,18 +1831,32 @@ def test_the_run_inputs_are_frozen_at_request_time(
 def test_the_capital_is_computed_before_the_task_starts(
     monkeypatch, tmp_path
 ) -> None:
-    """Spec 7: ``_research_scenario_capital`` runs on the UI thread."""
+    """Spec 7: the run inputs are read on the UI thread.
+
+    The orchestrator takes ``run_inputs_provider`` as a bound method at
+    construction, so the spy has to sit on the *state* the provider reads: the
+    canonical research scenario capital.  Recording the ``decimal_value`` read
+    is what proves the capital was resolved before ``submit_task`` ran rather
+    than inside the worker.  v2O-C4 moved that read from the retired window
+    scalar to ``ResearchScenarioCapitalState``; the timing rule is unchanged.
+    """
 
     window = _window(monkeypatch, tmp_path)
     try:
         window.universe_orchestrator.restore_snapshot(_universe())
         calls: list[str] = []
 
-        def capital():
-            calls.append("capital")
-            return "CAPITAL"
+        class RecordingCapital:
+            value = 1500
 
-        monkeypatch.setattr(window, "_research_scenario_capital", capital)
+            @property
+            def decimal_value(self):
+                calls.append("capital")
+                return Decimal(1500)
+
+        monkeypatch.setattr(
+            window, "research_scenario_capital", RecordingCapital()
+        )
 
         captured: list = []
 
@@ -1836,9 +1887,7 @@ def test_the_service_is_called_once_per_task_run(
     window = _window(monkeypatch, tmp_path)
     try:
         window.universe_orchestrator.restore_snapshot(_universe())
-        monkeypatch.setattr(
-            window, "_research_scenario_capital", lambda: Decimal("1500")
-        )
+        window.research_scenario_capital.set(1500)
         task, _kwargs = _capture_task(window, monkeypatch)
 
         calls: list = []
@@ -1919,6 +1968,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_REMOVED_METHODS)
         | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS)
         | set(DESKTOP_SCANNER_ORCHESTRATION_V2_REMOVED_METHODS)
+        | set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1938,6 +1988,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_ADDED_METHODS)
         | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_ADDED_METHODS)
         | set(DESKTOP_SCANNER_ORCHESTRATION_V2_ADDED_METHODS)
+        | set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_ADDED_METHODS)
     )
 
     # The two methods the ScannerPage round added and this round removed exist
@@ -1980,6 +2031,29 @@ def test_only_the_declared_methods_changed() -> None:
         set(DESKTOP_BACKTEST_ORCHESTRATION_V2_NET_ZERO_METHODS)
         & set(current_methods)
     )
+    # v2O-C4: the four CrossSectionPage handlers are net zero against this
+    # file base commit.  Asserted separately so their deletion is recorded
+    # rather than inferred from a missing declaration.
+    declared_cross_section = set(
+        DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_REMOVED_METHODS
+    ) | set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_ADDED_METHODS)
+    assert not (
+        set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & declared_cross_section
+    )
+    assert not (
+        set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & (set(base_methods) - set(current_methods))
+    )
+    assert not (
+        set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & (set(current_methods) - set(base_methods))
+    )
+    assert not (
+        set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & set(current_methods)
+    )
+
 
     changed = []
     for name, node in base_methods.items():
@@ -2016,6 +2090,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS)
         | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS)
         | set(DESKTOP_SCANNER_ORCHESTRATION_V2_METHODS)
+        | set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_METHODS)
     )
     assert set(changed) <= allowed
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)
@@ -2035,6 +2110,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(DESKTOP_MARKET_ORCHESTRATION_V2_METHODS) <= set(changed)
     assert set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS) <= set(changed)
     assert set(DESKTOP_SCANNER_ORCHESTRATION_V2_METHODS) <= set(changed)
+    assert set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_METHODS) <= set(changed)
 
 
 def test_the_other_frozen_modules_are_untouched() -> None:

@@ -621,6 +621,16 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
     ``Callable[..., bool]``, which says nothing about what it expects.  The
     module holds the ``TaskSubmitter`` protocol and two aliases and no runtime
     behaviour -- the generic task lifecycle stays on ``MainWindow``.
+
+    ``orchestration/research/cross_section/`` arrived with v2O-C4: the
+    cross-section report truth, the run request and the page render moved out of
+    ``MainWindow``, and the executable research procedure with its artifact
+    boundary went to ``desktop_cross_section_service`` beside the other
+    stateless desktop services.  ``orchestration/research/scenario_capital.py``
+    arrived in the same round: the research scenario scalar the window used to
+    own had seven consumers across four workspaces, so it got one canonical
+    owner.  It is a single module rather than a package because it holds one
+    ``int`` and nothing else.
     """
 
     desktop_v2 = _SRC / "desktop_v2"
@@ -654,6 +664,9 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "orchestration/research/backtest/__init__.py",
         "orchestration/research/backtest/queries.py",
         "orchestration/research/backtest/orchestrator.py",
+        "orchestration/research/cross_section/__init__.py",
+        "orchestration/research/cross_section/orchestrator.py",
+        "orchestration/research/scenario_capital.py",
         "orchestration/tasking.py",
         "pages/__init__.py",
         "pages/account.py",

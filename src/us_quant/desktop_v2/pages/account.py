@@ -101,7 +101,7 @@ class AccountPage(QWidget):
             "IBKR 模拟账户净值", MISSING, "尚未读取"
         )
         self.research_capital_card = MetricCard(
-            "历史研究资金情景", "$1,500", "可调整；不是账户真值"
+            "历史研究资金情景", MISSING, "尚未设置"
         )
         self.daily_pnl_card = MetricCard(
             "当日盈亏", MISSING, "IBKR reqPnL"
@@ -218,6 +218,7 @@ class AccountPage(QWidget):
         *,
         ledger_points: Sequence[EquityPoint] = (),
         exposure_multipliers: Mapping[str, Decimal] | None = None,
+        research_capital: int | None = None,
         error: str | None = None,
     ) -> None:
         """Draw ``portfolio``.
@@ -229,11 +230,19 @@ class AccountPage(QWidget):
         ``exposure_multipliers`` is a *presentation* projection -- the
         configured per-symbol multiplier applied to broker market value for
         display.  It is never written back into the domain.
+
+        ``research_capital`` is likewise presentation only: a research
+        *scenario* figure shown on this route because this is where a
+        dollar-shaped number belongs visually.  It is **not** broker equity and
+        the page says so in the card's note, so the same surface carrying both
+        numbers cannot be read as one account fact.  ``None`` means the caller
+        has no value to present, and the card is left at its placeholder.
         """
 
         self._portfolio = portfolio
         if error:
             self.status_label.setText(f"读取失败：{error}")
+        self._render_research_capital(research_capital)
         if portfolio is None:
             self._render_empty()
             self._render_ledger(ledger_points)
@@ -243,6 +252,22 @@ class AccountPage(QWidget):
             portfolio.positions, exposure_multipliers or {}
         )
         self._render_ledger(ledger_points)
+
+    def _render_research_capital(self, value: int | None) -> None:
+        """Format the research scenario figure, or leave the placeholder.
+
+        The formatting is the page's business: it is the page that knows this
+        card holds a whole-dollar scenario rather than a broker amount, and it
+        is the page that owns the disclaimer the operator reads.
+        """
+
+        if value is None:
+            self.research_capital_card.set_value(MISSING, "尚未设置")
+            return
+        self.research_capital_card.set_value(
+            f"${int(value):,.0f}",
+            "历史研究情景；不是 Paper/Live 账户余额",
+        )
 
     def _render_empty(self) -> None:
         for card in (
@@ -360,23 +385,6 @@ class AccountPage(QWidget):
 
         self.notice_label.setText(text)
         self.notice_label.setVisible(bool(text))
-
-    def set_research_capital(self, value: str, note: str) -> None:
-        """Write the research-capital card.
-
-        Research capital is *not* account truth -- it is a historical research
-        scenario the operator can edit, shown on this route only because that
-        is where an account-shaped number belongs visually.  It reaches the
-        page through a named method rather than a widget attribute so the
-        window cannot reach through to ``research_capital_card`` and so the
-        card's formatting stays this page's business.
-
-        The window still owns the scalar and still decides when it changed;
-        which cross-workflow owner finally publishes it is v2O-C Research's
-        question, not this round's.
-        """
-
-        self.research_capital_card.set_value(value, note)
 
     @property
     def portfolio(self) -> BrokerAccountPortfolio | None:

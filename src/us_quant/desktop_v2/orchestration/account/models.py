@@ -35,13 +35,24 @@ class AccountPresentationInputs:
     change what the page renders without any render having been requested.
     ``AccountPresentationInputs.of(...)`` is the conversion from the window's
     own config-derived mapping.
+
+    ``research_capital`` is the research *scenario* figure the page shows beside
+    the broker numbers, and it travels here for the same reason the multipliers
+    do: the account route must not import the capability that owns it.  It is
+    presentation only -- never broker equity, never a sizing input -- and this
+    type carries it as a plain ``int`` so nothing here can be mistaken for an
+    account balance.
     """
 
     exposure_multipliers: tuple[tuple[str, Decimal], ...] = ()
+    research_capital: int | None = None
 
     @classmethod
     def of(
-        cls, multipliers: dict[str, Decimal] | None = None
+        cls,
+        multipliers: dict[str, Decimal] | None = None,
+        *,
+        research_capital: int | None = None,
     ) -> "AccountPresentationInputs":
         """Freeze a mapping into the immutable form the boundary carries."""
 
@@ -49,7 +60,10 @@ class AccountPresentationInputs:
             exposure_multipliers=tuple(
                 (str(symbol), Decimal(value))
                 for symbol, value in (multipliers or {}).items()
-            )
+            ),
+            research_capital=(
+                None if research_capital is None else int(research_capital)
+            ),
         )
 
     def multiplier_for(self, symbol: str) -> Decimal:

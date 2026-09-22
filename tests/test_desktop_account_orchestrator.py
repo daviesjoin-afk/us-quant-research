@@ -122,8 +122,22 @@ class _Page(QObject):
         super().__init__()
         self.rendered: list[tuple] = []
 
-    def render(self, portfolio, *, ledger_points=(), exposure_multipliers=None):
-        self.rendered.append((portfolio, ledger_points, exposure_multipliers))
+    def render(
+        self,
+        portfolio,
+        *,
+        ledger_points=(),
+        exposure_multipliers=None,
+        research_capital=None,
+    ):
+        self.rendered.append(
+            (
+                portfolio,
+                ledger_points,
+                exposure_multipliers,
+                research_capital,
+            )
+        )
 
 
 def _make_orchestrator(
@@ -267,10 +281,16 @@ def test_render_current_reads_the_application_and_the_ledger() -> None:
     orchestrator.render_current()
 
     assert len(page.rendered) == 1
-    rendered_portfolio, rendered_points, multipliers = page.rendered[0]
+    (
+        rendered_portfolio,
+        rendered_points,
+        multipliers,
+        research_capital,
+    ) = page.rendered[0]
     assert rendered_portfolio is result
     assert rendered_points == ("point-a", "point-b")
     assert multipliers == {}
+    assert research_capital is None
 
 
 def test_render_current_never_fetches() -> None:
@@ -293,6 +313,19 @@ def test_presentation_inputs_freeze_the_multipliers() -> None:
     assert inputs.multiplier_for("AAPL") == Decimal("2")
     assert inputs.multiplier_for("MSFT") == Decimal("1")
     assert inputs.as_mapping() == {"AAPL": Decimal("2")}
+    # The research scenario figure travels as a plain ``int`` and defaults to
+    # "no value to present", so a caller that only has multipliers cannot
+    # accidentally publish a zero-dollar scenario.
+    assert inputs.research_capital is None
+
+
+def test_presentation_inputs_carry_the_research_scenario_capital() -> None:
+    inputs = AccountPresentationInputs.of(
+        {"AAPL": Decimal("2")}, research_capital=2500
+    )
+
+    assert inputs.research_capital == 2500
+    assert inputs.as_mapping() == {"AAPL": Decimal("2")}
 
 
 def test_presentation_inputs_are_passed_to_the_page() -> None:
@@ -301,12 +334,15 @@ def test_presentation_inputs_are_passed_to_the_page() -> None:
     orchestrator = _make_orchestrator(application=app, page=page)
 
     orchestrator.set_presentation_inputs(
-        AccountPresentationInputs.of({"AAPL": Decimal("2")})
+        AccountPresentationInputs.of(
+            {"AAPL": Decimal("2")}, research_capital=2500
+        )
     )
     orchestrator.render_current()
 
-    _, _, multipliers = page.rendered[0]
+    _, _, multipliers, research_capital = page.rendered[0]
     assert multipliers == {"AAPL": Decimal("2")}
+    assert research_capital == 2500
 
 
 # -- the fresh Paper net-liquidation rule -------------------------------

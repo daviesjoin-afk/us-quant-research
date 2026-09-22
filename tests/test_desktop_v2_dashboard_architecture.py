@@ -261,7 +261,12 @@ def test_gateway_and_theme_are_wired_at_page_level() -> None:
     "method",
     (
         "_load_local_state",
-        "_cross_section_finished",
+        # v2O-C4: the cross-section success path is now a bridge on the
+        # capability's published fact.  ``_cross_section_finished`` was the
+        # inline handler and is retired with the capability; the property this
+        # guard protects -- that a cross-section research success repaints the
+        # dashboard -- is unchanged, it just moved behind ``report_changed``.
+        "_on_cross_section_report_changed",
         "_on_account_portfolio_changed",
         "_on_market_snapshot_invalidated",
         "_on_market_snapshot_changed",

@@ -196,7 +196,6 @@ MARKET_DATA_V2_METHODS = (
 BROKER_ACCOUNT_V2_METHODS = (
     "_export_terminal_state",
     "_refresh_target_preflight",
-    "_research_capital_changed",
     "_start_shadow",
 )
 
@@ -337,7 +336,6 @@ DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS = (
     "_auto_quant_preflight",
     "_export_terminal_state",
     "_refresh_target_preflight",
-    "_research_capital_changed",
     "_select_auto_quant_candidates",
     "_start_shadow",
 )
@@ -459,16 +457,56 @@ CROSS_SECTION_V2_REMOVED_METHODS = (
 )
 CROSS_SECTION_V2_ADDED_METHODS = (
     "_connect_cross_section_page",
+)
+CROSS_SECTION_V2_METHODS = (
+    "_load_local_state",
+    "_apply_theme",
+)
+
+# v2O-C4 moved the Cross Section workspace's desktop runtime into
+# ``CrossSectionOrchestrator``: the report truth, the report artifact boundary,
+# the run request and the page render.  ``_research_scenario_capital`` and
+# ``_research_capital_changed`` are the two methods this file has declared as
+# *changed* since an earlier round -- they existed at this file base commit and
+# they are gone now, so they move from the changed declaration to this removal
+# one.  The window keeps composition (``_connect_cross_section_page``), the
+# three cross-workflow bridges and the account presentation push.
+DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_REMOVED_METHODS = (
+    "_research_scenario_capital",
+    "_research_capital_changed",
+)
+DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_ADDED_METHODS = (
+    "_on_research_scenario_capital_changed",
+    "_on_cross_section_report_changed",
+    "_report_cross_section_refusal",
+)
+#: Net zero relative to this file base commit: the CrossSectionPage round *added*
+#: these four window handlers and v2O-C4 *deleted* them, so they exist at neither
+#: revision.  Declared separately because dropping them from
+#: ``CROSS_SECTION_V2_ADDED_METHODS`` without a record would hide a real
+#: deletion -- the same treatment the Scanner and Backtest net-zero sets got.
+DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_NET_ZERO_METHODS = (
     "_publish_cross_section_view",
     "_run_cross_section_research",
     "_cross_section_finished",
     "_load_cross_section_report",
 )
-CROSS_SECTION_V2_METHODS = (
+#: The methods this round changed *in place*: composition, the startup restore
+#: that delegates to the capability, and the five consumers that now read the
+#: canonical research scenario capital instead of the retired window scalar.
+#:
+#: ``_build_v2_pages``, ``_connect_cross_section_page``,
+#: ``_publish_account_presentation_inputs`` and ``_scanner_run_inputs`` also
+#: moved, but they do not exist at this file base commit -- an earlier round
+#: added them -- so they belong to that round added declaration and asserting
+#: them here too would double-count them.
+DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_METHODS = (
+    "__init__",
+    "_apply_intraday_watchlist",
     "_load_local_state",
-    "_research_scenario_capital",
-    "_research_capital_changed",
-    "_apply_theme",
+    "_prepare_auto_quant_candidates",
+    "_run_targeted_replay",
+    "_run_targeted_robustness",
 )
 
 DESKTOP_EXECUTION_V2_REMOVED_METHODS = (
@@ -1581,6 +1619,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_REMOVED_METHODS)
         | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS)
         | set(DESKTOP_SCANNER_ORCHESTRATION_V2_REMOVED_METHODS)
+        | set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1600,6 +1639,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_ADDED_METHODS)
         | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_ADDED_METHODS)
         | set(DESKTOP_SCANNER_ORCHESTRATION_V2_ADDED_METHODS)
+        | set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_ADDED_METHODS)
     )
 
     # The two methods the ScannerPage round added and this round removed exist
@@ -1643,6 +1683,29 @@ def test_only_the_declared_methods_changed() -> None:
         set(DESKTOP_BACKTEST_ORCHESTRATION_V2_NET_ZERO_METHODS)
         & set(current_methods)
     )
+    # v2O-C4: the four CrossSectionPage handlers are net zero against this
+    # file base commit.  Asserted separately so their deletion is recorded
+    # rather than inferred from a missing declaration.
+    declared_cross_section = set(
+        DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_REMOVED_METHODS
+    ) | set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_ADDED_METHODS)
+    assert not (
+        set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & declared_cross_section
+    )
+    assert not (
+        set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & (set(base_methods) - set(current_methods))
+    )
+    assert not (
+        set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & (set(current_methods) - set(base_methods))
+    )
+    assert not (
+        set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & set(current_methods)
+    )
+
 
     changed = []
     for name, node in base_methods.items():
@@ -1659,6 +1722,7 @@ def test_only_the_declared_methods_changed() -> None:
         set(REFACTORED_METHODS)
         | set(LATER_ROUND_METHODS)
         | set(LATER_ROUND_UI_METHODS)
+        | set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_METHODS)
     )
     declared = set(declared) | set(MARKET_DATA_V2_METHODS)
     declared = (
@@ -1700,6 +1764,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS) <= set(changed)
     assert set(DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS) <= set(changed)
     assert set(DESKTOP_SCANNER_ORCHESTRATION_V2_METHODS) <= set(changed)
+    assert set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_METHODS) <= set(changed)
     for name in REFACTORED_METHODS:
         if name != "__init__":
             assert name in changed, name

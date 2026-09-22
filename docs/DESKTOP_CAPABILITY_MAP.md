@@ -31,7 +31,7 @@ in one of those files instead. Every orchestration PR updates this table.
 | **History** | `DesktopHistoryService` queue (not copied) | `HistoryOrchestrator` | `DesktopHistoryService` | `request_run_ibkr`, `request_run_public`, `request_schedule`, `retry_failed`, `render_current`, signals | `history_changed` → `_refresh_market_scope_summary`. Nothing else; see *History* below | v2O-C1 complete |
 | **Scanner** | `ScannerOrchestrator.scan` | `ScannerOrchestrator` | `DesktopMarketScanService` | `scan`, `request_scan`, `request_chart`, `restore_saved`, `adopt_external_scan`, `render_current`, signals | `scan_changed` → `_refresh_market_scope_summary`. AutoQuant **publishes** its finished scan in through `adopt_external_scan` (direction: AutoQuant → Scanner) | v2O-C2 complete |
 | **Backtest** | `BacktestOrchestrator._runs` (private) | `BacktestOrchestrator` | `DesktopBacktestService` | `refresh_strategy_options`, `request_selected`, `request_compare_all`, `select_run`, `render_current`, signals | None. `MainWindow` only constructs, connects and shows the refusal dialog; the strategy catalogue arrives as a provider callable | v2O-C3 complete |
-| **Cross Section** | `MainWindow.cross_section_report` | `MainWindow._publish_cross_section_view` | `us_quant.cross_sectional` (called inline) | none yet | **Research capital** is a window-owned scalar shared by Cross Section, the Scanner run inputs and the Account presentation; its ownership is designed in v2O-C4 | not started |
+| **Cross Section** | `CrossSectionOrchestrator._report` (private) | `CrossSectionOrchestrator` | `DesktopCrossSectionService` | `request_capital_change`, `request_run`, `restore_saved`, `render_current`, signals | `capital_changed` → `_on_research_scenario_capital_changed` (Account presentation only). `report_changed` → `_on_cross_section_report_changed` (reloads the artifact catalogue, repaints the Dashboard). Startup `restore_saved()` publishes nothing | v2O-C4 complete |
 | **Targeted** | `MainWindow` (`_selected_robustness_run_id`, `_selected_review_run_id`, `_target_status`, …) | `MainWindow._publish_targeted_view` | the `targeted_*` modules (called inline) | none yet | Shares the target symbol with the market stream; scheduled for v2O-C5 | not started |
 | **Shadow** | `MainWindow.shadow_engine` | `MainWindow` | `ShadowPaperStore`, shadow workflow | none yet | Consumes the market snapshot and the account truth; scheduled for v2O-D | not started |
 | **Paper** | `PaperTradingService` / workflow controllers | `MainWindow` (execution page) | `us_quant.trading.*` | none yet | The largest remaining bridge; scheduled for v2O-E | not started |
@@ -66,6 +66,31 @@ a snapshot. It is triggered by the operator clicking on the market page.
 The AutoQuant preparation path does schedule history gaps and render the History
 page, but that direction is **AutoQuant → History** — AutoQuant calls the
 capability. It is not `history_changed → AutoQuant`.
+
+**Cross Section.** Two bridges, and neither is a second truth:
+
+```text
+capital_changed  → MainWindow._on_research_scenario_capital_changed
+    → _publish_account_presentation_inputs + AccountOrchestrator.render_current
+    (Account presentation only; Scanner / AutoQuant / Targeted / the watchlist
+     pull the canonical scalar when they next build a request)
+
+report_changed   → MainWindow._on_cross_section_report_changed
+    → reload the artifact catalogue + repaint the Dashboard
+```
+
+Neither the Dashboard nor the artifact catalogue is known to the capability.
+`restore_saved()` deliberately emits neither signal: the catalogue is read
+during the same startup pass, so announcing a re-read would fan out twice.
+
+## Shared facts
+
+Not capabilities: one fact with several consumers, and therefore one owner.
+These are the objects a maintainer greps for when a workflow behaves oddly.
+
+| Fact | Owner | Editor | Consumers | It is **not** |
+| --- | --- | --- | --- | --- |
+| **Research Scenario Capital** (研究情景资金) | `ResearchScenarioCapitalState` (`orchestration/research/scenario_capital.py`) | the Cross Section page control, via `CrossSectionOrchestrator.request_capital_change` | Cross Section research, Scanner manual scan, AutoQuant candidate preparation, Market watchlist fallback, Targeted replay, Targeted robustness, Account presentation | Not `NetLiquidation`, not buying power, not risk capital, **not** a `CapitalAllocator`. A future allocator is computed from broker truth + portfolio risk; research scenario dollars must never be promoted into it |
 
 ## Shared plumbing
 

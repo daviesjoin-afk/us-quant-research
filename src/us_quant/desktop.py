@@ -9,7 +9,6 @@ from pathlib import Path
 import re
 import sqlite3
 import sys
-from threading import Event
 from time import monotonic
 from typing import Callable
 
@@ -54,14 +53,7 @@ from us_quant.paths import ApplicationPaths
 from us_quant.account_ledger import AccountLedger
 from us_quant.history_queue import HistoryJobStore
 from us_quant.desktop_history_service import DesktopHistoryService
-from us_quant.desktop_universe_service import (
-    STAGE_DOWNLOAD_OFFICIAL,
-    STAGE_ENRICH_SEC,
-    STAGE_ENRICH_SEC_START,
-    STAGE_PREPARE_REFERENCE,
-    UniverseRefreshProgress,
-    DesktopUniverseService,
-)
+from us_quant.desktop_universe_service import DesktopUniverseService
 from us_quant.desktop_market_scan_service import DesktopMarketScanService
 from us_quant.desktop_backtest_service import DesktopBacktestService
 from us_quant.ibkr import IBKRConnectionConfig, probe_ibkr_socket
@@ -184,6 +176,12 @@ from us_quant.desktop_v2.orchestration.market import (
     MarketOrchestrator,
     MarketReadinessInputs,
 )
+from us_quant.desktop_v2.orchestration.research.history import (
+    HistoryOrchestrator,
+)
+from us_quant.desktop_v2.orchestration.research.universe import (
+    UniverseOrchestrator,
+)
 from us_quant.desktop_v2.pages.execution import ExecutionPage
 from us_quant.desktop_v2.pages.execution.presenter import (
     build_candidates_view,
@@ -204,13 +202,7 @@ from us_quant.desktop_v2.pages.research.targeted.session_presenter import (
     session_view,
 )
 from us_quant.desktop_v2.pages.research.universe import UniversePage
-from us_quant.desktop_v2.pages.research.universe.presenter import (
-    build_universe_view,
-)
 from us_quant.desktop_v2.pages.research.history import HistoryPage
-from us_quant.desktop_v2.pages.research.history.presenter import (
-    build_history_view,
-)
 from us_quant.desktop_v2.pages.research.scanner import ScannerPage
 from us_quant.desktop_v2.pages.research.scanner.models import ScannerChartView
 from us_quant.desktop_v2.pages.research.scanner.presenter import (
@@ -575,15 +567,17 @@ class MainWindow(QMainWindow):
         self.targeted_execution_stress_results: list[
             TargetedExecutionStressResult
         ] = []
-        self.universe: UniverseSnapshot | None = None
         self.scan: MarketScan | None = None
         self.cross_section_report: dict | None = None
         self._research_capital_value = int(self.config.initial_equity)
         self.task_controller = DesktopTaskController[TaskThread]()
         self.workers = self.task_controller.workers
-        self.universe_refresh_cancel_event: Event | None = None
-        self.universe_refresh_worker: TaskThread | None = None
-        self._history_progress_percent = 0
+        # The universe and history routes keep their runtime in
+        # ``desktop_v2/orchestration/research``.  There is deliberately no
+        # ``self.universe``, no refresh ``Event``/worker handle and no history
+        # progress percentage here, and no compatibility property either: a
+        # forwarding property would keep every unmigrated caller silently
+        # working, so "who reads universe truth" would stop being one grep.
         # Admission gate for new background work.  The runtime supervisor
         # raises it as the first step of teardown so a close cannot race a
         # task that is still being admitted.
@@ -743,8 +737,34 @@ class MainWindow(QMainWindow):
         self.targeted_validation_page = TargetedValidationPage(palette=self.theme)
         self._connect_targeted_validation_page()
         self.universe_page = UniversePage(palette=self.theme)
+        # The universe route's desktop runtime -- the official snapshot, the
+        # refresh request and the cancel event -- belongs to
+        # ``universe_orchestrator``, constructed here with its dependencies
+        # injected.  What stays on the window is composition and the
+        # cross-workflow fan-out of the published snapshot.  Note what is *not*
+        # stored: there is no ``self.universe``, because this orchestrator is
+        # the canonical desktop owner and every consumer reads
+        # ``universe_orchestrator.snapshot``.
+        self.universe_orchestrator = UniverseOrchestrator(
+            service=self.universe_service,
+            page=self.universe_page,
+            submit_task=self._start_task,
+        )
         self._connect_universe_page()
         self.history_page = HistoryPage(palette=self.theme)
+        # Same shape for history, with two differences that matter: the queue
+        # truth stays in ``history_service`` and this orchestrator caches none
+        # of it, and both providers are callables rather than objects -- so
+        # History never imports the universe implementation, and an IBKR run
+        # always reads the *current* connection config rather than the one that
+        # was live when the window was built.
+        self.history_orchestrator = HistoryOrchestrator(
+            service=self.history_service,
+            page=self.history_page,
+            submit_task=self._start_task,
+            universe_provider=lambda: self.universe_orchestrator.snapshot,
+            ibkr_config_provider=lambda: self.config.ibkr,
+        )
         self._connect_history_page()
         self.scanner_page = ScannerPage(palette=self.theme)
         self._connect_scanner_page()
@@ -1290,16 +1310,75 @@ class MainWindow(QMainWindow):
         page.review_run_selected.connect(self._review_run_selected)
 
     def _connect_universe_page(self) -> None:
+        """Wire the universe page to its capability; no business logic here.
+
+        The window is allowed to connect signals -- that is what composition
+        means -- so this stays a pure wiring method rather than being inlined
+        away.  What it may *not* contain is the refresh procedure, the cancel
+        state or the render, all of which now live in the orchestrator.
+        """
+
         page = self.universe_page
-        page.refresh_requested.connect(self._refresh_universe)
-        page.cancel_refresh_requested.connect(self._cancel_universe_refresh)
+        page.refresh_requested.connect(
+            self.universe_orchestrator.request_refresh
+        )
+        page.cancel_refresh_requested.connect(
+            self.universe_orchestrator.request_cancel
+        )
+        # The capability publishes facts; the window routes them.  Whether the
+        # market-scope summary, the scanner or the shadow gate react to a new
+        # universe is not a universe decision.
+        orchestrator = self.universe_orchestrator
+        orchestrator.log_requested.connect(self._log)
+        orchestrator.snapshot_changed.connect(self._on_universe_changed)
 
     def _connect_history_page(self) -> None:
+        """Wire the history page to its capability; no business logic here."""
+
         page = self.history_page
-        page.schedule_requested.connect(self._schedule_history)
-        page.run_ibkr_requested.connect(self._run_history)
-        page.run_public_requested.connect(self._run_public_history)
-        page.retry_failed_requested.connect(self._retry_failed)
+        page.schedule_requested.connect(
+            self.history_orchestrator.request_schedule
+        )
+        page.run_ibkr_requested.connect(
+            self.history_orchestrator.request_run_ibkr
+        )
+        page.run_public_requested.connect(
+            self.history_orchestrator.request_run_public
+        )
+        page.retry_failed_requested.connect(
+            self.history_orchestrator.retry_failed
+        )
+        orchestrator = self.history_orchestrator
+        orchestrator.log_requested.connect(self._log)
+        orchestrator.history_changed.connect(
+            self._refresh_market_scope_summary
+        )
+        # A refusal is the window's to show: the history capability holds no
+        # widget, which is what keeps it importable without Qt.
+        orchestrator.refused.connect(self._report_history_refusal)
+
+    def _on_universe_changed(self, snapshot: UniverseSnapshot) -> None:
+        """Route a new universe to whatever else consumes it.
+
+        Deliberately thin, and deliberately not inside the capability.  A
+        successful refresh moves the canonical ``universe.json`` into the
+        writable reference root, and the market-scope summary is built from the
+        universe plus the local history counts -- both are cross-workflow facts
+        rather than universe decisions.
+        """
+
+        self.universe_path = self.reference_root / "universe.json"
+        self._refresh_market_scope_summary()
+
+    def _report_history_refusal(self, title: str, message: str) -> None:
+        """Surface a request the history layer refused before touching a job.
+
+        ``information`` rather than ``warning``: this is the severity the
+        pre-extraction inline dialog used, and the extraction is not an
+        occasion to change how the operator is told.
+        """
+
+        QMessageBox.information(self, title, message)
 
     def _connect_scanner_page(self) -> None:
         page = self.scanner_page
@@ -1346,40 +1425,15 @@ class MainWindow(QMainWindow):
             robustness_enabled=True,
         )
 
-    def _publish_universe_view(self) -> None:
-        """Project the universe business state onto the native page."""
-
-        if not hasattr(self, "universe_page"):
-            return
-        cancel_event = self.universe_refresh_cancel_event
-        self.universe_page.render(
-            build_universe_view(
-                self.universe,
-                refreshing=self.universe_refresh_worker is not None,
-                cancel_requested=bool(cancel_event and cancel_event.is_set()),
-            )
-        )
-
-    def _publish_history_view(self) -> None:
-        """Project the history queue state onto the native page."""
-
-        if not hasattr(self, "history_page"):
-            return
-        self.history_page.render(
-            build_history_view(
-                self.history_service.snapshot(),
-                progress_percent=self._history_progress_percent,
-            )
-        )
-
     def _publish_scanner_view(self) -> None:
         """Project the scan truth onto the native scanner page."""
+        universe = self.universe_orchestrator.snapshot
 
         if not hasattr(self, "scanner_page"):
             return
-        if self.universe is not None:
+        if universe is not None:
             research_count = int(
-                self.universe.summary()["research_eligible"]
+                universe.summary()["research_eligible"]
             )
         elif self.scan is not None:
             research_count = len(self.scan.results) + len(self.scan.skipped)
@@ -1491,15 +1545,25 @@ class MainWindow(QMainWindow):
         configure_table(table)
 
     def _load_local_state(self) -> None:
+        # Restoration, not a refresh: the orchestrator adopts the snapshot and
+        # publishes nothing, so a process that merely re-read a local file does
+        # not announce an official refresh.  It *does* paint, because adopting a
+        # snapshot changes what the page must show -- which is why the window
+        # does not paint again below.  The capability owns the page render, and a
+        # second call here would rebuild the whole 11k-row table for nothing.
+        restored = False
         if self.universe_path.exists():
             try:
-                self.universe = load_universe_snapshot(
-                    self.universe_path
+                self.universe_orchestrator.restore_snapshot(
+                    load_universe_snapshot(self.universe_path)
                 )
+                restored = True
             except Exception as error:
                 self._log(f"标的快照读取失败：{error}")
-        self._publish_universe_view()
-        self._publish_history_view()
+        if not restored:
+            # Nothing was adopted, so the page still needs its first paint.
+            self.universe_orchestrator.render_current()
+        self.history_orchestrator.render_current()
         self._probe_gateway()
         if self.scan_path.exists():
             self._load_scan_file()
@@ -1564,152 +1628,9 @@ class MainWindow(QMainWindow):
         )
         self._publish_targeted_view()
 
-    def _refresh_universe(self) -> None:
-        cancel_event = Event()
-
-        def task(progress: Callable[[str], None]) -> UniverseSnapshot:
-            def report(event: UniverseRefreshProgress) -> None:
-                if event.stage == STAGE_PREPARE_REFERENCE:
-                    progress("正在准备可写的用户参考数据目录…")
-                elif event.stage == STAGE_DOWNLOAD_OFFICIAL:
-                    progress("正在下载 Nasdaq Trader 与 SEC 官方标的清单…")
-                elif event.stage == STAGE_ENRICH_SEC_START:
-                    progress("正在增量核验 500 家 SEC 注册地与行业…")
-                elif event.stage == STAGE_ENRICH_SEC:
-                    progress(
-                        f"SEC 核验 {event.done}/{event.total}：{event.detail}"
-                    )
-                else:
-                    raise ValueError(
-                        f"unknown universe refresh stage: {event.stage}"
-                    )
-
-            return self.universe_service.refresh(
-                should_stop=cancel_event.is_set,
-                progress=report,
-            )
-
-        started = self._start_task(
-            task,
-            on_success=self._universe_refreshed,
-            start_message="刷新官方标的中…",
-            resource_group="universe",
-        )
-        if not started:
-            return
-        self.universe_refresh_cancel_event = cancel_event
-        self.universe_refresh_worker = self.workers[-1]
-        self._publish_universe_view()
-
-    def _cancel_universe_refresh(self) -> None:
-        if self.universe_refresh_cancel_event is None:
-            return
-        self.universe_refresh_cancel_event.set()
-        self._publish_universe_view()
-        self._log("已请求取消官方标的刷新；当前网络请求最多再等待 8 秒。")
-
-    def _reset_universe_refresh_controls(self) -> None:
-        self.universe_refresh_cancel_event = None
-        self.universe_refresh_worker = None
-        self._publish_universe_view()
-
-    def _universe_refreshed(self, result: object) -> None:
-        self.universe = result  # type: ignore[assignment]
-        self.universe_path = (
-            self.reference_root / "universe.json"
-        )
-        self._publish_universe_view()
-        self._refresh_market_scope_summary()
-        summary = self.universe.summary()
-        self._log(
-            f"官方标的已刷新：{summary['total']:,} 个，"
-            f"研究池 {summary['research_eligible']} 个。"
-        )
-
-    def _schedule_history(self) -> None:
-        if self.universe is None:
-            QMessageBox.information(
-                self,
-                "缺少标的池",
-                "请先刷新官方标的。",
-            )
-            return
-        result = self.history_service.schedule_universe(self.universe)
-        self._publish_history_view()
-        self._refresh_market_scope_summary()
-        self._log(
-            f"全部非中概研究池已加入历史队列：新增 {result.inserted} 个，"
-            f"队列合计 {result.total:,} 个；"
-            "下载仍按页面所选批量执行。"
-        )
-
-    def _run_history(self, maximum_jobs: int) -> None:
-        def task(progress: Callable[[str], None]) -> dict[str, int]:
-            return self.history_service.run_ibkr(
-                self.config.ibkr,
-                maximum_jobs=maximum_jobs,
-                progress=lambda done, total, symbol, status: (
-                    progress(f"{done}/{total} {symbol}：{status}")
-                ),
-            )
-
-        self._history_progress_percent = 1
-        self._publish_history_view()
-        self._start_task(
-            task,
-            on_success=self._history_finished,
-            on_failure=self._history_task_failed,
-            start_message="IBKR 历史日 K 下载中…",
-            resource_group="history",
-        )
-
-    def _history_finished(self, result: object) -> None:
-        counts: dict[str, int] = result  # type: ignore[assignment]
-        total = sum(counts.values())
-        completed = counts.get("completed", 0)
-        self._history_progress_percent = (
-            int(completed / total * 100) if total else 0
-        )
-        self._publish_history_view()
-        self._refresh_market_scope_summary()
-        self._log(
-            f"本批结束：累计完成 {completed}，"
-            f"失败 {counts.get('failed', 0)}。"
-        )
-
-    def _history_task_failed(self, _message: str) -> None:
-        self._history_progress_percent = 0
-        self._publish_history_view()
-
-    def _run_public_history(self, maximum_jobs: int) -> None:
-        def task(progress: Callable[[str], None]) -> dict[str, int]:
-            return self.history_service.run_public(
-                maximum_jobs=maximum_jobs,
-                progress=lambda done, total, symbol, status: (
-                    progress(f"{done}/{total} {symbol}：{status}")
-                ),
-            )
-
-        self._history_progress_percent = 1
-        self._publish_history_view()
-        self._start_task(
-            task,
-            on_success=self._history_finished,
-            on_failure=self._history_task_failed,
-            start_message=(
-                "备用免费日 K 下载中；只用于历史研究，"
-                "不会替代 IBKR 实时行情…"
-            ),
-            resource_group="history",
-        )
-
-    def _retry_failed(self) -> None:
-        count = self.history_service.reset_failed()
-        self._publish_history_view()
-        self._log(f"已将 {count} 个失败任务放回待处理队列。")
-
     def _run_scan(self) -> None:
-        if self.universe is None:
+        universe = self.universe_orchestrator.snapshot
+        if universe is None:
             QMessageBox.information(
                 self,
                 "缺少标的池",
@@ -1722,7 +1643,11 @@ class MainWindow(QMainWindow):
         def task(progress: Callable[[str], None]) -> MarketScan:
             progress("正在读取已通过质量门的本地日 K…")
             return self.market_scan_service.scan(
-                self.universe,
+                # Read at execution time, not at request time: a refresh that
+                # landed while this task queued must be the universe scanned.
+                # The capital above is deliberately the opposite -- it is a
+                # UI-thread snapshot taken before the worker starts.
+                self.universe_orchestrator.snapshot,
                 capital=research_capital,
                 max_position_risk_pct=(
                     self.config.risk_limits.max_position_exposure_pct
@@ -1928,7 +1853,8 @@ class MainWindow(QMainWindow):
         self,
         draft: CrossSectionResearchDraft,
     ) -> None:
-        if self.universe is None:
+        universe = self.universe_orchestrator.snapshot
+        if universe is None:
             QMessageBox.information(
                 self,
                 "缺少标的池",
@@ -1950,7 +1876,8 @@ class MainWindow(QMainWindow):
             )
             result = run_executable_cross_sectional_research(
                 research_config,
-                self.universe,
+                # Execution-time read, same rule as ``_run_scan``.
+                self.universe_orchestrator.snapshot,
                 data_root=Path(self.data_root),
                 fallback_data_root=Path(
                     self.bundled_data_root
@@ -2234,7 +2161,8 @@ class MainWindow(QMainWindow):
         self._log(f"IBKR Paper 订单通道检查通过（未下单）：{detail}")
 
     def _prepare_auto_quant_candidates(self) -> None:
-        if self.universe is None:
+        universe = self.universe_orchestrator.snapshot
+        if universe is None:
             QMessageBox.information(
                 self,
                 "缺少官方标的池",
@@ -2270,7 +2198,8 @@ class MainWindow(QMainWindow):
                 "自动量化第 1 步：扫描全部非中概研究池及已有合格日 K…"
             )
             result = scan_market(
-                self.universe,
+                # Execution-time read, same rule as ``_run_scan``.
+                self.universe_orchestrator.snapshot,
                 data_root=self.data_root,
                 fallback_data_root=self.bundled_data_root,
                 capital=research_capital,
@@ -2304,12 +2233,13 @@ class MainWindow(QMainWindow):
         if not isinstance(result, MarketScan):
             raise TypeError("unexpected full-market scan result")
         self.scan = result
+        universe = self.universe_orchestrator.snapshot
         scheduled = HistoryJobStore(self.queue_path).schedule(
-            prioritized_research_symbols(self.universe, limit=None)
-            if self.universe is not None
+            prioritized_research_symbols(universe, limit=None)
+            if universe is not None
             else ()
         )
-        self._publish_history_view()
+        self.history_orchestrator.render_current()
         self._publish_scanner_view()
         self._refresh_market_scope_summary()
         if scheduled:
@@ -2320,7 +2250,8 @@ class MainWindow(QMainWindow):
         self._select_auto_quant_candidates()
 
     def _select_auto_quant_candidates(self) -> None:
-        if self.scan is None or self.universe is None:
+        universe = self.universe_orchestrator.snapshot
+        if self.scan is None or universe is None:
             if self.paper_trading.phase() is PaperWorkflowPhase.PREPARING:
                 self.paper_workflow.cancel_preparing()
             self._set_launch_busy(False)
@@ -2359,7 +2290,7 @@ class MainWindow(QMainWindow):
         )
         eligible = select_paper_rotation_rows(
             self.scan,
-            self.universe,
+            universe,
             capital=paper_capital,
             max_position_fraction=(
                 self.config.risk_limits.max_position_exposure_pct
@@ -2408,7 +2339,7 @@ class MainWindow(QMainWindow):
             self.paper_workflow.mark_ready()
         symbols = tuple(row.symbol for row in candidates)
         research_count = int(
-            self.universe.summary()["research_eligible"]
+            universe.summary()["research_eligible"]
         )
         self.execution_page.render_context(
             scope=(
@@ -3283,6 +3214,7 @@ class MainWindow(QMainWindow):
         return self.targeted_validation_page.target_symbol()
 
     def _apply_target_symbol(self) -> None:
+        universe = self.universe_orchestrator.snapshot
         symbol = self._current_target_symbol()
         if not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", symbol):
             QMessageBox.warning(
@@ -3304,10 +3236,10 @@ class MainWindow(QMainWindow):
                 return
         self.targeted_validation_page.set_target_symbol(symbol)
         eligible = None
-        if self.universe is not None:
+        if universe is not None:
             eligible = any(
                 row.symbol == symbol and row.eligible_for_research
-                for row in self.universe.records
+                for row in universe.records
             )
         if eligible is False:
             self._target_status = (
@@ -3380,17 +3312,18 @@ class MainWindow(QMainWindow):
         self._publish_targeted_view()
 
     def _refresh_target_preflight(self, *_args: object) -> None:
+        universe = self.universe_orchestrator.snapshot
         if not hasattr(self, "targeted_validation_page"):
             return
         symbol = self._current_target_symbol()
         universe_record = next(
             (
                 row
-                for row in self.universe.records
+                for row in universe.records
                 if row.symbol == symbol
             ),
             None,
-        ) if self.universe is not None else None
+        ) if universe is not None else None
         stream = self.market_orchestrator.snapshot
         quote = next(
             (
@@ -3423,6 +3356,7 @@ class MainWindow(QMainWindow):
         self._publish_targeted_view()
 
     def _run_targeted_replay(self) -> None:
+        universe = self.universe_orchestrator.snapshot
         strategy = self._selected_shadow_strategy_record()
         if strategy is None:
             QMessageBox.warning(
@@ -3435,10 +3369,10 @@ class MainWindow(QMainWindow):
                 self, "代码无效", "请输入需要回放的股票或 ETF 代码。"
             )
             return
-        if self.universe is not None:
+        if universe is not None:
             eligible = {
                 row.symbol
-                for row in self.universe.records
+                for row in universe.records
                 if row.eligible_for_research
             }
             if symbol not in eligible:
@@ -3522,6 +3456,7 @@ class MainWindow(QMainWindow):
 
 
     def _run_targeted_robustness(self) -> None:
+        universe = self.universe_orchestrator.snapshot
         strategy = self._selected_shadow_strategy_record()
         if strategy is None:
             QMessageBox.warning(
@@ -3534,10 +3469,10 @@ class MainWindow(QMainWindow):
                 self, "代码无效", "请输入需要评估的股票或 ETF 代码。"
             )
             return
-        if self.universe is not None:
+        if universe is not None:
             eligible = {
                 row.symbol
-                for row in self.universe.records
+                for row in universe.records
                 if row.eligible_for_research
             }
             if symbol not in eligible:
@@ -4317,6 +4252,7 @@ class MainWindow(QMainWindow):
 
 
     def _start_shadow(self) -> None:
+        universe = self.universe_orchestrator.snapshot
         if (
             self.trading_runtime is not None
             and self.trading_runtime.session.active
@@ -4391,7 +4327,7 @@ class MainWindow(QMainWindow):
                 ),
             )
             return
-        if self.universe is None:
+        if universe is None:
             QMessageBox.warning(
                 self,
                 "标的门未通过",
@@ -4408,7 +4344,7 @@ class MainWindow(QMainWindow):
             return
         research_eligible = {
             row.symbol
-            for row in self.universe.records
+            for row in universe.records
             if row.eligible_for_research
         }
         if target_symbol not in research_eligible:
@@ -4649,18 +4585,19 @@ class MainWindow(QMainWindow):
         return [worker for worker in self.workers if worker.isRunning()]
 
     def _request_worker_stops(self) -> None:
-        """Ask every cancellable worker to stop.
+        """Ask the one cancellable task to stop.
 
         ``TaskThread`` has no generic cancel hook -- each task owns its own
-        ``Event`` -- so the only universal signal is the universe refresh
-        cancel event, which is the one long-running network task the desktop
-        can interrupt.  The thread is never terminated: a half-written
-        reference file is worse than a slow close.
+        ``Event`` -- so the only universal signal is the universe refresh, which
+        is the one long-running network task the desktop can interrupt.  The
+        window does not read that event and does not reach into the capability
+        for it: it calls the capability's shutdown lifecycle, which is a
+        different intent from the operator pressing cancel and therefore does
+        not write an operator status line.  The thread is never terminated: a
+        half-written reference file is worse than a slow close.
         """
 
-        event = self.universe_refresh_cancel_event
-        if event is not None:
-            event.set()
+        self.universe_orchestrator.cancel_for_shutdown()
 
     def _join_background_workers(self) -> bool:
         """Wait for running workers; report whether all of them exited."""
@@ -4792,10 +4729,9 @@ class MainWindow(QMainWindow):
     def _refresh_market_scope_summary(self) -> None:
         if not hasattr(self, "market_page"):
             return
+        universe = self.universe_orchestrator.snapshot
         universe_summary = (
-            self.universe.summary()
-            if self.universe is not None
-            else {}
+            universe.summary() if universe is not None else {}
         )
         research_count = int(
             universe_summary.get("research_eligible", 0)
@@ -4844,6 +4780,7 @@ class MainWindow(QMainWindow):
         resource_group: str = "research",
         suppress_busy_message: bool = False,
         shutdown_essential: bool = False,
+        on_finished: Callable[[], None] | None = None,
     ) -> bool:
         if self._closing and not shutdown_essential:
             # Closing raises the admission gate before releasing anything,
@@ -4879,18 +4816,37 @@ class MainWindow(QMainWindow):
         worker.cancelled.connect(self._task_cancelled)
         worker.succeeded.connect(on_success)
         worker.finished.connect(
-            lambda: self._worker_finished(worker)
+            lambda: self._finish_task(worker, on_finished)
         )
         self._log(start_message)
         worker.start()
         return True
 
+    def _finish_task(
+        self,
+        worker: TaskThread,
+        on_finished: Callable[[], None] | None,
+    ) -> None:
+        """Release the worker, then let the capability update its own state.
+
+        The order is the contract.  Generic lifecycle cleanup runs first, so the
+        resource group is free and the execution controls are republished before
+        anything repaints; the capability's ``on_finished`` hook runs second, so
+        it observes a released worker rather than one still registered.
+
+        The worker object is deliberately not passed to the hook.  A capability
+        that received it could compare identity against the worker list, which is
+        exactly the coupling ``on_finished`` exists to remove.
+        """
+
+        self._worker_finished(worker)
+        if on_finished is not None:
+            on_finished()
+
     def _worker_finished(self, worker: TaskThread) -> None:
         self.task_controller.finish(worker)
         if hasattr(self, "runtime_events_page"):
             self._schedule_runtime_events_refresh()
-        if worker is self.universe_refresh_worker:
-            self._reset_universe_refresh_controls()
         self._publish_execution_controls()
 
     def _task_cancelled(self) -> None:

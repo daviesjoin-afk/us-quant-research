@@ -1,4 +1,17 @@
-"""Wiring tests for the Universe and History native pages."""
+"""Wiring tests for the Universe and History native pages.
+
+These originally drove the window's own handlers (``_refresh_universe``,
+``_history_finished`` and friends).  v2O-C1 moved those handlers into
+``desktop_v2/orchestration/research``, so the tests now drive the capability and
+read the same real widgets the window shows.  The intent is unchanged -- prove
+the page is painted from the right state -- and asserting on the real
+``QPushButton``/``QTableWidget`` rather than on the orchestrator's return value
+is what keeps that true.
+
+The button-click wiring lives in
+``tests/test_desktop_research_foundations_wiring.py``; what stays here is the
+page state each intent produces.
+"""
 
 from __future__ import annotations
 
@@ -28,6 +41,10 @@ class _IdleWorker:
 @pytest.fixture()
 def window(monkeypatch, tmp_path):
     monkeypatch.setenv(STATE_ROOT_ENV, str(tmp_path))
+    monkeypatch.setattr(
+        QMessageBox, "information", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: None)
     widget = MainWindow()
     _APP.processEvents()
     yield widget
@@ -65,86 +82,94 @@ def _history_snapshot() -> HistoryQueueSnapshot:
     return HistoryQueueSnapshot((job,), 0, 0, 1, 0)
 
 
+def _stub_refresh(window: MainWindow, monkeypatch) -> None:
+    """Admit a refresh without running it, so the controls can be observed.
 
-def test_universe_refresh_and_cancel_intents_reach_handlers(
-    window: MainWindow, monkeypatch
-) -> None:
-    page = window.universe_page
-    seen: list[str] = []
-    for signal, handler in (
-        (page.refresh_requested, "_refresh_universe"),
-        (page.cancel_refresh_requested, "_cancel_universe_refresh"),
-    ):
-        monkeypatch.setattr(window, handler, lambda handler=handler: seen.append(handler))
-        signal.disconnect()
-    window._connect_universe_page()
-    page.refresh_button.click()
-    page.cancel_button.setEnabled(True)
-    page.cancel_button.click()
-    assert seen == ["_refresh_universe", "_cancel_universe_refresh"]
+    Only the *domain* call is stubbed.  The page render must run for real: this
+    test is about the painted control state, and stubbing the render would leave
+    the buttons in whatever state the fixture built them in.
+    """
+
+    monkeypatch.setattr(
+        window.universe_orchestrator._service,
+        "refresh",
+        lambda *, should_stop, progress=None: _universe(),
+    )
 
 
 def test_universe_refresh_lifecycle_publishes_control_state(
     window: MainWindow, monkeypatch
 ) -> None:
-    monkeypatch.setattr(window, "_start_task", lambda *args, **kwargs: True)
-    monkeypatch.setattr(window, "workers", [_IdleWorker()])
-    window._refresh_universe()
+    """The three control states: refreshing, cancelling, idle."""
+
+    _stub_refresh(window, monkeypatch)
+
+    window.universe_orchestrator.request_refresh()
     assert window.universe_page.refresh_button.isEnabled() is False
     assert window.universe_page.cancel_button.isEnabled() is True
     assert window.universe_page.refresh_button.text() == "官方标的刷新中…"
-    window._cancel_universe_refresh()
+
+    window.universe_orchestrator.request_cancel()
     assert window.universe_page.cancel_button.isEnabled() is False
     assert window.universe_page.cancel_button.text() == "正在取消…"
-    window._reset_universe_refresh_controls()
+
+    # The task's completion path is what returns the controls to idle; it is
+    # reached through ``on_finished`` rather than by reading a worker.
+    window.universe_orchestrator._refresh_finished()
     assert window.universe_page.refresh_button.isEnabled() is True
     assert window.universe_page.cancel_button.isEnabled() is False
 
 
-def test_universe_refresh_success_renders_new_snapshot(window: MainWindow) -> None:
-    window._universe_refreshed(_universe())
+def test_adopting_a_snapshot_renders_the_new_rows(window: MainWindow) -> None:
+    """Startup adoption paints: the page shows what the loader read."""
+
+    window.universe_orchestrator.restore_snapshot(_universe())
+
     assert window.universe_page.table.rowCount() == 1
     assert window.universe_page.table.item(0, 0).text() == "AAPL"
 
 
-def test_history_intents_reach_handlers_with_batch_size(
+def test_history_intents_reach_the_orchestrator_with_the_batch_size(
     window: MainWindow, monkeypatch
 ) -> None:
+    """Each history intent arrives with the page's batch size, not a default."""
+
     page = window.history_page
     seen: list[tuple[str, int | None]] = []
-    for signal, handler in (
-        (page.schedule_requested, "_schedule_history"),
-        (page.run_ibkr_requested, "_run_history"),
-        (page.run_public_requested, "_run_public_history"),
-        (page.retry_failed_requested, "_retry_failed"),
+    for handler in (
+        "request_schedule",
+        "request_run_ibkr",
+        "request_run_public",
+        "retry_failed",
     ):
         monkeypatch.setattr(
-            window,
+            window.history_orchestrator,
             handler,
             lambda value=None, handler=handler: seen.append(
                 (handler, value if isinstance(value, int) else None)
             ),
         )
-        signal.disconnect()
-    window._connect_history_page()
     page.batch_size.setValue(37)
     page.schedule_button.click()
     page.run_ibkr_button.click()
     page.run_public_button.click()
     page.retry_button.click()
+
     assert seen == [
-        ("_schedule_history", None),
-        ("_run_history", 37),
-        ("_run_public_history", 37),
-        ("_retry_failed", None),
+        ("request_schedule", None),
+        ("request_run_ibkr", 37),
+        ("request_run_public", 37),
+        ("retry_failed", None),
     ]
 
 
-def test_history_finished_publishes_progress_and_rows(
+def test_history_completion_publishes_progress_and_rows(
     window: MainWindow, monkeypatch
 ) -> None:
     monkeypatch.setattr(window.history_service, "snapshot", _history_snapshot)
-    window._history_finished({"completed": 1, "failed": 1})
+
+    window.history_orchestrator._finished({"completed": 1, "failed": 1})
+
     assert window.history_page.progress.value() == 50
     assert window.history_page.table.rowCount() == 1
     assert window.history_page.table.item(0, 0).text() == "AAPL"
@@ -154,20 +179,29 @@ def test_history_failure_resets_only_history_progress(
     window: MainWindow, monkeypatch
 ) -> None:
     monkeypatch.setattr(window.history_service, "snapshot", _history_snapshot)
-    window._history_progress_percent = 77
-    window._publish_history_view()
-    window._history_task_failed("failed")
+    window.history_orchestrator._progress_percent = 77
+    window.history_orchestrator.render_current()
+
+    window.history_orchestrator._failed("failed")
+
     assert window.history_page.progress.value() == 0
 
 
 def test_unrelated_task_failure_does_not_touch_history_page(
     window: MainWindow, monkeypatch
 ) -> None:
+    """A failure elsewhere must not clear the history bar.
+
+    The progress bar belongs to the history capability now, so a generic task
+    failure has no route to it at all -- which is exactly what this asserts.
+    """
+
     monkeypatch.setattr(window.history_service, "snapshot", _history_snapshot)
-    window._history_progress_percent = 77
-    window._publish_history_view()
-    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: None)
+    window.history_orchestrator._progress_percent = 77
+    window.history_orchestrator.render_current()
+
     window._task_failed("unrelated")
+
     assert window.history_page.progress.value() == 77
 
 

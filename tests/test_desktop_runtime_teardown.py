@@ -14,6 +14,7 @@ otherwise a timer that never started would also read as "not running".
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -148,7 +149,7 @@ def test_supervisor_module_imports_no_gui_toolkit() -> None:
 class _BlockingWorker:
     """A real ``TaskThread`` parked on an ``Event``, released in a ``finally``."""
 
-    def __init__(self, window: MainWindow) -> None:
+    def __init__(self, window: MainWindow, resource_group: str = "universe") -> None:
         from threading import Event as ThreadingEvent
 
         from us_quant.desktop import TaskThread
@@ -161,7 +162,7 @@ class _BlockingWorker:
             self.release.wait(30)
             return "done"
 
-        self.thread = TaskThread(task, resource_group="universe")
+        self.thread = TaskThread(task, resource_group=resource_group)
         window.task_controller.register(self.thread)
         self.window = window
 
@@ -244,22 +245,63 @@ def test_close_with_a_running_task_refuses_new_tasks(monkeypatch) -> None:
 
 
 def test_close_sets_the_universe_refresh_cancel_event(monkeypatch) -> None:
-    """Requirement 2: a cancellable network task is asked to stop."""
+    """Requirement 2: a cancellable network task is asked to stop.
 
-    from threading import Event as ThreadingEvent
+    The event is no longer a window attribute -- the capability owns it -- so
+    this drives the real :meth:`request_refresh` path and captures the event the
+    domain call was handed.  That is a stronger test than the old one: it proves
+    the event *the running refresh actually polls* is the one close sets, rather
+    than an object the test parked on the window itself.
+    """
 
     _silence_dialogs(monkeypatch)
     window = _window()
     try:
-        with _BlockingWorker(window):
-            cancel_event = ThreadingEvent()
-            window.universe_refresh_cancel_event = cancel_event
-            window.universe_refresh_worker = window.workers[-1]
+        # A different resource group: the refresh this test admits needs the
+        # ``universe`` group free, and the blocking worker only has to be *a*
+        # running task for the close to be deferred.
+        with _BlockingWorker(window, resource_group="research"):
+            from threading import Event as ThreadingEvent
 
-            assert not cancel_event.is_set()
+            from us_quant.universe import UniverseRecord, UniverseSnapshot
+
+            entered = ThreadingEvent()
+            seen: dict = {}
+
+            def refresh(*, should_stop, progress=None):
+                seen["should_stop"] = should_stop
+                entered.set()
+                return UniverseSnapshot(
+                    generated_at=datetime.now(timezone.utc),
+                    source_timestamps={},
+                    records=(
+                        UniverseRecord(
+                            symbol="AAPL",
+                            name="Apple",
+                            exchange="NASDAQ",
+                            security_type="STK",
+                        ),
+                    ),
+                )
+
+            monkeypatch.setattr(
+                window.universe_orchestrator._service, "refresh", refresh
+            )
+            monkeypatch.setattr(
+                window.universe_orchestrator._page, "render", lambda view: None
+            )
+
+            window.universe_orchestrator.request_refresh()
+
+            # The task runs on a worker thread, so wait for the domain call to
+            # actually start rather than racing it: asserting on an event that
+            # was never handed out would pass for the wrong reason.
+            assert entered.wait(10), "the refresh never reached the service"
+            assert seen["should_stop"]() is False
+
             _close_verdict(window)
 
-            assert cancel_event.is_set()
+            assert seen["should_stop"]() is True
     finally:
         window.deleteLater()
 

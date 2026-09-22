@@ -375,24 +375,52 @@ RESEARCH_DATA_V2_REMOVED_METHODS = (
 )
 RESEARCH_DATA_V2_ADDED_METHODS = (
     "_connect_universe_page",
-    "_publish_universe_view",
     "_connect_history_page",
-    "_publish_history_view",
-    "_history_task_failed",
 )
 RESEARCH_DATA_V2_METHODS = (
     "_load_local_state",
+    "_auto_market_scan_finished",
+    "_task_failed",
+)
+
+# v2O-C1 (Research foundations): the universe and history runtimes moved out of
+# the window into ``desktop_v2/orchestration/research``.  Twelve handlers left
+# the window, three arrived, and four more changed because they used to read the
+# universe off the window.  ``_publish_universe_view``, ``_publish_history_view``
+# and ``_history_task_failed`` were *added* by the round above and *removed*
+# here, so they exist at neither the base commit nor now and belong to neither
+# delta.  Dropping them silently would hide a real deletion, so they are pinned
+# below and asserted absent from both deltas.
+DESKTOP_RESEARCH_FOUNDATIONS_V2_NET_ZERO_METHODS = (
+    "_publish_universe_view",
+    "_publish_history_view",
+    "_history_task_failed",
+)
+DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS = (
     "_refresh_universe",
     "_cancel_universe_refresh",
     "_reset_universe_refresh_controls",
     "_universe_refreshed",
-    "_auto_market_scan_finished",
     "_schedule_history",
     "_run_history",
+    "_history_finished",
     "_run_public_history",
     "_retry_failed",
-    "_history_finished",
-    "_task_failed",
+)
+DESKTOP_RESEARCH_FOUNDATIONS_V2_ADDED_METHODS = (
+    "_finish_task",
+    "_on_universe_changed",
+    "_report_history_refusal",
+)
+DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS = (
+    # ``_request_worker_stops`` calls the capability's shutdown lifecycle
+    # instead of setting the cancel event itself.
+    "_request_worker_stops",
+    # ``_run_scan`` reads the universe off the capability at execution time.
+    "_run_scan",
+    # The targeted-replay entry points read the universe at execution time.
+    "_run_targeted_replay",
+    "_run_targeted_robustness",
 )
 
 SCANNER_V2_REMOVED_METHODS = (
@@ -551,6 +579,20 @@ _SYSTEM_V2_REPAIR_BASE_BLOCK = (
 _SYSTEM_V2_REPAIR_DELTA_BLOCK = (
     '        if hasattr(self, "runtime_events_page"):\n'
     '            self._schedule_runtime_events_refresh()\n'
+)
+
+# v2O-C1: ``_start_task`` gained one optional completion hook.  Each edit is
+# asserted present exactly once before being reverted, so a second landing of
+# the same edit fails here instead of silently widening the freeze.
+_DESKTOP_RESEARCH_FOUNDATIONS_V2_START_TASK_DELTAS = (
+    (
+        '        shutdown_essential: bool = False,\n        on_finished: Callable[[], None] | None = None,\n',
+        '        shutdown_essential: bool = False,\n',
+    ),
+    (
+        '        worker.finished.connect(\n            lambda: self._finish_task(worker, on_finished)\n        )\n',
+        '        worker.finished.connect(\n            lambda: self._worker_finished(worker)\n        )\n',
+    ),
 )
 
 SYSTEM_V2_CHANGED_MODULES = (
@@ -1881,6 +1923,15 @@ def test_the_frozen_method_is_byte_identical(name: str) -> None:
             _SYSTEM_V2_REPAIR_DELTA_BLOCK, _SYSTEM_V2_REPAIR_BASE_BLOCK
         )
 
+    if name == "_start_task":
+        # v2O-C1: the generic task boundary gained one optional completion hook.
+        # Each declared edit is asserted present exactly once before being
+        # reverted, so an edit landing twice -- or somewhere else in the method
+        # -- fails here instead of silently widening the freeze.
+        for delta, base_block in _DESKTOP_RESEARCH_FOUNDATIONS_V2_START_TASK_DELTAS:
+            assert current_body.count(delta) == 1, (name, delta)
+            current_body = current_body.replace(delta, base_block)
+
     if name == "closeEvent":
         # v2O-A: the live-worker check asks the market orchestrator instead of
         # reading the worker attribute.  Only that declared delta may differ.
@@ -1943,6 +1994,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DASHBOARD_V2_REMOVED_METHODS)
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_REMOVED_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_REMOVED_METHODS)
+        | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1959,6 +2011,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DASHBOARD_V2_ADDED_METHODS)
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_ADDED_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_ADDED_METHODS)
+        | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1991,6 +2044,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(SYSTEM_V2_REPAIR_METHODS)
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS)
+        | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS)
     )
     # Exact, not a subset: the delta is the declared surface and nothing
     # else, in both directions.

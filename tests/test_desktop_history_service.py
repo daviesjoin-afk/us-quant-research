@@ -54,11 +54,16 @@ BASE_COMMIT = "2b3e3f5337274f46f66e7757d7c71be2b471e846"
 # Spec 33: the only MainWindow methods this step may change.
 REFACTORED_METHODS = (
     "__init__",
-    "_schedule_history",
-    "_run_history",
-    "_run_public_history",
-    "_retry_failed",
 )
+
+# v2O-C1 (Research foundations): ``_schedule_history``, ``_run_history``,
+# ``_run_public_history`` and ``_retry_failed`` were the four methods this file's
+# spec allowed to change.  They no longer exist -- the capability owns them -- so
+# they moved from "changed" to "removed" and are declared in
+# ``DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS`` below, where the exact-delta
+# assertion still pins them.  The per-method behavioural guards they used to
+# carry now drive ``HistoryOrchestrator`` directly in
+# ``test_desktop_history_orchestrator.py``.
 
 # Methods a *later* round legitimately rewrote.  Each round appends the
 # methods it declared; the union is what this guard tolerates relative to
@@ -378,23 +383,11 @@ RESEARCH_DATA_V2_REMOVED_METHODS = (
 )
 RESEARCH_DATA_V2_ADDED_METHODS = (
     "_connect_universe_page",
-    "_publish_universe_view",
     "_connect_history_page",
-    "_publish_history_view",
-    "_history_task_failed",
 )
 RESEARCH_DATA_V2_METHODS = (
     "_load_local_state",
-    "_refresh_universe",
-    "_cancel_universe_refresh",
-    "_reset_universe_refresh_controls",
-    "_universe_refreshed",
     "_auto_market_scan_finished",
-    "_schedule_history",
-    "_run_history",
-    "_run_public_history",
-    "_retry_failed",
-    "_history_finished",
     "_task_failed",
 )
 
@@ -566,13 +559,58 @@ FROZEN_METHODS = (
     "closeEvent",
 )
 
-# Spec 56: the five history methods must not build a store or call a runner.
-HISTORY_METHODS = (
+# v2O-C1 (Research foundations): the history runtime moved into
+# ``desktop_v2/orchestration/research/history``.  The five methods this file's
+# spec named no longer exist on the window -- their behaviour is asserted
+# directly against the orchestrator in ``test_desktop_history_orchestrator.py``,
+# which is a stronger guard than reading a window method that forwards.
+#
+# ``_publish_history_view`` and ``_history_task_failed`` were *added* by the
+# Research Data round and *removed* here, so they exist at neither revision and
+# belong to neither delta; they are pinned separately below.
+DESKTOP_RESEARCH_FOUNDATIONS_V2_NET_ZERO_METHODS = (
+    "_publish_history_view",
+    "_history_task_failed",
+)
+DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS = (
+    "_refresh_universe",
+    "_cancel_universe_refresh",
+    "_reset_universe_refresh_controls",
+    "_universe_refreshed",
     "_schedule_history",
     "_run_history",
+    "_history_finished",
     "_run_public_history",
     "_retry_failed",
-    "_publish_history_view",
+)
+DESKTOP_RESEARCH_FOUNDATIONS_V2_ADDED_METHODS = (
+    "_finish_task",
+    "_on_universe_changed",
+    "_report_history_refusal",
+)
+DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS = (
+    "_request_worker_stops",
+    "_run_targeted_replay",
+    "_run_targeted_robustness",
+)
+
+# v2O-C1: ``_start_task`` gained one optional completion hook.  Each edit is
+# asserted present exactly once before being reverted, so a second landing of
+# the same edit fails here instead of silently widening the freeze.
+_DESKTOP_RESEARCH_FOUNDATIONS_V2_START_TASK_DELTAS = (
+    (
+        "        shutdown_essential: bool = False,\n"
+        "        on_finished: Callable[[], None] | None = None,\n",
+        "        shutdown_essential: bool = False,\n",
+    ),
+    (
+        "        worker.finished.connect(\n"
+        "            lambda: self._finish_task(worker, on_finished)\n"
+        "        )\n",
+        "        worker.finished.connect(\n"
+        "            lambda: self._worker_finished(worker)\n"
+        "        )\n",
+    ),
 )
 
 FORBIDDEN_CALLS = (
@@ -1419,6 +1457,15 @@ def test_the_frozen_method_is_byte_identical(name: str) -> None:
             _SYSTEM_V2_REPAIR_DELTA_BLOCK, _SYSTEM_V2_REPAIR_BASE_BLOCK
         )
 
+    if name == "_start_task":
+        # v2O-C1: the generic task boundary gained one optional completion hook.
+        # Each declared edit is asserted present exactly once before being
+        # reverted, so an edit landing twice -- or somewhere else in the method
+        # -- fails here instead of silently widening the freeze.
+        for delta, base_block in _DESKTOP_RESEARCH_FOUNDATIONS_V2_START_TASK_DELTAS:
+            assert current_body.count(delta) == 1, (name, delta)
+            current_body = current_body.replace(delta, base_block)
+
     if name == "closeEvent":
         # v2O-A: the live-worker check asks the market orchestrator instead of
         # reading the worker attribute.  Only that declared delta may differ.
@@ -1484,6 +1531,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DASHBOARD_V2_REMOVED_METHODS)
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_REMOVED_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_REMOVED_METHODS)
+        | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1500,6 +1548,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DASHBOARD_V2_ADDED_METHODS)
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_ADDED_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_ADDED_METHODS)
+        | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1536,6 +1585,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(SYSTEM_V2_REPAIR_METHODS)
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS)
+        | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS)
     )
     assert set(changed) <= declared
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)
@@ -1554,23 +1604,76 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(SYSTEM_V2_REPAIR_METHODS) <= set(changed)
     assert set(DESKTOP_MARKET_ORCHESTRATION_V2_METHODS) <= set(changed)
     assert set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS) <= set(changed)
+    assert set(DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS) <= set(changed)
     for name in REFACTORED_METHODS:
         if name != "__init__":
             assert name in changed, name
 
 
+def test_the_net_zero_methods_exist_in_neither_revision() -> None:
+    """v2O-C1: pin what an earlier round added and this round deleted.
+
+    These methods belong to neither delta, so without this guard the only record
+    of their deletion would be a comment.  Asserting both halves -- absent from
+    the base commit *and* absent now -- is what makes "net zero" a fact rather
+    than a claim.
+    """
+
+    base = _base_source("src/us_quant/desktop.py")
+    if base is None:
+        pytest.fail(
+            f"base commit {BASE_COMMIT} is unreachable; the "
+            "byte-equivalence guard cannot run"
+        )
+
+    def names(source: str) -> set[str]:
+        cls = _main_window_class(ast.parse(source))
+        return {
+            node.name
+            for node in cls.body
+            if isinstance(node, ast.FunctionDef)
+        }
+
+    base_names, current_names = names(base), names(_desktop_source())
+    for name in DESKTOP_RESEARCH_FOUNDATIONS_V2_NET_ZERO_METHODS:
+        assert name not in base_names, f"{name} is in the base commit"
+        assert name not in current_names, f"{name} is still declared"
+
+    declared = set(DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS) | set(
+        DESKTOP_RESEARCH_FOUNDATIONS_V2_ADDED_METHODS
+    )
+    assert not (set(DESKTOP_RESEARCH_FOUNDATIONS_V2_NET_ZERO_METHODS) & declared)
+
+
 # -- 56/57: the scope guard is per method, not per module --------------
 
 
-@pytest.mark.parametrize("name", HISTORY_METHODS)
-def test_the_history_method_no_longer_builds_a_store(name: str) -> None:
-    """Spec 31/56: these five methods go through the service instead."""
+@pytest.mark.parametrize(
+    "name",
+    DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS
+    + DESKTOP_RESEARCH_FOUNDATIONS_V2_NET_ZERO_METHODS,
+)
+def test_the_history_method_is_gone_from_the_window(name: str) -> None:
+    """Spec 31/56, carried to v2O-C1: the window no longer runs history.
+
+    The original guard asserted these five methods did not *build a store* --
+    they went through ``DesktopHistoryService``.  This round goes one step
+    further and removes them: the capability owns the task intent now, so the
+    strongest available assertion is that no such method exists to regress.
+
+    The behavioural half lives in ``test_desktop_history_orchestrator.py``,
+    which drives the orchestrator directly.  A window method that forwards would
+    pass a "no store" check while still being a second place history could be
+    started from, which is why absence is the guard here.
+    """
 
     cls = _main_window_class(ast.parse(_desktop_source()))
-    names = _called_names(_method(cls, name))
-
-    for forbidden in FORBIDDEN_CALLS:
-        assert forbidden not in names, f"{name} still calls {forbidden}"
+    names = {
+        node.name
+        for node in cls.body
+        if isinstance(node, ast.FunctionDef)
+    }
+    assert name not in names, f"{name} is back on the window"
 
 
 def test_the_module_wide_ban_is_deliberately_not_asserted() -> None:
@@ -1641,256 +1744,25 @@ def test_building_the_window_does_not_create_the_queue_file(
 # -- 50/51: _schedule_history wiring ----------------------------------
 
 
-def test_schedule_history_hands_the_universe_to_the_service(
-    monkeypatch, tmp_path
-) -> None:
-    """Spec 50: the result drives the log line and both refreshes."""
-
-    window = _window(monkeypatch, tmp_path)
-    calls: list = []
-    try:
-        monkeypatch.setattr(
-            window.history_service,
-            "schedule_universe",
-            lambda universe: (
-                calls.append(universe),
-                HistoryScheduleResult(inserted=7, total=1234),
-            )[1],
-        )
-        monkeypatch.setattr(
-            window,
-            "_publish_history_view",
-            lambda: calls.append("publish_history"),
-        )
-        monkeypatch.setattr(
-            window,
-            "_refresh_market_scope_summary",
-            lambda: calls.append("refresh_scope"),
-        )
-        logs: list[str] = []
-        monkeypatch.setattr(window, "_log", logs.append)
-
-        universe = object()
-        window.universe = universe
-        window._schedule_history()
-
-        assert calls[0] is universe
-        assert calls[1:] == ["publish_history", "refresh_scope"]
-        assert len(logs) == 1
-        assert "新增 7 个" in logs[0]
-        assert "队列合计 1,234 个" in logs[0]
-    finally:
-        window.deleteLater()
-
-
-def test_schedule_history_still_refuses_without_a_universe(
-    monkeypatch, tmp_path
-) -> None:
-    """Spec 5/51: the ``None`` guard and its dialog stay in the window."""
-
-    window = _window(monkeypatch, tmp_path)
-    shown: list = []
-    called: list = []
-    try:
-        monkeypatch.setattr(
-            window.history_service,
-            "schedule_universe",
-            lambda universe: called.append(universe),
-        )
-        monkeypatch.setattr(
-            "us_quant.desktop.QMessageBox.information",
-            staticmethod(lambda *args, **kwargs: shown.append(args)),
-        )
-
-        window.universe = None
-        window._schedule_history()
-
-        assert called == []
-        assert len(shown) == 1
-        assert shown[0][1] == "缺少标的池"
-    finally:
-        window.deleteLater()
 
 
 # -- 52: _run_history wiring ------------------------------------------
 
 
-def test_run_history_wraps_the_service_as_a_task(
-    monkeypatch, tmp_path
-) -> None:
-    """Spec 9/52: domain progress becomes the UI string, config stays live."""
-
-    window = _window(monkeypatch, tmp_path)
-    seen: dict = {}
-    captured: list = []
-    try:
-
-        def fake_run_ibkr(config, *, maximum_jobs, progress=None):
-            seen["config"] = config
-            seen["maximum_jobs"] = maximum_jobs
-            seen["progress"] = progress
-            if progress is not None:
-                progress(1, 25, "AAPL", "完成 1200 根")
-            return {"completed": 1}
-
-        monkeypatch.setattr(
-            window.history_service, "run_ibkr", fake_run_ibkr
-        )
-        monkeypatch.setattr(
-            window,
-            "_start_task",
-            lambda task, **kwargs: captured.append((task, kwargs)) or True,
-        )
-        window._run_history(37)
-
-        assert len(captured) == 1
-        task, kwargs = captured[0]
-        assert kwargs["on_success"] == window._history_finished
-        assert kwargs["resource_group"] == "history"
-
-        ui: list[str] = []
-        task(ui.append)
-
-        assert seen["config"] is window.config.ibkr
-        assert seen["maximum_jobs"] == 37
-        assert ui == ["1/25 AAPL：完成 1200 根"]
-
-        seen["progress"](1, 25, "AAPL", "完成 1200 根")
-        assert ui[-1] == "1/25 AAPL：完成 1200 根"
-    finally:
-        window.deleteLater()
-
-
-def test_run_history_reads_the_live_config_not_the_stream_copy(
-    monkeypatch, tmp_path
-) -> None:
-    """Spec 7: ``self.config.ibkr`` is re-read per call.
-
-    ``BrokerAccountApplication.config`` happens to be the *same object*
-    right after construction, so ``is window.config.ibkr`` cannot tell the
-    two apart.  A settings commit replaces ``self.config``, which is exactly
-    when a stale copy would diverge -- and since Broker Account v2 the
-    account application is the owner that must observe the replacement.
-    """
-
-    window = _window(monkeypatch, tmp_path)
-    seen: dict = {}
-    captured: list = []
-    try:
-        fresh_ibkr = replace(window.config.ibkr)
-        window.config = replace(window.config, ibkr=fresh_ibkr)
-        # The account application still holds the pre-replacement config:
-        # the window's own attribute is not where the runtime reads from.
-        assert window.broker_account.config is not fresh_ibkr
-
-        def fake_run_ibkr(config, *, maximum_jobs, progress=None):
-            seen["config"] = config
-            return {"completed": 1}
-
-        monkeypatch.setattr(
-            window.history_service, "run_ibkr", fake_run_ibkr
-        )
-        monkeypatch.setattr(
-            window,
-            "_start_task",
-            lambda task, **kwargs: captured.append((task, kwargs)) or True,
-        )
-        window._run_history(37)
-        captured[0][0](lambda _message: None)
-
-        assert seen["config"] is fresh_ibkr
-    finally:
-        window.deleteLater()
 
 
 # -- 53: _run_public_history wiring -----------------------------------
 
 
-def test_run_public_history_wraps_the_service_as_a_task(
-    monkeypatch, tmp_path
-) -> None:
-    """Spec 53: the window must not reset failures itself any more."""
-
-    window = _window(monkeypatch, tmp_path)
-    seen: dict = {}
-    captured: list = []
-    try:
-
-        def fake_run_public(*, maximum_jobs, progress=None):
-            seen["maximum_jobs"] = maximum_jobs
-            seen["progress"] = progress
-            return {"completed": 2}
-
-        def forbidden_reset_failed() -> int:
-            raise AssertionError(
-                "the window must not reset failures itself; run_public does"
-            )
-
-        monkeypatch.setattr(
-            window.history_service, "run_public", fake_run_public
-        )
-        monkeypatch.setattr(
-            window.history_service,
-            "reset_failed",
-            forbidden_reset_failed,
-        )
-        monkeypatch.setattr(
-            window,
-            "_start_task",
-            lambda task, **kwargs: captured.append((task, kwargs)) or True,
-        )
-        window._run_public_history(9)
-
-        task, kwargs = captured[0]
-        assert kwargs["resource_group"] == "history"
-        # Spec 14: the whole two-line copy, not just its first phrase.
-        assert kwargs["start_message"] == (
-            "备用免费日 K 下载中；只用于历史研究，"
-            "不会替代 IBKR 实时行情…"
-        )
-
-        ui: list[str] = []
-        task(ui.append)
-
-        assert seen["maximum_jobs"] == 9
-        seen["progress"](2, 9, "MSFT", "完成 300 根")
-        assert ui == ["2/9 MSFT：完成 300 根"]
-    finally:
-        window.deleteLater()
-
 
 # -- 54: _retry_failed wiring -----------------------------------------
 
 
-def test_retry_failed_reports_the_service_count(
-    monkeypatch, tmp_path
-) -> None:
-    """Spec 54: the count comes from the service and reaches the log."""
 
-    window = _window(monkeypatch, tmp_path)
-    try:
-        monkeypatch.setattr(
-            window.history_service, "reset_failed", lambda: 6
-        )
-        refreshed: list = []
-        monkeypatch.setattr(
-            window, "_publish_history_view", lambda: refreshed.append(1)
-        )
-        logs: list[str] = []
-        monkeypatch.setattr(window, "_log", logs.append)
-
-        window._retry_failed()
-
-        assert refreshed == [1]
-        assert logs == ["已将 6 个失败任务放回待处理队列。"]
-    finally:
-        window.deleteLater()
+# -- 55: render_current wiring (was _refresh_queue_table) -------------
 
 
-# -- 55: _refresh_queue_table wiring ----------------------------------
-
-
-def test_refresh_queue_table_caps_the_table_not_the_snapshot(
+def test_render_current_caps_the_table_not_the_snapshot(
     monkeypatch, tmp_path
 ) -> None:
     """Spec 16/17/20/55: the 2500-row cap belongs to the table."""
@@ -1928,7 +1800,9 @@ def test_refresh_queue_table_caps_the_table_not_the_snapshot(
             ),
         )
 
-        window._publish_history_view()
+        # v2O-C1: the render entry point moved to the capability; the
+        # assertions below still read the real widget the window shows.
+        window.history_orchestrator.render_current()
 
         assert window.history_page.table.rowCount() == 2500
         summary = window.history_page.summary_label.text()
@@ -1941,7 +1815,7 @@ def test_refresh_queue_table_caps_the_table_not_the_snapshot(
         window.deleteLater()
 
 
-def test_refresh_queue_table_hides_the_hint_at_exactly_the_cap(
+def test_render_current_hides_the_hint_at_exactly_the_cap(
     monkeypatch, tmp_path
 ) -> None:
     """Spec 20: the hint is for *more than* the cap, not for any queue.
@@ -1959,7 +1833,9 @@ def test_refresh_queue_table_hides_the_hint_at_exactly_the_cap(
             lambda: HistoryQueueSnapshot(jobs, 2500, 0, 0, 0),
         )
 
-        window._publish_history_view()
+        # v2O-C1: the render entry point moved to the capability; the
+        # assertions below still read the real widget the window shows.
+        window.history_orchestrator.render_current()
 
         assert window.history_page.table.rowCount() == 2500
         summary = window.history_page.summary_label.text()
@@ -1969,7 +1845,7 @@ def test_refresh_queue_table_hides_the_hint_at_exactly_the_cap(
         window.deleteLater()
 
 
-def test_refresh_queue_table_snapshots_once(monkeypatch, tmp_path) -> None:
+def test_render_current_snapshots_once(monkeypatch, tmp_path) -> None:
     """Spec 16/55: one snapshot per refresh, reused for rows and summary."""
 
     window = _window(monkeypatch, tmp_path)
@@ -1986,7 +1862,9 @@ def test_refresh_queue_table_snapshots_once(monkeypatch, tmp_path) -> None:
             window.history_service, "snapshot", counting_snapshot
         )
 
-        window._publish_history_view()
+        # v2O-C1: the render entry point moved to the capability; the
+        # assertions below still read the real widget the window shows.
+        window.history_orchestrator.render_current()
 
         assert len(calls) == 1
         assert window.history_page.table.rowCount() == 3
@@ -1995,7 +1873,7 @@ def test_refresh_queue_table_snapshots_once(monkeypatch, tmp_path) -> None:
         window.deleteLater()
 
 
-def test_refresh_queue_table_translates_statuses(
+def test_render_current_translates_statuses(
     monkeypatch, tmp_path
 ) -> None:
     """Spec 19: the Chinese status mapping stays in the window."""
@@ -2025,7 +1903,9 @@ def test_refresh_queue_table_translates_statuses(
             lambda: HistoryQueueSnapshot(jobs, 1, 1, 1, 1),
         )
 
-        window._publish_history_view()
+        # v2O-C1: the render entry point moved to the capability; the
+        # assertions below still read the real widget the window shows.
+        window.history_orchestrator.render_current()
 
         rendered = {
             window.history_page.table.item(row, 0).text(): window.history_page.table.item(

@@ -9,12 +9,14 @@ from __future__ import annotations
 import ast
 import pathlib
 import subprocess
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from us_quant.desktop import MainWindow
+from us_quant.universe import UniverseRecord, UniverseSnapshot
 from us_quant.desktop_market_scan_service import DesktopMarketScanService
 from us_quant.paths import STATE_ROOT_ENV
 
@@ -381,24 +383,50 @@ RESEARCH_DATA_V2_REMOVED_METHODS = (
 )
 RESEARCH_DATA_V2_ADDED_METHODS = (
     "_connect_universe_page",
-    "_publish_universe_view",
     "_connect_history_page",
-    "_publish_history_view",
-    "_history_task_failed",
 )
 RESEARCH_DATA_V2_METHODS = (
     "_load_local_state",
+    "_auto_market_scan_finished",
+    "_task_failed",
+)
+
+# v2O-C1 (Research foundations): the universe and history runtimes moved out of
+# the window into ``desktop_v2/orchestration/research``.  Twelve handlers left
+# the window, three arrived, and four more changed because they used to read the
+# universe off the window.  ``_publish_universe_view``, ``_publish_history_view``
+# and ``_history_task_failed`` were *added* by the round above and *removed*
+# here, so they exist at neither the base commit nor now and belong to neither
+# delta.  Dropping them silently would hide a real deletion, so they are pinned
+# below and asserted absent from both deltas.
+DESKTOP_RESEARCH_FOUNDATIONS_V2_NET_ZERO_METHODS = (
+    "_publish_universe_view",
+    "_publish_history_view",
+    "_history_task_failed",
+)
+DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS = (
     "_refresh_universe",
     "_cancel_universe_refresh",
     "_reset_universe_refresh_controls",
     "_universe_refreshed",
-    "_auto_market_scan_finished",
     "_schedule_history",
     "_run_history",
+    "_history_finished",
     "_run_public_history",
     "_retry_failed",
-    "_history_finished",
-    "_task_failed",
+)
+DESKTOP_RESEARCH_FOUNDATIONS_V2_ADDED_METHODS = (
+    "_finish_task",
+    "_on_universe_changed",
+    "_report_history_refusal",
+)
+DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS = (
+    # ``_request_worker_stops`` calls the capability's shutdown lifecycle
+    # instead of setting the cancel event itself.
+    "_request_worker_stops",
+    # The targeted-replay entry points read the universe at execution time.
+    "_run_targeted_replay",
+    "_run_targeted_robustness",
 )
 
 SCANNER_V2_REMOVED_METHODS = (
@@ -1255,7 +1283,9 @@ def test_a_missing_universe_blocks_the_scan(monkeypatch, tmp_path) -> None:
     try:
         from PySide6.QtWidgets import QMessageBox
 
-        window.universe = None
+        # No universe is loaded: the window's default, asserted rather than
+        # assigned, because the window no longer holds a universe of its own.
+        assert window.universe_orchestrator.snapshot is None
 
         shown: list[tuple] = []
         monkeypatch.setattr(
@@ -1288,6 +1318,29 @@ def test_a_missing_universe_blocks_the_scan(monkeypatch, tmp_path) -> None:
 # -- 6/43/44: progress copy and the task contract ----------------------
 
 
+def _universe(symbol: str = "AAPL") -> UniverseSnapshot:
+    """A real snapshot: ``restore_snapshot`` renders, so it reads ``records``.
+
+    Seeding a bare ``object()`` used to be enough when the window merely held
+    the value; now that adoption paints the page, the placeholder would fail
+    inside the presenter instead of exercising the path under test.
+    """
+
+    return UniverseSnapshot(
+        generated_at=datetime(2026, 9, 18, tzinfo=timezone.utc),
+        source_timestamps={"test": "now"},
+        records=(
+            UniverseRecord(
+                symbol=symbol,
+                name=symbol,
+                exchange="NASDAQ",
+                security_type="STK",
+                eligible_for_research=True,
+            ),
+        ),
+    )
+
+
 def _capture_task(window, monkeypatch):
     """Capture the task ``_run_scan`` starts, without running it.
 
@@ -1298,8 +1351,8 @@ def _capture_task(window, monkeypatch):
 
     from PySide6.QtWidgets import QMessageBox
 
-    if window.universe is None:
-        window.universe = object()
+    if window.universe_orchestrator.snapshot is None:
+        window.universe_orchestrator.restore_snapshot(_universe())
 
     monkeypatch.setattr(QMessageBox, "information", lambda *a: None)
     captured: list = []
@@ -1371,9 +1424,9 @@ def test_the_evaluation_timing_is_preserved(monkeypatch, tmp_path) -> None:
 
     window = _window(monkeypatch, tmp_path)
     try:
-        universe_a = object()
-        universe_b = object()
-        window.universe = universe_a
+        universe_a = _universe("AAA")
+        universe_b = _universe("BBB")
+        window.universe_orchestrator.restore_snapshot(universe_a)
 
         # The capital is computed once, on the UI thread.  Returning a
         # *different* value on a second call is what proves the worker does
@@ -1388,7 +1441,7 @@ def test_the_evaluation_timing_is_preserved(monkeypatch, tmp_path) -> None:
         task, _kwargs = _capture_task(window, monkeypatch)
 
         # Everything the worker will read is replaced *after* the capture.
-        window.universe = universe_b
+        window.universe_orchestrator.restore_snapshot(universe_b)
         new_rules = {"MSFT": object()}
         window.config = replace(
             window.config,
@@ -1425,7 +1478,7 @@ def test_the_capital_is_computed_before_the_task_starts(
 
     window = _window(monkeypatch, tmp_path)
     try:
-        window.universe = object()
+        window.universe_orchestrator.restore_snapshot(_universe())
         calls: list[str] = []
 
         def capital():
@@ -1460,7 +1513,7 @@ def test_the_service_is_called_once_per_task_run(
 
     window = _window(monkeypatch, tmp_path)
     try:
-        window.universe = object()
+        window.universe_orchestrator.restore_snapshot(_universe())
         monkeypatch.setattr(
             window, "_research_scenario_capital", lambda: Decimal("1500")
         )
@@ -1541,6 +1594,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DASHBOARD_V2_REMOVED_METHODS)
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_REMOVED_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_REMOVED_METHODS)
+        | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1557,6 +1611,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DASHBOARD_V2_ADDED_METHODS)
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_ADDED_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_ADDED_METHODS)
+        | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1592,6 +1647,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(SYSTEM_V2_REPAIR_METHODS)
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS)
+        | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS)
     )
     assert set(changed) <= allowed
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)

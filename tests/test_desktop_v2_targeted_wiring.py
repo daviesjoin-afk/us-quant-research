@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -18,6 +20,7 @@ from us_quant.desktop_v2.pages.research.targeted.models import (
     TargetedControlView,
 )
 from us_quant.paths import STATE_ROOT_ENV
+from us_quant.universe import UniverseRecord, UniverseSnapshot
 from us_quant.trading.domain.strategy import StrategyStatus
 
 
@@ -62,9 +65,21 @@ def _valid_strategy() -> SimpleNamespace:
     )
 
 
-def _eligible_universe() -> SimpleNamespace:
-    return SimpleNamespace(
-        records=(SimpleNamespace(symbol="AAPL", eligible_for_research=True),)
+def _eligible_universe() -> UniverseSnapshot:
+    """A real snapshot: adoption renders, so the presenter reads every field."""
+
+    return UniverseSnapshot(
+        generated_at=datetime(2026, 9, 22, tzinfo=timezone.utc),
+        source_timestamps={"test": "now"},
+        records=(
+            UniverseRecord(
+                symbol="AAPL",
+                name="Apple",
+                exchange="NASDAQ",
+                security_type="STK",
+                eligible_for_research=True,
+            ),
+        ),
     )
 
 
@@ -287,8 +302,16 @@ def test_shadow_start_rejects_non_research_eligible_symbol(
     monkeypatch.setattr(window, "_selected_shadow_strategy_record", _valid_strategy)
     monkeypatch.setattr(window.account_orchestrator, "fresh_paper_net_liquidation", lambda: Decimal("10000"))
     _fake_live_market(window, _ready_stream())
-    window.universe = SimpleNamespace(
-        records=(SimpleNamespace(symbol="AAPL", eligible_for_research=False),)
+    window.universe_orchestrator.restore_snapshot(
+        replace(_eligible_universe(), records=(
+            UniverseRecord(
+                symbol="AAPL",
+                name="Apple",
+                exchange="NASDAQ",
+                security_type="STK",
+                eligible_for_research=False,
+            ),
+        ))
     )
     window.targeted_validation_page.set_target_symbol("AAPL")
     window._start_shadow()
@@ -304,7 +327,7 @@ def test_shadow_start_rejects_missing_fresh_target_quote(
         window,
         _ready_stream(SimpleNamespace(symbol="AAPL", realtime_ready=False)),
     )
-    window.universe = _eligible_universe()
+    window.universe_orchestrator.restore_snapshot(_eligible_universe())
     window.targeted_validation_page.set_target_symbol("AAPL")
     window._start_shadow()
     assert dialogs[0][1][1] == "目标行情未就绪"
@@ -322,7 +345,7 @@ def test_shadow_start_allowed_path_builds_and_starts_engine(
     monkeypatch.setattr(window, "_record_runtime_event", lambda **kwargs: None)
     monkeypatch.setattr(window, "_log", lambda *args, **kwargs: None)
     _fake_live_market(window, _ready_stream())
-    window.universe = _eligible_universe()
+    window.universe_orchestrator.restore_snapshot(_eligible_universe())
     window.broker_account._portfolio = SimpleNamespace(
         account=SimpleNamespace(account_alias="Paper")
     )

@@ -601,6 +601,14 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
     ``MarketOrchestrator``.  It lives under ``desktop_v2`` because it is desktop
     orchestration, not trading logic, and it is a package because the runtime
     owner and its shell-health publisher are separate jobs.
+
+    ``orchestration/research/`` arrived with v2O-C1 Research foundations: the
+    universe snapshot/refresh and the history queue intents moved out of
+    ``MainWindow``.  Research is deliberately **not** one package with an
+    aggregate orchestrator -- it is a route aggregate for navigation only, so
+    each workspace that owns runtime truth gets its own subpackage, and the
+    absence of ``orchestration/research/orchestrator.py`` is itself asserted by
+    ``tests/test_desktop_research_foundations_architecture.py``.
     """
 
     desktop_v2 = _SRC / "desktop_v2"
@@ -623,6 +631,11 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "orchestration/account/models.py",
         "orchestration/account/orchestrator.py",
         "orchestration/account/queries.py",
+        "orchestration/research/__init__.py",
+        "orchestration/research/universe/__init__.py",
+        "orchestration/research/universe/orchestrator.py",
+        "orchestration/research/history/__init__.py",
+        "orchestration/research/history/orchestrator.py",
         "pages/__init__.py",
         "pages/account.py",
         "pages/risk.py",

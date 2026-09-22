@@ -137,6 +137,7 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Paper Trading Service | MIGRATED |
 | Desktop Workflow Aggregate | MIGRATED |
 | Market Orchestration | MIGRATED（v2O-A，`desktop_v2/orchestration/market/`） |
+| Account Orchestration | MIGRATED（v2O-B，`desktop_v2/orchestration/account/`） |
 
 Shadow 子系统：
 
@@ -1256,6 +1257,102 @@ per-file line budgets（`orchestrator.py ≤ 550`）/ `desktop.py` 相对 base c
 
 `desktop.py`：**5847 → 5432 行（净减 415）**；`orchestrator.py` 544 行。
 
+### 8.12 account orchestration 已抽出（v2O-B）
+
+v2O-A 之后，account route 的桌面 truth 仍散在 `MainWindow`：最后一份
+portfolio、refresh task、ledger append、page render 与 shell badge 由若干个
+handler 分别触碰。本轮把它们搬进 `desktop_v2/orchestration/account/`：
+
+```text
+desktop_v2/orchestration/account/
+  __init__.py      export AccountOrchestrator + 三个 fact 类型 + fresh-Paper query
+  models.py        Qt-free：AccountPresentationInputs / AccountRuntimeEvent /
+                   AccountShellHealthView
+  queries.py       Qt-free：fresh_paper_net_liquidation（300 秒新鲜度规则）
+  orchestrator.py  AccountOrchestrator：refresh 请求、ledger append、
+                   page render、shell 事实发布
+```
+
+职责边界：
+
+```text
+MainWindow           construct AccountPage + AccountOrchestrator、connect signals、
+                     跨 workflow fan-out（Dashboard / Auto Quant / Targeted）、
+                     构造并共享 BrokerAccountApplication
+AccountOrchestrator  refresh 请求、ledger append、page render、shell 事实、
+                     runtime event 请求
+queries              fresh-Paper NLV 规则（纯函数，可单测）
+```
+
+- **单一真相，且不是第二份。** `BrokerAccountApplication` 仍是 canonical
+  account truth（config / portfolio / last_error / refresh lifecycle）。
+  `AccountOrchestrator` **不存** `self._portfolio`：
+  `orchestrator.portfolio is application.portfolio`，是只读委托而不是拷贝。
+  `MainWindow` 的 `self.account_portfolio` 已删除，且**没有** compatibility
+  property；所有 caller 改成显式 `self.account_orchestrator.portfolio`。
+- **窗口删除的方法。** `_refresh_account_snapshot` /
+  `_account_snapshot_finished` / `_refresh_account_surfaces` /
+  `_paper_simulation_capital` 全部删除，不留 wrapper；窗口不再调用
+  `account_page.render(...)`、`account_ledger.append(...)`、
+  `account_ledger.list_points(...)`，也不再调用 `broker_account.refresh`。
+- **refresh 进入 orchestrator。** `AccountPage.refresh_requested` →
+  `AccountOrchestrator.request_refresh` → 注入的 `submit_task`
+  （`resource_group="broker"`）→ `BrokerAccountApplication.refresh(timeout_seconds=20)`。
+  orchestrator 不知道 `TaskThread` / worker list / closing gate / busy dialog，
+  generic task lifecycle 仍属窗口（§八）。
+- **generic task lifecycle 仍在窗口。** `TaskThread`、`DesktopTaskController`、
+  worker 列表、关闭准入闸门与取消处理一律不搬；orchestrator 只拿到一个窄
+  callable `submit_task`。等 v2O-C Research 成为第二个真实消费者再决定是否
+  提炼共享 task protocol。
+- **page render 只有一个 owner。** `render_current()` 读
+  `application.portfolio` + ledger 后调 `AccountPage.render(...)`；它**不 fetch**，
+  否则就是第二条 refresh 路径。窗口不再是 AccountPage 的 render 调用者。
+- **ledger 归 capability。** `AccountLedger` 仍由窗口作为 composition root
+  构造并注入，但业务使用（append / list_points）只在 Account capability 内。
+- **exposure multiplier 是 pushed presentation input。**
+  `AccountPresentationInputs.of(...)` 把 `symbol -> multiplier` 冻结成
+  tuple（避免外部 dict 被就地改动而悄悄改变 view），由窗口推入；
+  orchestrator 不知道这些 multiplier 从哪里算出来，因此不会 import
+  `RiskApplication` / Strategy / app config。
+- **跨 workflow fan-out 暂留窗口。** `_on_account_portfolio_changed()` 只执行
+  既有 downstream side effect（Dashboard publish、Auto Quant runtime view、
+  Targeted preflight、Auto Quant preflight），不 render page、不碰 ledger、
+  不请求 refresh；它只 fan-out finished `portfolio` fact。
+- **research capital 仍是 Research 的事。** 本轮只把
+  `account_page.research_capital_card.set_value(...)` 这个 widget reach-through
+  改成 `AccountPage.set_research_capital(...)` 命名方法，scalar 仍由窗口持有；
+  最终 owner 留给 v2O-C。`set_notice(...)` 已是正确的 page-level API，保留。
+- **shell 与事件是请求，不是写入。** badge 由 `AccountShellHealthView` 描述后
+  由窗口绘制（`_render_account_shell_health` 只写 text/state/tooltip + repolish，
+  不读 portfolio、不写 page）；runtime event 通过 `runtime_event_requested`
+  请求窗口记录，因此不存在 `Account → System` 反向依赖。
+  **account 链永远不写 market badge**：行情是否实时是 Market Data v2 的答案。
+- **gateway probe 不属于本轮。** `_probe_gateway` / `probe_ibkr_socket` /
+  `gateway_badge` 是 connection/system 级 capability，留给后续 System
+  orchestration 或 composition closure，不因为用了 IBKR config 就归入 Account。
+- **`broker_account` 仍允许留在 composition root。** 它同时被 MarketData
+  composition getter、SettingsService 的 IBKR 事务闸门与 AccountOrchestrator
+  使用，这是 composition 而不是业务 ownership 泄漏；窗口不得
+  `account_orchestrator._application.*` reach-through。
+
+新增守卫位于 `tests/test_desktop_account_orchestration_architecture.py`、
+`tests/test_desktop_account_orchestrator.py` 与
+`tests/test_desktop_account_orchestration_wiring.py`，覆盖已删 state / 无
+compatibility property / 无 reach-through / 无 `account_page.render` /
+`AccountPage.render` 唯一 Desktop caller / 无 ledger 调用 /
+orchestrator 的禁止依赖与禁止调用 / public surface 精确相等 /
+Qt-free 的 models+queries（含子进程按文件路径加载验证）/ per-file line
+budgets（`orchestrator.py ≤ 320`、`models.py ≤ 140`、`queries.py ≤ 140`）/
+fresh-Paper 规则全分支（含 naive timestamp 与 300 秒边界）/
+真实 ledger table 与 execution equity card 的端到端渲染。
+
+`desktop.py`：**5450 → 5436 行（净减 14）**；`orchestrator.py` 252 行、
+`models.py` 104 行、`queries.py` 83 行、`__init__.py` 36 行。
+
+净减少之所以远小于 v2O-A 的 415 行：本轮删掉的是 4 个窗口方法与其内部逻辑
+（约 128 行），但按规格必须**保留**在窗口的跨 workflow bridge 与
+presentation push（约 117 行）计入新增。ownership 正确优先于行数。
+
 ## 9. 已删除的旧架构
 
 ```text
@@ -1976,6 +2073,7 @@ MainWindow._auto_quant_tab             ✅ 已删除（Desktop Execution v2）
 ShadowConfig（含 compatibility alias）  ✅ 已删除（Trading Framework Closure v2C）
 shadow_paper.py                        ✅ 已删除（Shadow Framework v2）
 旧 MainWindow stream lifecycle         ✅ 已删除（v2O-A Market orchestration）
+旧 MainWindow account refresh/ledger/render ✅ 已删除（v2O-B Account orchestration）
 旧 Paper-specific orchestration glue   ⏭ 后续
 旧 workflow duplicate state            ⏭ 后续
 旧页面 builder（其余 route）            ⏭ 后续
@@ -1986,7 +2084,7 @@ shadow_paper.py                        ✅ 已删除（Shadow Framework v2）
 
 ```text
 v2O-A Market orchestration      ✅ 已完成（§8.11）
-v2O-B Account orchestration     ⏭ 后续
+v2O-B Account orchestration     ✅ 已完成（§8.12）
 v2O-C Research orchestration    ⏭ 后续
 v2O-D Shadow orchestration      ⏭ 后续
 v2O-E Paper orchestration       ⏭ 后续
@@ -2071,7 +2169,10 @@ v2。**Desktop Research v2E 已完成**（§8.8），CrossSectionResearchPage �
 System aggregate 已 native v2 且两类大 UI 耦合已清零；System orchestration 仍暂留在
 MainWindow。**v2O-A Market orchestration 已完成**（§8.11），Market runtime truth 已
 从 `MainWindow` 迁入 `desktop_v2/orchestration/market/`，窗口只保留跨 workflow
-safety bridge 与 snapshot fan-out。阶段 2 剩余：
+safety bridge 与 snapshot fan-out。**v2O-B Account orchestration 已完成**（§8.12），
+Account 的 refresh / ledger / page render / shell 事实已迁入
+`desktop_v2/orchestration/account/`，`BrokerAccountApplication` 仍是唯一 account
+truth，窗口只保留 composition 与跨 workflow fan-out。阶段 2 剩余：
 
 ```text
 Desktop Dashboard v2
@@ -2080,7 +2181,6 @@ Desktop Dashboard v2
 后续 orchestration 抽取：
 
 ```text
-v2O-B Account orchestration
 v2O-C Research orchestration
 v2O-D Shadow orchestration
 v2O-E Paper orchestration
@@ -2118,6 +2218,26 @@ v2O-A 刻意没有做的事，留给更后面：
 - 没有引入 `DesktopManager` / `ApplicationContext` 之类依赖袋；
 - 没有改 `MarketDataApplication`、readiness 判定语义、30 秒 recently-ready 窗口、
   1 秒 push-idle 阈值或 30 个订阅上限。
+
+v2O-B 刻意没有做的事，留给更后面：
+
+- 只抽 Account，没有 Research / Shadow / Paper / System orchestration；
+- 没有搬 generic task lifecycle（`TaskThread` / `DesktopTaskController` / worker
+  列表 / closing admission gate / `_worker_finished` / `_task_cancelled` /
+  busy dialog）——orchestrator 只拿到窄 callable `submit_task`，也没有借机
+  创造全局 `TaskFramework`；
+- 没有把 gateway probe（`_probe_gateway` / `probe_ibkr_socket` /
+  `gateway_badge`）归入 Account，尽管它使用 IBKR config；
+- 没有把 exposure multiplier 的来源（Risk / Strategy / app config）引入
+  Account，也没有让 AccountOrchestrator import 任何其他 capability；
+- 没有给 research capital 换 owner，也没有动 strategy notice——只把
+  `research_capital_card` 的 widget reach-through 收成 `AccountPage` 命名方法；
+- 没有把跨 workflow fan-out（Dashboard / Auto Quant / Targeted）搬进
+  orchestrator，它们仍是窗口订阅 `portfolio_changed` 后的路由；
+- 没有给 orchestrator 加 `net_liquidation` / `account_alias` / `positions` /
+  `cash` / `daily_pnl` 等 accessor：domain snapshot 本身已是只读 finished fact；
+- 没有改 `BrokerAccountApplication` 的失败语义（失败保持 last good portfolio
+  并设置 `last_error`），也没有新增任何业务行为。
 
 Framework v2C 刻意没有做的事，留给更后面：
 

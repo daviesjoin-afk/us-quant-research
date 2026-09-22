@@ -1,16 +1,19 @@
 """MainWindow broker-account wiring tests.
 
-These pin the Desktop half of the migration:
+These pin the Desktop half of the account migration, now mediated by
+``AccountOrchestrator`` (v2O-B):
 
 * the ``account`` route is the native ``AccountPage``, and the legacy
   ``_account_tab`` / ``_populate_account_view`` builders are gone;
-* an account refresh delegates to ``BrokerAccountApplication``, stores the
-  domain ``BrokerAccountPortfolio``, appends to the ledger and refreshes the
-  preflights;
-* **an account refresh never writes the market badge.**  That is the whole
-  point of separating the two chains: the v1 code derived "行情 · 实时 Type 1"
-  from the account snapshot's own quote checks, so an account refresh could
-  report on market readiness it did not own.  Market Data v2 owns that now.
+* the refresh button reaches ``AccountOrchestrator.request_refresh``, which
+  delegates to ``BrokerAccountApplication`` and then appends to the ledger,
+  renders the page and publishes the portfolio;
+* **there is no second account truth.**  ``window`` has no
+  ``account_portfolio``; ``AccountOrchestrator.portfolio`` is a read-only
+  delegation to ``BrokerAccountApplication.portfolio`` and the two are the
+  same object;
+* **an account refresh never writes the market badge.**  Market readiness is
+  Market Data v2's alone, and the account chain has no opinion about it.
 """
 
 from __future__ import annotations
@@ -49,6 +52,13 @@ _DESKTOP_PATH = (
     / "desktop.py"
 )
 NOW = datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc)
+
+
+class _FakeAdapter:
+    """The one call the application makes on an adapter: a portfolio read."""
+
+    def refresh(self, *, timeout_seconds: float = 20):
+        return _portfolio()
 
 
 def _qapp():
@@ -103,24 +113,21 @@ def test_the_account_route_is_the_native_account_page(window) -> None:
     assert window.shell.page("account") is window.account_page
 
 
-def test_the_refresh_signal_is_wired_to_the_window(window) -> None:
-    """The page asks; the window performs the read.
+def test_the_refresh_signal_reaches_the_orchestrator(window) -> None:
+    """The page asks; the orchestrator performs the read.
 
-    Asserted by driving the signal and observing the window's own refresh
-    path, not by inspecting Qt's connection table.
+    The window's own connection is left in place: the test replaces the
+    orchestrator's method, not the signal wiring, so a window that had wired
+    the button somewhere else would fail here.
     """
 
     calls: list[int] = []
-    original = window._refresh_account_snapshot
-    window._refresh_account_snapshot = lambda: calls.append(1)
+    original = window.account_orchestrator.request_refresh
+    window.account_orchestrator.request_refresh = lambda: calls.append(1)
     try:
-        window.account_page.refresh_requested.disconnect()
-        window.account_page.refresh_requested.connect(
-            window._refresh_account_snapshot
-        )
         window.account_page.refresh_button.click()
     finally:
-        window._refresh_account_snapshot = original
+        window.account_orchestrator.request_refresh = original
 
     assert calls == [1]
 
@@ -135,7 +142,11 @@ def test_the_legacy_account_builder_is_gone() -> None:
     }
     assert "_account_tab" not in methods
     assert "_populate_account_view" not in methods
-    assert "_refresh_account_surfaces" in methods
+    # The retired window-level account handlers are gone too.
+    assert "_refresh_account_snapshot" not in methods
+    assert "_account_snapshot_finished" not in methods
+    assert "_refresh_account_surfaces" not in methods
+    assert "_paper_simulation_capital" not in methods
 
 
 def test_the_legacy_account_view_type_is_gone_from_the_window() -> None:
@@ -163,7 +174,7 @@ def test_the_window_owns_a_broker_account_application(window) -> None:
 def test_the_refresh_delegates_to_the_account_application(
     window, monkeypatch
 ) -> None:
-    """The window must not build an IBKR client itself."""
+    """The orchestrator must not build an IBKR client itself."""
 
     calls: list[float] = []
 
@@ -174,19 +185,17 @@ def test_the_refresh_delegates_to_the_account_application(
     monkeypatch.setattr(window.broker_account, "refresh", fake_refresh)
     started: list = []
     monkeypatch.setattr(
-        window,
-        "_start_task",
+        window.account_orchestrator,
+        "_submit_task",
         lambda task, **kwargs: started.append((task, kwargs)),
     )
 
-    window._refresh_account_snapshot()
+    window.account_orchestrator.request_refresh()
 
     assert len(started) == 1
     task, kwargs = started[0]
-    assert kwargs["on_success"] == window._account_snapshot_finished
     assert kwargs["resource_group"] == "broker"
 
-    # Running the task must reach the application, with no symbol list.
     result = task(lambda _message: None)
     assert calls == [20]
     assert result.account.account_alias == "DU***67"
@@ -204,78 +213,126 @@ def test_the_refresh_passes_no_market_data_symbols(window, monkeypatch) -> None:
     monkeypatch.setattr(window.broker_account, "refresh", fake_refresh)
     captured: list = []
     monkeypatch.setattr(
-        window,
-        "_start_task",
+        window.account_orchestrator,
+        "_submit_task",
         lambda task, **kwargs: captured.append((task, kwargs)),
     )
-    window._refresh_account_snapshot()
+    window.account_orchestrator.request_refresh()
     captured[0][0](lambda _message: None)
 
     assert set(seen) == {"timeout"}
 
 
-# -- success stores domain truth ---------------------------------------
-
-
-def test_a_successful_refresh_stores_the_domain_portfolio(
+def test_the_refresh_never_touches_the_market_data_application(
     window, monkeypatch
 ) -> None:
-    monkeypatch.setattr(window, "_repolish_health_badges", lambda: None)
-    monkeypatch.setattr(window, "_log", lambda _message: None)
-    monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
-    monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
-    monkeypatch.setattr(window, "_refresh_target_preflight", lambda: None)
-    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    """Spec 33: the account read requests no market data and opens no socket.
+
+    The account path used to take a symbol list and run a readiness check on
+    the same socket.  Whether quotes are real-time is Market Data v2's answer,
+    so this asserts the *market* side is untouched while the account read runs:
+    a start request, a snapshot read or a credential lookup from this path
+    would all be the coupling the separation removed.
+    """
+
+    touched: list[str] = []
+
+    class _Tripwire:
+        def __getattr__(self, name: str):
+            touched.append(name)
+            raise AssertionError(f"account refresh touched market data: {name}")
+
+    monkeypatch.setattr(window, "market_data", _Tripwire())
+
+    captured: list = []
+    monkeypatch.setattr(
+        window.account_orchestrator,
+        "_submit_task",
+        lambda task, **kwargs: captured.append((task, kwargs)),
+    )
+    # The real application refresh, with a fake adapter so no socket opens.
+    monkeypatch.setattr(
+        window.broker_account,
+        "_adapter_factory",
+        lambda: _FakeAdapter(),
+    )
+    window.account_orchestrator.request_refresh()
+    result = captured[0][0](lambda _message: None)
+
+    assert touched == []
+    assert result.account.account_alias == "DU***67"
+
+# -- single truth ------------------------------------------------------
+
+
+def test_the_window_has_no_account_portfolio(window) -> None:
+    """``account_portfolio`` is deleted, with no compatibility property."""
+
+    assert not hasattr(window, "account_portfolio")
+    names = {
+        node.name
+        for node in ast.walk(ast.parse(_DESKTOP_PATH.read_text(encoding="utf-8")))
+        if isinstance(node, ast.FunctionDef)
+    }
+    assert "account_portfolio" not in names
+
+
+def test_the_orchestrator_delegates_to_the_application_truth(
+    window, monkeypatch
+) -> None:
+    """``orchestrator.portfolio is application.portfolio``, not a copy."""
 
     portfolio = _portfolio()
-    window._account_snapshot_finished(portfolio)
+    monkeypatch.setattr(window.broker_account, "_portfolio", portfolio)
 
-    assert window.account_portfolio is portfolio
-    assert window.account_page.portfolio is portfolio
+    assert window.account_orchestrator.portfolio is portfolio
+    assert window.account_orchestrator.portfolio is window.broker_account.portfolio
 
 
-def test_a_successful_refresh_appends_to_the_ledger(
+def test_a_successful_refresh_renders_the_page_and_appends_once(
     window, monkeypatch
 ) -> None:
-    monkeypatch.setattr(window, "_repolish_health_badges", lambda: None)
-    monkeypatch.setattr(window, "_log", lambda _message: None)
-    monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
-    monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
-    monkeypatch.setattr(window, "_refresh_target_preflight", lambda: None)
-    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
-
     appended: list = []
     monkeypatch.setattr(
         window.account_ledger, "append", lambda account: appended.append(account)
     )
-
-    portfolio = _portfolio()
-    window._account_snapshot_finished(portfolio)
-
-    assert appended == [portfolio.account]
-
-
-def test_a_successful_refresh_sets_the_account_badge(
-    window, monkeypatch
-) -> None:
-    monkeypatch.setattr(window, "_repolish_health_badges", lambda: None)
-    monkeypatch.setattr(window, "_log", lambda _message: None)
     monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
+    monkeypatch.setattr(window, "_log", lambda _message: None)
     monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
     monkeypatch.setattr(window, "_refresh_target_preflight", lambda: None)
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
 
-    window._account_snapshot_finished(_portfolio())
+    portfolio = _portfolio()
+    window.broker_account._portfolio = portfolio
+    window.account_orchestrator._refresh_succeeded(portfolio)
+
+    assert appended == [portfolio.account]
+    assert window.account_page.portfolio is portfolio
+    assert window.account_orchestrator.portfolio is portfolio
+
+
+def test_a_successful_refresh_sets_the_account_badge(window, monkeypatch) -> None:
+    monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
+    monkeypatch.setattr(window, "_log", lambda _message: None)
+    monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
+    monkeypatch.setattr(window, "_refresh_target_preflight", lambda: None)
+    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+
+    window.account_orchestrator._refresh_succeeded(_portfolio())
 
     assert "DU***67" in window.account_badge.text()
+    assert window.handshake_badge.text() == "协议 · 已握手"
+    assert window.handshake_badge.toolTip() == "最近一次账户刷新握手成功"
 
 
-def test_a_successful_refresh_refreshes_the_preflights(
+def test_a_successful_refresh_fans_out_to_the_preflights(
     window, monkeypatch
 ) -> None:
-    monkeypatch.setattr(window, "_repolish_health_badges", lambda: None)
-    monkeypatch.setattr(window, "_log", lambda _message: None)
     monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
+    monkeypatch.setattr(window, "_log", lambda _message: None)
+    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
 
     calls: list[str] = []
@@ -286,16 +343,21 @@ def test_a_successful_refresh_refreshes_the_preflights(
         window, "_refresh_target_preflight", lambda: calls.append("target")
     )
 
-    window._account_snapshot_finished(_portfolio())
+    window.account_orchestrator._refresh_succeeded(_portfolio())
 
-    # Both preflights run; the order between them is not a contract, only
-    # that the account refresh drives both.
     assert set(calls) == {"auto", "target"}
 
 
-def test_a_wrong_result_type_is_refused(window) -> None:
+def test_a_wrong_result_type_is_refused(window, monkeypatch) -> None:
+    monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
+    monkeypatch.setattr(window, "_log", lambda _message: None)
+    monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
+    monkeypatch.setattr(window, "_refresh_target_preflight", lambda: None)
+    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+
     with pytest.raises(TypeError):
-        window._account_snapshot_finished(object())
+        window.account_orchestrator._refresh_succeeded(object())
 
 
 # -- the account chain never writes the market badge -------------------
@@ -304,31 +366,27 @@ def test_a_wrong_result_type_is_refused(window) -> None:
 def test_a_successful_refresh_does_not_touch_the_market_badge(
     window, monkeypatch
 ) -> None:
-    """The separation, asserted on observable state.
+    """The separation, asserted on observable state."""
 
-    The v1 code set the market badge from the account snapshot's quote
-    checks.  Market readiness is Market Data v2's alone.
-    """
-
-    monkeypatch.setattr(window, "_repolish_health_badges", lambda: None)
-    monkeypatch.setattr(window, "_log", lambda _message: None)
     monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
+    monkeypatch.setattr(window, "_log", lambda _message: None)
     monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
     monkeypatch.setattr(window, "_refresh_target_preflight", lambda: None)
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
 
     before_text = window.market_badge.text()
     before_state = window.market_badge.property("state")
 
-    window._account_snapshot_finished(_portfolio())
+    window.account_orchestrator._refresh_succeeded(_portfolio())
 
     assert window.market_badge.text() == before_text
     assert window.market_badge.property("state") == before_state
 
 
-def test_the_account_finished_handler_never_mentions_the_market_badge() -> None:
-    """Belt and braces on the source, so the state assertion cannot be the
-    only guard."""
+def test_the_account_shell_health_handler_never_mentions_the_market_badge() -> None:
+    """Belt and braces on the source: the account shell-health bridge only
+    paints the handshake and account badges, never the market badge."""
 
     source = _DESKTOP_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -341,10 +399,8 @@ def test_the_account_finished_handler_never_mentions_the_market_badge() -> None:
         node
         for node in window.body
         if isinstance(node, ast.FunctionDef)
-        and node.name == "_account_snapshot_finished"
+        and node.name == "_render_account_shell_health"
     )
-    # Strip the docstring before checking: it *explains* the removal by
-    # naming the badge, which is documentation rather than a write.
     body = method.body
     if (
         body
@@ -355,15 +411,10 @@ def test_the_account_finished_handler_never_mentions_the_market_badge() -> None:
     code = "\n".join(ast.unparse(node) for node in body)
     assert "market_badge" not in code
     assert "intraday_market_data_reasons" not in code
-    assert "行情" not in code
 
 
 def test_the_account_path_has_no_market_readiness_helper() -> None:
-    """``intraday_market_data_reasons`` is deleted, not merely unused.
-
-    It used to live in the account read and answer a market-readiness
-    question.  Both halves are gone: the function and its caller.
-    """
+    """``intraday_market_data_reasons`` is deleted, not merely unused."""
 
     for path in (
         pathlib.Path(__file__).resolve().parents[1]

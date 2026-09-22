@@ -768,7 +768,7 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
         for path in (_SRC / "desktop_v2" / "orchestration").iterdir()
         if path.is_dir() and path.name != "__pycache__"
     }
-    assert children == {"market"}, children
+    assert children == {"market", "account"}, children
 
     forbidden_classes = (
         "DesktopManager",

@@ -262,7 +262,7 @@ def test_gateway_and_theme_are_wired_at_page_level() -> None:
     (
         "_load_local_state",
         "_cross_section_finished",
-        "_refresh_account_surfaces",
+        "_on_account_portfolio_changed",
         "_on_market_snapshot_invalidated",
         "_on_market_snapshot_changed",
     ),

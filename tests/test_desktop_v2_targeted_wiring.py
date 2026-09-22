@@ -257,7 +257,7 @@ def test_shadow_start_rejects_missing_paper_capital(
     window: MainWindow, monkeypatch, dialogs
 ) -> None:
     monkeypatch.setattr(window, "_selected_shadow_strategy_record", _valid_strategy)
-    monkeypatch.setattr(window, "_paper_simulation_capital", lambda: None)
+    monkeypatch.setattr(window.account_orchestrator, "fresh_paper_net_liquidation", lambda: None)
     window._start_shadow()
     assert dialogs[0][1][1] == "缺少 IBKR Paper 资金真值"
 
@@ -266,7 +266,7 @@ def test_shadow_start_rejects_stale_market(
     window: MainWindow, monkeypatch, dialogs
 ) -> None:
     monkeypatch.setattr(window, "_selected_shadow_strategy_record", _valid_strategy)
-    monkeypatch.setattr(window, "_paper_simulation_capital", lambda: Decimal("10000"))
+    monkeypatch.setattr(window.account_orchestrator, "fresh_paper_net_liquidation", lambda: Decimal("10000"))
     monkeypatch.setattr(
         type(window.market_orchestrator),
         "is_live",
@@ -285,7 +285,7 @@ def test_shadow_start_rejects_non_research_eligible_symbol(
     window: MainWindow, monkeypatch, dialogs
 ) -> None:
     monkeypatch.setattr(window, "_selected_shadow_strategy_record", _valid_strategy)
-    monkeypatch.setattr(window, "_paper_simulation_capital", lambda: Decimal("10000"))
+    monkeypatch.setattr(window.account_orchestrator, "fresh_paper_net_liquidation", lambda: Decimal("10000"))
     _fake_live_market(window, _ready_stream())
     window.universe = SimpleNamespace(
         records=(SimpleNamespace(symbol="AAPL", eligible_for_research=False),)
@@ -299,7 +299,7 @@ def test_shadow_start_rejects_missing_fresh_target_quote(
     window: MainWindow, monkeypatch, dialogs
 ) -> None:
     monkeypatch.setattr(window, "_selected_shadow_strategy_record", _valid_strategy)
-    monkeypatch.setattr(window, "_paper_simulation_capital", lambda: Decimal("10000"))
+    monkeypatch.setattr(window.account_orchestrator, "fresh_paper_net_liquidation", lambda: Decimal("10000"))
     _fake_live_market(
         window,
         _ready_stream(SimpleNamespace(symbol="AAPL", realtime_ready=False)),
@@ -315,7 +315,7 @@ def test_shadow_start_allowed_path_builds_and_starts_engine(
 ) -> None:
     strategy = _valid_strategy()
     monkeypatch.setattr(window, "_selected_shadow_strategy_record", lambda: strategy)
-    monkeypatch.setattr(window, "_paper_simulation_capital", lambda: Decimal("10000"))
+    monkeypatch.setattr(window.account_orchestrator, "fresh_paper_net_liquidation", lambda: Decimal("10000"))
     monkeypatch.setattr(desktop, "build_targeted_shadow_config", lambda *args, **kwargs: object())
     monkeypatch.setattr(desktop, "ShadowPaperEngine", _Engine)
     monkeypatch.setattr(window, "_publish_targeted_view", lambda: None)
@@ -323,7 +323,7 @@ def test_shadow_start_allowed_path_builds_and_starts_engine(
     monkeypatch.setattr(window, "_log", lambda *args, **kwargs: None)
     _fake_live_market(window, _ready_stream())
     window.universe = _eligible_universe()
-    window.account_portfolio = SimpleNamespace(
+    window.broker_account._portfolio = SimpleNamespace(
         account=SimpleNamespace(account_alias="Paper")
     )
     window.shadow_workflow = _Workflow()

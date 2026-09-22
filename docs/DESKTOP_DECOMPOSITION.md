@@ -1657,3 +1657,128 @@ AST 语句顺序守卫，并把「不回滚」写成**观察真实文件是否�
 
 harness 本轮另有一处改进：替换文本若 `ast.parse` 失败，记录为
 `UNPARSEABLE` 并**继续**，不再让整轮中止（上一轮踩过这个坑）。
+
+## 17. 第十六步：`desktop_v2/orchestration/account/`（Account capability 边界）
+
+第十五步之后，account route 的桌面 truth 仍在 `MainWindow`：最后一份
+`BrokerAccountPortfolio`、refresh task、ledger append、page render 与 shell
+badge 分散在若干个 handler 里。本步把它们收进
+`desktop_v2/orchestration/account/`，与 v2O-A 的 market capability 并列。
+
+### 17.1 被移出的知识
+
+- **refresh 请求。** `_refresh_account_snapshot` 的 task 构造（进度文案、
+  `timeout_seconds=20`、`resource_group="broker"`、`start_message`）搬进
+  `AccountOrchestrator.request_refresh()`；窗口只负责把
+  `AccountPage.refresh_requested` 连到它。
+- **成功路径。** `_account_snapshot_finished` 的 Account-specific 部分
+  （ledger append、page render、runtime event 请求、log 请求、shell 事实）
+  搬进 `_refresh_succeeded`。
+- **页面渲染。** `_refresh_account_surfaces` 的 ledger 读取与
+  `AccountPage.render(...)` 调用搬进 `render_current()`。
+- **fresh-Paper 规则。** `_paper_simulation_capital` 变成 Qt-free 纯函数
+  `fresh_paper_net_liquidation(portfolio, *, now=None, max_age_seconds=300)`，
+  规则逐字义保持（含「恰好 300 秒仍有效」与「naive timestamp 按 UTC 处理」）。
+- **state。** `self.account_portfolio` 删除，且**不提供** compatibility
+  property；`AccountOrchestrator.portfolio` 是
+  `return self._application.portfolio` 的只读委托，因此
+  `orchestrator.portfolio is application.portfolio`——**不存在第二份
+  account truth**。
+
+### 17.2 为什么 `BrokerAccountApplication` 仍是唯一 truth
+
+`BrokerAccountApplication` 已经拥有 config、portfolio、`last_error` 与
+refresh lifecycle，是正确 application-layer owner。若 orchestrator 再存一份
+`self._portfolio`，两份副本会在「某条路径忘了更新另一份」时首次分叉——在账户
+界面上这是安全缺陷而不是外观问题。所以 orchestrator 只委托，守卫里有一条
+AST 检查：`orchestrator.py` 任何位置都不得 assign `self._portfolio` /
+`self.portfolio`，且必须存在 `portfolio` property。
+
+### 17.3 边界形状
+
+```text
+AccountOrchestrator(
+    application=broker_account,     # BrokerAccountApplication
+    ledger=account_ledger,          # AccountLedger
+    page=account_page,              # 已构造好的 AccountPage
+    submit_task=self._start_task,   # 窗口的通用后台任务准入边界
+)
+```
+
+禁止 `window=self`、禁止 `context=desktop_context`、禁止 `services` 依赖袋。
+orchestrator 的 public surface 精确为 `portfolio` /
+`fresh_paper_net_liquidation` / `request_refresh` / `render_current` /
+`set_presentation_inputs`，加四个 signal：`portfolio_changed` /
+`shell_health_changed` / `runtime_event_requested` / `log_requested`。
+
+### 17.4 通用任务生命周期仍属于窗口
+
+`TaskThread`、`DesktopTaskController`、worker 列表、关闭准入闸门、
+`_worker_finished`、`_task_cancelled`、busy dialog 一律留在窗口；orchestrator
+只知道一个窄 callable `submit_task`。本步**不**提炼全局 `TaskFramework`：
+等 v2O-C Research 成为第二个真实消费者时再决定。
+
+### 17.5 exposure multiplier：pushed presentation input
+
+账户页显示的「风险敞口」需要 configured exposure multipliers，而它们来自
+app config 的 substitution 规则（Risk 的事实）。若 orchestrator 自己去取，
+就会 import Risk / Strategy / config，破坏 capability 边界。所以由窗口
+（composition root）推入冻结事实：
+
+```text
+AccountPresentationInputs.of({"AAPL": Decimal("2")})
+  -> tuple[tuple[str, Decimal], ...]   # 不可变，避免外部 dict 被就地改动
+```
+
+orchestrator 只知道 `symbol -> presentation multiplier`，不知道它从哪来。
+
+### 17.6 跨 workflow fan-out 暂留窗口
+
+`_on_account_portfolio_changed()` 只执行既有 downstream side effect，顺序与
+retired `_account_snapshot_finished` 一致：`_publish_dashboard_view()` →
+（有 snapshot 时）`_render_auto_quant_snapshot()` → `_refresh_target_preflight()`
+→ `_refresh_auto_quant_preflight()`。它禁止 `account_page.render`、
+`account_ledger.*`、`broker_account.refresh`——只 fan-out finished
+`portfolio` fact。本步不新增业务行为；发现潜在旧 bug 只单独记录。
+
+> 记录在案、本步不修：base commit（`99049f0`）的
+> `_refresh_account_surfaces` 调用的是 `_populate_auto_quant_snapshot(...)`，
+> 而该方法在 Desktop Execution v2 已改名为 `_render_auto_quant_snapshot()`，
+> 因此 base 上「账户刷新 → 且当时存在 auto_quant_snapshot」这条路径会
+> `AttributeError`。本步迁移时按现状语义保留为 `_render_auto_quant_snapshot()`
+> （即修掉该潜在崩溃），未新增任何行为。
+
+### 17.7 research capital 与 strategy notice
+
+`account_page.research_capital_card.set_value(...)` 这类 widget reach-through
+收成 `AccountPage.set_research_capital(value, note)` 命名方法；scalar 仍由窗口
+持有，最终 owner 留给 v2O-C。`set_notice(...)` 已是正确的 page-level API，
+保留。窗口对 `AccountPage` 的直接调用白名单只有
+`set_research_capital` / `set_notice` / `refresh_requested`。
+
+### 17.8 体积与测试
+
+| | before | after |
+|---|---|---|
+| `desktop.py` | 5450 行 | 5436 行（净减 14） |
+| `orchestration/account/orchestrator.py` | — | 252 行 |
+| `orchestration/account/models.py` | — | 104 行 |
+| `orchestration/account/queries.py` | — | 83 行 |
+| 全套测试 | 2904 passed | 2926 passed |
+
+净减少远小于 v2O-A 的 415 行是预期的：本步删掉 4 个窗口方法（约 128 行），
+但按规格必须**保留**在窗口的跨 workflow bridge 与 presentation push
+（约 117 行）计入新增。ownership 正确优先于行数。
+
+### 17.9 覆盖强度与突变结果
+
+`tests/test_desktop_account_orchestrator.py`（orchestrator 行为 + fresh-Paper
+纯规则全分支）、`tests/test_desktop_account_orchestration_wiring.py`（真实
+`MainWindow` 端到端：badge、Dashboard card、ledger table、execution equity
+card、preflight fan-out、terminal export truth）、
+`tests/test_desktop_account_orchestration_architecture.py`（结构守卫：已删
+state / 无 compatibility property / 无 reach-through / render 唯一调用者 /
+无 ledger 调用 / orchestrator 禁止依赖与禁止调用 / public surface 精确相等 /
+Qt-free / line budgets）。
+
+**突变结果：15/15 全杀。** 见 PR 描述。

@@ -1099,6 +1099,13 @@ MainWindow 上不再有 `self.cross_section_report` / `self.cross_section_path` 
 `_research_capital_changed()` —— 没有 compatibility alias，也没有 forwarding wrapper，
 所以 grep `research_scenario_capital` 就能看到全部消费者。
 
+**commit 线契约（review 修正后）**：`_report_finished` 必须在 commit *之前* 把整条
+success path 可能失败的东西全部准备完（type check / projection / **完成日志文案及其数值
+格式化**），commit 之后不得再有任何可能因 result 失败的操作。原因是投影用 `float(...)`
+强转、而日志用裸 `{:+.1%}`，数字字符串报告会出现「投影成功但 logger 抛
+`ValueError`」，而那时 truth 已移动、页面已重画、artifact bridge 已触发。失败统一
+normalize 成 `TypeError`（`__cause__` 保留原始异常）。
+
 ### 8.9 research aggregate 页已完成（Desktop Research v2R-F）
 
 Research 一级 route 已由 `ResearchPage` aggregate 承接，旧的 MainWindow-owned Research

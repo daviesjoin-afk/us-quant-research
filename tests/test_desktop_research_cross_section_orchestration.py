@@ -247,6 +247,25 @@ def _calls_attr(path: pathlib.Path, attribute: str) -> bool:
     return False
 
 
+def _method_body(name: str) -> str:
+    """The source text of one ``_report_finished``-style method.
+
+    Kept local to this file: one ordering guard is not the repeated consumer
+    that would justify a shared helper module.
+    """
+
+    source = _ORCHESTRATOR_PATH.read_text(encoding="utf-8")
+    for node in ast.walk(_tree(_ORCHESTRATOR_PATH)):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        if node.name != "CrossSectionOrchestrator":
+            continue
+        for item in node.body:
+            if isinstance(item, ast.FunctionDef) and item.name == name:
+                return ast.get_source_segment(source, item) or ""
+    raise AssertionError(f"{name} not found")
+
+
 # -- the window no longer owns the cross-section runtime ----------------
 
 
@@ -556,6 +575,34 @@ def test_the_capability_never_holds_the_truth_it_does_not_own() -> None:
     source = _ORCHESTRATOR_PATH.read_text(encoding="utf-8")
     assert "self._capital_value" not in source
     assert "self._research_capital" not in source
+
+
+def test_the_success_path_prepares_everything_before_it_commits() -> None:
+    """The commit line is the last point of no return, so nothing may follow it.
+
+    Read as ordered source, because the defect this pins was an *ordering* bug:
+    the completion message used to be built after ``self._report = result``, so a
+    report whose numbers the presenter could coerce (``float("0.2")``) but the
+    formatter could not (``"0.2":+.1%``) killed the handler *after* the truth had
+    moved, the page repainted and ``report_changed`` been emitted.
+
+    So the contract is asserted structurally: the message is built above the
+    commit, and the emit below it passes a finished variable rather than
+    formatting a field of the result inline.  A reviewer reordering these two
+    blocks would reintroduce the window, and this guard fails.
+    """
+
+    body = _method_body("_report_finished")
+    commit = body.index("self._report = result")
+    built = body.index("completion_message = (")
+    emitted = body.index("self.log_requested.emit(completion_message)")
+
+    assert built < commit, "the completion message must be built before commit"
+    assert commit < emitted, "the emit must happen after the commit"
+    # And the emit must not reformat the result inline -- that is the shape that
+    # used to raise after the truth had already moved.
+    assert "log_requested.emit(\n            f\"" not in body
+    assert "{metrics[" not in body
 
 
 def test_the_service_imports_no_qt() -> None:

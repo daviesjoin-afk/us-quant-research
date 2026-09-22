@@ -568,23 +568,62 @@ def test_a_malformed_result_keeps_the_last_good_report(
     """Projection happens before the commit, so a bad report cannot land.
 
     A schema-incomplete dict is *valid* Python and passes the ``isinstance``
-    check, so the failure surfaces from the presenter.  That is the point of
-    projecting first: the projection runs against the candidate while the last
-    good report is still in place, so the failure leaves both the truth and the
-    page untouched instead of poisoning them.
+    check, so the failure surfaces from the presenter -- normalised into a
+    ``TypeError`` at the capability's boundary.  Projecting first is what makes
+    that safe: it runs against the candidate while the last good report is still
+    in place, so the failure leaves the truth, the page and the artifact bridge
+    untouched rather than poisoning them.
     """
 
     orchestrator = window.cross_section_orchestrator
     orchestrator._report_finished(_report())
     last_good = orchestrator._report
+    published: list[None] = []
+    orchestrator.report_changed.connect(lambda: published.append(None))
 
-    with pytest.raises(Exception):
+    with pytest.raises(TypeError):
         orchestrator._report_finished({"status": "research_exploratory"})
 
     # The page still draws the last good projection, not an empty one.
     assert orchestrator._report is last_good
+    assert published == []
     assert window.cross_section_page.return_card.value_label.text() == "+20.0%"
     assert window.cross_section_page.candidate_table.rowCount() == 1
+
+
+def test_numeric_string_metrics_still_refresh_the_artifact_bridge(
+    window: MainWindow, monkeypatch
+) -> None:
+    """Regression: a projectable report must not fail after the commit.
+
+    A report carrying numeric strings projects fine (the presenter coerces with
+    ``float``), but the completion log formats the same values with a raw
+    ``{:+.1%}``.  Building that message *after* the commit used to mean a
+    "successful" run left the truth moved, the page repainted and the Dashboard
+    catalogue reloaded, with the failure surfacing from a logger.
+
+    Driven through the real window so the bridge is exercised: the assertion is
+    that the artifact catalogue really was reloaded, i.e. the whole success path
+    completed rather than half of it.
+    """
+
+    report = _report()
+    report["out_of_sample"]["strategy"]["total_return"] = "0.2"
+    report["out_of_sample"]["strategy"]["max_drawdown"] = "0.1"
+
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        "us_quant.desktop.load_artifact_catalog",
+        lambda root: calls.append(root) or "RELOADED",
+    )
+    logged: list[str] = []
+    monkeypatch.setattr(window, "_log", logged.append)
+
+    window.cross_section_orchestrator._report_finished(report)
+
+    assert calls == [window.paths.research_results_root]
+    assert window.artifact_catalog == "RELOADED"
+    assert logged and "OOS +20.0%" in logged[0]
 
 
 def test_a_wrong_result_type_fails_loudly_without_committing(

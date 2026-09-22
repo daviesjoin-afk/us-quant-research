@@ -231,12 +231,26 @@ class CrossSectionOrchestrator(QObject):
     def _report_finished(self, result: object) -> None:
         """Publish one successful run: report, page, event, log.
 
-        The result is validated and *projected* before it is committed, and that
-        order is the contract rather than an accident.  Storing first and
-        rendering second would let a malformed report reach the truth and then
-        fail in the presenter, leaving the capability holding an object its own
-        page cannot draw -- and nothing left to paint the last good one from.
-        So: project, then commit, then render, then announce.
+        **Everything the success path can fail on happens before the commit.**
+        That is the contract, and it is stronger than "project first": no step
+        below the commit line may raise because of the *result*, so a result
+        that reached the truth is one the whole success path can finish.
+
+        Three things are prepared up front, in this order:
+
+        * the type check;
+        * the projection -- valid JSON can still be a partly written or
+          incompatible report, and the page must be able to draw whatever the
+          truth ends up holding;
+        * the completion message, including its number formatting.
+
+        The message is the step that used to be missing, and its absence was a
+        real defect rather than a tidiness issue.  The presenter coerces with
+        ``float(...)``, so a report carrying numeric *strings* projects fine --
+        and formatting that same string with a raw ``{:+.1%}`` raised
+        ``ValueError`` *after* ``_report`` was replaced, the page repainted and
+        ``report_changed`` emitted: a "successful" run that moved the truth and
+        fired the artifact bridge, with the failure surfacing from a logger.
 
         A wrong or malformed object therefore fails loudly while the last
         complete report stays exactly where it was, and the page keeps drawing
@@ -246,15 +260,30 @@ class CrossSectionOrchestrator(QObject):
 
         if not isinstance(result, dict):
             raise TypeError("unexpected cross-sectional research report")
-        view = build_cross_section_view(result)
+
+        try:
+            view = build_cross_section_view(result)
+            strategy = result["out_of_sample"]["strategy"]
+            completion_message = (
+                f"组合研究完成：OOS "
+                f"{float(strategy['total_return']):+.1%}，"
+                f"最大回撤 "
+                f"{float(strategy['max_drawdown']):.1%}。"
+            )
+        except (KeyError, TypeError, ValueError, IndexError) as error:
+            # The presenter is a pure projection and keeps raising whatever the
+            # schema violation was; normalising here means the capability
+            # reports one failure rather than leaking the bug's shape, while
+            # ``__cause__`` keeps the original for whoever debugs the artifact.
+            raise TypeError(
+                "unexpected cross-sectional research report"
+            ) from error
+
+        # Only past this line may the capability's truth change.
         self._report = result
         self._page.render(view)
         self.report_changed.emit()
-        metrics = self._report["out_of_sample"]["strategy"]
-        self.log_requested.emit(
-            f"组合研究完成：OOS {metrics['total_return']:+.1%}，"
-            f"最大回撤 {metrics['max_drawdown']:.1%}。"
-        )
+        self.log_requested.emit(completion_message)
 
 
 __all__ = [

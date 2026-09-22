@@ -2332,7 +2332,9 @@ validate（必须 dict）
   ↓
 project（build_cross_section_view，此时 last-good report 还在）
   ↓
-commit（_report = result）
+build completion message（含数值格式化 —— 这也是会失败的一步）
+  ↓
+commit（_report = result）        ← 过了这条线就不得再因 result 失败
   ↓
 render
   ↓
@@ -2340,6 +2342,33 @@ report_changed + completion log
 ```
 
 禁止「先 commit 再 render」：presenter 随后失败会把 last-good 污染成画不出来的对象。
+
+**并且：commit 之后不得再有任何可能因 result 失败的操作。** 这条比「先 project」更强，
+它是由 review 发现的真实缺陷换来的。presenter 用 `float(...)` 强转，所以带**数字字符串**
+的报告（`"total_return": "0.2"`）能正常投影；但完成日志用裸 `{:+.1%}` 格式化同一个值会抛
+`ValueError`。原先日志在 commit 之后构建，于是出现：
+
+```text
+_report 已被替换 → 页面已 render → report_changed 已发出
+（Dashboard artifact bridge 已跑）→ 然后 exception，且没有完成日志
+```
+
+即「UI 已接受、logger 才失败」的中间状态：truth 已移动、bridge 已触发、日志缺失。
+现在把**完整成功输出所需的一切**（含日志文案）都在 commit 前准备好；失败统一在边界上
+normalize 成 `TypeError`（`__cause__` 保留原始 `KeyError` / `ValueError`），因此
+
+```text
+能投影 ⇒ 整条 success path 一定能跑完
+```
+
+回归在 `test_desktop_cross_section_orchestrator.py`
+（`test_numeric_string_metrics_complete_the_whole_success_path`、
+`test_every_unusable_shape_fails_before_any_side_effect`）与
+`test_desktop_v2_cross_section_wiring.py`
+（`test_numeric_string_metrics_still_refresh_the_artifact_bridge`，走真实窗口验证 bridge）；
+顺序本身由 `test_desktop_research_cross_section_orchestration.py` 的
+`test_the_success_path_prepares_everything_before_it_commits` 结构钉死。
+
 task failure 不清 `_report` —— 一次失败的 run 不能作为上一份报告错误的证据，与
 Account / Universe / Backtest 的 last-good 原则一致。
 

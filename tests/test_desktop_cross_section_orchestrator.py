@@ -370,13 +370,59 @@ def test_a_wrong_result_type_fails_loudly_and_keeps_the_last_good() -> None:
     assert len(page.rendered) == renders_before
 
 
+def test_numeric_string_metrics_complete_the_whole_success_path() -> None:
+    """Regression: a projectable report must not die in the completion log.
+
+    The presenter coerces with ``float(...)``, so a report carrying numeric
+    *strings* projects fine -- but the completion message formats those same
+    values with a raw ``{:+.1%}``, which raises ``ValueError`` on a ``str``.
+    That failure used to happen *after* the truth had moved, the page repainted
+    and ``report_changed`` been emitted: a "successful" run that left the
+    capability in a new state, fired the Dashboard bridge, and wrote no
+    completion log.
+
+    So the contract is asserted as one indivisible outcome: if the projection
+    accepted it, the whole success path must finish -- commit, render, announce,
+    log -- with no partial state in between.
+    """
+
+    report = _report()
+    report["out_of_sample"]["strategy"]["total_return"] = "0.2"
+    report["out_of_sample"]["strategy"]["max_drawdown"] = "0.1"
+
+    service = _Service(result=report)
+    page = _Page()
+    submit = _Submit()
+    orchestrator, _ = _make(service=service, page=page, submit=submit)
+    published: list[None] = []
+    logged: list[str] = []
+    orchestrator.report_changed.connect(lambda: published.append(None))
+    orchestrator.log_requested.connect(logged.append)
+
+    orchestrator.request_run(CrossSectionResearchDraft(research_capital=2500))
+    submit.run()
+
+    assert orchestrator._report is report
+    assert len(page.rendered) == 1
+    assert published == [None]
+    assert len(logged) == 1
+    assert "OOS +20.0%" in logged[0]
+    assert "最大回撤 10.0%" in logged[0]
+
+
 def test_a_malformed_report_fails_loudly_and_keeps_the_last_good() -> None:
     """Projection happens before the commit, so the truth is never poisoned.
 
-    A schema-incomplete dict passes the type check and fails in the presenter.
-    That ordering is deliberate: committing first would leave the capability
-    holding an object its own page cannot draw, with nothing left to paint the
-    last good one from.
+    A schema-incomplete dict passes the type check and fails in the presenter,
+    which is a ``KeyError`` -- normalised here into a ``TypeError`` so the
+    capability reports one consistent failure while ``__cause__`` keeps the
+    original for anyone debugging the artifact.
+
+    The four assertions are the whole point, and each one is checked because
+    the failure mode this guards against is *partial* success: the truth must
+    not move, the page must not repaint, ``report_changed`` must not fire, and
+    no completion log may be written.  A looser "it raised" check is exactly
+    what let the post-commit window through in the first place.
     """
 
     service = _Service()
@@ -386,12 +432,58 @@ def test_a_malformed_report_fails_loudly_and_keeps_the_last_good() -> None:
     orchestrator.request_run(CrossSectionResearchDraft(research_capital=2500))
     submit.run()
     last_good = orchestrator._report
+    renders_before = len(page.rendered)
+    published: list[None] = []
+    logged: list[str] = []
+    orchestrator.report_changed.connect(lambda: published.append(None))
+    orchestrator.log_requested.connect(logged.append)
 
-    with pytest.raises(Exception):
+    with pytest.raises(TypeError) as raised:
         orchestrator._report_finished({"status": "research_exploratory"})
 
+    assert isinstance(raised.value.__cause__, KeyError)
     assert orchestrator._report is last_good
-    assert len(page.rendered) >= 1
+    assert len(page.rendered) == renders_before
+    assert published == []
+    assert logged == []
+
+
+@pytest.mark.parametrize(
+    "broken",
+    (
+        {"out_of_sample": {"strategy": {"total_return": "not-a-number"}}},
+        {"out_of_sample": {"strategy": None}},
+        {"out_of_sample": "not-a-mapping"},
+    ),
+)
+def test_every_unusable_shape_fails_before_any_side_effect(broken) -> None:
+    """The window is closed for coercion failures and shape failures alike.
+
+    ``total_return`` is formatted, so a non-numeric string is the case that
+    reaches the message builder; the other two fail in the presenter.  Both
+    must land on the same side of the commit line.
+    """
+
+    service = _Service()
+    page = _Page()
+    submit = _Submit()
+    orchestrator, _ = _make(service=service, page=page, submit=submit)
+    orchestrator.request_run(CrossSectionResearchDraft(research_capital=2500))
+    submit.run()
+    last_good = orchestrator._report
+    renders_before = len(page.rendered)
+    published: list[None] = []
+    logged: list[str] = []
+    orchestrator.report_changed.connect(lambda: published.append(None))
+    orchestrator.log_requested.connect(logged.append)
+
+    with pytest.raises(TypeError):
+        orchestrator._report_finished(broken)
+
+    assert orchestrator._report is last_good
+    assert len(page.rendered) == renders_before
+    assert published == []
+    assert logged == []
 
 
 def test_a_task_failure_keeps_the_last_good_report() -> None:

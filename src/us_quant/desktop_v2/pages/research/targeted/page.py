@@ -17,11 +17,12 @@ from us_quant.desktop_v2.pages.research.targeted.evidence_panel import (
 from us_quant.desktop_v2.pages.research.targeted.models import (
     TargetPreflightView,
     TargetedControlView,
+    TargetedEvidenceView,
     TargetedEvidenceWorkspace,
     TargetedReviewDetail,
     TargetedRobustnessDetail,
+    TargetedSessionView,
     TargetedStrategyOption,
-    TargetedValidationView,
     TargetedWorkspace,
 )
 from us_quant.desktop_v2.pages.research.targeted.session_panel import (
@@ -126,14 +127,28 @@ class TargetedValidationPage(QWidget):
         )
         self.evidence_panel.review_run_selected.connect(self.review_run_selected.emit)
 
-    def render(self, view: TargetedValidationView) -> None:
-        self.session_panel.render(view.session)
-        self.evidence_panel.render(view.evidence)
-        self._render_preflight(view.session.preflight)
-        if view.active_workspace is not None:
-            self.workspace_tabs.setCurrentIndex(view.active_workspace)
-        if view.active_evidence_tab is not None:
-            self.evidence_panel.tabs.setCurrentIndex(view.active_evidence_tab)
+    def render_session(self, view: TargetedSessionView) -> None:
+        """Draw the Shadow session, its tables and the preflight workspace.
+
+        The session side and the evidence side have separate entry points on
+        purpose.  A caller that draws the session is a caller that knows about the
+        Shadow snapshot, the target status and the preflight -- it has no business
+        rebuilding seven research evidence tables, and until this split it did so
+        on every market tick, every preflight refresh and every minute-status
+        update.
+        """
+
+        self.session_panel.render(view)
+        self._render_preflight(view.preflight)
+
+    def render_evidence(self, view: TargetedEvidenceView) -> None:
+        """Draw the seven evidence sections.
+
+        The mirror image of :meth:`render_session`: the research evidence has its
+        own owner and its own paint, and neither side can repaint the other.
+        """
+
+        self.evidence_panel.render(view)
 
     def _render_preflight(self, preflight: TargetPreflightView) -> None:
         self.preflight_summary.setText(preflight.summary)

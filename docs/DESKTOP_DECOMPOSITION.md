@@ -2499,26 +2499,29 @@ C1–C3 的三次迁移各自退休了一批 `MainWindow` widget 属性与 priva
 code。`desktop.py` 本轮 **0 行改动**：目标正是让 tooling 适配已经存在的正确边界。
 
 留作 bridge（对应 capability 尚未轮到，不提前拆）：`_populate_auto_quant_candidates`
-（Execution/Paper → v2O-E）、`_refresh_minute_data_status`（Targeted → v2O-C5）。
+（Execution/Paper → v2O-E）、`_refresh_minute_data_status`（Targeted session →
+v2O-C5B）。
 
 ownership、roadmap 与 capability map 均未改变；preview 的 fixture 数据、Scanner 候选
 选择算法、Targeted 研究算法与 Execution/Paper 状态机全部冻结。下一刀当时仍是
 **v2O-C4 Cross Section**（已完成，见 §21）。
 
-## 23. 路线状态（v2O-C4 之后）
+## 23. 路线状态（v2O-C5A 之后）
 
 ```text
 v2O-A Market        ✅
 v2O-B Account       ✅
 
-v2O-C Research
+v2O-C Research      IN PROGRESS
   C1 Universe       ✅
   C1 History        ✅
   C2 Scanner        ✅
   C3 Backtest       ✅
   Preview repair    ✅
   C4 Cross Section  ✅   （含 Research Scenario Capital 单 owner 化）
-  C5 Targeted       ← 下一刀
+  C5A Targeted Evidence   ✅
+  C5B Targeted Session + Preflight   ← 下一刀
+  Research closure
 
 v2O-D Shadow
 v2O-E Paper
@@ -2529,6 +2532,181 @@ Final Architecture Closure
 ```
 
 C5 是 Research 中最复杂的一刀，因此 C4 先把 `research scenario capital` 这个共享
-事实收干净：C5 的 Targeted replay / robustness 已经是它的消费者，现在它们读的是唯一
+事实收干净：C5A 的 Targeted replay / robustness 已经是它的消费者，它们读的是唯一
 owner，拼接期间不存在两套资金真值。
+
+C5 本身又拆成两刀，因为 Targeted 实际混着三类互不相关的东西：
+
+```text
+A. Evidence research      → C5A（本轮）  TargetedEvidenceOrchestrator
+B. Target session/preflight → C5B
+C. Shadow runtime         → v2O-D
+```
+
+全部塞进一个 `TargetedOrchestrator` 会直接制造一个新的 MainWindow，所以本轮明确
+禁止创建 `targeted/orchestrator.py`、`TargetedOrchestrator`、`TargetedContext`、
+`TargetedState`、`TargetedServices`（见 §24）。
+
+## 24. v2O-C5A：Targeted Evidence 提取
+
+### 24.1 为什么 Evidence 与 Session 必须分开
+
+最终架构里这是四个不同的权威问题：
+
+```text
+Targeted Evidence → 这套策略有什么研究证据？
+Shadow            → 这套策略在实时市场模拟运行得怎样？
+Paper             → 是否允许发送真实 IBKR Paper orders？
+Live              → 是否经过 Risk Kernel 后允许真实资金执行？
+```
+
+研究证据不能因为页面叫「Targeted」就获得 Shadow/Paper/Live 权威。B 组的
+依赖结构（Universe + Market + Account + Strategy + Minute summary + Shadow
+session state）与 A 组（研究产物）完全不同，所以 B 留在 C5B。
+
+### 24.2 状态收口
+
+MainWindow 退出九个 evidence state：
+
+```text
+targeted_replay_results            targeted_robustness_results
+targeted_walk_forward_results      targeted_overfit_results
+targeted_data_quality_results      targeted_execution_stress_results
+targeted_review_results
+
+_selected_robustness_run_id        _selected_review_run_id
+```
+
+外加两个一刀即用的导航状态 `_targeted_active_workspace` /
+`_targeted_active_evidence_tab`——它们原本只是为了「robustness 完成 → 下一次
+combined render → 切 tab」，现在直接使用 PR #42 的 semantic navigation
+（`set_active_workspace(TargetedWorkspace.EVIDENCE)` /
+`set_active_evidence_workspace(TargetedEvidenceWorkspace.REVIEW)`）。
+
+canonical truth 是 `TargetedEvidenceOrchestrator._snapshot`，类型为 immutable
+`TargetedEvidenceSnapshot`（七类 result tuple + 两个 selection）。它**公开**
+`:attr:`snapshot``，因为有一个真实的跨能力消费者：`export_terminal_bundle`
+需要全部七类。Backtest runs 不公开是因为没有消费者；这里的判据是消费者，不是
+对私有性的偏好。没有增加七个独立 getter。
+
+### 24.3 依赖与文件
+
+```text
+TargetedEvidenceOrchestrator
+        ↓
+DesktopTargetedEvidenceService
+        ↓
+targeted_replay / targeted_robustness / targeted_validation /
+targeted_overfit / targeted_data_quality / targeted_execution_stress /
+targeted_review / MinuteQuoteStore
+```
+
+反向依赖被禁止，所以 contract 放在中性模块
+`src/us_quant/desktop_targeted_evidence_models.py`（Qt-free）：
+`TargetedEvidenceRunInputs` / `TargetedEvidenceSnapshot` /
+`TargetedRobustnessBundle` / `TargetedEvidenceRuntimeEvent`。service 与
+capability 都依赖它，而不是 service 反向 import orchestration。
+
+capability 包内按真实职责分为四个文件：
+
+```text
+targeted/evidence/models.py      纯规则：拒绝、commit、类型校验
+targeted/evidence/messages.py    面向操作员的文本（含结果相关文案）
+targeted/evidence/projector.py   snapshot → page view 的字段接线
+targeted/evidence/orchestrator.py 时序、请求、render owner
+```
+
+`models.py` 与 `messages.py` 分开是因为「结果相关格式化必须在 commit 之前完成」
+这条规则需要一个显式的家：C4 曾出现 completion message 用 `{:+.2%}` 格式化
+numeric string 而在 truth 已经移动、页面已经重绘之后抛 `ValueError` 的缺陷。
+
+### 24.4 时序语义（与 C4 相反）
+
+```text
+request-time freeze（UI 线程，每个请求各读一次）：
+  strategy version    ← strategy_provider
+  target symbol       ← target_symbol_provider（page 自己的 editor）
+  research capital    ← capital_state.decimal_value
+
+request-time gate：
+  Universe            ← 仅用于 eligibility；None ≠ 拒绝（产品行为，未改）
+
+execution-time（service 内部）：
+  minute evidence     ← MinuteQuoteStore
+```
+
+worker 不重新读取任何一项。Universe 不做 execution-time re-read，因为
+Targeted 从来不用它做研究——为了「和 C4 统一」而加一次读取会改变请求语义。
+
+### 24.5 冻结的研究语义
+
+provider selection 逐字义等价（行数最多优先，同数时取 lexical 最大 provider
+名——`max` over `(row_count, provider)` 的实际语义），data quality 使用**同一个**
+provider 的 raw rows；replay session 是 `group_regular_sessions(selected)` 的
+`sessions[-1]`；pipeline 顺序与每个 save 时机不变（robustness → overfit →
+quality → walk-forward when `usable_sessions >= 20` → stress → review）。
+`Decimal initial_equity` 不做 float round-trip。
+
+匿名 `tuple[6]` 改为具名 immutable `TargetedRobustnessBundle`：`bundle.review`
+比 `result[5]` 稳定得多，而且六项必须**原子** commit——旧代码逐条
+`insert(0, ...)` 可能产生「robustness 列表已更新但 review 仍是旧值」的中间态。
+
+### 24.6 render 边界拆分
+
+```text
+TargetedValidationPage.render_session(view)   ← MainWindow（C5B 再迁）
+TargetedValidationPage.render_evidence(view)  ← TargetedEvidenceOrchestrator
+```
+
+combined `render(TargetedValidationView)` 与其 view model 已**删除**，没有留
+compatibility wrapper——否则 MainWindow 以后仍可拿回 evidence render。
+
+这同时消掉一个隐性性能问题：此前任何 market tick / preflight refresh /
+minute status 更新都会走 `_publish_targeted_view()`，从而重新 build
+evidence view 并重绘七张研究证据表，即使 evidence 完全没变。现在
+session 变化只 `render_session`，evidence 变化只 `render_evidence`。
+
+### 24.7 跨 workflow 信号
+
+```text
+refused                          → 窗口显示 dialog
+runtime_event_requested          → 窗口写入 runtime event store
+minute_status_refresh_requested  → 窗口刷新 session 的分钟证据状态
+focus_requested                  → 窗口 shell.navigate_to("research") +
+                                   research_page.set_active_workspace(TARGETED)
+```
+
+前三条让 capability 不持有 dialog / event store / minute-status ownership。
+第四条是刻意的分层：完成一次 robustness suite 后，capability 自己把**页面的**
+evidence workspace 切到 REVIEW（这是该 capability 的 presentation behavior），
+而「整个桌面路由是否跳转」属于 shell composition，所以发信号让窗口决定。
+capability 不 import `DesktopShellV2` / `ResearchPage` / `ResearchWorkspace`。
+
+`restore_saved()` 与普通 session refresh 都不发这些信号。
+
+### 24.8 启动
+
+`_load_local_state()` 里手写的七个 loader 全部退休，改为：
+
+```python
+self.targeted_evidence_orchestrator.restore_saved()   # 一次读全部七类
+self._publish_targeted_session_view()                 # session 自己的首绘
+```
+
+evidence 恰好绘制一次（constructor 不绘制）；startup **不**自动选 latest
+robustness / review——与既有行为一致，本轮不改变。session 的首次 render 独立
+计算，不计入 evidence render。
+
+### 24.9 冻结范围
+
+研究算法（`run_targeted_*` 的计算、阈值、数据过滤、成本、统计方法）、
+artifact schema（`run_id` / `strategy_version_id` / `parameter_hash` /
+`data_hash` / `provider` / `evidence_grade` / `status` / review gates）与
+precision（Decimal、returns、commissions、slippage、execution stress、
+PBO/DSR、Newey-West、walk-forward partitions）全部未改。
+
+Shadow（engine / start-stop / stream ingestion）完全冻结，本轮不 import、
+不迁移，属 v2O-D。Target symbol、minute-status、preflight、strategy-selection
+的 ownership 属 C5B，本轮不动。
+
 

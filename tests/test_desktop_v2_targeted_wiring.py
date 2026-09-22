@@ -15,9 +15,14 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from us_quant import desktop
 from us_quant.desktop import MainWindow
+from us_quant.desktop_targeted_evidence_models import (
+    TargetedRobustnessBundle,
+)
 from us_quant.desktop_v2.pages.research import ResearchWorkspace
 from us_quant.desktop_v2.pages.research.targeted.models import (
     TargetedControlView,
+    TargetedEvidenceWorkspace,
+    TargetedWorkspace,
 )
 from us_quant.paths import STATE_ROOT_ENV
 from us_quant.universe import UniverseRecord, UniverseSnapshot
@@ -139,6 +144,176 @@ class _Engine:
         return SimpleNamespace(active=False)
 
 
+def _bundle(run_id: str, symbol: str) -> TargetedRobustnessBundle:
+    """One complete suite, shaped as the service returns it.
+
+    Built here rather than shared with the completion file on purpose: the two
+    files assert different things about the same shape, and a shared fixture
+    would let a change that breaks one of them silently satisfy both.
+    """
+
+    from us_quant.targeted_data_quality import TargetedDataQualityResult
+    from us_quant.targeted_execution_stress import (
+        TargetedExecutionStressResult,
+    )
+    from us_quant.targeted_overfit import TargetedOverfitResult
+    from us_quant.targeted_review import (
+        DependenceDiagnostic,
+        EvidenceGate,
+        TargetedReviewResult,
+    )
+    from us_quant.targeted_robustness import TargetedRobustnessResult
+
+    robustness = TargetedRobustnessResult(
+        run_id=run_id,
+        symbol=symbol,
+        strategy_version_id="version-1",
+        strategy_semver="1.0.0",
+        base_parameter_hash="base-hash",
+        data_hash=f"data-{run_id}",
+        provider="IBKR",
+        coverages=("Type 1",),
+        first_session="2026-09-01",
+        last_session="2026-09-20",
+        total_sessions=20,
+        usable_sessions=20,
+        skipped_sessions=(),
+        minimum_required_minutes=300,
+        scenario_summaries=(),
+        session_outcomes=(),
+        sign_stability_fraction=Decimal("1"),
+        evidence_grade="B",
+        review_ready=True,
+        status="research_robustness",
+    )
+    overfit = TargetedOverfitResult(
+        run_id=f"overfit-{run_id}",
+        robustness_run_id=run_id,
+        symbol=symbol,
+        strategy_version_id="version-1",
+        strategy_semver="1.0.0",
+        base_parameter_hash="base-hash",
+        data_hash=f"data-{run_id}",
+        provider="IBKR",
+        candidate_count=5,
+        observations_total=20,
+        observations_used=20,
+        excluded_tail=0,
+        cscv_partitions=8,
+        cscv_combinations=70,
+        pbo=Decimal("0.25"),
+        probability_oos_loss=Decimal("0.30"),
+        mean_is_selected_return=None,
+        mean_oos_selected_return=None,
+        average_performance_degradation=Decimal("-0.005"),
+        median_oos_rank=None,
+        dsr_probability=Decimal("0.80"),
+        dsr_selected_scenario="base",
+        observed_sharpe=None,
+        deflated_sharpe_threshold=None,
+        sample_skewness=None,
+        sample_kurtosis=None,
+        evidence_grade="B",
+        status="research_overfit",
+        limitations=(),
+        source_references=(),
+    )
+    quality = TargetedDataQualityResult(
+        run_id=f"quality-{run_id}",
+        robustness_run_id=run_id,
+        symbol=symbol,
+        strategy_version_id="version-1",
+        strategy_semver="1.0.0",
+        data_hash=f"data-{run_id}",
+        raw_data_hash=f"raw-{run_id}",
+        provider="IBKR",
+        evidence_origins=("captured_stream",),
+        session_count=20,
+        high_quality_sessions=20,
+        minimum_completeness=Decimal("0.99"),
+        median_completeness=Decimal("1"),
+        maximum_consecutive_missing=0,
+        stale_fraction=Decimal("0"),
+        invalid_quote_rows=0,
+        p95_source_age_seconds=Decimal("1"),
+        size_coverage_fraction=Decimal("0.95"),
+        sessions=(),
+        evidence_grade="A",
+        status="research_data_quality",
+    )
+    stress = TargetedExecutionStressResult(
+        run_id=f"stress-{run_id}",
+        robustness_run_id=run_id,
+        symbol=symbol,
+        strategy_version_id="version-1",
+        strategy_semver="1.0.0",
+        base_parameter_hash="base-hash",
+        data_hash=f"data-{run_id}",
+        provider="IBKR",
+        scenarios=(),
+        worst_stressed_return=Decimal("-0.02"),
+        worst_performance_degradation=Decimal("-0.07"),
+        size_observations=20,
+        p95_top_of_book_participation=Decimal("0.10"),
+        maximum_top_of_book_participation=Decimal("0.20"),
+        capacity_status="可接受",
+        stress_resilient=True,
+        evidence_grade="B",
+        limitations=(),
+        status="research_execution_stress",
+    )
+    review = TargetedReviewResult(
+        run_id=f"review-{run_id}",
+        robustness_run_id=run_id,
+        validation_run_id=None,
+        overfit_run_id=overfit.run_id,
+        data_quality_run_id=quality.run_id,
+        execution_stress_run_id=stress.run_id,
+        symbol=symbol,
+        strategy_version_id="version-1",
+        strategy_semver="1.0.0",
+        base_parameter_hash="base-hash",
+        data_hash=f"data-{run_id}",
+        provider="IBKR",
+        evidence_origins=("captured_stream",),
+        dependence=DependenceDiagnostic(
+            oos_session_count=20,
+            lag1_autocorrelation=None,
+            effective_sample_size_ar1=Decimal("10"),
+            newey_west_lags=1,
+            hac_mean_return=Decimal("0.001"),
+            hac_standard_error=Decimal("0.0005"),
+            probability_mean_positive=Decimal("0.80"),
+            status="estimated",
+        ),
+        gates=(
+            EvidenceGate(
+                code="complete_sessions",
+                name="完整会话",
+                passed=True,
+                observed="20",
+                required="20",
+                evidence="20/20",
+                severity="hard",
+            ),
+        ),
+        passed_gates=1,
+        blocking_failures=0,
+        warnings=(),
+        decision="人工评审",
+        eligible_for_independent_review=True,
+        status="research_review",
+    )
+    return TargetedRobustnessBundle(
+        robustness=robustness,
+        walk_forward=None,
+        overfit=overfit,
+        data_quality=quality,
+        execution_stress=stress,
+        review=review,
+    )
+
+
 # -- route and wiring ----------------------------------------------------
 
 
@@ -152,29 +327,46 @@ def test_research_route_is_the_native_aggregate(window: MainWindow) -> None:
     assert window.research_page._tabs.currentWidget() is window.backtest_page
 
 
-def test_every_targeted_intent_reaches_the_window_handler(
+def test_every_targeted_intent_reaches_its_owner(
     window: MainWindow, monkeypatch
 ) -> None:
+    """The page's intents split by owner, and each reaches the right one.
+
+    The session/Shadow intents are still the window's handlers.  The four
+    evidence intents are *not*: they reach the capability that owns the evidence,
+    which is the property v2O-C5A establishes.  Driving them through the real
+    buttons is what makes this a wiring test rather than a signal test.
+    """
+
     page = window.targeted_validation_page
+    orchestrator = window.targeted_evidence_orchestrator
     seen: list[str] = []
-    wiring = (
+    session_wiring = (
         ("strategy_selected", "_shadow_strategy_selection_changed"),
         ("target_apply_requested", "_target_symbol_requested"),
         ("target_subscribe_requested", "_target_subscribe_requested"),
         ("shadow_start_requested", "_start_shadow"),
         ("shadow_stop_requested", "_stop_shadow"),
-        ("replay_requested", "_run_targeted_replay"),
-        ("robustness_requested", "_run_targeted_robustness"),
-        ("robustness_run_selected", "_robustness_run_selected"),
-        ("review_run_selected", "_review_run_selected"),
     )
-    for _signal, handler in wiring:
+    for _signal, handler in session_wiring:
         monkeypatch.setattr(
             window,
             handler,
             lambda *_args, handler=handler: seen.append(handler),
         )
-    for signal, _handler in wiring:
+    evidence_wiring = (
+        ("replay_requested", "request_replay"),
+        ("robustness_requested", "request_robustness"),
+        ("robustness_run_selected", "select_robustness_run"),
+        ("review_run_selected", "select_review_run"),
+    )
+    for _signal, method in evidence_wiring:
+        monkeypatch.setattr(
+            orchestrator,
+            method,
+            lambda *_args, method=method: seen.append(method),
+        )
+    for signal, _handler in session_wiring + evidence_wiring:
         getattr(page, signal).disconnect()
     window._connect_targeted_validation_page()
 
@@ -207,7 +399,9 @@ def test_every_targeted_intent_reaches_the_window_handler(
     page.robustness_run_selected.emit("run-1")
     page.review_run_selected.emit("review-1")
 
-    assert seen == [handler for _signal, handler in wiring]
+    assert seen == [
+        handler for _signal, handler in session_wiring
+    ] + [method for _signal, method in evidence_wiring]
 
 
 def test_targeted_theme_switch_notifies_the_page(
@@ -237,21 +431,48 @@ def test_targeted_controls_preserve_legacy_shadow_availability(
     assert controls.robustness_enabled is True
 
 
-def test_pending_tab_switch_is_one_shot(window: MainWindow, monkeypatch) -> None:
-    seen: list[object] = []
+def test_a_robustness_completion_asks_for_focus_and_navigates_semantically(
+    window: MainWindow, monkeypatch
+) -> None:
+    """The one-shot tab fields are gone; focus is a pure navigation request.
+
+    A completed suite used to stash two integers on the window so the *next*
+    repaint would switch tabs.  That is state that exists only to be consumed
+    once, and the page already names its panels semantically, so the capability
+    now navigates its own page directly and asks the window for the route.
+    """
+
+    page = window.targeted_validation_page
+    navigations: list[str] = []
     monkeypatch.setattr(
-        window.targeted_validation_page,
-        "render",
-        lambda view: seen.append(view),
+        page, "set_active_workspace", lambda ws: navigations.append(f"ws:{ws}")
     )
-    window._targeted_active_workspace = 3
-    window._targeted_active_evidence_tab = 6
-    window._publish_targeted_view()
-    window._publish_targeted_view()
-    assert seen[0].active_workspace == 3
-    assert seen[0].active_evidence_tab == 6
-    assert seen[1].active_workspace is None
-    assert seen[1].active_evidence_tab is None
+    monkeypatch.setattr(
+        page,
+        "set_active_evidence_workspace",
+        lambda ws: navigations.append(f"evidence:{ws}"),
+    )
+    monkeypatch.setattr(window.shell, "navigate_to", lambda *args, **kwargs: None)
+    monkeypatch.setattr(window, "_record_runtime_event", lambda **kwargs: None)
+    monkeypatch.setattr(window, "_log", lambda *args, **kwargs: None)
+
+    window.targeted_evidence_orchestrator._robustness_finished(
+        _bundle("run-1", "AAPL")
+    )
+
+    assert navigations == [
+        f"ws:{TargetedWorkspace.EVIDENCE}",
+        f"evidence:{TargetedEvidenceWorkspace.REVIEW}",
+    ]
+    assert (
+        window.research_page.active_workspace() is ResearchWorkspace.TARGETED
+    )
+    # No integer reached the tab widgets: the vocabulary is the page's own.
+    for name in (
+        "_targeted_active_workspace",
+        "_targeted_active_evidence_tab",
+    ):
+        assert not hasattr(window, name), name
 
 
 # -- shadow characterization --------------------------------------------
@@ -341,7 +562,7 @@ def test_shadow_start_allowed_path_builds_and_starts_engine(
     monkeypatch.setattr(window.account_orchestrator, "fresh_paper_net_liquidation", lambda: Decimal("10000"))
     monkeypatch.setattr(desktop, "build_targeted_shadow_config", lambda *args, **kwargs: object())
     monkeypatch.setattr(desktop, "ShadowPaperEngine", _Engine)
-    monkeypatch.setattr(window, "_publish_targeted_view", lambda: None)
+    monkeypatch.setattr(window, "_publish_targeted_session_view", lambda: None)
     monkeypatch.setattr(window, "_record_runtime_event", lambda **kwargs: None)
     monkeypatch.setattr(window, "_log", lambda *args, **kwargs: None)
     _fake_live_market(window, _ready_stream())
@@ -368,7 +589,7 @@ def test_shadow_stop_calls_engine_and_workflow(window: MainWindow, monkeypatch) 
     workflow.active = True
     window.shadow_engine = engine
     window.shadow_workflow = workflow
-    monkeypatch.setattr(window, "_publish_targeted_view", lambda: None)
+    monkeypatch.setattr(window, "_publish_targeted_session_view", lambda: None)
     monkeypatch.setattr(window, "_record_runtime_event", lambda **kwargs: None)
 
     window._stop_shadow()

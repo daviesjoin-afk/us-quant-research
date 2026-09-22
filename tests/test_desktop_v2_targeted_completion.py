@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from decimal import Decimal
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -11,7 +12,17 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from us_quant.desktop import MainWindow
+from us_quant.desktop_targeted_evidence_models import (
+    TargetedRobustnessBundle,
+)
+from us_quant.desktop_v2.orchestration.research.targeted.evidence import (
+    models,
+)
 from us_quant.desktop_v2.pages.research import ResearchWorkspace
+from us_quant.desktop_v2.pages.research.targeted.models import (
+    TargetedEvidenceWorkspace,
+    TargetedWorkspace,
+)
 from us_quant.paths import STATE_ROOT_ENV
 from us_quant.targeted_data_quality import TargetedDataQualityResult
 from us_quant.targeted_execution_stress import TargetedExecutionStressResult
@@ -215,11 +226,35 @@ def _pipeline(run_id: str, symbol: str):
     return robustness, None, overfit, quality, stress, review
 
 
+def _bundle(run_id: str, symbol: str) -> TargetedRobustnessBundle:
+    """The same six results, in the shape the service now returns them."""
+
+    robustness, walk_forward, overfit, quality, stress, review = _pipeline(
+        run_id, symbol
+    )
+    return TargetedRobustnessBundle(
+        robustness=robustness,
+        walk_forward=walk_forward,
+        overfit=overfit,
+        data_quality=quality,
+        execution_stress=stress,
+        review=review,
+    )
+
+
 def _capture_views(window: MainWindow, monkeypatch) -> list[object]:
+    """Record every evidence paint, leaving the session paint alone.
+
+    The page has two render entry points now, so this stubs exactly the one the
+    evidence capability owns.  Stubbing the session paint too would hide the
+    regression this file exists to catch: a normal session refresh must not
+    repaint the evidence, and the way to see that is to keep counting.
+    """
+
     seen: list[object] = []
     monkeypatch.setattr(
         window.targeted_validation_page,
-        "render",
+        "render_evidence",
         lambda view: seen.append(view),
     )
     monkeypatch.setattr(window.shell, "navigate_to", lambda *args, **kwargs: None)
@@ -228,85 +263,103 @@ def _capture_views(window: MainWindow, monkeypatch) -> list[object]:
     return seen
 
 
+def _seed_history(
+    window: MainWindow,
+    bundle: TargetedRobustnessBundle,
+    *,
+    select: bool,
+) -> None:
+    """Put one completed suite into the canonical snapshot.
+
+    The snapshot is the truth now, so a test seeds it through the capability
+    rather than by assigning a window list -- there is no window list to assign.
+    """
+
+    orchestrator = window.targeted_evidence_orchestrator
+    orchestrator._snapshot = models.commit_bundle(
+        orchestrator.snapshot, bundle
+    )
+    if not select:
+        # Startup semantics: evidence is present, nothing is selected yet.
+        orchestrator._snapshot = replace(
+            orchestrator.snapshot,
+            selected_robustness_run_id=None,
+            selected_review_run_id=None,
+        )
+
+
 def test_completed_robustness_pipeline_selects_the_new_evidence(
     window: MainWindow, monkeypatch
 ) -> None:
-    old_robustness, _, old_overfit, old_quality, old_stress, old_review = _pipeline(
-        "old-robustness", "AAPL"
-    )
-    new_robustness, _, new_overfit, new_quality, new_stress, new_review = _pipeline(
-        "new-robustness", "MSFT"
-    )
-    window.targeted_robustness_results = [old_robustness]
-    window.targeted_overfit_results = [old_overfit]
-    window.targeted_data_quality_results = [old_quality]
-    window.targeted_execution_stress_results = [old_stress]
-    window.targeted_review_results = [old_review]
-    window._selected_robustness_run_id = old_robustness.run_id
-    window._selected_review_run_id = old_review.run_id
+    old = _bundle("old-robustness", "AAPL")
+    new = _bundle("new-robustness", "MSFT")
+    _seed_history(window, old, select=True)
     seen = _capture_views(window, monkeypatch)
 
-    window._targeted_robustness_finished(
-        (
-            new_robustness,
-            None,
-            new_overfit,
-            new_quality,
-            new_stress,
-            new_review,
-        )
-    )
+    window.targeted_evidence_orchestrator._robustness_finished(new)
 
-    assert window._selected_robustness_run_id == new_robustness.run_id
-    assert window._selected_review_run_id == new_review.run_id
+    snapshot = window.targeted_evidence_orchestrator.snapshot
+    assert snapshot.selected_robustness_run_id == new.robustness.run_id
+    assert snapshot.selected_review_run_id == new.review.run_id
     assert seen
     view = seen[-1]
-    assert view.evidence.selected_robustness_run_id == new_robustness.run_id
-    assert view.evidence.selected_review_run_id == new_review.run_id
-    assert "MSFT" in view.evidence.robustness_summary
-    assert "AAPL" not in view.evidence.robustness_summary
-    assert "MSFT" in view.evidence.review_summary
-    assert "AAPL" not in view.evidence.review_summary
-    assert view.evidence.review_gate_rows
-    assert view.active_workspace == 3
-    assert view.active_evidence_tab == 6
+    assert view.selected_robustness_run_id == new.robustness.run_id
+    assert view.selected_review_run_id == new.review.run_id
+    assert "MSFT" in view.robustness_summary
+    assert "AAPL" not in view.robustness_summary
+    assert "MSFT" in view.review_summary
+    assert "AAPL" not in view.review_summary
+    assert view.review_gate_rows
+    # The capability owns its own page's evidence workspace...
+    assert (
+        window.targeted_validation_page.workspace_tabs.currentIndex()
+        == int(TargetedWorkspace.EVIDENCE)
+    )
+    assert (
+        window.targeted_validation_page.evidence_panel.tabs.currentIndex()
+        == int(TargetedEvidenceWorkspace.REVIEW)
+    )
+    # ...and the window owns the route, which it was asked for by signal.
     assert (
         window.research_page.active_workspace()
         is ResearchWorkspace.TARGETED
     )
 
 
-def test_normal_targeted_refresh_preserves_a_historical_run_selection(
+def test_a_normal_session_refresh_preserves_the_evidence_and_its_selection(
     window: MainWindow, monkeypatch
 ) -> None:
-    old_robustness, _, old_overfit, old_quality, old_stress, old_review = _pipeline(
-        "old-robustness", "AAPL"
-    )
-    new_robustness, _, new_overfit, new_quality, new_stress, new_review = _pipeline(
-        "new-robustness", "MSFT"
-    )
-    window.targeted_robustness_results = [new_robustness, old_robustness]
-    window.targeted_overfit_results = [new_overfit, old_overfit]
-    window.targeted_data_quality_results = [new_quality, old_quality]
-    window.targeted_execution_stress_results = [new_stress, old_stress]
-    window.targeted_review_results = [new_review, old_review]
-    window._selected_robustness_run_id = old_robustness.run_id
-    window._selected_review_run_id = old_review.run_id
+    """A market tick, preflight refresh or minute update must not touch evidence.
+
+    Before the render split, every one of those callers went through a single
+    ``_publish_targeted_view`` that rebuilt all seven evidence tables.  This is
+    the regression that split exists to prevent, so it asserts both halves: the
+    evidence selection survives, and the evidence is not repainted at all.
+    """
+
+    old = _bundle("old-robustness", "AAPL")
+    _seed_history(window, old, select=True)
     window.research_page.set_active_workspace(ResearchWorkspace.BACKTEST)
-    seen = _capture_views(window, monkeypatch)
+    evidence_paints: list[object] = []
+    session_paints: list[object] = []
+    monkeypatch.setattr(
+        window.targeted_validation_page,
+        "render_evidence",
+        lambda view: evidence_paints.append(view),
+    )
+    monkeypatch.setattr(
+        window.targeted_validation_page,
+        "render_session",
+        lambda view: session_paints.append(view),
+    )
 
-    window._publish_targeted_view()
+    window._publish_targeted_session_view()
 
-    assert window._selected_robustness_run_id == old_robustness.run_id
-    assert window._selected_review_run_id == old_review.run_id
-    assert seen
-    view = seen[-1]
-    assert view.evidence.selected_robustness_run_id == old_robustness.run_id
-    assert view.evidence.selected_review_run_id == old_review.run_id
-    assert "AAPL" in view.evidence.robustness_summary
-    assert "MSFT" not in view.evidence.robustness_summary
-    assert view.active_workspace is None
-    assert view.active_evidence_tab is None
+    assert session_paints, "the session half should have been painted"
+    assert evidence_paints == [], "a session refresh must not repaint evidence"
+    snapshot = window.targeted_evidence_orchestrator.snapshot
+    assert snapshot.selected_robustness_run_id == old.robustness.run_id
+    assert snapshot.selected_review_run_id == old.review.run_id
     assert (
         window.research_page.active_workspace()
         is ResearchWorkspace.BACKTEST

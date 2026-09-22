@@ -795,6 +795,7 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
         "scanner",
         "backtest",
         "cross_section",
+        "targeted",
     }, research_children
 
     forbidden_classes = (

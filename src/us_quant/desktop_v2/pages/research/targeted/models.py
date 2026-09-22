@@ -184,14 +184,6 @@ class TargetedEvidenceView:
     selected_review_run_id: str | None
 
 
-@dataclass(frozen=True, slots=True)
-class TargetedValidationView:
-    session: TargetedSessionView
-    evidence: TargetedEvidenceView
-    active_workspace: int | None = None
-    active_evidence_tab: int | None = None
-
-
 __all__ = [
     "DataQualityRow",
     "ExecutionStressRow",
@@ -215,7 +207,6 @@ __all__ = [
     "TargetedSessionView",
     "TargetedStrategyOption",
     "TargetedTableRow",
-    "TargetedValidationView",
     "TargetedWorkspace",
     "WalkForwardRow",
 ]

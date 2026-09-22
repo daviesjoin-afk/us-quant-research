@@ -20,6 +20,12 @@ LINE_BUDGET = 150
 
 #: Every capability the desktop has, extracted or not.  A row disappearing means
 #: a maintainer's entry point went with it.
+#:
+#: v2O-C5A split ``Targeted`` into three rows on purpose: the workspace held three
+#: unrelated things -- research evidence, the target session/preflight, and the
+#: Shadow runtime -- and only the first moved.  One row would have had to describe
+#: three owners at once, which is exactly the confusion the extraction removes, so
+#: each is listed and each has to keep its own row.
 CAPABILITIES = (
     "Market",
     "Account",
@@ -28,7 +34,8 @@ CAPABILITIES = (
     "Scanner",
     "Backtest",
     "Cross Section",
-    "Targeted",
+    "Targeted Evidence",
+    "Targeted Session / Preflight",
     "Shadow",
     "Paper",
     "System",
@@ -122,6 +129,42 @@ def test_the_cross_section_row_points_at_the_capability() -> None:
     assert "CrossSectionOrchestrator._report" in row
     assert "MainWindow.cross_section_report" not in row
     assert "v2O-C4 complete" in row
+
+
+def test_the_evidence_row_points_at_the_capability() -> None:
+    """v2O-C5A: the evidence half moved, and its row must say so."""
+
+    text = _MAP.read_text(encoding="utf-8")
+    row = next(
+        line
+        for line in text.splitlines()
+        if line.startswith("| **Targeted Evidence**")
+    )
+    assert "TargetedEvidenceOrchestrator.snapshot" in row
+    assert "DesktopTargetedEvidenceService" in row
+    assert "v2O-C5A complete" in row
+    # The window must not still be described as the evidence owner.
+    assert "_selected_robustness_run_id" not in row
+    assert "_publish_targeted_view" not in row
+
+
+def test_the_session_row_says_it_is_still_the_windows() -> None:
+    """The deliberate intermediate state: evidence moved, session did not.
+
+    Recording this honestly is what stops the next maintainer from assuming the
+    whole Targeted workspace is done, and stops a later round from quietly
+    folding the session half into the evidence capability.
+    """
+
+    text = _MAP.read_text(encoding="utf-8")
+    row = next(
+        line
+        for line in text.splitlines()
+        if line.startswith("| **Targeted Session / Preflight**")
+    )
+    assert "MainWindow" in row
+    assert "v2O-C5B" in row
+    assert "not started" in row
 
 
 def test_the_shared_research_capital_fact_has_an_entry() -> None:

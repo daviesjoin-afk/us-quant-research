@@ -59,6 +59,9 @@ from us_quant.desktop_backtest_service import DesktopBacktestService
 from us_quant.desktop_cross_section_service import (
     DesktopCrossSectionService,
 )
+from us_quant.desktop_targeted_evidence_service import (
+    DesktopTargetedEvidenceService,
+)
 from us_quant.ibkr import IBKRConnectionConfig, probe_ibkr_socket
 from us_quant.trading.composition.accounts import (
     build_broker_account_application,
@@ -202,13 +205,9 @@ from us_quant.desktop_v2.pages.execution.presenter import (
 )
 from us_quant.desktop_v2.pages.market import MarketPage
 from us_quant.desktop_v2.pages.research.targeted import TargetedValidationPage
-from us_quant.desktop_v2.pages.research.targeted.evidence_presenter import (
-    evidence_view,
-)
 from us_quant.desktop_v2.pages.research.targeted.models import (
     TargetedControlView,
     TargetedStrategyOption,
-    TargetedValidationView,
 )
 from us_quant.desktop_v2.pages.research.targeted.session_presenter import (
     session_view,
@@ -225,6 +224,9 @@ from us_quant.desktop_v2.orchestration.research.cross_section import (
 )
 from us_quant.desktop_v2.orchestration.research.scenario_capital import (
     ResearchScenarioCapitalState,
+)
+from us_quant.desktop_v2.orchestration.research.targeted.evidence import (
+    TargetedEvidenceOrchestrator,
 )
 from us_quant.desktop_v2.pages.research import (
     ResearchPage,
@@ -264,49 +266,6 @@ from us_quant.minute_data import MinuteQuoteStore
 from us_quant.targeted_preflight import (
     TargetPreflightResult,
     evaluate_target_preflight,
-)
-from us_quant.targeted_replay import (
-    TargetedReplayResult,
-    load_targeted_replays,
-    run_targeted_replay,
-    save_targeted_replay,
-)
-from us_quant.targeted_robustness import (
-    TargetedRobustnessResult,
-    group_regular_sessions,
-    load_targeted_robustness,
-    run_targeted_robustness,
-    save_targeted_robustness,
-)
-from us_quant.targeted_validation import (
-    TargetedWalkForwardResult,
-    load_targeted_walk_forwards,
-    run_targeted_walk_forward,
-    save_targeted_walk_forward,
-)
-from us_quant.targeted_overfit import (
-    TargetedOverfitResult,
-    load_targeted_overfits,
-    run_targeted_overfit_diagnostics,
-    save_targeted_overfit,
-)
-from us_quant.targeted_review import (
-    TargetedReviewResult,
-    load_targeted_reviews,
-    run_targeted_review,
-    save_targeted_review,
-)
-from us_quant.targeted_data_quality import (
-    TargetedDataQualityResult,
-    load_targeted_data_quality,
-    run_targeted_data_quality,
-    save_targeted_data_quality,
-)
-from us_quant.targeted_execution_stress import (
-    TargetedExecutionStressResult,
-    load_targeted_execution_stress,
-    run_targeted_execution_stress,
-    save_targeted_execution_stress,
 )
 from us_quant.intraday_universe import (
     select_intraday_watchlist,
@@ -510,15 +469,18 @@ class MainWindow(QMainWindow):
         # group serializes it, so an unrelated task finishing must not be able
         # to release the route on the probe's behalf.
         self._channel_check_inflight = False
-        # Targeted workspace facts the page renders but does not own.
+        # Targeted workspace facts the page renders but does not own.  These are
+        # the *session* half -- the target symbol's status and the local minute
+        # evidence summary -- and they stay here for v2O-C5B.  The *evidence*
+        # half (seven result families, two run selections, two one-shot tab
+        # switches) moved into ``targeted_evidence_orchestrator``, which is now
+        # the canonical owner: answering "who owns the robustness evidence?" is
+        # one grep, and the window can no longer hold a mirrored list that
+        # disagrees with the owner.
         self._target_status = "未指定"
         self._minute_status = (
             "分钟证据：输入代码后显示本地已录数据；只回放 fresh bid/ask。"
         )
-        self._selected_robustness_run_id: str | None = None
-        self._selected_review_run_id: str | None = None
-        self._targeted_active_workspace: int | None = None
-        self._targeted_active_evidence_tab: int | None = None
         self._dashboard_chart_view = DashboardChartView(None, ())
         self.shadow_engine: ShadowPaperEngine | None = None
         self.shadow_snapshot: ShadowSnapshot | None = None
@@ -547,27 +509,6 @@ class MainWindow(QMainWindow):
         ] = ()
         self._next_auto_launch_attempt = 0
         self._active_auto_launch_plan: AutoLaunchPlan | None = None
-        self.targeted_replay_results: list[
-            TargetedReplayResult
-        ] = []
-        self.targeted_robustness_results: list[
-            TargetedRobustnessResult
-        ] = []
-        self.targeted_walk_forward_results: list[
-            TargetedWalkForwardResult
-        ] = []
-        self.targeted_overfit_results: list[
-            TargetedOverfitResult
-        ] = []
-        self.targeted_review_results: list[
-            TargetedReviewResult
-        ] = []
-        self.targeted_data_quality_results: list[
-            TargetedDataQualityResult
-        ] = []
-        self.targeted_execution_stress_results: list[
-            TargetedExecutionStressResult
-        ] = []
         # Research Scenario Capital: the initial-equity figure historical
         # research, replay, scan affordability and cross-sectional portfolio
         # research run at.  It is *research-only* -- never broker equity, never
@@ -744,6 +685,41 @@ class MainWindow(QMainWindow):
         self._connect_market_page()
 
         self.targeted_validation_page = TargetedValidationPage(palette=self.theme)
+        # The targeted workspace's *research evidence* runtime -- the seven result
+        # families, the two run selections, the replay and robustness requests and
+        # the evidence render -- belongs to ``targeted_evidence_orchestrator``.
+        # Note what is *not* stored: there is no ``self.targeted_replay_results``
+        # and no ``self._selected_review_run_id``, because this orchestrator is the
+        # canonical owner and the evidence tables are painted only from it.  The
+        # procedure itself -- the artifact paths and the minute evidence reads --
+        # is in the service next to it.
+        #
+        # The dependencies are deliberate: the universe arrives as a ``Callable``
+        # so the capability never imports ``UniverseOrchestrator``; the strategy
+        # as a ``Callable`` onto the selection service, so a change to strategy
+        # application does not reach it; the target symbol as a ``Callable`` onto
+        # the page's own editor, so the capability never reaches through
+        # ``session_panel``; and the research capital is the one shared state
+        # object, which this capability reads but does not own.
+        #
+        # Each request-time provider is read **once per request**, which is what
+        # makes "the strategy and capital the operator saw" true of a run that
+        # starts later on a worker.
+        self.targeted_evidence_service = DesktopTargetedEvidenceService(
+            minute_store=self.minute_quote_store,
+            results_root=self.paths.research_results_root,
+        )
+        self.targeted_evidence_orchestrator = TargetedEvidenceOrchestrator(
+            service=self.targeted_evidence_service,
+            page=self.targeted_validation_page,
+            submit_task=self._start_task,
+            universe_provider=lambda: self.universe_orchestrator.snapshot,
+            strategy_provider=lambda: self._selected_shadow_strategy_record(),
+            target_symbol_provider=(
+                self.targeted_validation_page.target_symbol
+            ),
+            capital_state=self.research_scenario_capital,
+        )
         self._connect_targeted_validation_page()
         self.universe_page = UniversePage(palette=self.theme)
         # The universe route's desktop runtime -- the official snapshot, the
@@ -1312,7 +1288,7 @@ class MainWindow(QMainWindow):
                 self._log(str(error))
         if self.shadow_engine is not None and self.shadow_engine.active:
             self.shadow_snapshot = self.shadow_engine.on_stream(snapshot)
-            self._publish_targeted_view()
+            self._publish_targeted_session_view()
 
     def _on_market_snapshot_invalidated(self) -> None:
         """The feed's snapshot was invalidated; the dashboard card must follow."""
@@ -1361,18 +1337,42 @@ class MainWindow(QMainWindow):
         )
 
     def _connect_targeted_validation_page(self) -> None:
-        """Wire the targeted page's intents to the existing window handlers."""
+        """Wire the targeted page's intents to their owners.  No business here.
+
+        The two groups have different owners, so they are kept apart: the
+        session/Shadow intents still belong to this window (v2O-C5B and v2O-D),
+        while the evidence intents belong to the capability that owns the
+        evidence truth.  Nothing is interpreted -- every line is a connect.
+        """
 
         page = self.targeted_validation_page
+        evidence = self.targeted_evidence_orchestrator
+        # Session and Shadow intents: still the window's.
         page.strategy_selected.connect(self._shadow_strategy_selection_changed)
         page.target_apply_requested.connect(self._target_symbol_requested)
         page.target_subscribe_requested.connect(self._target_subscribe_requested)
         page.shadow_start_requested.connect(self._start_shadow)
         page.shadow_stop_requested.connect(self._stop_shadow)
-        page.replay_requested.connect(self._run_targeted_replay)
-        page.robustness_requested.connect(self._run_targeted_robustness)
-        page.robustness_run_selected.connect(self._robustness_run_selected)
-        page.review_run_selected.connect(self._review_run_selected)
+        # Evidence intents: the capability's.  A replay or robustness request
+        # validates, freezes its inputs, submits its own task and paints its own
+        # evidence -- the window has no handler for either any more.
+        page.replay_requested.connect(evidence.request_replay)
+        page.robustness_requested.connect(evidence.request_robustness)
+        page.robustness_run_selected.connect(evidence.select_robustness_run)
+        page.review_run_selected.connect(evidence.select_review_run)
+        # The capability publishes finished facts; the window routes them.  A
+        # refusal is a dialog, a log line is the footer, a runtime event is the
+        # store, a minute refresh is the session panel's own status, and focus is
+        # the research route -- none of which is an evidence decision.
+        evidence.refused.connect(self._report_targeted_evidence_refusal)
+        evidence.log_requested.connect(self._log)
+        evidence.runtime_event_requested.connect(
+            self._record_targeted_evidence_runtime_event
+        )
+        evidence.minute_status_refresh_requested.connect(
+            self._refresh_minute_data_status
+        )
+        evidence.focus_requested.connect(self._focus_targeted_evidence)
 
     def _connect_universe_page(self) -> None:
         """Wire the universe page to its capability; no business logic here.
@@ -1573,13 +1573,38 @@ class MainWindow(QMainWindow):
         self.targeted_validation_page.set_target_symbol(symbol)
         self._sync_targeted_symbol_to_stream()
 
-    def _robustness_run_selected(self, run_id: str) -> None:
-        self._selected_robustness_run_id = run_id
-        self._publish_targeted_view()
+    def _report_targeted_evidence_refusal(
+        self, title: str, message: str
+    ) -> None:
+        """Surface a request the evidence capability refused before running.
 
-    def _review_run_selected(self, run_id: str) -> None:
-        self._selected_review_run_id = run_id
-        self._publish_targeted_view()
+        The capability chose the wording; this handler shows the dialog and
+        nothing else, which is what keeps the capability free of widgets.
+        """
+
+        QMessageBox.warning(self, title, message)
+
+    def _record_targeted_evidence_runtime_event(self, event: object) -> None:
+        """Record one evidence runtime event; the store is the window's."""
+
+        self._record_runtime_event(
+            severity=event.severity,
+            component=event.component,
+            code=event.code,
+            message=event.message,
+        )
+
+    def _focus_targeted_evidence(self) -> None:
+        """Bring the research route and the targeted workspace into view.
+
+        A completed robustness suite wants its own result visible.  The capability
+        has already moved the *evidence* workspace to the review section; whether
+        the whole desktop navigates is a shell decision, which is why the
+        capability holds no shell and this window holds no evidence state.
+        """
+
+        self.shell.navigate_to("research")
+        self.research_page.set_active_workspace(ResearchWorkspace.TARGETED)
 
     def _targeted_controls(self) -> TargetedControlView:
         shadow_active = bool(
@@ -1595,8 +1620,18 @@ class MainWindow(QMainWindow):
             robustness_enabled=True,
         )
 
-    def _publish_targeted_view(self) -> None:
-        """Project targeted business state and render it on the native page."""
+    def _publish_targeted_session_view(self) -> None:
+        """Project the *session* half of the targeted workspace and draw it.
+
+        This method used to be ``_publish_targeted_view`` and it also built the
+        seven-family evidence projection.  That made every caller -- a market
+        tick, a preflight refresh, a minute-status update, a Shadow start or stop
+        -- rebuild seven research evidence tables that had not changed.
+
+        The evidence half has its own owner and its own paint now, so this method
+        knows nothing about it: no result lists, no selected run ids, no active
+        tab.  Two capabilities, two paints, and neither can repaint the other.
+        """
 
         if not hasattr(self, "targeted_validation_page"):
             return
@@ -1607,31 +1642,7 @@ class MainWindow(QMainWindow):
             preflight=self.target_preflight_result,
             controls=self._targeted_controls(),
         )
-        evidence = evidence_view(
-            replay_results=tuple(self.targeted_replay_results),
-            robustness_results=tuple(self.targeted_robustness_results),
-            walk_forward_results=tuple(self.targeted_walk_forward_results),
-            overfit_results=tuple(self.targeted_overfit_results),
-            data_quality_results=tuple(self.targeted_data_quality_results),
-            execution_stress_results=tuple(
-                self.targeted_execution_stress_results
-            ),
-            review_results=tuple(self.targeted_review_results),
-            selected_robustness_run_id=self._selected_robustness_run_id,
-            selected_review_run_id=self._selected_review_run_id,
-        )
-        active_workspace = self._targeted_active_workspace
-        active_evidence_tab = self._targeted_active_evidence_tab
-        self._targeted_active_workspace = None
-        self._targeted_active_evidence_tab = None
-        self.targeted_validation_page.render(
-            TargetedValidationView(
-                session=session,
-                evidence=evidence,
-                active_workspace=active_workspace,
-                active_evidence_tab=active_evidence_tab,
-            )
-        )
+        self.targeted_validation_page.render_session(session)
 
     @staticmethod
     def _field_label(text: str) -> QLabel:
@@ -1725,49 +1736,15 @@ class MainWindow(QMainWindow):
             )
             break
         self._publish_dashboard_view()
-        self.targeted_replay_results = list(
-            load_targeted_replays(
-                self.paths.research_results_root
-                / "targeted_replays"
-            )
-        )
-        self.targeted_robustness_results = list(
-            load_targeted_robustness(
-                self.paths.research_results_root
-                / "targeted_robustness"
-            )
-        )
-        self.targeted_walk_forward_results = list(
-            load_targeted_walk_forwards(
-                self.paths.research_results_root
-                / "targeted_walk_forward"
-            )
-        )
-        self.targeted_overfit_results = list(
-            load_targeted_overfits(
-                self.paths.research_results_root
-                / "targeted_overfit"
-            )
-        )
-        self.targeted_data_quality_results = list(
-            load_targeted_data_quality(
-                self.paths.research_results_root
-                / "targeted_data_quality"
-            )
-        )
-        self.targeted_execution_stress_results = list(
-            load_targeted_execution_stress(
-                self.paths.research_results_root
-                / "targeted_execution_stress"
-            )
-        )
-        self.targeted_review_results = list(
-            load_targeted_reviews(
-                self.paths.research_results_root
-                / "targeted_review"
-            )
-        )
-        self._publish_targeted_view()
+        # The targeted evidence capability owns its seven artifact schemas now: it
+        # restores all seven families in one call and paints the evidence exactly
+        # once, and publishes nothing because re-reading local files is not new
+        # research.  The window therefore neither names the seven directories nor
+        # repaints the evidence tables here.  The *session* half is still the
+        # window's, so it gets its own first paint below -- that is a session
+        # render, not an evidence render, and the two no longer share a call.
+        self.targeted_evidence_orchestrator.restore_saved()
+        self._publish_targeted_session_view()
 
     def _connect_backtest_page(self) -> None:
         """Wiring only: the page reports intent, the capability owns the work."""
@@ -3151,7 +3128,7 @@ class MainWindow(QMainWindow):
             self._minute_status = (
                 "分钟证据：输入代码后显示本地已录数据；只回放 fresh bid/ask。"
             )
-            self._publish_targeted_view()
+            self._publish_targeted_session_view()
             return
         summary = self.minute_quote_store.summary(target)
         providers = " / ".join(summary.providers) or "无"
@@ -3166,7 +3143,7 @@ class MainWindow(QMainWindow):
             f"总计 {summary.total_rows} 行 · 来源 {providers} · "
             f"证据类型 {origins} · 区间 {data_range}"
         )
-        self._publish_targeted_view()
+        self._publish_targeted_session_view()
 
     def _refresh_target_preflight(self, *_args: object) -> None:
         universe = self.universe_orchestrator.snapshot
@@ -3210,360 +3187,7 @@ class MainWindow(QMainWindow):
             broker_orders_available=False,
         )
         self.target_preflight_result = result
-        self._publish_targeted_view()
-
-    def _run_targeted_replay(self) -> None:
-        universe = self.universe_orchestrator.snapshot
-        strategy = self._selected_shadow_strategy_record()
-        if strategy is None:
-            QMessageBox.warning(
-                self, "缺少策略版本", "请选择指定标的日内 T 策略版本。"
-            )
-            return
-        symbol = self._current_target_symbol()
-        if not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", symbol):
-            QMessageBox.warning(
-                self, "代码无效", "请输入需要回放的股票或 ETF 代码。"
-            )
-            return
-        if universe is not None:
-            eligible = {
-                row.symbol
-                for row in universe.records
-                if row.eligible_for_research
-            }
-            if symbol not in eligible:
-                QMessageBox.warning(
-                    self,
-                    "标的门未通过",
-                    f"{symbol} 未通过当前非中概研究资格门。",
-                )
-                return
-        initial_equity = self.research_scenario_capital.decimal_value
-
-        def task(
-            progress: Callable[[str], None],
-        ) -> TargetedReplayResult:
-            progress(f"读取 {symbol} 的本地 fresh 分钟 bid/ask…")
-            records = self.minute_quote_store.load(symbol)
-            groups: dict[str, list] = {}
-            for record in records:
-                groups.setdefault(record.provider, []).append(record)
-            if not groups:
-                raise ValueError(
-                    f"{symbol} 尚无可用分钟数据；请先订阅实时行情并录制"
-                )
-            provider, selected = max(
-                groups.items(),
-                key=lambda item: (len(item[1]), item[0]),
-            )
-            sessions = group_regular_sessions(selected)
-            if not sessions:
-                raise ValueError(
-                    f"{symbol} 在纽约常规交易时段内没有可回放分钟"
-                )
-            session_date, session_rows = sessions[-1]
-            progress(
-                f"使用 {provider} 的最近独立会话 {session_date}，"
-                f"共 {len(session_rows)} 行分钟证据执行回放…"
-            )
-            result = run_targeted_replay(
-                session_rows,
-                strategy_version_id=strategy.version_id,
-                strategy_semver=strategy.semver,
-                parameter_hash=strategy.parameter_hash,
-                parameters=strategy.parameters,
-                initial_equity=initial_equity,
-            )
-            save_targeted_replay(
-                result,
-                self.paths.research_results_root
-                / "targeted_replays",
-            )
-            return result
-
-        self._start_task(
-            task,
-            on_success=self._targeted_replay_finished,
-            start_message=f"{symbol} 分钟回放开始…",
-            resource_group="targeted",
-        )
-
-    def _targeted_replay_finished(self, result: object) -> None:
-        if not isinstance(result, TargetedReplayResult):
-            raise TypeError("unexpected targeted replay result")
-        self.targeted_replay_results.insert(0, result)
-        self._publish_targeted_view()
-        self._refresh_minute_data_status(result.symbol)
-        self._record_runtime_event(
-            severity="info",
-            component="targeted_replay",
-            code="REPLAY_COMPLETE",
-            message=(
-                f"{result.symbol} run {result.run_id[:8]} 完成；"
-                f"{result.row_count} 行；收益 {result.total_return:.2%}；"
-                "券商订单 0"
-            ),
-        )
-        self._log(
-            f"{result.symbol} 分钟回放完成：收益 "
-            f"{result.total_return:.2%}，最大回撤 "
-            f"{result.maximum_drawdown:.2%}，成交 {len(result.fills)} 笔。"
-        )
-
-
-    def _run_targeted_robustness(self) -> None:
-        universe = self.universe_orchestrator.snapshot
-        strategy = self._selected_shadow_strategy_record()
-        if strategy is None:
-            QMessageBox.warning(
-                self, "缺少策略版本", "请选择指定标的日内 T 策略版本。"
-            )
-            return
-        symbol = self._current_target_symbol()
-        if not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", symbol):
-            QMessageBox.warning(
-                self, "代码无效", "请输入需要评估的股票或 ETF 代码。"
-            )
-            return
-        if universe is not None:
-            eligible = {
-                row.symbol
-                for row in universe.records
-                if row.eligible_for_research
-            }
-            if symbol not in eligible:
-                QMessageBox.warning(
-                    self,
-                    "标的门未通过",
-                    f"{symbol} 未通过当前非中概研究资格门。",
-                )
-                return
-        initial_equity = self.research_scenario_capital.decimal_value
-
-        def task(
-            progress: Callable[[str], None],
-        ) -> tuple[
-            TargetedRobustnessResult,
-            TargetedWalkForwardResult | None,
-            TargetedOverfitResult,
-            TargetedDataQualityResult,
-            TargetedExecutionStressResult,
-            TargetedReviewResult,
-        ]:
-            progress(f"按行情源读取 {symbol} 的独立分钟会话…")
-            records = self.minute_quote_store.load(symbol)
-            raw_records = self.minute_quote_store.load(
-                symbol, usable_only=False
-            )
-            groups: dict[str, list] = {}
-            for record in records:
-                groups.setdefault(record.provider, []).append(record)
-            if not groups:
-                raise ValueError(
-                    f"{symbol} 尚无可用分钟数据；请先录制多个交易日"
-                )
-            provider, selected = max(
-                groups.items(),
-                key=lambda item: (len(item[1]), item[0]),
-            )
-            raw_selected = tuple(
-                row
-                for row in raw_records
-                if row.provider == provider
-            )
-            progress(
-                f"使用单一行情源 {provider}；按纽约交易日分组并运行"
-                "基准及四组参数扰动…"
-            )
-            result = run_targeted_robustness(
-                tuple(selected),
-                strategy_version_id=strategy.version_id,
-                strategy_semver=strategy.semver,
-                parameter_hash=strategy.parameter_hash,
-                parameters=strategy.parameters,
-                initial_equity=initial_equity,
-            )
-            save_targeted_robustness(
-                result,
-                self.paths.research_results_root
-                / "targeted_robustness",
-            )
-            progress(
-                "按固定候选集运行 CSCV/PBO 与 DSR 过拟合诊断…"
-            )
-            overfit = run_targeted_overfit_diagnostics(result)
-            save_targeted_overfit(
-                overfit,
-                self.paths.research_results_root
-                / "targeted_overfit",
-            )
-            progress(
-                "检查 346 个预期分钟、连续缺口、报价年龄和一档数量…"
-            )
-            data_quality = run_targeted_data_quality(
-                result, raw_selected
-            )
-            save_targeted_data_quality(
-                data_quality,
-                self.paths.research_results_root
-                / "targeted_data_quality",
-            )
-            validation = None
-            if result.usable_sessions >= 20:
-                progress(
-                    "有效会话达到 20；执行仅训练集选参、"
-                    "验证门和未触碰测试集…"
-                )
-                validation = run_targeted_walk_forward(
-                    result,
-                    tuple(selected),
-                    parameters=strategy.parameters,
-                    initial_equity=initial_equity,
-                )
-                save_targeted_walk_forward(
-                    validation,
-                    self.paths.research_results_root
-                    / "targeted_walk_forward",
-                )
-            progress(
-                "运行配置成本、5bps、10bps+双倍佣金执行压力…"
-            )
-            execution_stress = run_targeted_execution_stress(
-                result,
-                tuple(selected),
-                parameters=strategy.parameters,
-                initial_equity=initial_equity,
-            )
-            save_targeted_execution_stress(
-                execution_stress,
-                self.paths.research_results_root
-                / "targeted_execution_stress",
-            )
-            progress(
-                "汇总证据身份、真实流来源、序列相关性与晋级硬门…"
-            )
-            review = run_targeted_review(
-                result,
-                validation,
-                overfit,
-                parameters=strategy.parameters,
-                data_quality=data_quality,
-                execution_stress=execution_stress,
-            )
-            save_targeted_review(
-                review,
-                self.paths.research_results_root
-                / "targeted_review",
-            )
-            return (
-                result,
-                validation,
-                overfit,
-                data_quality,
-                execution_stress,
-                review,
-            )
-
-        self._start_task(
-            task,
-            on_success=self._targeted_robustness_finished,
-            start_message=f"{symbol} 多日稳健性评估开始…",
-            resource_group="targeted",
-        )
-
-    def _targeted_robustness_finished(self, result: object) -> None:
-        if not (
-            isinstance(result, tuple)
-            and len(result) == 6
-            and isinstance(result[0], TargetedRobustnessResult)
-            and (
-                result[1] is None
-                or isinstance(result[1], TargetedWalkForwardResult)
-            )
-            and isinstance(result[2], TargetedOverfitResult)
-            and isinstance(result[3], TargetedDataQualityResult)
-            and isinstance(
-                result[4], TargetedExecutionStressResult
-            )
-            and isinstance(result[5], TargetedReviewResult)
-        ):
-            raise TypeError("unexpected targeted robustness result")
-        (
-            robustness,
-            validation,
-            overfit,
-            data_quality,
-            execution_stress,
-            review,
-        ) = result
-        self.targeted_robustness_results.insert(0, robustness)
-        if validation is not None:
-            self.targeted_walk_forward_results.insert(0, validation)
-        self.targeted_overfit_results.insert(0, overfit)
-        self.targeted_data_quality_results.insert(
-            0, data_quality
-        )
-        self.targeted_execution_stress_results.insert(
-            0, execution_stress
-        )
-        self.targeted_review_results.insert(0, review)
-        self._selected_robustness_run_id = robustness.run_id
-        self._selected_review_run_id = review.run_id
-        # Bring the finished robustness evidence into view: the targeted
-        # workspace lives on the research route, and its own detail tabs are
-        # what actually hold the result.
-        self._targeted_active_workspace = 3
-        self._targeted_active_evidence_tab = 6
-        self._publish_targeted_view()
-        self.shell.navigate_to("research")
-        self.research_page.set_active_workspace(
-            ResearchWorkspace.TARGETED
-        )
-        self._record_runtime_event(
-            severity="info",
-            component="targeted_robustness",
-            code="ROBUSTNESS_COMPLETE",
-            message=(
-                f"{robustness.symbol} run {robustness.run_id[:8]} 完成；"
-                f"有效独立会话 {robustness.usable_sessions}/"
-                f"{robustness.total_sessions}；"
-                f"证据 {robustness.evidence_grade}；"
-                f"过拟合诊断 {overfit.evidence_grade}；"
-                f"数据质量 {data_quality.evidence_grade}；"
-                f"执行压力 {execution_stress.evidence_grade}；"
-                f"独立评审 {review.decision}；"
-                "自动晋级 0"
-            ),
-        )
-        self._log(
-            f"{robustness.symbol} 多日稳健性评估完成："
-            f"{robustness.usable_sessions}/"
-            f"{robustness.total_sessions} 个有效会话，"
-            f"参数收益方向一致率 "
-            f"{robustness.sign_stability_fraction:.0%}；"
-            + (
-                f"时间隔离测试超额 "
-                f"{validation.out_of_sample_excess_return:+.2%}。"
-                if validation is not None
-                else "未达到 20 会话，未运行时间隔离验证。"
-            )
-            + f" 过拟合诊断：{overfit.evidence_grade}。"
-            + (
-                f" 独立评审通过门 {review.passed_gates}/"
-                f"{len(review.gates)}，结论 {review.decision}。"
-            )
-        )
-
-
-
-
-
-
-
-
-
-
+        self._publish_targeted_session_view()
 
     def _configured_exposure_multipliers(
         self,
@@ -4260,7 +3884,7 @@ class MainWindow(QMainWindow):
             self.shadow_engine = None
             QMessageBox.warning(self, "内部影子仿真未启动", str(error))
             return
-        self._publish_targeted_view()
+        self._publish_targeted_session_view()
         self._record_runtime_event(
             severity="info",
             component="shadow_paper",
@@ -4285,7 +3909,7 @@ class MainWindow(QMainWindow):
         self.shadow_snapshot = engine.stop()
         if self.shadow_workflow.active:
             self.shadow_workflow.stop()
-        self._publish_targeted_view()
+        self._publish_targeted_session_view()
         self._record_runtime_event(
             severity="info",
             component="shadow_paper",
@@ -4778,6 +4402,12 @@ class MainWindow(QMainWindow):
         self._refresh_runtime_events()
 
     def _export_terminal_state(self) -> None:
+        # The evidence snapshot is read once into a local.  The export is a reader
+        # and nothing more: it neither selects a run, nor edits the evidence, nor
+        # triggers research.  Reading the capability's snapshot directly is also
+        # what keeps this method from becoming a second truth -- there are no
+        # ``self.targeted_*_results`` lists left for it to prefer over the owner.
+        evidence = self.targeted_evidence_orchestrator.snapshot
         try:
             target = export_terminal_bundle(
                 self.paths.exports_root,
@@ -4786,27 +4416,15 @@ class MainWindow(QMainWindow):
                 strategies=self.strategies.list_versions(),
                 events=self.runtime_events.list_recent(500),
                 shadow_fills=self.shadow_store.recent_fills(500),
-                targeted_replays=tuple(
-                    self.targeted_replay_results
+                targeted_replays=evidence.replay_results,
+                targeted_robustness=evidence.robustness_results,
+                targeted_walk_forward=evidence.walk_forward_results,
+                targeted_overfit=evidence.overfit_results,
+                targeted_data_quality=evidence.data_quality_results,
+                targeted_execution_stress=(
+                    evidence.execution_stress_results
                 ),
-                targeted_robustness=tuple(
-                    self.targeted_robustness_results
-                ),
-                targeted_walk_forward=tuple(
-                    self.targeted_walk_forward_results
-                ),
-                targeted_overfit=tuple(
-                    self.targeted_overfit_results
-                ),
-                targeted_data_quality=tuple(
-                    self.targeted_data_quality_results
-                ),
-                targeted_execution_stress=tuple(
-                    self.targeted_execution_stress_results
-                ),
-                targeted_review=tuple(
-                    self.targeted_review_results
-                ),
+                targeted_review=evidence.review_results,
                 paper_order_audit=(
                     self.order_repository.audit_rows()
                 ),

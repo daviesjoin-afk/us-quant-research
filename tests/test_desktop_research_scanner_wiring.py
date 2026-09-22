@@ -330,14 +330,26 @@ def test_the_autoquant_finish_writes_no_manual_completion_line(
 def test_a_manual_scan_does_write_the_completion_line(
     window, monkeypatch
 ) -> None:
-    """The contrast: the manual path is the one that announces itself."""
+    """The contrast: the manual path is the one that announces itself.
+
+    The assertion is "the line is present, exactly once" rather than "the log
+    list equals one entry".  Publishing a scan repaints the page, and
+    ``ScannerTable.render`` auto-selects the first row -- which emits
+    ``symbol_selected`` and therefore a chart read.  Whether *that* read
+    succeeds depends on whether the bundled daily bars are present in the
+    checkout, so asserting the whole list would make this test about the test
+    data instead of about the manual completion line.
+    """
 
     logs: list[str] = []
     monkeypatch.setattr(window, "_log", logs.append)
 
     window.scanner_orchestrator._scan_finished(_scan())
 
-    assert logs == ["扫描完成：2 个，趋势候选 0 个。"]
+    completion = [
+        line for line in logs if line == "扫描完成：2 个，趋势候选 0 个。"
+    ]
+    assert completion == ["扫描完成：2 个，趋势候选 0 个。"], logs
 
 
 def test_the_autoquant_finish_rejects_a_wrong_type(window) -> None:

@@ -221,7 +221,7 @@ def test_loading_the_scan_watchlist_writes_the_page_field() -> None:
 
     window = _window()
     try:
-        window.scan = _scan_result()
+        window.scanner_orchestrator.adopt_external_scan(_scan_result())
         window.market_page.set_subscription_symbols(())
 
         window._apply_intraday_watchlist()
@@ -242,7 +242,7 @@ def test_loading_the_scan_watchlist_writes_the_page_field() -> None:
 def test_load_watchlist_is_refused_while_a_stream_runs() -> None:
     window = _window()
     try:
-        window.scan = _scan_result()
+        window.scanner_orchestrator.adopt_external_scan(_scan_result())
         window.market_page.set_subscription_symbols(())
         window.market_orchestrator._worker = _FakeWorker(running=True)
 

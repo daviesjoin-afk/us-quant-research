@@ -1916,3 +1916,180 @@ aggregate、无已删 state、无 compatibility property、无 reach-through、r
 禁止 symbol、两个 capability 互不知晓、line budget）。
 
 **突变结果：见 PR 描述（15/15）。**
+
+## 19. 第十八步：`desktop_v2/orchestration/research/scanner/`（Scanner capability 边界）
+
+v2O-C1 之后，Scanner route 的桌面 truth 仍散在 `MainWindow`。`self.scan` 到这一
+步已经是一个**共享 Desktop fact**：手动扫描写它、startup restoration 手工解析
+`market_scan.json` 重建它、AutoQuant preparation 覆盖它，然后五个互不相关的
+消费者读它（Scanner page、intraday watchlist、market scope summary、execution
+context 文案、AutoQuant candidate selection）。本轮给它一个唯一 owner：
+
+```text
+desktop_v2/orchestration/research/scanner/
+  __init__.py              导出 ScannerOrchestrator / ScannerRunInputs
+  models.py                74 行：ScannerRunInputs（frozen / slots / Qt-free）
+  orchestrator.py          296 行：scan truth 的三种到达路径、chart 读取、
+                           page render
+```
+
+`desktop.py`：**5392 → 5351 行（净减 41）**。
+
+### 19.1 `MarketScan` canonical Desktop owner = `ScannerOrchestrator`
+
+窗口不再有 `self.scan`，也**没有** compatibility property：
+
+```python
+# 禁止
+@property
+def scan(self):
+    return self.scanner_orchestrator.scan
+```
+
+转发属性是缩小 diff 的诱人做法，也是陷阱：它让所有未迁移的消费者继续静默工作，
+于是"谁读 scan truth"不再是一个 grep，下一轮抽取也找不到剩余消费者。所有消费者
+必须显式写 `self.scanner_orchestrator.scan`。
+
+### 19.2 三种到达路径必须分义
+
+刻意做成三个入口，而不是一个带布尔 flag 的 setter：
+
+| | render | `scan_changed` | 「扫描完成」日志 |
+| --- | --- | --- | --- |
+| `request_scan()` | ✅ | ✅ | ✅ |
+| `restore_saved()` | ✅ | ❌ | ❌ |
+| `adopt_external_scan(scan)` | ✅ | ✅ | ❌ |
+
+拒绝 `set_scan(scan, emit=True, log=False, render=True)`：startup restoration
+≠ cross-workflow new scan ≠ manual scan success，以后改其中一个时不能靠布尔 flag
+猜 side effects。
+
+### 19.3 两个方向相反的时间语义
+
+```text
+research capital / risk pct / substitutions
+  → request_scan() 的 UI thread 冻结（ScannerRunInputs）
+UniverseSnapshot
+  → task 真正执行时重新读取
+```
+
+这是刻意设计，不是巧合：点「扫描」后、worker 启动前改研究资金不应改变即将跑的
+扫描；而扫描排队期间落地的官方标的刷新**应该**是被扫描的那一份。
+
+task 执行时 universe 若意外变成 `None`：**fail closed**（raise），不扫描 request
+时捕获的旧副本。`ScannerRunInputs` 用 frozen tuple 存 substitutions，所以"输入在
+request 时冻结"是数据的性质而不是约定。
+
+### 19.4 AutoQuant 仍然直接 scan（最重要的边界）
+
+`_prepare_auto_quant_candidates` 仍然直接：
+
+```text
+scan_market(...) + save_market_scan(...)
+```
+
+它连着 Paper `PREPARING`、候选准备失败清理与 `_auto_market_scan_finished`，属于
+高风险启动链；本轮的 frozen guard 继续钉住这一点。结果进入 truth 的方向是：
+
+```text
+AutoQuant workflow
+  ↓ finished MarketScan fact
+MainWindow composition bridge（_auto_market_scan_finished）
+  ↓
+ScannerOrchestrator.adopt_external_scan(scan)
+```
+
+**不是** `ScannerOrchestrator → PaperWorkflow → Execution`。Scanner 从不知道 Paper
+存在，所以边界正确。
+
+### 19.5 Scanner artifact 与 chart 归 Scanner data boundary
+
+`DesktopMarketScanService` 仍是扫描/I/O owner，本轮从"manual scan only"扩成更
+完整、仍然内聚的 Scanner data boundary：
+
+```text
+scan(universe, ...)   scan_market + save_market_scan
+load_saved()          scan_path → MarketScan | None
+load_chart(symbol)    load_close_series(symbol, data_root=..., fallback=...)
+```
+
+`MainWindow._load_scan_file()` 因此退休：窗口不再手写 `json.loads`、`ScanResult`
+reconstruction 与 `MarketScan` 的 datetime/date parsing，**不再知道 Scanner
+artifact schema**。`load_saved()` 三种结果刻意不同：文件不存在 → `None`；合法 →
+`MarketScan`；坏文件 → 异常向上。`restore_saved()` 捕获异常、truth 置空、**仍然
+渲染一次**，所以坏 artifact 不阻止桌面启动。
+
+chart loading 同样迁出（`_scanner_symbol_selected` 退休），失败语义保持：只 log、
+不弹 dialog、不清旧 chart。
+
+### 19.6 render 只有一个 caller
+
+`ScannerOrchestrator` 是 Desktop 层唯一调用 `scanner_page.render(...)` 与
+`scanner_page.render_chart(...)` 的对象。窗口只能 construct page、connect
+signals、set_palette。`render_current()` 的 research count 规则原样保留（有
+Universe 用 `research_eligible`，无 Universe 用 `len(results) + len(skipped)`，
+都没有则 0）。
+
+### 19.7 留在窗口的 cross-workflow consumers
+
+`_apply_intraday_watchlist`（Scanner + Market + Account capital）、
+`_select_auto_quant_candidates`（Paper workflow + account truth + strategy + risk
+multipliers + market references + Execution page）与
+`_refresh_market_scope_summary`（scan + universe + local history count）都留在
+窗口，只把 truth source 换成 `self.scanner_orchestrator.scan`。
+
+`scan_changed` 接到 `_refresh_market_scope_summary`，所以手动扫描与 AutoQuant
+adoption 都自然更新 scope line；startup restore 不 emit change，因为
+`_load_local_state()` 最后本来就统一 refresh scope。
+
+窗口新增只有两个薄 bridge：`_scanner_run_inputs()`（composition：冻
+`ScannerRunInputs`）与 `_report_scanner_refusal()`（`QMessageBox.information`，
+severity 不变）。`_connect_scanner_page()` 只 connect。
+
+### 19.8 依赖与 public surface
+
+`ScannerOrchestrator` 禁止 import：`MainWindow`、其他 orchestrator、`Paper*` /
+`Shadow*` / `Execution*` / `Market` / `Account` / `RiskApplication` /
+`StrategyApplication` / `TaskThread` / `DesktopTaskController` / `HistoryJobStore`
+/ `RuntimeSupervisor`，也不持有 `QMessageBox`。History 与 Scanner 不互相 import
+（都通过 callable provider 拿 universe）。
+
+```text
+scan
+restore_saved()
+request_scan()
+request_chart(symbol)
+adopt_external_scan(scan)
+render_current()
+signals: scan_changed / refused / log_requested
+```
+
+### 19.9 体积与测试
+
+| 文件 | base | 现在 |
+| --- | --- | --- |
+| `desktop.py` | 5392 行 | 5351 行（净减 41） |
+| `scanner/orchestrator.py` | — | 296 行 |
+| `scanner/models.py` | — | 74 行 |
+| `scanner/__init__.py` | — | 39 行 |
+| `desktop_market_scan_service.py` | 72 行 | 150 行 |
+| 全套测试 | 3049 collected | 3182 collected |
+
+### 19.10 覆盖强度与突变结果
+
+`tests/test_desktop_scanner_orchestrator.py`（30 项：三条到达路径的
+render/publish/log 矩阵、request-time 冻结 vs execution-time 重读、universe 消失
+时 fail closed、被拒任务不进入状态、chart 成功/失败/不清旧图、research count 三条
+分支、`render_current` 从不 fetch、`ScannerRunInputs` 不可变性与投影是新建
+mapping）、`tests/test_desktop_research_scanner_orchestration.py`（60 项：无
+Scanner god object、无已删 state/method、无 scan compatibility property、
+Scanner 方法白名单、无 reach-through、render/render_chart 唯一调用点、page class
+只在 composition root 构造、connect 方法只 connect、AutoQuant 仍直接 scan、
+AutoQuant 完成只 publish、依赖白名单双向相等、禁止 symbol、不 import 其他
+orchestrator、不持有 worker/dialog、public surface 相等、line budget）、
+`tests/test_desktop_research_scanner_wiring.py`（18 项真实 `MainWindow`：按钮点击
+→ capability、capability 三个信号都路由、单 truth identity 三条路径、AutoQuant
+bridge 全链路 + 不写手动日志、page filter 不改 truth、scope summary 读
+capability、startup exactly-once render 三态）。
+
+**突变结果：见 PR 描述（15/15）。**

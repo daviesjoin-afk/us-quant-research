@@ -789,7 +789,9 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
         ).iterdir()
         if path.is_dir() and path.name != "__pycache__"
     }
-    assert research_children == {"universe", "history"}, research_children
+    assert research_children == {"universe", "history", "scanner"}, (
+        research_children
+    )
 
     forbidden_classes = (
         "DesktopManager",

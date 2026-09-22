@@ -416,11 +416,43 @@ DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS = (
     # ``_request_worker_stops`` calls the capability's shutdown lifecycle
     # instead of setting the cancel event itself.
     "_request_worker_stops",
-    # ``_run_scan`` reads the universe off the capability at execution time.
-    "_run_scan",
     # The targeted-replay entry points read the universe at execution time.
     "_run_targeted_replay",
     "_run_targeted_robustness",
+)
+
+# v2O-C2 (Research scanner): the scan truth, the manual scan request, the
+# startup restore, the cross-workflow adoption and the chart read moved out of
+# the window into ``desktop_v2/orchestration/research/scanner``.  Five handlers
+# left, two arrived, and five more changed because they used to read
+# ``self.scan`` off the window.  ``_publish_scanner_view`` and
+# ``_scanner_symbol_selected`` were *added* by the ScannerPage round and
+# *removed* here, so they exist at neither this file's base commit nor now and
+# belong to neither delta; they are pinned below and asserted absent from both.
+DESKTOP_SCANNER_ORCHESTRATION_V2_NET_ZERO_METHODS = (
+    "_publish_scanner_view",
+    "_scanner_symbol_selected",
+)
+DESKTOP_SCANNER_ORCHESTRATION_V2_REMOVED_METHODS = (
+    "_run_scan",
+    "_scan_finished",
+    "_load_scan_file",
+)
+DESKTOP_SCANNER_ORCHESTRATION_V2_ADDED_METHODS = (
+    "_scanner_run_inputs",
+    "_report_scanner_refusal",
+)
+DESKTOP_SCANNER_ORCHESTRATION_V2_METHODS = (
+    # ``_load_local_state`` asks the capability to restore instead of parsing
+    # the scan JSON itself.
+    "_load_local_state",
+    # The AutoQuant completion hands its finished scan over instead of
+    # assigning ``self.scan`` and painting the page.
+    "_auto_market_scan_finished",
+    # The three cross-workflow consumers read ``scanner_orchestrator.scan``.
+    "_apply_intraday_watchlist",
+    "_select_auto_quant_candidates",
+    "_refresh_market_scope_summary",
 )
 
 SCANNER_V2_REMOVED_METHODS = (
@@ -430,12 +462,8 @@ SCANNER_V2_REMOVED_METHODS = (
 )
 SCANNER_V2_ADDED_METHODS = (
     "_connect_scanner_page",
-    "_publish_scanner_view",
-    "_scanner_symbol_selected",
 )
 SCANNER_V2_METHODS = (
-    "_scan_finished",
-    "_load_scan_file",
     "_auto_market_scan_finished",
     "_apply_theme",
 )
@@ -598,6 +626,15 @@ _DESKTOP_RESEARCH_FOUNDATIONS_V2_START_TASK_DELTAS = (
 SYSTEM_V2_CHANGED_MODULES = (
     # The transitional settings panel is deleted; the page owns its widgets now.
     "src/us_quant/desktop_settings_panel.py",
+)
+
+# v2O-C2 (Research scanner): the market scan service grew from "manual scan
+# only" into the Scanner data boundary -- it now also restores the saved scan
+# artifact and reads the chart series, so the window no longer parses the
+# Scanner JSON itself.  Declared so this guard can assert the delta exactly
+# rather than tolerate it.
+DESKTOP_SCANNER_ORCHESTRATION_V2_CHANGED_MODULES = (
+    "src/us_quant/desktop_market_scan_service.py",
 )
 
 FROZEN_METHODS = (
@@ -1995,6 +2032,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_REMOVED_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_REMOVED_METHODS)
         | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS)
+        | set(DESKTOP_SCANNER_ORCHESTRATION_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -2012,6 +2050,25 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_ADDED_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_ADDED_METHODS)
         | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_ADDED_METHODS)
+        | set(DESKTOP_SCANNER_ORCHESTRATION_V2_ADDED_METHODS)
+    )
+
+    # The two methods the ScannerPage round added and this round removed exist
+    # at neither commit.  They are declared separately and asserted absent from
+    # both deltas: dropping them silently would hide a real deletion.
+    declared = set(DESKTOP_SCANNER_ORCHESTRATION_V2_REMOVED_METHODS) | set(
+        DESKTOP_SCANNER_ORCHESTRATION_V2_ADDED_METHODS
+    )
+    assert not (
+        set(DESKTOP_SCANNER_ORCHESTRATION_V2_NET_ZERO_METHODS) & declared
+    )
+    assert not (
+        set(DESKTOP_SCANNER_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & (set(base_methods) - set(current_methods))
+    )
+    assert not (
+        set(DESKTOP_SCANNER_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & (set(current_methods) - set(base_methods))
     )
 
     changed = []
@@ -2045,6 +2102,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS)
         | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS)
+        | set(DESKTOP_SCANNER_ORCHESTRATION_V2_METHODS)
     )
     # Exact, not a subset: the delta is the declared surface and nothing
     # else, in both directions.
@@ -2065,6 +2123,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(SYSTEM_V2_REPAIR_METHODS) <= set(changed)
     assert set(DESKTOP_MARKET_ORCHESTRATION_V2_METHODS) <= set(changed)
     assert set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS) <= set(changed)
+    assert set(DESKTOP_SCANNER_ORCHESTRATION_V2_METHODS) <= set(changed)
     assert "_run_backtest_workspace" in changed
 
 
@@ -2094,6 +2153,7 @@ def test_the_other_frozen_modules_are_untouched() -> None:
         | set(EXECUTION_V2_CHANGED_MODULES)
         | set(RUNTIME_V2B_CHANGED_MODULES)
         | set(SYSTEM_V2_CHANGED_MODULES)
+        | set(DESKTOP_SCANNER_ORCHESTRATION_V2_CHANGED_MODULES)
     )
 
 

@@ -1,4 +1,11 @@
-"""Real-MainWindow wiring tests for the native ScannerPage."""
+"""Real-MainWindow wiring tests for the native ScannerPage.
+
+v2O-C2 moved the scanner runtime into
+``desktop_v2/orchestration/research/scanner``.  These tests therefore assert the
+*wiring*: a click on the page reaches the capability, a symbol selection reaches
+the chart read, and the window is no longer in the path.  What the capability
+decides is asserted in ``test_desktop_scanner_orchestrator.py``.
+"""
 
 from __future__ import annotations
 
@@ -92,71 +99,109 @@ def _universe() -> UniverseSnapshot:
     )
 
 
+def test_scan_intent_reaches_the_orchestrator(
+    window: MainWindow, monkeypatch
+) -> None:
+    """A click, not a direct method call: the signal wiring is the subject."""
 
-def test_scan_intent_reaches_run_scan(window: MainWindow, monkeypatch) -> None:
     seen: list[str] = []
-    monkeypatch.setattr(window, "_run_scan", lambda: seen.append("scan"))
-    window.scanner_page.scan_requested.disconnect()
-    window._connect_scanner_page()
+    monkeypatch.setattr(
+        window.scanner_orchestrator,
+        "request_scan",
+        lambda: seen.append("scan"),
+    )
+
     window.scanner_page.scan_button.click()
+    _APP.processEvents()
+
     assert seen == ["scan"]
 
 
-def test_symbol_intent_reaches_window_handler(
+def test_symbol_intent_reaches_the_orchestrator(
     window: MainWindow, monkeypatch
 ) -> None:
+    """A selection, not a direct method call: the wiring is the subject."""
+
     seen: list[str] = []
     monkeypatch.setattr(
-        window, "_scanner_symbol_selected", lambda symbol: seen.append(symbol)
+        window.scanner_orchestrator,
+        "request_chart",
+        lambda symbol: seen.append(symbol),
     )
-    window.scanner_page.symbol_selected.disconnect()
-    window._connect_scanner_page()
+
     window.scanner_page.symbol_selected.emit("MSFT")
+    _APP.processEvents()
+
     assert seen == ["MSFT"]
 
 
-def test_chart_handler_loads_and_renders_symbol(
+def test_the_window_no_longer_handles_the_chart(
+    window: MainWindow, monkeypatch
+) -> None:
+    """The legacy handler is gone, and nothing replaces it on the window."""
+
+    assert not hasattr(window, "_scanner_symbol_selected")
+    assert not hasattr(window, "_run_scan")
+    assert not hasattr(window, "_scan_finished")
+    assert not hasattr(window, "_load_scan_file")
+    assert not hasattr(window, "_publish_scanner_view")
+
+
+def test_chart_load_failure_only_logs(window: MainWindow, monkeypatch) -> None:
+    """A failed read is a status line and leaves the chart alone."""
+
+    messages: list[str] = []
+    monkeypatch.setattr(
+        window.market_scan_service,
+        "load_chart",
+        lambda symbol: (_ for _ in ()).throw(FileNotFoundError("x")),
+    )
+    monkeypatch.setattr(window, "_log", messages.append)
+
+    window.scanner_orchestrator.request_chart("AAPL")
+
+    assert window.scanner_page.chart.symbol == ""
+    assert messages == ["AAPL 图表读取失败：x"]
+
+
+def test_the_chart_is_rendered_through_the_capability(
     window: MainWindow, monkeypatch
 ) -> None:
     points = ((date(2026, 9, 18), 10.0), (date(2026, 9, 19), 11.0))
     monkeypatch.setattr(
-        "us_quant.desktop.load_close_series",
-        lambda symbol, **_kwargs: points,
+        window.market_scan_service,
+        "load_chart",
+        lambda symbol: points,
     )
-    window._scanner_symbol_selected("AAPL")
+
+    window.scanner_orchestrator.request_chart("AAPL")
+
     assert window.scanner_page.chart.symbol == "AAPL"
     assert window.scanner_page.chart.points == points
-
-
-def test_chart_load_failure_only_logs(window: MainWindow, monkeypatch) -> None:
-    messages: list[str] = []
-    monkeypatch.setattr(
-        "us_quant.desktop.load_close_series",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError("x")),
-    )
-    monkeypatch.setattr(window, "_log", messages.append)
-    window._scanner_symbol_selected("AAPL")
-    assert window.scanner_page.chart.symbol == ""
-    assert messages == ["AAPL 图表读取失败：x"]
 
 
 def test_scan_finished_refreshes_scanner_page(
     window: MainWindow, monkeypatch
 ) -> None:
-    monkeypatch.setattr(window, "_refresh_market_scope_summary", lambda: None)
-    window._scan_finished(_scan())
-    assert window.scan is not None
+    """The capability publishes a finished scan; the page follows."""
+
+    window.scanner_orchestrator.adopt_external_scan(_scan())
+
+    assert window.scanner_orchestrator.scan is not None
     assert window.scanner_page.table.rowCount() == 2
 
 
-def test_load_scan_file_refreshes_scanner_page(
+def test_startup_restore_refreshes_scanner_page(
     window: MainWindow, monkeypatch, tmp_path
 ) -> None:
     scan = _scan()
     window.scan_path = tmp_path / "market_scan.json"
+    window.market_scan_service.scan_path = window.scan_path
     save_market_scan(scan, window.scan_path)
-    window._load_scan_file()
-    assert window.scan is not None
+
+    window.scanner_orchestrator.restore_saved()
+
+    assert window.scanner_orchestrator.scan is not None
     assert window.scanner_page.table.rowCount() == 2
 
 
@@ -166,21 +211,30 @@ def test_auto_market_scan_finished_refreshes_scanner_page(
     window.universe_orchestrator.restore_snapshot(_universe())
     monkeypatch.setattr(window, "_refresh_market_scope_summary", lambda: None)
     monkeypatch.setattr(window, "_select_auto_quant_candidates", lambda: None)
+
     window._auto_market_scan_finished(_scan())
-    assert window.scan is not None
+
+    assert window.scanner_orchestrator.scan is not None
     assert window.scanner_page.table.rowCount() == 2
 
 
 def test_page_filter_does_not_change_business_scan_truth(
     window: MainWindow,
 ) -> None:
+    """Presentation is never business truth.
+
+    The page owns a search box and a filter combo; neither may reach the
+    canonical scan.  Driven through the real adoption path, because that is
+    what puts a scan on the page in production.
+    """
+
     scan = _scan()
-    window.scan = scan
-    window._publish_scanner_view()
+    window.scanner_orchestrator.adopt_external_scan(scan)
     window.scanner_page.filter_combo.setCurrentIndex(3)
     window.scanner_page.search_input.setText("MSFT")
-    assert window.scan is scan
-    assert len(window.scan.results) == 2
+
+    assert window.scanner_orchestrator.scan is scan
+    assert len(window.scanner_orchestrator.scan.results) == 2
     assert window.scanner_page.table.rowCount() == 1
 
 

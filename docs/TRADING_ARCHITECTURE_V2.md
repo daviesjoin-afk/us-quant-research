@@ -140,7 +140,8 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Account Orchestration | MIGRATED（v2O-B，`desktop_v2/orchestration/account/`） |
 | Universe Orchestration | MIGRATED（v2O-C1，`desktop_v2/orchestration/research/universe/`） |
 | History Orchestration | MIGRATED（v2O-C1，`desktop_v2/orchestration/research/history/`） |
-| Research Orchestration | **IN PROGRESS**（v2O-C；Scanner / Backtest / Cross-Section / Targeted 未迁） |
+| Scanner Orchestration | MIGRATED（v2O-C2，`desktop_v2/orchestration/research/scanner/`） |
+| Research Orchestration | **IN PROGRESS**（v2O-C；Universe / History / Scanner 已完成，Backtest / Cross-Section / Targeted 未迁） |
 
 Shadow 子系统：
 
@@ -1427,6 +1428,217 @@ refresh、`_start_task` 三条完成路径）。依赖守卫是**白名单**而�
 **v2O-C1 Universe + History ✅**；顶层路线仍为 **v2O-C Research in progress**，
 不得标整个 Research 完成。
 
+### 8.14 scanner orchestration 已抽出（v2O-C2）
+
+v2O-C1 之后，Scanner route 的桌面 truth 仍散在 `MainWindow`：`self.scan`
+同时承担手动扫描结果、startup restored scan、AutoQuant preparation scan、
+Scanner page render、AutoQuant candidate input、intraday watchlist input 与
+market scope summary。它已经是一个**共享 Desktop fact**，只是还没有 owner。
+
+本轮把唯一 owner 改成 `ScannerOrchestrator`：
+
+```text
+src/us_quant/desktop_v2/orchestration/research/scanner/
+  __init__.py      lazy export
+  models.py        ScannerRunInputs（frozen / slots / Qt-free）
+  orchestrator.py  ScannerOrchestrator
+```
+
+**MarketScan canonical Desktop owner = `ScannerOrchestrator`。** 窗口不再有
+`self.scan`，也没有 compatibility property：所有消费者显式写
+`self.scanner_orchestrator.scan`，所以"谁在消费 scan truth"仍然是一个 grep。
+
+#### 14.1 三种到达路径必须分义
+
+`MarketScan` 有三种完全不同的到达方式，本轮刻意做成**三个入口**而不是一个带
+布尔 flag 的 setter：
+
+```text
+request_scan()           操作员点击「扫描」
+restore_saved()          startup 重读本地 artifact
+adopt_external_scan(scan) 其他 workflow 已完成一次 scan
+```
+
+| | render | `scan_changed` | 「扫描完成」日志 |
+| --- | --- | --- | --- |
+| `request_scan` | ✅ | ✅ | ✅ |
+| `restore_saved` | ✅ | ❌ | ❌ |
+| `adopt_external_scan` | ✅ | ✅ | ❌ |
+
+`restore_saved` 不 publish 任何东西：**重读本地文件不是一次新扫描**，宣布完成
+就是撒谎。`adopt_external_scan` 是新扫描但**不是手动**的，所以不写"扫描完成"。
+
+拒绝 `set_scan(scan, emit=True, log=False, render=True)` 这种 API：startup
+restoration ≠ cross-workflow new scan ≠ manual scan success，以后改其中一个时
+不能靠布尔 flag 猜 side effects。
+
+#### 14.2 两个时间语义相反，且都是刻意的
+
+手动扫描有两个**方向相反**的读取时机，本轮明确保留：
+
+```text
+research capital / risk pct / substitutions
+  → request_scan() 的 UI thread 冻结（ScannerRunInputs）
+UniverseSnapshot
+  → task 真正执行时重新读取
+```
+
+原因：操作员点「扫描」后、worker 启动前改研究资金，不应该改变即将跑的扫描；
+而扫描排队期间落地的官方标的刷新，**应该**是被扫描的那一份。
+
+如果 task 执行时 universe 意外变成 `None`：**fail closed**（raise），不扫描
+request 时捕获的旧副本——扫描一个操作员已经看不到的快照比任务失败更糟。
+
+`ScannerRunInputs` 用 frozen tuple 存 substitutions（而不是 dict），所以"输入
+在 request 时被冻结"是**数据的性质**而不是约定。
+
+#### 14.3 AutoQuant 仍然直接 scan（本轮最重要的边界）
+
+AutoQuant preparation 仍然直接调：
+
+```text
+scan_market(...) + save_market_scan(...)
+```
+
+**本轮继续保留。** 它连着 Paper `PREPARING`、候选准备失败清理与
+`_auto_market_scan_finished`，属于高风险启动链；`_prepare_auto_quant_candidates`
+的扫描执行 ownership 一行未改（旧 frozen guard 继续钉住这一点）。
+
+AutoQuant 结果进入 canonical truth 的方向是：
+
+```text
+AutoQuant workflow
+  ↓ finished MarketScan fact
+MainWindow composition bridge（_auto_market_scan_finished）
+  ↓
+ScannerOrchestrator.adopt_external_scan(scan)
+```
+
+**不是** `ScannerOrchestrator → PaperWorkflow → Execution`，所以边界正确：
+Scanner 从不知道 Paper 存在。`_auto_market_scan_finished` 只允许改
+`self.scan = result` → `adopt_external_scan(result)`，并移除旧 Scanner render
+调用；它原有的 history gap scheduling、history render 与
+`_select_auto_quant_candidates` 全部保留。
+
+#### 14.4 Scanner artifact 与 chart 读取归 Scanner data boundary
+
+`DesktopMarketScanService` 仍然是扫描/I/O owner，本轮把它从"manual scan only"
+扩成更完整、仍然内聚的 **Scanner data/application boundary**：
+
+```text
+scan(universe, ...)        scan_market + save_market_scan
+load_saved()               scan_path → MarketScan | None
+load_chart(symbol)         load_close_series(symbol, data_root=..., fallback=...)
+```
+
+三个职责是同一类东西（Scanner 所需的数据读取/扫描/持久化），比把路径与 JSON
+parsing 留在 `MainWindow` 更容易维护。
+
+`MainWindow._load_scan_file()` 因此退休：窗口不再手写 `json.loads`、
+`ScanResult` reconstruction 与 `MarketScan` 的 datetime/date parsing，
+**不再知道 Scanner artifact schema**。
+
+`load_saved()` 三种结果刻意不同：
+
+```text
+文件不存在   → None（首次运行的正常状态，不是错误）
+合法文件     → MarketScan（generated_at / data_date / trading_date /
+                            max_position_risk_pct / skipped 全部恢复）
+坏文件       → 异常向上传播（静默降级成"没有扫描"会掩盖损坏）
+```
+
+`restore_saved()` 捕获异常并把 truth 置空后**仍然渲染一次**，所以坏 artifact
+不会阻止桌面启动——与窗口自己解析 JSON 时同样的容忍度。
+
+chart loading 同样迁出（`MainWindow._scanner_symbol_selected` 退休）。失败语义
+保持：**只 log、不弹 dialog、不清掉旧 chart**，文案
+`{symbol} 图表读取失败：{error}` 不变。清掉旧图会把操作员还能读的东西换成空白，
+那是丢信息而不是报告失败。
+
+#### 14.5 render 只有一个 caller
+
+迁移后 `ScannerOrchestrator` 是 Desktop 层**唯一**调用
+`scanner_page.render(...)` 与 `scanner_page.render_chart(...)` 的对象。窗口只能
+construct page、connect page signals、set_palette。
+
+`render_current()` 的 research count 规则原样保留：
+
+```text
+有 Universe          → universe.summary()["research_eligible"]
+无 Universe + 有 scan → len(scan.results) + len(scan.skipped)
+两者都没有            → 0
+```
+
+#### 14.6 留在窗口的 cross-workflow consumers
+
+以下逻辑继续留在原 capability，只把 truth source 换成
+`self.scanner_orchestrator.scan`：
+
+```text
+_apply_intraday_watchlist      Scanner + Market + Account capital
+_select_auto_quant_candidates  Paper + account truth + strategy + risk
+                               multipliers + market references + Execution page
+_refresh_market_scope_summary  scan + universe + local history count
+Execution context consumers
+```
+
+`_apply_intraday_watchlist` 与 `_select_auto_quant_candidates` 绝不能进 Scanner：
+前者是 Scanner/Market/Account 的 composition，后者同时拥有 Paper workflow、
+account truth、strategy、risk multipliers、market references 与 Execution page。
+
+`ScannerOrchestrator.scan_changed` 接到 `_refresh_market_scope_summary`，所以手动
+扫描与 AutoQuant external adoption 都自然更新 scope line；startup restore 不
+emit change，因为 `_load_local_state()` 最后本来就统一 refresh scope。
+
+窗口新增的只有两个薄 bridge：`_scanner_run_inputs()`（composition：把当前研究
+资金、`max_position_exposure_pct` 与 substitutions 冻成 `ScannerRunInputs`）与
+`_report_scanner_refusal()`（`QMessageBox.information`，severity 不变）。
+`_connect_scanner_page()` 只 connect，不做业务。
+
+#### 14.7 依赖与守卫
+
+`ScannerOrchestrator` 禁止 import：`MainWindow`、其他 orchestrator、
+`Paper*` / `Shadow*` / `Execution*` / `Market` / `Account` / `RiskApplication` /
+`StrategyApplication` / `TaskThread` / `DesktopTaskController` /
+`HistoryJobStore` / `RuntimeSupervisor`，也不持有 `QMessageBox`。
+允许：`DesktopMarketScanService`、Scanner page/presenter/models、`MarketScan`、
+`UniverseSnapshot` 类型、`ScannerRunInputs`、`QObject`/`Signal`、`Callable`。
+History 与 Scanner 也不互相 import（都通过 callable provider 拿 universe）。
+
+public surface 保持很小：
+
+```text
+scan
+restore_saved()
+request_scan()
+request_chart(symbol)
+adopt_external_scan(scan)
+render_current()
+signals: scan_changed / refused / log_requested
+```
+
+不增加 `results` / `skipped` / `summary` / `scanned_count` / `trade_candidates` /
+`research_count` / `scan_path` / `service` / `page`——这些不是 capability API。
+
+新增守卫位于 `tests/test_desktop_scanner_orchestrator.py`（30 项行为）、
+`tests/test_desktop_research_scanner_orchestration.py`（60 项结构）、
+`tests/test_desktop_research_scanner_wiring.py`（18 项真实 `MainWindow`：按钮点击
+→ capability、单 truth identity、AutoQuant bridge 全链路、page filter 不改
+truth、startup exactly-once render）。旧 scope guards
+（`test_desktop_backtest_service.py` / `test_desktop_history_service.py` /
+`test_desktop_universe_service.py` / `test_desktop_market_scan_service.py` /
+`test_desktop_research_foundations_architecture.py` / `test_trading_architecture.py`）
+同步更新 delta：5 个方法退休（`_run_scan` / `_scan_finished` /
+`_load_scan_file` / `_publish_scanner_view` / `_scanner_symbol_selected`）、
+2 个新增（`_scanner_run_inputs` / `_report_scanner_refusal`）、6 个改写。
+
+`desktop.py`：**5392 → 5351 行（净减 41）**；
+`scanner/orchestrator.py` 296 行、`scanner/models.py` 74 行。
+
+**v2O-C1 Universe + History + v2O-C2 Scanner ✅**；顶层路线仍为
+**v2O-C Research in progress**，Backtest / Cross-Section / Targeted 待续，
+不得标整个 Research 完成，也不得提前进入 Shadow。
+
 ## 9. 已删除的旧架构
 
 ```text
@@ -2254,8 +2466,14 @@ Account 的 refresh / ledger / page render / shell 事实已迁入
 truth，窗口只保留 composition 与跨 workflow fan-out。**v2O-C1 Research
 foundations 已完成**（§8.13），Universe 的 snapshot / refresh / cancel 与 History
 的 queue intents / progress 已迁入 `desktop_v2/orchestration/research/{universe,
-history}/`；Research 内部刻意不设 aggregate，`v2O-C Research orchestration`
-整体仍是 **IN PROGRESS**（Scanner / Backtest / Cross-Section / Targeted 待续）。
+history}/`；Research 内部刻意不设 aggregate。**v2O-C2 Scanner orchestration
+已完成**（§8.14），`MarketScan` 的 canonical Desktop owner 变成
+`ScannerOrchestrator`，窗口不再有 `self.scan`，Scanner artifact parsing 与 chart
+loading 归 `DesktopMarketScanService`；AutoQuant preparation **仍然直接**
+`scan_market` / `save_market_scan`，只把完成的 scan fact 通过窗口
+`adopt_external_scan` 交给 Scanner，方向是 AutoQuant → Scanner，不形成反向依赖。
+`v2O-C Research orchestration` 整体仍是 **IN PROGRESS**（Backtest /
+Cross-Section / Targeted 待续）。
 阶段 2 剩余：
 
 ```text
@@ -2265,7 +2483,7 @@ Desktop Dashboard v2
 后续 orchestration 抽取：
 
 ```text
-v2O-C Research orchestration    （🔄 IN PROGRESS，Universe + History 已完成）
+v2O-C Research orchestration    （🔄 IN PROGRESS，Universe + History + Scanner 已完成）
 v2O-D Shadow orchestration
 v2O-E Paper orchestration
 v2O-F System orchestration
@@ -2322,6 +2540,31 @@ v2O-B 刻意没有做的事，留给更后面：
   `cash` / `daily_pnl` 等 accessor：domain snapshot 本身已是只读 finished fact；
 - 没有改 `BrokerAccountApplication` 的失败语义（失败保持 last good portfolio
   并设置 `last_error`），也没有新增任何业务行为。
+
+v2O-C2 刻意没有做的事，留给更后面：
+
+- 只抽 Scanner，没有 Backtest / Cross-Section / Targeted orchestration，也没有
+  `ResearchOrchestrator` / `ResearchManager` / `ScannerManager` / `ScannerContext`
+  / `DesktopContext` / services bag；
+- 没有把 AutoQuant preparation 搬进 Scanner：`_prepare_auto_quant_candidates`
+  仍然直接 `scan_market` + `save_market_scan`，因为它连着 Paper `PREPARING` 与
+  候选准备失败清理，属于高风险启动链。本轮只改它的**结果如何进入 truth**
+  （`adopt_external_scan`），没有改它的执行 ownership；
+- 没有把 `_select_auto_quant_candidates`（Paper workflow + account truth +
+  strategy + risk multipliers + market references + Execution page）或
+  `_apply_intraday_watchlist`（Scanner + Market + Account capital）搬进 Scanner：
+  它们是 cross-workflow composition，搬进去会立刻造出反向依赖；
+- 没有搬 generic task lifecycle（`TaskThread` / `DesktopTaskController` / worker
+  列表 / busy dialog）——Scanner 只拿到窄 callable `submit_task`，也不持有 worker；
+- 没有持有 `QMessageBox`：缺 universe 走 `refused` 信号，窗口用
+  `_report_scanner_refusal` 以原有 severity 显示；
+- 没有给 ScannerOrchestrator 加 `results` / `skipped` / `summary` /
+  `scanned_count` / `trade_candidates` / `research_count` / `scan_path` /
+  `service` / `page` 这类 accessor：domain `MarketScan` 本身已是只读 finished
+  fact，这些不是 capability API；
+- 没有为了"命名好看"大规模 rename `DesktopMarketScanService`，也没有改
+  `scanner.py` 的扫描算法、score policy、China exclusion policy、whole-share
+  sizing 或 History scheduling 行为。
 
 Framework v2C 刻意没有做的事，留给更后面：
 

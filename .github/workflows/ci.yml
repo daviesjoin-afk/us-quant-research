@@ -23,7 +23,16 @@ jobs:
       QT_QPA_PLATFORM: offscreen
       US_QUANT_SELF_TEST: "1"
       PYTHONUTF8: "1"
+      PYTHONPATH: src
 
+    # Verification is four steps rather than one ``verify.ps1`` call so the log
+    # says *which* gate took the time.  Before the split, a 7-13 minute run
+    # reported one number and there was no way to see that pytest was ~99% of it.
+    #
+    # Both Python versions still run the **complete** pytest suite.  Dropping
+    # 3.13 to a smoke subset would save little wall-clock -- the two jobs run in
+    # parallel -- while removing the compatibility gate that exists to catch a
+    # 3.13-only behaviour change.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,6 +49,28 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install -e ".[desktop,test]"
 
-      - name: Verify repository
+      - name: Run tests
         shell: pwsh
-        run: .\scripts\verify.ps1
+        # ``-n 4 --dist=loadscope``: four explicit workers, never ``auto``.
+        # This suite builds Qt applications, MainWindow instances, SQLite files
+        # and temp trees, so an unbounded worker count is how a runner runs out
+        # of CPU and RAM.  ``loadscope`` keeps a module's tests on one worker,
+        # which is what keeps module fixtures and Qt global state intact.
+        # Measured locally: ~70% off sequential wall time on both versions.
+        # ``--durations=30`` is capped deliberately -- ``0`` would print every
+        # test and bury the signal in the log.
+        run: python -m pytest -q -n 4 --dist=loadscope --durations=30
+
+      - name: Doctor
+        shell: pwsh
+        run: python -m us_quant doctor
+
+      - name: Compile
+        shell: pwsh
+        run: python -m compileall -q src tests
+
+      - name: Desktop offscreen self-test
+        shell: pwsh
+        run: |
+          python -c "import PySide6"
+          python desktop_main.py

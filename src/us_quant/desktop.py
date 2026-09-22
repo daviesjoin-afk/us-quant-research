@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import datetime
 from decimal import Decimal
 import json
 import os
@@ -182,6 +182,10 @@ from us_quant.desktop_v2.orchestration.research.history import (
 from us_quant.desktop_v2.orchestration.research.universe import (
     UniverseOrchestrator,
 )
+from us_quant.desktop_v2.orchestration.research.scanner import (
+    ScannerOrchestrator,
+    ScannerRunInputs,
+)
 from us_quant.desktop_v2.pages.execution import ExecutionPage
 from us_quant.desktop_v2.pages.execution.presenter import (
     build_candidates_view,
@@ -204,10 +208,6 @@ from us_quant.desktop_v2.pages.research.targeted.session_presenter import (
 from us_quant.desktop_v2.pages.research.universe import UniversePage
 from us_quant.desktop_v2.pages.research.history import HistoryPage
 from us_quant.desktop_v2.pages.research.scanner import ScannerPage
-from us_quant.desktop_v2.pages.research.scanner.models import ScannerChartView
-from us_quant.desktop_v2.pages.research.scanner.presenter import (
-    build_scanner_view,
-)
 from us_quant.desktop_v2.pages.research.backtest import BacktestPage
 from us_quant.desktop_v2.pages.research.backtest.models import (
     BacktestFormDraft,
@@ -567,17 +567,17 @@ class MainWindow(QMainWindow):
         self.targeted_execution_stress_results: list[
             TargetedExecutionStressResult
         ] = []
-        self.scan: MarketScan | None = None
         self.cross_section_report: dict | None = None
         self._research_capital_value = int(self.config.initial_equity)
         self.task_controller = DesktopTaskController[TaskThread]()
         self.workers = self.task_controller.workers
-        # The universe and history routes keep their runtime in
+        # The universe, history and scanner routes keep their runtime in
         # ``desktop_v2/orchestration/research``.  There is deliberately no
-        # ``self.universe``, no refresh ``Event``/worker handle and no history
-        # progress percentage here, and no compatibility property either: a
-        # forwarding property would keep every unmigrated caller silently
-        # working, so "who reads universe truth" would stop being one grep.
+        # ``self.universe``, no ``self.scan``, no refresh ``Event``/worker
+        # handle and no history progress percentage here, and no compatibility
+        # property either: a forwarding property would keep every unmigrated
+        # caller silently working, so "who reads universe or scan truth" would
+        # stop being one grep.
         # Admission gate for new background work.  The runtime supervisor
         # raises it as the first step of teardown so a close cannot race a
         # task that is still being admitted.
@@ -767,6 +767,21 @@ class MainWindow(QMainWindow):
         )
         self._connect_history_page()
         self.scanner_page = ScannerPage(palette=self.theme)
+        # The scanner route's desktop runtime -- the canonical scan, the manual
+        # scan request, the startup restore, the cross-workflow adoption and the
+        # chart read -- belongs to ``scanner_orchestrator``.  Note what is *not*
+        # stored: there is no ``self.scan``, because this orchestrator is the
+        # canonical desktop owner and every consumer reads
+        # ``scanner_orchestrator.scan``.  Both providers are callables, so the
+        # capability never imports the universe implementation and never reads
+        # ``config``: the window decides what a scan runs with.
+        self.scanner_orchestrator = ScannerOrchestrator(
+            service=self.market_scan_service,
+            page=self.scanner_page,
+            submit_task=self._start_task,
+            universe_provider=lambda: self.universe_orchestrator.snapshot,
+            run_inputs_provider=self._scanner_run_inputs,
+        )
         self._connect_scanner_page()
         self.backtest_page = BacktestPage(
             per_share_commission=(
@@ -1381,9 +1396,57 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, title, message)
 
     def _connect_scanner_page(self) -> None:
+        """Wiring only: the page reports intent, the capability owns the work."""
+
         page = self.scanner_page
-        page.scan_requested.connect(self._run_scan)
-        page.symbol_selected.connect(self._scanner_symbol_selected)
+        page.scan_requested.connect(
+            self.scanner_orchestrator.request_scan
+        )
+        page.symbol_selected.connect(
+            self.scanner_orchestrator.request_chart
+        )
+        orchestrator = self.scanner_orchestrator
+        orchestrator.log_requested.connect(self._log)
+        # A refusal is the window's to show: the scanner capability holds no
+        # widget, which is what keeps it free of dialogs.
+        orchestrator.refused.connect(self._report_scanner_refusal)
+        # Both a manual scan and a cross-workflow adoption publish here, so the
+        # scope line follows either without the window tracking them separately.
+        # Startup restoration deliberately publishes nothing; ``_load_local_state``
+        # refreshes the scope once at the end for every startup path.
+        orchestrator.scan_changed.connect(
+            self._refresh_market_scope_summary
+        )
+
+    def _scanner_run_inputs(self) -> ScannerRunInputs:
+        """Freeze the facts one scan runs with, on the UI thread.
+
+        This is a composition bridge, not scanner logic.  The research capital
+        is a window-owned scalar, the risk percentage and the substitution
+        rules are configuration, and the scanner capability is deliberately
+        ignorant of all three: it receives a finished, immutable value.
+
+        Called at *request* time, so a capital change that lands while a scan
+        is queued cannot change the scan that is about to run.
+        """
+
+        return ScannerRunInputs.of(
+            capital=self._research_scenario_capital(),
+            max_position_risk_pct=(
+                self.config.risk_limits.max_position_exposure_pct
+            ),
+            substitutions=self.config.substitutions,
+        )
+
+    def _report_scanner_refusal(self, title: str, message: str) -> None:
+        """Surface a request the scanner layer refused before scanning.
+
+        ``information`` rather than ``warning``: this is the severity the
+        pre-extraction inline dialog used, and the extraction is not an
+        occasion to change how the operator is told.
+        """
+
+        QMessageBox.information(self, title, message)
 
     def _connect_cross_section_page(self) -> None:
         page = self.cross_section_page
@@ -1423,41 +1486,6 @@ class MainWindow(QMainWindow):
             shadow_stop_enabled=shadow_active,
             replay_enabled=True,
             robustness_enabled=True,
-        )
-
-    def _publish_scanner_view(self) -> None:
-        """Project the scan truth onto the native scanner page."""
-        universe = self.universe_orchestrator.snapshot
-
-        if not hasattr(self, "scanner_page"):
-            return
-        if universe is not None:
-            research_count = int(
-                universe.summary()["research_eligible"]
-            )
-        elif self.scan is not None:
-            research_count = len(self.scan.results) + len(self.scan.skipped)
-        else:
-            research_count = 0
-        self.scanner_page.render(
-            build_scanner_view(
-                self.scan,
-                research_count=research_count,
-            )
-        )
-
-    def _scanner_symbol_selected(self, symbol: str) -> None:
-        try:
-            points = load_close_series(
-                symbol,
-                data_root=self.data_root,
-                fallback_data_root=self.bundled_data_root,
-            )
-        except Exception as error:
-            self._log(f"{symbol} 图表读取失败：{error}")
-            return
-        self.scanner_page.render_chart(
-            ScannerChartView(symbol=symbol, points=points)
         )
 
     def _publish_targeted_view(self) -> None:
@@ -1565,8 +1593,11 @@ class MainWindow(QMainWindow):
             self.universe_orchestrator.render_current()
         self.history_orchestrator.render_current()
         self._probe_gateway()
-        if self.scan_path.exists():
-            self._load_scan_file()
+        # The scanner capability owns the artifact schema now: it restores the
+        # saved scan and paints exactly once, and publishes nothing because
+        # re-reading a local file is not a new scan.  The window therefore
+        # neither parses the JSON nor repaints the page here.
+        self.scanner_orchestrator.restore_saved()
         self._refresh_market_scope_summary()
         if self.cross_section_path.exists():
             self._load_cross_section_report()
@@ -1627,50 +1658,6 @@ class MainWindow(QMainWindow):
             )
         )
         self._publish_targeted_view()
-
-    def _run_scan(self) -> None:
-        universe = self.universe_orchestrator.snapshot
-        if universe is None:
-            QMessageBox.information(
-                self,
-                "缺少标的池",
-                "请先刷新官方标的。",
-            )
-            return
-
-        research_capital = self._research_scenario_capital()
-
-        def task(progress: Callable[[str], None]) -> MarketScan:
-            progress("正在读取已通过质量门的本地日 K…")
-            return self.market_scan_service.scan(
-                # Read at execution time, not at request time: a refresh that
-                # landed while this task queued must be the universe scanned.
-                # The capital above is deliberately the opposite -- it is a
-                # UI-thread snapshot taken before the worker starts.
-                self.universe_orchestrator.snapshot,
-                capital=research_capital,
-                max_position_risk_pct=(
-                    self.config.risk_limits.max_position_exposure_pct
-                ),
-                substitutions=self.config.substitutions,
-            )
-
-        self._start_task(
-            task,
-            on_success=self._scan_finished,
-            start_message="市场扫描中…",
-            resource_group="scan",
-        )
-
-    def _scan_finished(self, result: object) -> None:
-        self.scan = result  # type: ignore[assignment]
-        self._publish_scanner_view()
-        self._refresh_market_scope_summary()
-        summary = self.scan.summary()
-        self._log(
-            f"扫描完成：{summary['scanned']} 个，"
-            f"趋势候选 {summary['positive_signal']} 个。"
-        )
 
     def _connect_backtest_page(self) -> None:
         page = self.backtest_page
@@ -1876,7 +1863,9 @@ class MainWindow(QMainWindow):
             )
             result = run_executable_cross_sectional_research(
                 research_config,
-                # Execution-time read, same rule as ``_run_scan``.
+                # Execution-time read: the same timing rule the scanner's
+                # manual request uses, so a refresh that landed while this
+                # task queued is the universe that gets researched.
                 self.universe_orchestrator.snapshot,
                 data_root=Path(self.data_root),
                 fallback_data_root=Path(
@@ -1926,41 +1915,9 @@ class MainWindow(QMainWindow):
             )
             self._publish_cross_section_view()
 
-    def _load_scan_file(self) -> None:
-        try:
-            payload = json.loads(
-                self.scan_path.read_text(encoding="utf-8")
-            )
-            from us_quant.scanner import ScanResult
-
-            results = []
-            for row in payload["results"]:
-                row["trading_date"] = date.fromisoformat(
-                    row["trading_date"]
-                )
-                results.append(ScanResult(**row))
-            self.scan = MarketScan(
-                generated_at=datetime.fromisoformat(
-                    payload["generated_at"]
-                ),
-                capital=float(payload["capital"]),
-                data_date=(
-                    date.fromisoformat(payload["data_date"])
-                    if payload["data_date"]
-                    else None
-                ),
-                results=tuple(results),
-                skipped=dict(payload["skipped"]),
-                max_position_risk_pct=float(
-                    payload.get("max_position_risk_pct", 0.10)
-                ),
-            )
-            self._publish_scanner_view()
-        except Exception:
-            self.scan = None
-
     def _apply_intraday_watchlist(self) -> None:
-        if self.scan is None:
+        scan = self.scanner_orchestrator.scan
+        if scan is None:
             return
         if self.market_orchestrator.is_live:
             return
@@ -1969,7 +1926,7 @@ class MainWindow(QMainWindow):
             paper_capital or self._research_scenario_capital()
         )
         symbols = select_intraday_watchlist(
-            self.scan,
+            scan,
             capital=selection_capital,
         )
         if symbols:
@@ -1978,7 +1935,7 @@ class MainWindow(QMainWindow):
                 note="实时订阅子集；不限制研究或交易范围",
             )
             self._log(
-                f"已从 {len(self.scan.results):,} 个最近扫描结果中选出 "
+                f"已从 {len(scan.results):,} 个最近扫描结果中选出 "
                 f"{len(symbols)} 个实时订阅代码；"
                 "30 是行情连接上限，不是广域股票池大小"
             )
@@ -2198,7 +2155,8 @@ class MainWindow(QMainWindow):
                 "自动量化第 1 步：扫描全部非中概研究池及已有合格日 K…"
             )
             result = scan_market(
-                # Execution-time read, same rule as ``_run_scan``.
+                # Execution-time read: the same timing rule the scanner's
+                # manual request uses.
                 self.universe_orchestrator.snapshot,
                 data_root=self.data_root,
                 fallback_data_root=self.bundled_data_root,
@@ -2232,7 +2190,12 @@ class MainWindow(QMainWindow):
     def _auto_market_scan_finished(self, result: object) -> None:
         if not isinstance(result, MarketScan):
             raise TypeError("unexpected full-market scan result")
-        self.scan = result
+        # The AutoQuant preparation path runs its own scan on purpose -- it is
+        # wired into Paper PREPARING and failure cleanup -- and then hands the
+        # finished fact to the capability that owns scan truth.  The direction
+        # is AutoQuant -> Scanner: the scanner never learns Paper exists, and no
+        # manual "扫描完成" line is written because nobody clicked 扫描.
+        self.scanner_orchestrator.adopt_external_scan(result)
         universe = self.universe_orchestrator.snapshot
         scheduled = HistoryJobStore(self.queue_path).schedule(
             prioritized_research_symbols(universe, limit=None)
@@ -2240,8 +2203,6 @@ class MainWindow(QMainWindow):
             else ()
         )
         self.history_orchestrator.render_current()
-        self._publish_scanner_view()
-        self._refresh_market_scope_summary()
         if scheduled:
             self._log(
                 f"全市场历史缺口已自动加入数据任务队列：新增 "
@@ -2251,7 +2212,8 @@ class MainWindow(QMainWindow):
 
     def _select_auto_quant_candidates(self) -> None:
         universe = self.universe_orchestrator.snapshot
-        if self.scan is None or universe is None:
+        scan = self.scanner_orchestrator.scan
+        if scan is None or universe is None:
             if self.paper_trading.phase() is PaperWorkflowPhase.PREPARING:
                 self.paper_workflow.cancel_preparing()
             self._set_launch_busy(False)
@@ -2289,7 +2251,7 @@ class MainWindow(QMainWindow):
             )
         )
         eligible = select_paper_rotation_rows(
-            self.scan,
+            scan,
             universe,
             capital=paper_capital,
             max_position_fraction=(
@@ -2344,8 +2306,8 @@ class MainWindow(QMainWindow):
         self.execution_page.render_context(
             scope=(
                 f"全市场入口：非中概研究池 {research_count:,} · "
-                f"本轮有合格日 K 并完成评分 {len(self.scan.results):,} · "
-                f"缺数据/不足200根 {len(self.scan.skipped):,} · "
+                f"本轮有合格日 K 并完成评分 {len(scan.results):,} · "
+                f"缺数据/不足200根 {len(scan.skipped):,} · "
                 f"Paper 实时轮动候选 {len(symbols)}。"
             ),
             summary=(
@@ -4738,12 +4700,9 @@ class MainWindow(QMainWindow):
         )
         total_count = int(universe_summary.get("total", 0))
         history_count = self._local_history_symbol_count()
-        scanned_count = (
-            len(self.scan.results) if self.scan is not None else 0
-        )
-        missing_count = (
-            len(self.scan.skipped) if self.scan is not None else 0
-        )
+        scan = self.scanner_orchestrator.scan
+        scanned_count = len(scan.results) if scan is not None else 0
+        missing_count = len(scan.skipped) if scan is not None else 0
         scope = (
             f"范围分层 · 官方美股/ETF {total_count:,} · "
             f"排除中概后的研究池 {research_count:,} · "

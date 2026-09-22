@@ -271,9 +271,11 @@ def test_scanner_reads_the_updated_central_capital(
         seen["capital"] = capital
         return "SCAN"
 
-    monkeypatch.setattr(window, "_start_task", fake_start)
+    monkeypatch.setattr(
+        window.scanner_orchestrator, "_submit_task", fake_start
+    )
     monkeypatch.setattr(window.market_scan_service, "scan", fake_scan)
-    window._run_scan()
+    window.scanner_orchestrator.request_scan()
     assert seen["capital"] == Decimal(2500)
     assert seen["result"] == "SCAN"
 

@@ -73,7 +73,6 @@ REFACTORED_METHODS = (
 LATER_ROUND_METHODS = (
     "_settings_tab",  # step 11: the Settings page moved into a panel
     "_refresh_universe",  # step 13: the refresh moved into a service
-    "_run_scan",  # step 14: the manual scan moved into a service
     "_run_backtest_workspace",  # step 15: the batch loop moved into a service
 )
 
@@ -398,12 +397,8 @@ SCANNER_V2_REMOVED_METHODS = (
 )
 SCANNER_V2_ADDED_METHODS = (
     "_connect_scanner_page",
-    "_publish_scanner_view",
-    "_scanner_symbol_selected",
 )
 SCANNER_V2_METHODS = (
-    "_scan_finished",
-    "_load_scan_file",
     "_auto_market_scan_finished",
     "_apply_theme",
 )
@@ -592,6 +587,34 @@ DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS = (
     "_request_worker_stops",
     "_run_targeted_replay",
     "_run_targeted_robustness",
+)
+
+# v2O-C2 (Research scanner): the scan truth, the manual scan request, the
+# startup restore, the cross-workflow adoption and the chart read moved into
+# ``desktop_v2/orchestration/research/scanner``.  Five handlers left, two
+# arrived, and five more changed because they used to read ``self.scan`` off the
+# window.  ``_publish_scanner_view`` and ``_scanner_symbol_selected`` were
+# *added* by the ScannerPage round and *removed* here, so they exist at neither
+# revision and belong to neither delta; they are pinned separately below.
+DESKTOP_SCANNER_ORCHESTRATION_V2_NET_ZERO_METHODS = (
+    "_publish_scanner_view",
+    "_scanner_symbol_selected",
+)
+DESKTOP_SCANNER_ORCHESTRATION_V2_REMOVED_METHODS = (
+    "_run_scan",
+    "_scan_finished",
+    "_load_scan_file",
+)
+DESKTOP_SCANNER_ORCHESTRATION_V2_ADDED_METHODS = (
+    "_scanner_run_inputs",
+    "_report_scanner_refusal",
+)
+DESKTOP_SCANNER_ORCHESTRATION_V2_METHODS = (
+    "_load_local_state",
+    "_auto_market_scan_finished",
+    "_apply_intraday_watchlist",
+    "_select_auto_quant_candidates",
+    "_refresh_market_scope_summary",
 )
 
 # v2O-C1: ``_start_task`` gained one optional completion hook.  Each edit is
@@ -1532,6 +1555,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_REMOVED_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_REMOVED_METHODS)
         | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS)
+        | set(DESKTOP_SCANNER_ORCHESTRATION_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1549,6 +1573,26 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_ADDED_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_ADDED_METHODS)
         | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_ADDED_METHODS)
+        | set(DESKTOP_SCANNER_ORCHESTRATION_V2_ADDED_METHODS)
+    )
+
+    # The two methods the ScannerPage round added and this round removed exist
+    # at neither revision.  They are declared separately and asserted absent
+    # from both deltas: dropping them silently would hide a real deletion.
+    declared_scanner = set(
+        DESKTOP_SCANNER_ORCHESTRATION_V2_REMOVED_METHODS
+    ) | set(DESKTOP_SCANNER_ORCHESTRATION_V2_ADDED_METHODS)
+    assert not (
+        set(DESKTOP_SCANNER_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & declared_scanner
+    )
+    assert not (
+        set(DESKTOP_SCANNER_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & (set(base_methods) - set(current_methods))
+    )
+    assert not (
+        set(DESKTOP_SCANNER_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & (set(current_methods) - set(base_methods))
     )
 
     changed = []
@@ -1586,6 +1630,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS)
         | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS)
+        | set(DESKTOP_SCANNER_ORCHESTRATION_V2_METHODS)
     )
     assert set(changed) <= declared
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)
@@ -1605,6 +1650,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(DESKTOP_MARKET_ORCHESTRATION_V2_METHODS) <= set(changed)
     assert set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS) <= set(changed)
     assert set(DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS) <= set(changed)
+    assert set(DESKTOP_SCANNER_ORCHESTRATION_V2_METHODS) <= set(changed)
     for name in REFACTORED_METHODS:
         if name != "__init__":
             assert name in changed, name

@@ -249,7 +249,13 @@ def test_a_successful_refresh_is_what_the_downstream_readers_see(
 def test_the_scan_hands_the_orchestrators_snapshot_to_the_service(
     window, monkeypatch, silent_dialogs
 ) -> None:
-    """Spec 29: ``_run_scan`` reads the capability, not a window attribute."""
+    """Spec 29: the scan reads the capability, not a window attribute.
+
+    v2O-C2 moved the request to ``ScannerOrchestrator``, so the task boundary
+    is now the orchestrator's own injected ``submit_task``.  What this test has
+    always protected is unchanged: the universe that reaches the service is the
+    one the *universe capability* published, not a copy the window kept.
+    """
 
     snapshot = _universe("NVDA")
     window.universe_orchestrator.restore_snapshot(snapshot)
@@ -257,8 +263,8 @@ def test_the_scan_hands_the_orchestrators_snapshot_to_the_service(
     seen: dict = {}
     captured: list = []
     monkeypatch.setattr(
-        window,
-        "_start_task",
+        window.scanner_orchestrator,
+        "_submit_task",
         lambda task, **kwargs: captured.append(task) or True,
     )
     monkeypatch.setattr(
@@ -267,7 +273,7 @@ def test_the_scan_hands_the_orchestrators_snapshot_to_the_service(
         lambda universe, **kwargs: seen.setdefault("universe", universe),
     )
 
-    window._run_scan()
+    window.scanner_orchestrator.request_scan()
     captured[0](lambda _message: None)
 
     assert seen["universe"] is snapshot

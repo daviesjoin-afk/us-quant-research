@@ -33,6 +33,7 @@ _DESKTOP = _SRC / "desktop.py"
 _RESEARCH = _SRC / "desktop_v2" / "orchestration" / "research"
 _UNIVERSE_DIR = _RESEARCH / "universe"
 _HISTORY_DIR = _RESEARCH / "history"
+_SCANNER_DIR = _RESEARCH / "scanner"
 
 #: Spec 43: this file must never exist, and these classes must never be
 #: declared.  One object owning all of Universe/History/Scanner/Backtest/
@@ -81,6 +82,28 @@ ALLOWED_IMPORTS = {
         "us_quant.ibkr",
         "us_quant.universe",
     },
+    "scanner/__init__.py": {
+        "__future__",
+        "us_quant.desktop_v2.orchestration.research.scanner.models",
+        "us_quant.desktop_v2.orchestration.research.scanner.orchestrator",
+    },
+    "scanner/models.py": {
+        "__future__",
+        "dataclasses",
+        "decimal",
+        "us_quant.portfolio",
+    },
+    "scanner/orchestrator.py": {
+        "__future__",
+        "collections.abc",
+        "PySide6.QtCore",
+        "us_quant.desktop_market_scan_service",
+        "us_quant.desktop_v2.orchestration.research.scanner.models",
+        "us_quant.desktop_v2.pages.research.scanner.models",
+        "us_quant.desktop_v2.pages.research.scanner.presenter",
+        "us_quant.scanner",
+        "us_quant.universe",
+    },
 }
 
 #: Spec 35: symbols no Research capability may import, by name.  A module-path
@@ -106,6 +129,13 @@ FORBIDDEN_SYMBOLS = (
 #: Spec 35: the same ban expressed as module paths.  ``Paper*`` / ``Shadow*`` /
 #: ``Execution*`` are prefixes rather than exact names, and a symbol guard would
 #: miss ``import us_quant.trading.application.paper_session`` entirely.
+#:
+#: ``us_quant.scanner`` is deliberately **not** here.  The C1 round banned it
+#: because Scanner was a later slice; v2O-C2 makes Scanner this package's own
+#: capability, and the scanner domain module is where ``MarketScan`` -- the
+#: immutable fact the capability publishes -- is declared.  The ban that still
+#: matters is on Scanner reaching *other* capabilities' domains, and on the
+#: orchestrators themselves (see ``FORBIDDEN_SYMBOLS``).
 FORBIDDEN_MODULE_PREFIXES = (
     "us_quant.desktop",
     "us_quant.desktop_workers",
@@ -117,7 +147,6 @@ FORBIDDEN_MODULE_PREFIXES = (
     "us_quant.shadow",
     "us_quant.paper",
     "us_quant.execution",
-    "us_quant.scanner",
     "us_quant.backtest",
     "us_quant.cross_section",
 )
@@ -128,17 +157,28 @@ FORBIDDEN_MODULE_PREFIXES = (
 ALLOWED_DESKTOP_MODULES = (
     "us_quant.desktop_universe_service",
     "us_quant.desktop_history_service",
+    "us_quant.desktop_market_scan_service",
 )
 
-#: Spec 36: the two capabilities must not know each other.  History reaches the
-#: universe through a ``Callable`` provider, so a change to how the universe is
-#: implemented cannot ripple into History.
+#: Spec 36: the capabilities must not know each other.  History reaches the
+#: universe through a ``Callable`` provider, and Scanner does the same -- so a
+#: change to how the universe is implemented cannot ripple into either.
 MUTUAL_FORBIDDEN = {
-    "universe": ("HistoryOrchestrator",),
-    "history": ("UniverseOrchestrator",),
+    "universe": ("HistoryOrchestrator", "ScannerOrchestrator"),
+    "history": ("UniverseOrchestrator", "ScannerOrchestrator"),
+    "scanner": ("UniverseOrchestrator", "HistoryOrchestrator"),
 }
 
-#: The runtime state the window must no longer hold (spec 27/42).
+#: The capability subpackages, for the mutual-import and line-budget guards.
+_CAPABILITY_DIRS = {
+    "universe": _UNIVERSE_DIR,
+    "history": _HISTORY_DIR,
+    "scanner": _SCANNER_DIR,
+}
+
+#: The runtime state the window must no longer hold (spec 27/42).  v2O-C2 adds
+#: the Scanner half: the scan is the capability's fact now, so the window must
+#: declare no ``self.scan`` of its own -- and no compatibility property either.
 RETIRED_WINDOW_STATE = (
     "self.universe ",
     "self.universe:",
@@ -146,6 +186,9 @@ RETIRED_WINDOW_STATE = (
     "universe_refresh_cancel_event",
     "universe_refresh_worker",
     "_history_progress_percent",
+    "self.scan ",
+    "self.scan:",
+    "self.scan =",
 )
 
 #: The methods the window must no longer declare (spec 28).
@@ -162,6 +205,16 @@ RETIRED_WINDOW_METHODS = (
     "_history_task_failed",
     "_run_public_history",
     "_retry_failed",
+    # v2O-C2: the scanner handlers.  ``_publish_scanner_view`` and
+    # ``_scanner_symbol_selected`` are listed even though they arrived with the
+    # ScannerPage round rather than existing at this file's base commit: what
+    # this guard asserts is the end state, and "the window does not paint or
+    # load the scanner" is exactly the property v2O-C2 establishes.
+    "_run_scan",
+    "_scan_finished",
+    "_load_scan_file",
+    "_publish_scanner_view",
+    "_scanner_symbol_selected",
 )
 
 
@@ -169,7 +222,8 @@ RETIRED_WINDOW_METHODS = (
 #: equality, so a convenience accessor (``research_symbols()``,
 #: ``eligible_symbols()``, ``summary()`` ...) fails here.  Spec 30 forbids
 #: turning the orchestrator into a domain facade: other workflows read the
-#: immutable ``UniverseSnapshot`` itself, not a method that wraps it.
+#: immutable ``UniverseSnapshot`` / ``MarketScan`` itself, not a method that
+#: wraps it.
 PUBLIC_SURFACE = {
     "universe": (
         # Signals, which are the capability's published facts.
@@ -194,6 +248,21 @@ PUBLIC_SURFACE = {
         "request_schedule",
         "retry_failed",
     ),
+    "scanner": (
+        # Signals, which are the capability's published facts.
+        "log_requested",
+        "refused",
+        "scan_changed",
+        # The read-only fact.
+        "scan",
+        # The three deliberately distinct ways a scan can arrive, plus the
+        # chart read and the single render entry point.
+        "adopt_external_scan",
+        "render_current",
+        "request_chart",
+        "request_scan",
+        "restore_saved",
+    ),
 }
 
 #: Spec 30: names that would make the orchestrator a domain facade.
@@ -212,8 +281,11 @@ FORBIDDEN_ACCESSORS = (
 #: half-finished migration from looking complete: a reader who sees "Scanner
 #: migrated" in one guard and "Scanner state still in MainWindow" in another has
 #: found a real inconsistency rather than a stale comment.
+#:
+#: v2O-C2 moved Scanner out, so ``self.scan`` is gone from this list and pinned
+#: in ``RETIRED_WINDOW_STATE`` instead.  Backtest, Cross-Section and Shadow
+#: remain here: they are still later slices.
 UNTOUCHED_WINDOW_STATE = (
-    "self.scan = ",
     "self.backtest_runs",
     "self._selected_backtest_run_id",
     "self._backtest_busy",
@@ -292,26 +364,52 @@ def _method_source(name: str) -> str | None:
 def _render_callers(page_name: str) -> list[str]:
     """Files in ``src/`` that call ``.render(...)`` on ``<page_name>``."""
 
-    offenders: list[str] = []
-    for path in _python_files(_SRC):
-        for node in ast.walk(_parse(path)):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            if not isinstance(func, ast.Attribute) or func.attr != "render":
-                continue
-            target = func.value
-            name = (
-                target.id
-                if isinstance(target, ast.Name)
-                else target.attr
-                if isinstance(target, ast.Attribute)
-                else ""
-            )
-            if name == page_name:
-                offenders.append(str(path.relative_to(_SRC)))
-                break
-    return offenders
+    return [
+        str(path.relative_to(_SRC))
+        for path in _python_files(_SRC)
+        if _calls_method_on(path, page_name, "render")
+    ]
+
+
+def _calls_method_named(path: pathlib.Path, method: str) -> bool:
+    """Does ``path`` call ``<anything>.<method>(...)``?"""
+
+    for node in ast.walk(_parse(path)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == method:
+            return True
+    return False
+
+
+def _calls_method_on(
+    path: pathlib.Path, page_name: str, method: str
+) -> bool:
+    """Does ``path`` call ``<page_name>.<method>(...)``?
+
+    Matched on the *attribute chain*, so both ``self._page.render(...)`` and
+    ``self.scanner_page.render(...)`` are found -- the guard must not be
+    defeatable by renaming the receiver.
+    """
+
+    for node in ast.walk(_parse(path)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute) or func.attr != method:
+            continue
+        target = func.value
+        name = (
+            target.id
+            if isinstance(target, ast.Name)
+            else target.attr
+            if isinstance(target, ast.Attribute)
+            else ""
+        )
+        if name == page_name:
+            return True
+    return False
 
 
 # -- spec 43: no Research god object -----------------------------------
@@ -400,7 +498,7 @@ def test_the_window_declares_no_compatibility_property() -> None:
 
 
 def test_the_window_does_not_reach_into_the_orchestrators() -> None:
-    """Spec 42: no ``universe_orchestrator._x`` / ``history_orchestrator._x``."""
+    """Spec 42: no ``universe_orchestrator._x`` / ``..._orchestrator._x``."""
 
     offenders: list[str] = []
     for node in ast.walk(_main_window()):
@@ -409,7 +507,12 @@ def test_the_window_does_not_reach_into_the_orchestrators() -> None:
         owner = node.value
         if (
             isinstance(owner, ast.Attribute)
-            and owner.attr in ("universe_orchestrator", "history_orchestrator")
+            and owner.attr
+            in (
+                "universe_orchestrator",
+                "history_orchestrator",
+                "scanner_orchestrator",
+            )
         ):
             offenders.append(f"{owner.attr}.{node.attr}")
     assert not offenders, offenders
@@ -419,8 +522,10 @@ def test_the_window_does_not_reach_into_the_orchestrators() -> None:
 
 
 def test_the_window_never_calls_a_page_render_entry_point() -> None:
-    offenders = _render_callers("universe_page") + _render_callers(
-        "history_page"
+    offenders = (
+        _render_callers("universe_page")
+        + _render_callers("history_page")
+        + _render_callers("scanner_page")
     )
     assert offenders == [], offenders
 
@@ -434,7 +539,11 @@ def _page_render_count(directory: pathlib.Path) -> int:
 
 @pytest.mark.parametrize(
     ("directory", "expected"),
-    ((_UNIVERSE_DIR, "universe"), (_HISTORY_DIR, "history")),
+    (
+        (_UNIVERSE_DIR, "universe"),
+        (_HISTORY_DIR, "history"),
+        (_SCANNER_DIR, "scanner"),
+    ),
 )
 def test_each_capability_renders_its_own_page_exactly_once(
     directory: pathlib.Path, expected: str
@@ -450,8 +559,28 @@ def test_each_capability_renders_its_own_page_exactly_once(
     )
 
 
+def test_the_scanner_chart_has_exactly_one_caller() -> None:
+    """Spec 16/38: the chart, like the page, is painted from one place.
+
+    ``render_chart`` is a second render entry point, so the same rule applies:
+    exactly one call site, in the capability.  Counted by *method name* over the
+    whole source tree, because the failure mode is the window regaining a chart
+    path -- and the capability reaches its page as ``self._page``, so matching
+    on the receiver name would miss the very call this guard is about.
+    """
+
+    offenders = [
+        path
+        for path in _python_files(_SRC)
+        if _calls_method_named(path, "render_chart")
+    ]
+    assert offenders == [_SCANNER_DIR / "orchestrator.py"], [
+        str(path.relative_to(_SRC)) for path in offenders
+    ]
+
+
 @pytest.mark.parametrize(
-    "page_class", ("UniversePage", "HistoryPage")
+    "page_class", ("UniversePage", "HistoryPage", "ScannerPage")
 )
 def test_the_page_class_is_constructed_once_in_the_whole_source_tree(
     page_class: str,
@@ -562,10 +691,13 @@ def test_the_research_capabilities_import_no_forbidden_module() -> None:
     ("package", "forbidden"),
     tuple(MUTUAL_FORBIDDEN.items()),
 )
-def test_the_two_capabilities_do_not_know_each_other(
+def test_the_capabilities_do_not_know_each_other(
     package: str, forbidden: tuple[str, ...]
 ) -> None:
-    directory = _UNIVERSE_DIR if package == "universe" else _HISTORY_DIR
+    directory = _CAPABILITY_DIRS[package]
+    others = [
+        name for name in _CAPABILITY_DIRS if name != package
+    ]
     offenders: list[tuple[str, str]] = []
     for path in _python_files(directory):
         names = _imported_names(path)
@@ -574,10 +706,11 @@ def test_the_two_capabilities_do_not_know_each_other(
             if symbol in names:
                 offenders.append((str(path.relative_to(_SRC)), symbol))
         for module in modules:
-            if module.endswith(
-                f"orchestration.research.{'history' if package == 'universe' else 'universe'}"
-            ):
-                offenders.append((str(path.relative_to(_SRC)), module))
+            for other in others:
+                if module.endswith(
+                    f"orchestration.research.{other}"
+                ):
+                    offenders.append((str(path.relative_to(_SRC)), module))
     assert not offenders, offenders
 
 
@@ -586,6 +719,27 @@ def test_history_reaches_the_universe_only_through_a_callable() -> None:
 
     source = (_HISTORY_DIR / "orchestrator.py").read_text(encoding="utf-8")
     assert "universe_provider: Callable[[], UniverseSnapshot | None]" in source
+
+
+def test_scanner_reaches_the_universe_and_config_only_through_callables() -> None:
+    """Spec 36: Scanner takes facts, not the objects that own them.
+
+    Two providers, and the distinction between them is the point:
+
+    * ``universe_provider`` is read at *execution* time, so a refresh that
+      landed while the task queued is the universe that gets scanned;
+    * ``run_inputs_provider`` is called at *request* time, so the capital and
+      risk the operator saw are frozen into the scan.
+
+    Neither may become an object handle: Scanner importing ``UniverseOrchestrator``
+    or reading ``config`` would put it back in the business of deciding what a
+    scan runs with.
+    """
+
+    source = (_SCANNER_DIR / "orchestrator.py").read_text(encoding="utf-8")
+
+    assert "universe_provider: Callable[[], UniverseSnapshot | None]" in source
+    assert "run_inputs_provider: Callable[[], ScannerRunInputs]" in source
 
 
 @pytest.mark.parametrize("needle", FORBIDDEN_HISTORY_STATE)
@@ -642,20 +796,26 @@ def test_the_universe_capability_holds_no_worker_or_task_handle() -> None:
 
 
 def test_the_universe_capability_owns_its_snapshot_as_a_stored_fact() -> None:
-    """The contrast that makes the two designs legible.
+    """The contrast that makes the three designs legible.
 
     Universe stores the snapshot because ``DesktopUniverseService`` is
-    stateless; History stores none because ``DesktopHistoryService`` is not.
-    Asserting both halves together is what keeps the difference from reading as
-    an inconsistency.
+    stateless; History stores none because ``DesktopHistoryService`` is not;
+    Scanner stores the scan because ``DesktopMarketScanService`` is a stateless
+    procedure too.  Asserting all three together is what keeps the difference
+    from reading as an inconsistency.
     """
 
     universe = (_UNIVERSE_DIR / "orchestrator.py").read_text(encoding="utf-8")
     history = (_HISTORY_DIR / "orchestrator.py").read_text(encoding="utf-8")
+    scanner = (_SCANNER_DIR / "orchestrator.py").read_text(encoding="utf-8")
 
     assert "self._snapshot: UniverseSnapshot | None = None" in universe
     assert "self._snapshot" not in history
     assert "self._service.snapshot()" in history
+    # Scanner is the Universe shape: the service is a stateless procedure, so
+    # the fact is stored here rather than re-derived from the service.
+    assert "self._scan: MarketScan | None = None" in scanner
+    assert "self._scan" in scanner
 
 
 # -- spec 16/30: the public surface stays small ------------------------
@@ -689,6 +849,7 @@ def _public_names(relative: str) -> set[str]:
     (
         ("universe", "universe/orchestrator.py"),
         ("history", "history/orchestrator.py"),
+        ("scanner", "scanner/orchestrator.py"),
     ),
 )
 def test_the_public_surface_is_exactly_the_declared_one(
@@ -725,13 +886,31 @@ def test_no_convenience_accessor_was_added(name: str) -> None:
 # -- spec 44: line budget ----------------------------------------------
 
 @pytest.mark.parametrize(
-    "relative", ("universe/orchestrator.py", "history/orchestrator.py")
+    "relative",
+    (
+        "universe/orchestrator.py",
+        "history/orchestrator.py",
+        "scanner/orchestrator.py",
+    ),
 )
 def test_the_line_budget_holds(relative: str) -> None:
     path = _RESEARCH / relative
     count = len(path.read_text(encoding="utf-8").splitlines())
     assert count <= LINE_BUDGET, (
         f"{relative} is {count} lines; over budget means a responsibility "
-        f"leaked in (Scanner, Targeted, Market, System, or the generic task "
+        f"leaked in (Targeted, Backtest, Market, System, or the generic task "
         f"lifecycle) -- split the code, do not raise the budget"
     )
+
+
+def test_the_scanner_models_stay_inside_their_own_budget() -> None:
+    """Spec 41: the Qt-free input module has a tighter ceiling than the rest.
+
+    It carries one value object and nothing else, so exceeding 140 lines means
+    something that is not a run input leaked in.
+    """
+
+    count = len(
+        (_SCANNER_DIR / "models.py").read_text(encoding="utf-8").splitlines()
+    )
+    assert count <= 140, f"scanner/models.py is {count} lines"

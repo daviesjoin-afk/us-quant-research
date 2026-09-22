@@ -9,7 +9,7 @@ from __future__ import annotations
 import ast
 import pathlib
 import subprocess
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -19,6 +19,7 @@ from us_quant.desktop import MainWindow
 from us_quant.universe import UniverseRecord, UniverseSnapshot
 from us_quant.desktop_market_scan_service import DesktopMarketScanService
 from us_quant.paths import STATE_ROOT_ENV
+from us_quant.scanner import MarketScan, ScanResult, save_market_scan
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -102,8 +103,8 @@ RUNTIME_V2B_CHANGED_MODULES = (
 SERVICE_MODULE = "src/us_quant/desktop_market_scan_service.py"
 SERVICE_PATH = _REPO_ROOT / SERVICE_MODULE
 
-# Spec 48: the only two MainWindow methods this step may change.
-REFACTORED_METHODS = ("__init__", "_run_scan")
+# Spec 48: the one MainWindow method this step may change.
+REFACTORED_METHODS = ("__init__",)
 
 # Methods a *later* round legitimately rewrote.  Each round appends the
 # methods it declared; the union is what this guard tolerates relative to
@@ -429,6 +430,40 @@ DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS = (
     "_run_targeted_robustness",
 )
 
+# v2O-C2 (Research scanner): the scan truth, the manual scan request, the
+# startup restore, the cross-workflow adoption and the chart read moved out of
+# the window into ``desktop_v2/orchestration/research/scanner``.  Five handlers
+# left, two arrived, and five more changed because they used to read
+# ``self.scan`` off the window.  ``_publish_scanner_view`` and
+# ``_scanner_symbol_selected`` were *added* by the ScannerPage round and
+# *removed* here, so they exist at neither this file's base commit nor now and
+# belong to neither delta; they are pinned below and asserted absent from both.
+DESKTOP_SCANNER_ORCHESTRATION_V2_NET_ZERO_METHODS = (
+    "_publish_scanner_view",
+    "_scanner_symbol_selected",
+)
+DESKTOP_SCANNER_ORCHESTRATION_V2_REMOVED_METHODS = (
+    "_run_scan",
+    "_scan_finished",
+    "_load_scan_file",
+)
+DESKTOP_SCANNER_ORCHESTRATION_V2_ADDED_METHODS = (
+    "_scanner_run_inputs",
+    "_report_scanner_refusal",
+)
+DESKTOP_SCANNER_ORCHESTRATION_V2_METHODS = (
+    # ``_load_local_state`` asks the capability to restore instead of parsing
+    # the scan JSON itself.
+    "_load_local_state",
+    # The AutoQuant completion hands its finished scan over instead of
+    # assigning ``self.scan`` and painting the page.
+    "_auto_market_scan_finished",
+    # The three cross-workflow consumers read ``scanner_orchestrator.scan``.
+    "_apply_intraday_watchlist",
+    "_select_auto_quant_candidates",
+    "_refresh_market_scope_summary",
+)
+
 SCANNER_V2_REMOVED_METHODS = (
     "_scanner_tab",
     "_populate_scan_table",
@@ -436,12 +471,8 @@ SCANNER_V2_REMOVED_METHODS = (
 )
 SCANNER_V2_ADDED_METHODS = (
     "_connect_scanner_page",
-    "_publish_scanner_view",
-    "_scanner_symbol_selected",
 )
 SCANNER_V2_METHODS = (
-    "_scan_finished",
-    "_load_scan_file",
     "_auto_market_scan_finished",
     "_apply_theme",
 )
@@ -1086,17 +1117,206 @@ def test_the_service_never_swallows_an_exception(tmp_path) -> None:
     assert handlers == []
 
 
+# -- v2O-C2: load_saved (the artifact read) ----------------------------
+
+
+def _saved_scan() -> MarketScan:
+    """A scan with every restorable field set to a non-default value.
+
+    ``max_position_risk_pct`` is deliberately not the dataclass default, and
+    ``skipped`` is non-empty: a reader that dropped either field would still
+    pass against a scan built from defaults.
+    """
+
+    return MarketScan(
+        generated_at=datetime(2026, 9, 18, 12, 30, tzinfo=timezone.utc),
+        capital=4321.0,
+        data_date=date(2026, 9, 18),
+        results=(
+            ScanResult(
+                symbol="AAPL",
+                execution_symbol="AAPL",
+                name="Apple",
+                sector="Technology",
+                leader_tier=1,
+                security_type="STK",
+                trading_date=date(2026, 9, 17),
+                close=100.0,
+                execution_price=100.0,
+                whole_share_capacity=10,
+                average_dollar_volume_20d=1_000_000.0,
+                return_20d=0.01,
+                return_63d=0.02,
+                volatility_20d=0.2,
+                drawdown_252d=-0.1,
+                rsi_14d=55.0,
+                atr_pct_14d=0.02,
+                above_sma_50=True,
+                above_sma_200=True,
+                score=50.0,
+                signal="观察",
+                research_eligible=True,
+                trade_eligible=False,
+                reason="test",
+            ),
+        ),
+        skipped={"MSFT": "insufficient history"},
+        max_position_risk_pct=0.07,
+    )
+
+
+def test_load_saved_returns_none_when_the_file_is_absent(tmp_path) -> None:
+    """The ordinary first-run state: nothing cached is not an error."""
+
+    service = _service(tmp_path)
+
+    assert service.load_saved() is None
+
+
+def test_load_saved_restores_every_field(tmp_path) -> None:
+    """Every serialized fact comes back, compared by value."""
+
+    service = _service(tmp_path)
+    original = _saved_scan()
+    save_market_scan(original, service.scan_path)
+
+    restored = service.load_saved()
+
+    assert restored is not None
+    assert restored.generated_at == original.generated_at
+    assert restored.capital == original.capital
+    assert restored.data_date == original.data_date
+    assert restored.max_position_risk_pct == original.max_position_risk_pct
+    assert restored.skipped == original.skipped
+    assert restored.results == original.results
+
+
+def test_load_saved_restores_the_row_dates_as_dates(tmp_path) -> None:
+    """The two date fields must come back as ``date``, not ``str``.
+
+    A round-trip that left them as strings would still compare equal to nothing
+    useful, so the type is asserted rather than the value.
+    """
+
+    service = _service(tmp_path)
+    save_market_scan(_saved_scan(), service.scan_path)
+
+    restored = service.load_saved()
+
+    assert isinstance(restored.data_date, date)
+    assert isinstance(restored.results[0].trading_date, date)
+
+
+def test_load_saved_uses_the_configured_path(tmp_path) -> None:
+    """The artifact is read from the path this service owns."""
+
+    service = _service(tmp_path)
+    save_market_scan(_saved_scan(), service.scan_path)
+    elsewhere = tmp_path / "other" / "market_scan.json"
+    assert not elsewhere.exists()
+
+    assert service.load_saved() is not None
+
+
+def test_load_saved_raises_on_a_malformed_artifact(tmp_path) -> None:
+    """A corrupt artifact is a real problem, not "no scan".
+
+    Silently degrading it would hide the corruption and make the next scan look
+    like the first one.
+    """
+
+    service = _service(tmp_path)
+    service.scan_path.parent.mkdir(parents=True, exist_ok=True)
+    service.scan_path.write_text("{ not json", encoding="utf-8")
+
+    with pytest.raises(Exception):
+        service.load_saved()
+
+
+def test_load_saved_raises_on_a_truncated_artifact(tmp_path) -> None:
+    """Valid JSON that is missing a required key must also fail loudly."""
+
+    service = _service(tmp_path)
+    service.scan_path.parent.mkdir(parents=True, exist_ok=True)
+    service.scan_path.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(Exception):
+        service.load_saved()
+
+
+# -- v2O-C2: load_chart (the chart read) -------------------------------
+
+
+def test_load_chart_passes_both_roots_to_the_loader(
+    tmp_path, monkeypatch
+) -> None:
+    """The two roots are the service's own, passed verbatim.
+
+    Not read from a global or rebuilt: a chart drawn from a different tree than
+    the scan read would be a second, silently disagreeing data source.
+    """
+
+    import us_quant.desktop_market_scan_service as module
+
+    seen: dict = {}
+    sentinel = ((__import__("datetime").date(2026, 9, 18), 10.0),)
+
+    def fake_loader(symbol, *, data_root, fallback_data_root):
+        seen["symbol"] = symbol
+        seen["data_root"] = data_root
+        seen["fallback_data_root"] = fallback_data_root
+        return sentinel
+
+    monkeypatch.setattr(module, "load_close_series", fake_loader)
+    service = _service(tmp_path)
+
+    result = service.load_chart("AAPL")
+
+    assert result is sentinel
+    assert seen["symbol"] == "AAPL"
+    assert seen["data_root"] is service.data_root
+    assert seen["fallback_data_root"] is service.fallback_data_root
+
+
+def test_load_chart_propagates_a_read_failure(tmp_path, monkeypatch) -> None:
+    """The capability decides that a chart failure is a log line, not this."""
+
+    import us_quant.desktop_market_scan_service as module
+
+    error = FileNotFoundError("no bars")
+
+    def fake_loader(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(module, "load_close_series", fake_loader)
+    service = _service(tmp_path)
+
+    with pytest.raises(FileNotFoundError) as caught:
+        service.load_chart("AAPL")
+
+    assert caught.value is error
+
+
 # -- 17/18/19/39: the service's own boundaries -------------------------
 
 
 def test_the_service_depends_only_on_the_allowed_modules() -> None:
-    """Spec 19/39: dependency set equality, not a forbidden-name scan."""
+    """Spec 19/39: dependency set equality, not a forbidden-name scan.
+
+    v2O-C2 grew the service from "manual scan only" to the Scanner data
+    boundary, which is why the standard-library set now also covers reading
+    the artifact back and the domain set also covers its two row types and the
+    chart loader.  Still compared for equality: a new import must be declared
+    here, in a place a reviewer sees.
+    """
 
     source = SERVICE_PATH.read_text(encoding="utf-8")
 
     assert _module_imports(source) == {
         "__future__",
+        "datetime",
         "decimal",
+        "json",
         "pathlib",
         "us_quant.portfolio",
         "us_quant.scanner",
@@ -1277,7 +1497,13 @@ def test_the_window_does_not_build_a_second_paths_object(
 
 
 def test_a_missing_universe_blocks_the_scan(monkeypatch, tmp_path) -> None:
-    """Spec 5/42: the dialog, and nothing else, happens."""
+    """Spec 5/42: the dialog, and nothing else, happens.
+
+    v2O-C2 moved the request to ``ScannerOrchestrator.request_scan``; the rule
+    is unchanged.  The orchestrator refuses through its ``refused`` signal and
+    the window shows the dialog, so the operator-facing severity and copy are
+    asserted through the window exactly as before.
+    """
 
     window = _window(monkeypatch, tmp_path)
     try:
@@ -1295,7 +1521,9 @@ def test_a_missing_universe_blocks_the_scan(monkeypatch, tmp_path) -> None:
         )
         started: list = []
         monkeypatch.setattr(
-            window, "_start_task", lambda *a, **k: started.append(a) or True
+            window.scanner_orchestrator,
+            "_submit_task",
+            lambda *a, **k: started.append(a) or True,
         )
         scanned: list = []
         monkeypatch.setattr(
@@ -1304,7 +1532,7 @@ def test_a_missing_universe_blocks_the_scan(monkeypatch, tmp_path) -> None:
             lambda *a, **k: scanned.append(a) or "RESULT",
         )
 
-        window._run_scan()
+        window.scanner_orchestrator.request_scan()
 
         assert started == []
         assert scanned == []
@@ -1342,11 +1570,17 @@ def _universe(symbol: str = "AAPL") -> UniverseSnapshot:
 
 
 def _capture_task(window, monkeypatch):
-    """Capture the task ``_run_scan`` starts, without running it.
+    """Capture the task ``request_scan`` starts, without running it.
 
     The dialog is stubbed because a modal ``QMessageBox`` blocks forever
     under ``QT_QPA_PLATFORM=offscreen``, and ``universe`` is defaulted so
     the missing-universe guard does not fire in the timing tests.
+
+    The task boundary is replaced on the *orchestrator*, not on the window:
+    the orchestrator takes ``submit_task`` at construction, so patching
+    ``window._start_task`` after the fact would no longer reach it.  The two
+    providers stay real, which is what keeps the window's own composition --
+    the run-inputs bridge and the universe lambda -- under test.
     """
 
     from PySide6.QtWidgets import QMessageBox
@@ -1357,11 +1591,11 @@ def _capture_task(window, monkeypatch):
     monkeypatch.setattr(QMessageBox, "information", lambda *a: None)
     captured: list = []
     monkeypatch.setattr(
-        window,
-        "_start_task",
+        window.scanner_orchestrator,
+        "_submit_task",
         lambda task, **kwargs: captured.append((task, kwargs)) or True,
     )
-    window._run_scan()
+    window.scanner_orchestrator.request_scan()
     return captured[0]
 
 
@@ -1397,7 +1631,9 @@ def test_the_start_task_contract_is_unchanged(monkeypatch, tmp_path) -> None:
     try:
         _task, kwargs = _capture_task(window, monkeypatch)
 
-        assert kwargs["on_success"] == window._scan_finished
+        assert kwargs["on_success"] == (
+            window.scanner_orchestrator._scan_finished
+        )
         assert kwargs["start_message"] == "市场扫描中…"
         assert kwargs["resource_group"] == "scan"
         assert set(kwargs) == {
@@ -1413,11 +1649,16 @@ def test_the_start_task_contract_is_unchanged(monkeypatch, tmp_path) -> None:
 
 
 def test_the_evaluation_timing_is_preserved(monkeypatch, tmp_path) -> None:
-    """Spec 45: capital is captured now; universe, risk and rules are live.
+    """Spec 45: the run inputs are captured now; the universe is live.
 
     The old closure computed ``research_capital`` on the UI thread before
     ``_start_task`` and read the other three inside the worker.  Extraction
-    must not silently move any of them.
+    changed that on purpose: the capital, the risk percentage *and* the
+    substitution rules are now one frozen :class:`ScannerRunInputs` taken at
+    request time, while the universe is still re-read inside the worker so a
+    refresh that landed while this task queued is the universe that gets
+    scanned.  Both halves are asserted, because the whole point is that they
+    are deliberately opposite.
     """
 
     from dataclasses import replace
@@ -1463,10 +1704,65 @@ def test_the_evaluation_timing_is_preserved(monkeypatch, tmp_path) -> None:
 
         task(lambda _message: None)
 
+        # The universe is the live one: read at execution time.
         assert seen["universe"] is universe_b
+        # The three run inputs are the frozen ones: the capital is the value
+        # the operator saw, and the risk/rules are the values that were
+        # configured when they clicked, not the ones edited afterwards.
         assert seen["capital"] == "CAPITAL_A"
-        assert seen["max_position_risk_pct"] == Decimal("0.42")
-        assert seen["substitutions"] is new_rules
+        assert seen["max_position_risk_pct"] == Decimal("0.10")
+        assert seen["substitutions"] == {}
+    finally:
+        window.deleteLater()
+
+
+def test_the_run_inputs_are_frozen_at_request_time(
+    monkeypatch, tmp_path
+) -> None:
+    """Spec 7/27: the whole input set is a UI-thread snapshot.
+
+    Asserted separately from the universe half above: the risk percentage and
+    the substitution rules used to be read inside the worker, and this round
+    deliberately moved them to the request thread.  A guard that only checked
+    the capital would not notice them sliding back.
+    """
+
+    from dataclasses import replace
+
+    window = _window(monkeypatch, tmp_path)
+    try:
+        window.universe_orchestrator.restore_snapshot(_universe())
+        window.config = replace(
+            window.config,
+            substitutions={"OLD": object()},
+            risk_limits=replace(
+                window.config.risk_limits,
+                max_position_exposure_pct=Decimal("0.11"),
+            ),
+        )
+
+        task, _kwargs = _capture_task(window, monkeypatch)
+
+        window.config = replace(
+            window.config,
+            substitutions={"NEW": object()},
+            risk_limits=replace(
+                window.config.risk_limits,
+                max_position_exposure_pct=Decimal("0.99"),
+            ),
+        )
+
+        seen: dict = {}
+        monkeypatch.setattr(
+            window.market_scan_service,
+            "scan",
+            lambda universe, **kwargs: seen.update(kwargs) or "RESULT",
+        )
+
+        task(lambda _message: None)
+
+        assert seen["max_position_risk_pct"] == Decimal("0.11")
+        assert set(seen["substitutions"]) == {"OLD"}
     finally:
         window.deleteLater()
 
@@ -1494,12 +1790,14 @@ def test_the_capital_is_computed_before_the_task_starts(
             captured.append(task)
             return True
 
-        monkeypatch.setattr(window, "_start_task", start)
+        monkeypatch.setattr(
+            window.scanner_orchestrator, "_submit_task", start
+        )
         monkeypatch.setattr(
             window.market_scan_service, "scan", lambda *a, **k: "RESULT"
         )
 
-        window._run_scan()
+        window.scanner_orchestrator.request_scan()
 
         assert calls == ["capital", "start"]
     finally:
@@ -1550,11 +1848,11 @@ def test_the_frozen_method_is_byte_identical(name: str) -> None:
 
 
 def test_only_the_declared_methods_changed() -> None:
-    """Spec 48: the declared surface is ``__init__`` and ``_run_scan``.
+    """Spec 48: the declared surface is ``__init__`` plus later rounds.
 
     The guard is relative to this step's base commit.  Every later round
-    appends the methods it declares to ``LATER_ROUND_METHODS`` and ships its
-    own guard against its own base commit.
+    appends the methods it declares to its own delta set and ships its own
+    guard against its own base commit.
     """
 
     base = _require_base("src/us_quant/desktop.py")
@@ -1595,6 +1893,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_REMOVED_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_REMOVED_METHODS)
         | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS)
+        | set(DESKTOP_SCANNER_ORCHESTRATION_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1612,6 +1911,25 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_ADDED_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_ADDED_METHODS)
         | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_ADDED_METHODS)
+        | set(DESKTOP_SCANNER_ORCHESTRATION_V2_ADDED_METHODS)
+    )
+
+    # The two methods the ScannerPage round added and this round removed exist
+    # at neither commit.  They are declared separately and asserted absent from
+    # both deltas: dropping them silently would hide a real deletion.
+    declared = set(DESKTOP_SCANNER_ORCHESTRATION_V2_REMOVED_METHODS) | set(
+        DESKTOP_SCANNER_ORCHESTRATION_V2_ADDED_METHODS
+    )
+    assert not (
+        set(DESKTOP_SCANNER_ORCHESTRATION_V2_NET_ZERO_METHODS) & declared
+    )
+    assert not (
+        set(DESKTOP_SCANNER_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & (set(base_methods) - set(current_methods))
+    )
+    assert not (
+        set(DESKTOP_SCANNER_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & (set(current_methods) - set(base_methods))
     )
 
     changed = []
@@ -1648,6 +1966,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS)
         | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS)
+        | set(DESKTOP_SCANNER_ORCHESTRATION_V2_METHODS)
     )
     assert set(changed) <= allowed
     assert set(MARKET_DATA_V2_METHODS) <= set(changed)
@@ -1666,7 +1985,7 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(SYSTEM_V2_REPAIR_METHODS) <= set(changed)
     assert set(DESKTOP_MARKET_ORCHESTRATION_V2_METHODS) <= set(changed)
     assert set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS) <= set(changed)
-    assert "_run_scan" in changed
+    assert set(DESKTOP_SCANNER_ORCHESTRATION_V2_METHODS) <= set(changed)
 
 
 def test_the_other_frozen_modules_are_untouched() -> None:
@@ -1699,16 +2018,33 @@ def test_the_other_frozen_modules_are_untouched() -> None:
 
 
 def test_the_manual_path_no_longer_calls_the_scanner() -> None:
-    """Spec 50: only the manual method, not the whole file."""
+    """Spec 50: the manual scan request delegates, it does not scan.
+
+    v2O-C2 moved the request itself into ``ScannerOrchestrator``, so the
+    window no longer declares ``_run_scan`` at all.  The rule this test has
+    always protected is unchanged: the manual path must not reach the scanner
+    domain directly, and the service is the only thing that may.
+    """
 
     source = (_REPO_ROOT / "src/us_quant/desktop.py").read_text(
         encoding="utf-8"
     )
-    method = _find_method(source, "_run_scan")
 
-    assert "scan_market(" not in method
-    assert "save_market_scan(" not in method
-    assert "self.market_scan_service.scan(" in method
+    assert "_run_scan" not in source
+
+    from us_quant.desktop_v2.orchestration.research.scanner import (
+        orchestrator as module,
+    )
+
+    request = _find_method(
+        pathlib.Path(module.__file__).read_text(encoding="utf-8"),
+        "request_scan",
+        owner="ScannerOrchestrator",
+    )
+
+    assert "scan_market(" not in request
+    assert "save_market_scan(" not in request
+    assert "self._service.scan(" in request
 
 
 def test_the_auto_quant_path_still_calls_the_scanner_directly() -> None:

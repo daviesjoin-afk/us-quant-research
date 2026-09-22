@@ -760,7 +760,13 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
     """No ``DesktopManager``/``ApplicationContext`` was introduced.
 
     A single object holding market *and* account *and* paper would be the God
-    object this round forbids, so the package holds exactly one capability.
+    object this round forbids, so the package holds one directory per capability.
+    ``research/`` is the exception that proves the rule: it is a *route
+    aggregate* -- the navigation-level grouping -- not a capability, so it holds
+    no orchestrator of its own and each workspace that owns runtime truth gets a
+    subpackage instead.  That structure is asserted in
+    ``tests/test_desktop_research_foundations_architecture.py``; what matters
+    here is that ``research/`` did not become a fourth kind of thing.
     """
 
     children = {
@@ -768,7 +774,22 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
         for path in (_SRC / "desktop_v2" / "orchestration").iterdir()
         if path.is_dir() and path.name != "__pycache__"
     }
-    assert children == {"market", "account"}, children
+    assert children == {"market", "account", "research"}, children
+
+    # The route aggregate must stay an aggregate: a capability-level
+    # orchestrator at its root is the God object in a new costume.
+    assert not (
+        _SRC / "desktop_v2" / "orchestration" / "research" / "orchestrator.py"
+    ).exists()
+
+    research_children = {
+        path.name
+        for path in (
+            _SRC / "desktop_v2" / "orchestration" / "research"
+        ).iterdir()
+        if path.is_dir() and path.name != "__pycache__"
+    }
+    assert research_children == {"universe", "history"}, research_children
 
     forbidden_classes = (
         "DesktopManager",

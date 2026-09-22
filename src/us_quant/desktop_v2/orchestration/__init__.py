@@ -10,8 +10,11 @@ Each one takes injected dependencies and exposes a small read-only surface, so
 the window's remaining job is composition: build the object, wire its signals,
 and route its published facts to whoever still consumes them.
 
-Two capabilities live here today -- ``market`` (v2O-A) and ``account``
-(v2O-B).  The remaining extractions are tracked in
+Four capabilities live here today: ``market`` (v2O-A), ``account`` (v2O-B) and
+``research/{universe,history}`` (v2O-C1).  ``research`` is a directory rather
+than a single module because Research is a *route* aggregate, not a runtime
+owner -- an aggregate controller over every Research workspace would be a second
+``MainWindow``.  The remaining extractions are tracked in
 ``docs/TRADING_ARCHITECTURE_V2.md``.
 """
 

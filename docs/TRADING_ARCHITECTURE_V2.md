@@ -138,6 +138,9 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Desktop Workflow Aggregate | MIGRATED |
 | Market Orchestration | MIGRATED（v2O-A，`desktop_v2/orchestration/market/`） |
 | Account Orchestration | MIGRATED（v2O-B，`desktop_v2/orchestration/account/`） |
+| Universe Orchestration | MIGRATED（v2O-C1，`desktop_v2/orchestration/research/universe/`） |
+| History Orchestration | MIGRATED（v2O-C1，`desktop_v2/orchestration/research/history/`） |
+| Research Orchestration | **IN PROGRESS**（v2O-C；Scanner / Backtest / Cross-Section / Targeted 未迁） |
 
 Shadow 子系统：
 
@@ -1353,6 +1356,77 @@ fresh-Paper 规则全分支（含 naive timestamp 与 300 秒边界）/
 （约 128 行），但按规格必须**保留**在窗口的跨 workflow bridge 与
 presentation push（约 117 行）计入新增。ownership 正确优先于行数。
 
+### 8.13 research foundations orchestration 已抽出（v2O-C1）
+
+v2O-B 之后，Research 两条基础 route 的桌面 truth 仍散在 `MainWindow`：
+`self.universe` 快照、refresh task 的 cancel `Event`、refresh worker 句柄、
+`_history_progress_percent`，以及围绕它们的 12 个 handler。本轮把它们搬进
+`desktop_v2/orchestration/research/`：
+
+```text
+desktop_v2/orchestration/research/
+  __init__.py      故意没有 aggregate
+  universe/__init__.py         export UniverseOrchestrator
+  universe/orchestrator.py     275 行：refresh 请求 / cancel / snapshot 持有 /
+                               page render
+  history/__init__.py          export HistoryOrchestrator
+  history/orchestrator.py      227 行：history task intent + progress 展示
+```
+
+**v2O-C Research is intentionally decomposed internally.** Research 在导航上是
+一个 route aggregate，在运行时**不是**一个 owner。`research/orchestrator.py`
+不得存在；`ResearchOrchestrator` / `ResearchManager` / `ResearchContext` /
+`ResearchServices` / `ResearchController` / `DesktopContext` 一律禁止声明。把
+六个 workspace 收进一个对象等于在单文件里重新长出 `MainWindow`。这三条由
+`tests/test_desktop_research_foundations_architecture.py` 断言（含「该文件不
+存在」这一条），是本阶段最重要的长期维护 guard 之一。
+
+- **`UniverseSnapshot` 的 canonical Desktop owner 是
+  `UniverseOrchestrator.snapshot`。** `DesktopUniverseService` 无状态：它执行
+  刷新过程、不持有结果，所以 truth 只能落在 desktop 层。窗口 `self.universe`
+  已删除，且**没有** compatibility property——转发 property 会让未迁移的
+  caller 继续静默工作，"谁在读 universe 真相" 就不再是一条 grep 能回答的
+  问题。所有读取改成显式 `self.universe_orchestrator.snapshot`，且**在任务
+  执行时读取**而非排程时捕获。
+- **History queue truth 仍属 service/store。** `DesktopHistoryService` /
+  `HistoryJobStore` 已经拥有 job 行、优先顺序、公共源回退与 reset_failed
+  规则，所以 `HistoryOrchestrator` **不存** jobs、不缓存
+  `HistoryQueueSnapshot`：`render_current()` 每次都向 service 要新的一份。它
+  只拥有四个 page intent、进度百分比与唯一的 render 调用点。
+- **History 不依赖 `UniverseOrchestrator`。** 它通过
+  `universe_provider: Callable[[], UniverseSnapshot | None]` 取快照，因此
+  universe 实现变化不会波及 History。IBKR 配置同理走
+  `ibkr_config_provider`，且每次运行都重新读——构造时捕获一份会让 Settings
+  的修改在本次会话剩余时间里继续打旧端点。
+- **`on_finished` 是本轮新增的 generic hook。** `TaskThread` 没有通用 cancel
+  hook，此前窗口靠 `workers[-1]` 与 worker 身份判断完成归属，这正是 Universe
+  必须持有 worker 句柄的原因。History 成为第二个真实消费者后该耦合不再可
+  接受：`_start_task` 增加可选 `on_finished: Callable[[], None] | None`，由
+  caller 传入且**不接收 worker 对象**。顺序是契约——`_finish_task` 先跑通用
+  清理（释放资源组、重发 execution controls），再跑 hook，因此 hook 看到的
+  是已释放的 worker；成功/失败/取消三条路径共用同一个 hook。
+- **shutdown 取消走 capability 生命周期。** `_request_worker_stops()` 调
+  `universe_orchestrator.cancel_for_shutdown()`，窗口既不读那个 `Event` 也不
+  reach into capability 取它。它与 `request_cancel()` 分开：关闭不是操作员
+  请求取消，所以不写状态行、也不在窗口拆自己时重绘页面。
+- **本轮不动 Scanner / Backtest / Cross-Section / Targeted。** 它们是后续独立
+  小刀；Market scope bridge（`_on_universe_changed`）与 `_run_scan` 的读取
+  迁移是必要连带改动，不是顺手重构。
+
+新增守卫位于 `tests/test_desktop_research_foundations_architecture.py`（51 项
+结构守卫）、`tests/test_desktop_universe_orchestrator.py`（26 项行为）、
+`tests/test_desktop_history_orchestrator.py`（16 项行为）、
+`tests/test_desktop_research_foundations_wiring.py`（14 项真实 `MainWindow`
+端到端：按钮点击、真实 refresh 后下游读到的 snapshot、shutdown 取消 live
+refresh、`_start_task` 三条完成路径）。依赖守卫是**白名单**而非禁用清单，且
+双向断言（未声明依赖失败、过期声明也失败）。
+
+`desktop.py`：**5436 → 5385 行（净减 51）**；`universe/orchestrator.py` 275
+行、`history/orchestrator.py` 227 行、三个 `__init__.py` 共 93 行。
+
+**v2O-C1 Universe + History ✅**；顶层路线仍为 **v2O-C Research in progress**，
+不得标整个 Research 完成。
+
 ## 9. 已删除的旧架构
 
 ```text
@@ -2074,6 +2148,10 @@ ShadowConfig（含 compatibility alias）  ✅ 已删除（Trading Framework Clo
 shadow_paper.py                        ✅ 已删除（Shadow Framework v2）
 旧 MainWindow stream lifecycle         ✅ 已删除（v2O-A Market orchestration）
 旧 MainWindow account refresh/ledger/render ✅ 已删除（v2O-B Account orchestration）
+旧 MainWindow universe snapshot / refresh task / cancel event / refresh worker
+                                        ✅ 已删除（v2O-C1 Research foundations）
+旧 MainWindow history queue intents / progress state
+                                        ✅ 已删除（v2O-C1 Research foundations）
 旧 Paper-specific orchestration glue   ⏭ 后续
 旧 workflow duplicate state            ⏭ 后续
 旧页面 builder（其余 route）            ⏭ 后续
@@ -2085,7 +2163,8 @@ shadow_paper.py                        ✅ 已删除（Shadow Framework v2）
 ```text
 v2O-A Market orchestration      ✅ 已完成（§8.11）
 v2O-B Account orchestration     ✅ 已完成（§8.12）
-v2O-C Research orchestration    ⏭ 后续
+v2O-C Research orchestration    🔄 IN PROGRESS（§8.13 完成 Universe + History；
+                                   Scanner / Backtest / Cross-Section / Targeted 待续）
 v2O-D Shadow orchestration      ⏭ 后续
 v2O-E Paper orchestration       ⏭ 后续
 v2O-F System orchestration      ⏭ 后续
@@ -2172,7 +2251,12 @@ MainWindow。**v2O-A Market orchestration 已完成**（§8.11），Market runti
 safety bridge 与 snapshot fan-out。**v2O-B Account orchestration 已完成**（§8.12），
 Account 的 refresh / ledger / page render / shell 事实已迁入
 `desktop_v2/orchestration/account/`，`BrokerAccountApplication` 仍是唯一 account
-truth，窗口只保留 composition 与跨 workflow fan-out。阶段 2 剩余：
+truth，窗口只保留 composition 与跨 workflow fan-out。**v2O-C1 Research
+foundations 已完成**（§8.13），Universe 的 snapshot / refresh / cancel 与 History
+的 queue intents / progress 已迁入 `desktop_v2/orchestration/research/{universe,
+history}/`；Research 内部刻意不设 aggregate，`v2O-C Research orchestration`
+整体仍是 **IN PROGRESS**（Scanner / Backtest / Cross-Section / Targeted 待续）。
+阶段 2 剩余：
 
 ```text
 Desktop Dashboard v2
@@ -2181,7 +2265,7 @@ Desktop Dashboard v2
 后续 orchestration 抽取：
 
 ```text
-v2O-C Research orchestration
+v2O-C Research orchestration    （🔄 IN PROGRESS，Universe + History 已完成）
 v2O-D Shadow orchestration
 v2O-E Paper orchestration
 v2O-F System orchestration

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from us_quant.desktop_v2.pages.research.cross_section.models import (
     CrossSectionResearchDraft,
 )
 from us_quant.paths import STATE_ROOT_ENV
+from us_quant.universe import UniverseRecord, UniverseSnapshot
 
 
 _APP = QApplication.instance() or QApplication([])
@@ -99,6 +101,24 @@ def test_programmatic_setter_is_silent_but_changes_the_widget(
     assert seen == []
 
 
+def _universe(symbol: str = "AAPL") -> UniverseSnapshot:
+    """A real snapshot: adoption renders, so the presenter reads every field."""
+
+    return UniverseSnapshot(
+        generated_at=datetime(2026, 9, 22, tzinfo=timezone.utc),
+        source_timestamps={"test": "now"},
+        records=(
+            UniverseRecord(
+                symbol=symbol,
+                name=symbol,
+                exchange="NASDAQ",
+                security_type="STK",
+                eligible_for_research=True,
+            ),
+        ),
+    )
+
+
 def test_run_button_delivers_the_current_immutable_draft(
     window: MainWindow, monkeypatch
 ) -> None:
@@ -114,7 +134,9 @@ def test_run_button_delivers_the_current_immutable_draft(
 def test_missing_universe_is_rejected_before_task(
     window: MainWindow, monkeypatch
 ) -> None:
-    window.universe = None
+    # The capability starts with no snapshot; asserting it keeps the test's
+    # premise honest now that ``self.universe`` no longer exists to set.
+    assert window.universe_orchestrator.snapshot is None
     started: list[object] = []
     shown: list[tuple] = []
     monkeypatch.setattr(
@@ -133,7 +155,7 @@ def test_missing_universe_is_rejected_before_task(
 def test_research_config_receives_the_draft_capital(
     window: MainWindow, monkeypatch
 ) -> None:
-    window.universe = SimpleNamespace()
+    window.universe_orchestrator.restore_snapshot(_universe())
     captured: dict[str, object] = {}
     configs: list[object] = []
     saved: list[Path] = []
@@ -238,7 +260,7 @@ def test_scanner_reads_the_updated_central_capital(
     window: MainWindow, monkeypatch
 ) -> None:
     window.cross_section_page.capital_changed.emit(2500)
-    window.universe = SimpleNamespace()
+    window.universe_orchestrator.restore_snapshot(_universe())
     seen: dict[str, object] = {}
 
     def fake_start(task, **kwargs):

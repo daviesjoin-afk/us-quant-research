@@ -1782,3 +1782,121 @@ state / 无 compatibility property / 无 reach-through / render 唯一调用者 
 Qt-free / line budgets）。
 
 **突变结果：15/15 全杀。** 见 PR 描述。
+
+## 18. 第十七步：`desktop_v2/orchestration/research/`（Research 基础 capability 边界）
+
+v2O-B 之后，Research 两条基础 route 的桌面 truth 仍散在 `MainWindow`：
+`self.universe` 快照、refresh task 的 cancel `Event`、refresh worker 句柄、
+`_history_progress_percent`，以及围绕它们的 12 个 handler。本轮把它们搬进
+`desktop_v2/orchestration/research/`：
+
+```text
+desktop_v2/orchestration/research/
+  __init__.py                       故意没有 aggregate（见 18.1）
+  universe/__init__.py              导出 UniverseOrchestrator
+  universe/orchestrator.py          275 行：官方标的 refresh 请求、cancel、
+                                    snapshot 持有、page render
+  history/__init__.py               导出 HistoryOrchestrator
+  history/orchestrator.py           227 行：history 队列的 task intent 与
+                                    progress 展示
+```
+
+### 18.1 为什么没有 `ResearchOrchestrator`
+
+Research 在导航上是一个 route aggregate，在运行时**不是**一个 owner。把
+Universe/History/Scanner/Backtest/Cross-Section/Targeted 收进一个对象，等于
+在单个文件里把 `MainWindow` 重新长出来一遍——只是换了个名字。所以本步：
+
+- 每个真正持有 runtime truth 的 workspace 一个 subpackage；
+- `research/orchestrator.py` 不得存在；
+- `ResearchOrchestrator` / `ResearchManager` / `ResearchContext` /
+  `ResearchServices` / `ResearchController` / `DesktopContext` 一律禁止声明。
+
+这三条都由 `tests/test_desktop_research_foundations_architecture.py` 断言
+（含「该文件不存在」这一条），是本阶段最重要的长期维护 guard。
+
+### 18.2 单一真相：`UniverseSnapshot` 的 canonical Desktop owner
+
+`DesktopUniverseService` 是无状态的：它执行刷新过程，不持有结果。所以
+snapshot 的 canonical owner 只能是 desktop 层，即
+`UniverseOrchestrator.snapshot`（只读 property，内部 `self._snapshot`）。
+
+`MainWindow.self.universe` 已删除，且**没有** compatibility property——这是
+刻意的：转发 property 会让所有未迁移的 caller 继续静默工作，"谁在读 universe
+真相" 就不再是一条 grep 能回答的问题，下一次抽取也就找不到剩余消费者。
+窗口所有读取改成显式 `self.universe_orchestrator.snapshot`，且**在任务执行时
+读取**而不是在排程时捕获：刷新在任务排队期间落地时，被扫描的必须是新快照。
+
+### 18.3 History 为什么仍然不持有队列
+
+`DesktopHistoryService` / `HistoryJobStore` 已经是队列的 canonical truth：
+job 行、优先顺序、公共源回退、"把失败放回队列" 的规则都在那里。
+`HistoryOrchestrator` 因此**不存** jobs、不存 snapshot、不缓存
+`HistoryQueueSnapshot`；`render_current()` 每次都向 service 要一份新的。
+它只拥有真正属于桌面的那一半：四个 page intent、进度百分比、以及唯一的
+render 调用点。把队列复制进 orchestrator 会立刻产生第二份真相，且第一次
+后台下载完成时两份就会不一致。
+
+### 18.4 History 如何拿到 universe，而不依赖 `UniverseOrchestrator`
+
+通过 `universe_provider: Callable[[], UniverseSnapshot | None]`。History 不
+import Universe 的实现：universe 的实现还会继续变，依赖它的 History 就得跟着
+变。同理 IBKR 配置走 `ibkr_config_provider`，且**每次运行都重新读**——构造时
+捕获一份会让「Settings 里改了连接参数」在本次会话剩余时间里继续打旧端点。
+
+### 18.5 `on_finished` 为什么现在才加
+
+`TaskThread` 没有通用 cancel hook，每个 task 自带 `Event`；此前窗口靠
+`workers[-1]` 与 worker 身份判断「这次完成属于哪个 capability」，这正是
+Universe 必须持有 worker 句柄的原因。第二个真实消费者（History）出现后，
+这个耦合不再是可接受的：`_start_task` 因此增加一个可选
+`on_finished: Callable[[], None] | None = None`，由 caller 传入，**不接收
+worker 对象**——拿到 worker 的 capability 可以拿它跟 worker 列表比身份，
+而那正是 `on_finished` 要消除的耦合。
+
+顺序是契约：`_finish_task` 先跑通用清理（释放资源组、重发 execution
+controls），再跑 capability 的 hook，因此 hook 看到的是已释放的 worker。
+成功、失败、取消三条路径都经由同一个 hook，capability 的完成不再依赖
+worker 身份。
+
+### 18.6 shutdown 如何取消 universe refresh
+
+窗口不再读那个 `Event`，也不再 reach into capability 取它：
+`_request_worker_stops()` 调 `universe_orchestrator.cancel_for_shutdown()`。
+它与 `request_cancel()` 分开是刻意的——关闭不是操作员在请求取消，所以不写
+状态行、也不在窗口拆自己时重绘页面。
+
+### 18.7 本轮不动的东西
+
+Scanner、Backtest / Cross-Section、Targeted research orchestration 一律不碰：
+它们是后续的独立小刀，本轮只为 Research 的两条基础 route 建立边界。Market
+scope bridge（`_on_universe_changed`）与 `_run_scan` 的读取迁移是这一轮的
+**必要**连带改动，不是顺手重构。
+
+### 18.8 体积与测试
+
+| | before | after |
+|---|---|---|
+| `desktop.py` | 5436 行 | 5385 行（净减 51） |
+| `orchestration/research/universe/orchestrator.py` | — | 275 行 |
+| `orchestration/research/history/orchestrator.py` | — | 227 行 |
+| `research/__init__.py` | — | 33 行 |
+| `research/universe/__init__.py` | — | 29 行 |
+| `research/history/__init__.py` | — | 31 行 |
+| 全套测试 | 2926 passed | 见 PR 描述 |
+
+### 18.9 覆盖强度与突变结果
+
+`tests/test_desktop_universe_orchestrator.py`（26 项：refresh 成功/失败/取消
+全分支、被拒任务不得进入 refreshing、snapshot 是 stored fact 而非委托）、
+`tests/test_desktop_history_orchestrator.py`（16 项：四个 intent、进度百分比
+计算与除零边界、失败重置、每次 render 读新快照、provider 每次重读）、
+`tests/test_desktop_research_foundations_wiring.py`（14 项：真实按钮点击到
+capability、真实 refresh 后下游读到的是新 snapshot、shutdown 取消 live
+refresh 且不写状态行、`_start_task` 三条完成路径 + 不依赖 worker 句柄）、
+`tests/test_desktop_research_foundations_architecture.py`（51 项：无
+aggregate、无已删 state、无 compatibility property、无 reach-through、render
+唯一调用点、page class 只在 composition root 构造、依赖白名单双向相等、
+禁止 symbol、两个 capability 互不知晓、line budget）。
+
+**突变结果：见 PR 描述（15/15）。**

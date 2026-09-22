@@ -32,8 +32,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 # Spec 54/55/56: the base commit of this step, not the project's first one.
 BASE_COMMIT = "5109a18033b044252ee4a04f81f4e696f1a5fab3"
 
-# Spec 56: the only two MainWindow methods this step may change.
-REFACTORED_METHODS = ("__init__", "_refresh_universe")
+# Spec 56: the only MainWindow methods this step may change.  v2O-C1 retired
+# ``_refresh_universe`` (the capability owns the refresh now), so the constant
+# keeps only what still exists -- the removal is declared below.
+REFACTORED_METHODS = ("__init__",)
 
 # Trading Core v2: this round deleted the legacy/unified shell builders and
 # added the v2 page composer.  The delta is declared here so the guard below
@@ -344,24 +346,51 @@ RESEARCH_DATA_V2_REMOVED_METHODS = (
 )
 RESEARCH_DATA_V2_ADDED_METHODS = (
     "_connect_universe_page",
-    "_publish_universe_view",
     "_connect_history_page",
-    "_publish_history_view",
-    "_history_task_failed",
 )
 RESEARCH_DATA_V2_METHODS = (
     "_load_local_state",
+    "_auto_market_scan_finished",
+    "_task_failed",
+)
+
+# v2O-C1 (Research foundations): the universe and history runtimes moved out of
+# the window into ``desktop_v2/orchestration/research``.  Twelve handlers left
+# the window, three arrived, and four more changed because they used to read the
+# universe off the window.  ``_publish_universe_view``, ``_publish_history_view``
+# and ``_history_task_failed`` were *added* by the round above and *removed*
+# here, so they exist at neither the base commit nor now and belong to neither
+# delta.  Dropping them silently would hide a real deletion, so they are pinned
+# below and asserted absent from both deltas.
+DESKTOP_RESEARCH_FOUNDATIONS_V2_NET_ZERO_METHODS = (
+    "_publish_universe_view",
+    "_publish_history_view",
+    "_history_task_failed",
+)
+DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS = (
     "_refresh_universe",
     "_cancel_universe_refresh",
     "_reset_universe_refresh_controls",
     "_universe_refreshed",
-    "_auto_market_scan_finished",
     "_schedule_history",
     "_run_history",
+    "_history_finished",
     "_run_public_history",
     "_retry_failed",
-    "_history_finished",
-    "_task_failed",
+)
+DESKTOP_RESEARCH_FOUNDATIONS_V2_ADDED_METHODS = (
+    "_finish_task",
+    "_on_universe_changed",
+    "_report_history_refusal",
+)
+DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS = (
+    # ``_build_ui`` lost the universe/history page wiring to the capability.
+    "_build_ui",
+    # ``_request_worker_stops`` calls the capability's shutdown lifecycle.
+    "_request_worker_stops",
+    # The targeted-replay entry points read the universe at execution time.
+    "_run_targeted_replay",
+    "_run_targeted_robustness",
 )
 
 SCANNER_V2_REMOVED_METHODS = (
@@ -522,6 +551,46 @@ _SYSTEM_V2_REPAIR_DELTA_BLOCK = (
     '            self._schedule_runtime_events_refresh()\n'
 )
 
+# v2O-C1 (Research foundations): ``_request_worker_stops`` no longer reads the
+# capability's cancel event -- the window would be reaching into the capability
+# for state it no longer owns.  It calls the capability's *shutdown* lifecycle
+# instead, which is a different intent from the operator pressing cancel and so
+# does not write an operator status line.  The whole method is declared as the
+# delta because the intent changed with the body: there is no unchanged
+# remainder left to freeze.
+_DESKTOP_RESEARCH_FOUNDATIONS_V2_REQUEST_WORKER_STOPS_BASE = (
+    '    def _request_worker_stops(self) -> None:\n'
+    '        """Ask every cancellable worker to stop.\n'
+    '\n'
+    '        ``TaskThread`` has no generic cancel hook -- each task owns its own\n'
+    '        ``Event`` -- so the only universal signal is the universe refresh\n'
+    '        cancel event, which is the one long-running network task the desktop\n'
+    '        can interrupt.  The thread is never terminated: a half-written\n'
+    '        reference file is worse than a slow close.\n'
+    '        """\n'
+    '\n'
+    '        event = self.universe_refresh_cancel_event\n'
+    '        if event is not None:\n'
+    '            event.set()\n'
+)
+_DESKTOP_RESEARCH_FOUNDATIONS_V2_REQUEST_WORKER_STOPS_DELTA = (
+    '    def _request_worker_stops(self) -> None:\n'
+    '        """Ask the one cancellable task to stop.\n'
+    '\n'
+    '        ``TaskThread`` has no generic cancel hook -- each task owns its own\n'
+    '        ``Event`` -- so the only universal signal is the universe refresh, which\n'
+    '        is the one long-running network task the desktop can interrupt.  The\n'
+    '        window does not read that event and does not reach into the capability\n'
+    "        for it: it calls the capability's shutdown lifecycle, which is a\n"
+    '        different intent from the operator pressing cancel and therefore does\n'
+    '        not write an operator status line.  The thread is never terminated: a\n'
+    '        half-written reference file is worse than a slow close.\n'
+    '        """\n'
+    '\n'
+    '        self.universe_orchestrator.cancel_for_shutdown()\n'
+)
+
+
 SYSTEM_V2_CHANGED_MODULES = (
     # The transitional settings panel is deleted; the page owns its widgets now.
     "src/us_quant/desktop_settings_panel.py",
@@ -532,6 +601,28 @@ FROZEN_METHODS = (
     "_task_cancelled",
     "_start_task",
     "closeEvent",
+)
+
+# v2O-C1: ``_start_task`` is the generic task boundary (spec 9).  It gained one
+# optional completion hook and nothing else; the hook exists so a caller can run
+# work after the *task* finishes, which the orchestrators need because they are
+# the ones that know what to do with the result.  Declared as the minimal delta,
+# in both places it appears, so the rest of the method stays frozen byte for
+# byte.
+_DESKTOP_RESEARCH_FOUNDATIONS_V2_START_TASK_DELTAS = (
+    (
+        "        shutdown_essential: bool = False,\n"
+        "        on_finished: Callable[[], None] | None = None,\n",
+        "        shutdown_essential: bool = False,\n",
+    ),
+    (
+        "        worker.finished.connect(\n"
+        "            lambda: self._finish_task(worker, on_finished)\n"
+        "        )\n",
+        "        worker.finished.connect(\n"
+        "            lambda: self._worker_finished(worker)\n"
+        "        )\n",
+    ),
 )
 
 # Spec 62/63/64: modules this step must not touch at all.
@@ -1411,109 +1502,11 @@ def test_the_window_does_not_build_a_second_paths_object(
 # -- 25/49/50: the window's formatting ---------------------------------
 
 
-def _captured_task(window, monkeypatch):
-    """Run ``_refresh_universe`` and hand back the task it started."""
 
-    captured: list = []
-    monkeypatch.setattr(
-        window,
-        "_start_task",
-        lambda task, **kwargs: captured.append((task, kwargs)) or True,
-    )
-    monkeypatch.setattr(
-        window,
-        "workers",
-        [type("IdleWorker", (), {"isRunning": lambda self: False})()],
-    )
-    window._refresh_universe()
-    return captured[0][0]
-
-
-def test_the_window_formats_every_stage_verbatim(
-    monkeypatch, tmp_path
-) -> None:
-    """Spec 12/49: the four Chinese strings, exactly as before."""
-
-    window = _window(monkeypatch, tmp_path)
-    try:
-        events = [
-            UniverseRefreshProgress(stage=STAGE_PREPARE_REFERENCE),
-            UniverseRefreshProgress(stage=STAGE_DOWNLOAD_OFFICIAL),
-            UniverseRefreshProgress(stage=STAGE_ENRICH_SEC_START),
-            UniverseRefreshProgress(
-                stage=STAGE_ENRICH_SEC, done=2, total=500, detail="AAPL"
-            ),
-        ]
-
-        monkeypatch.setattr(
-            window.universe_service,
-            "refresh",
-            lambda **kwargs: [
-                kwargs["progress"](event) for event in events
-            ]
-            and "SNAPSHOT",
-        )
-
-        task = _captured_task(window, monkeypatch)
-        seen: list[str] = []
-        task(seen.append)
-
-        assert seen == [
-            "正在准备可写的用户参考数据目录…",
-            "正在下载 Nasdaq Trader 与 SEC 官方标的清单…",
-            "正在增量核验 500 家 SEC 注册地与行业…",
-            "SEC 核验 2/500：AAPL",
-        ]
-    finally:
-        window.deleteLater()
-
-
-def test_an_unknown_stage_fails_closed(monkeypatch, tmp_path) -> None:
-    """Spec 13/50: protocol drift must not pass silently."""
-
-    window = _window(monkeypatch, tmp_path)
-    try:
-        monkeypatch.setattr(
-            window.universe_service,
-            "refresh",
-            lambda **kwargs: kwargs["progress"](
-                UniverseRefreshProgress(stage="future_stage")
-            ),
-        )
-
-        task = _captured_task(window, monkeypatch)
-
-        with pytest.raises(ValueError, match="future_stage"):
-            task(lambda _message: None)
-    finally:
-        window.deleteLater()
 
 
 # -- 51: the cancel callback is the current event ----------------------
 
-
-def test_should_stop_comes_from_the_current_cancel_event(
-    monkeypatch, tmp_path
-) -> None:
-    """Spec 18/51: the same callable, wired to this refresh's Event."""
-
-    window = _window(monkeypatch, tmp_path)
-    try:
-        seen: dict = {}
-        monkeypatch.setattr(
-            window.universe_service,
-            "refresh",
-            lambda **kwargs: seen.update(kwargs) or "SNAPSHOT",
-        )
-
-        task = _captured_task(window, monkeypatch)
-        task(lambda _message: None)
-
-        assert seen["should_stop"]() is False
-        window.universe_refresh_cancel_event.set()
-        assert seen["should_stop"]() is True
-    finally:
-        window.deleteLater()
 
 
 def test_the_service_receives_the_same_callback_twice(
@@ -1551,72 +1544,7 @@ def test_the_service_receives_the_same_callback_twice(
 # -- 26/52/53: start refusal and start success -------------------------
 
 
-def test_a_refused_start_changes_no_ui_state(monkeypatch, tmp_path) -> None:
-    """Spec 26/52: refusal must leave the buttons and the event alone."""
 
-    window = _window(monkeypatch, tmp_path)
-    try:
-        window.universe_refresh_cancel_event = "SENTINEL"
-        window.universe_refresh_worker = "SENTINEL"
-        monkeypatch.setattr(
-            window, "_start_task", lambda task, **kwargs: False
-        )
-
-        window._refresh_universe()
-
-        assert window.universe_refresh_cancel_event == "SENTINEL"
-        assert window.universe_refresh_worker == "SENTINEL"
-        assert window.universe_page.refresh_button.isEnabled() is True
-        assert window.universe_page.cancel_button.isEnabled() is False
-    finally:
-        window.deleteLater()
-
-
-def test_a_successful_start_sets_the_running_state(
-    monkeypatch, tmp_path
-) -> None:
-    """Spec 27/53: event saved, worker identity, and the button states."""
-
-    window = _window(monkeypatch, tmp_path)
-    try:
-        worker = type("IdleWorker", (), {"isRunning": lambda self: False})()
-        monkeypatch.setattr(window, "workers", [worker])
-        monkeypatch.setattr(
-            window, "_start_task", lambda task, **kwargs: True
-        )
-
-        window._refresh_universe()
-
-        assert window.universe_refresh_worker is worker
-        assert window.universe_refresh_cancel_event is not None
-        assert window.universe_page.refresh_button.isEnabled() is False
-        assert window.universe_page.refresh_button.text() == "官方标的刷新中…"
-        assert window.universe_page.cancel_button.isEnabled() is True
-    finally:
-        window.deleteLater()
-
-
-def test_the_start_message_and_resource_group_are_unchanged(
-    monkeypatch, tmp_path
-) -> None:
-    """Spec 25: the task wrapper arguments keep their old values."""
-
-    window = _window(monkeypatch, tmp_path)
-    try:
-        captured: list = []
-        monkeypatch.setattr(
-            window,
-            "_start_task",
-            lambda task, **kwargs: captured.append(kwargs) or False,
-        )
-
-        window._refresh_universe()
-
-        assert captured[0]["start_message"] == "刷新官方标的中…"
-        assert captured[0]["resource_group"] == "universe"
-        assert captured[0]["on_success"] == window._universe_refreshed
-    finally:
-        window.deleteLater()
 
 
 # -- 54/55/56/57: the scope guards -------------------------------------
@@ -1654,6 +1582,29 @@ def test_the_frozen_method_is_byte_identical(name: str) -> None:
         current_method = current_method.replace(
             _DESKTOP_MARKET_ORCHESTRATION_V2_CLOSE_EVENT_DELTA,
             _DESKTOP_MARKET_ORCHESTRATION_V2_CLOSE_EVENT_BASE,
+        )
+
+    if name == "_start_task":
+        # v2O-C1: the generic task boundary gained one optional completion hook.
+        # Each declared edit is asserted to be present exactly once before being
+        # reverted, so an edit that lands twice -- or lands somewhere else in
+        # the method -- fails here instead of silently widening the freeze.
+        for delta, base_block in _DESKTOP_RESEARCH_FOUNDATIONS_V2_START_TASK_DELTAS:
+            assert current_method.count(delta) == 1, (name, delta)
+            current_method = current_method.replace(delta, base_block)
+
+    if name == "_request_worker_stops":
+        # v2O-C1: the shutdown signal now goes through the capability's
+        # lifecycle rather than the window setting its cancel event.
+        assert (
+            current_method.count(
+                _DESKTOP_RESEARCH_FOUNDATIONS_V2_REQUEST_WORKER_STOPS_DELTA
+            )
+            == 1
+        ), name
+        current_method = current_method.replace(
+            _DESKTOP_RESEARCH_FOUNDATIONS_V2_REQUEST_WORKER_STOPS_DELTA,
+            _DESKTOP_RESEARCH_FOUNDATIONS_V2_REQUEST_WORKER_STOPS_BASE,
         )
 
     assert current_method == base_method, name
@@ -1716,6 +1667,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DASHBOARD_V2_REMOVED_METHODS)
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_REMOVED_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_REMOVED_METHODS)
+        | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1732,6 +1684,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DASHBOARD_V2_ADDED_METHODS)
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_ADDED_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_ADDED_METHODS)
+        | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_ADDED_METHODS)
     )
 
     changed = []
@@ -1765,6 +1718,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(SYSTEM_V2_REPAIR_METHODS)
         | set(DESKTOP_MARKET_ORCHESTRATION_V2_METHODS)
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS)
+        | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS)
     )
     # Exact, not a subset: the delta is the declared surface and nothing
     # else, in both directions.
@@ -1785,7 +1739,43 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(SYSTEM_V2_REPAIR_METHODS) <= set(changed)
     assert set(DESKTOP_MARKET_ORCHESTRATION_V2_METHODS) <= set(changed)
     assert set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS) <= set(changed)
-    assert "_refresh_universe" in changed
+    # v2O-C1: the window no longer reads the universe off itself, so the
+    # targeted-replay entry points and the shutdown path changed with it.
+    assert set(DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS) <= set(changed)
+
+
+def test_the_net_zero_methods_exist_in_neither_revision() -> None:
+    """v2O-C1: pin what an earlier round added and this round deleted.
+
+    These methods are in neither delta, so without this guard the only record of
+    their deletion would be a comment.  Asserting both halves -- absent from the
+    base commit *and* absent now -- is what makes "net zero" a fact rather than a
+    claim, and asserting disjointness from the deltas keeps them from being
+    double-counted if a later round re-adds one.
+    """
+
+    base = _require_base("src/us_quant/desktop.py")
+    current = (_REPO_ROOT / "src/us_quant/desktop.py").read_text(
+        encoding="utf-8"
+    )
+
+    def names(source: str) -> set[str]:
+        window = _class_named(ast.parse(source), "MainWindow")
+        return {
+            node.name
+            for node in window.body
+            if isinstance(node, ast.FunctionDef)
+        }
+
+    base_names, current_names = names(base), names(current)
+    for name in DESKTOP_RESEARCH_FOUNDATIONS_V2_NET_ZERO_METHODS:
+        assert name not in base_names, f"{name} is in the base commit"
+        assert name not in current_names, f"{name} is still declared"
+
+    declared = set(DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS) | set(
+        DESKTOP_RESEARCH_FOUNDATIONS_V2_ADDED_METHODS
+    )
+    assert not (set(DESKTOP_RESEARCH_FOUNDATIONS_V2_NET_ZERO_METHODS) & declared)
 
 
 def test_the_other_frozen_modules_are_untouched() -> None:

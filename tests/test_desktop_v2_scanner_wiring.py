@@ -163,7 +163,7 @@ def test_load_scan_file_refreshes_scanner_page(
 def test_auto_market_scan_finished_refreshes_scanner_page(
     window: MainWindow, monkeypatch
 ) -> None:
-    window.universe = _universe()
+    window.universe_orchestrator.restore_snapshot(_universe())
     monkeypatch.setattr(window, "_refresh_market_scope_summary", lambda: None)
     monkeypatch.setattr(window, "_select_auto_quant_candidates", lambda: None)
     window._auto_market_scan_finished(_scan())

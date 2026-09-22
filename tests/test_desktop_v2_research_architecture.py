@@ -155,7 +155,17 @@ def test_main_window_routes_research_to_the_aggregate() -> None:
 
 
 def test_main_window_uses_the_semantic_targeted_workspace() -> None:
-    source = _method_source(_DESKTOP_PATH, "_targeted_robustness_finished")
+    """The desktop route is named semantically, and only from one place.
+
+    The route focus used to be inside ``_targeted_robustness_finished``, which
+    was the window's own evidence handler.  That handler is gone -- the evidence
+    capability owns the evidence and its own page's evidence workspace -- so the
+    route navigation is now a separate window bridge the capability *asks* for
+    through ``focus_requested``.  The rule being pinned is unchanged: the window
+    names a workspace, never a tab index.
+    """
+
+    source = _method_source(_DESKTOP_PATH, "_focus_targeted_evidence")
     assert 'self.shell.navigate_to("research")' in source
     assert "self.research_page.set_active_workspace" in source
     assert "ResearchWorkspace.TARGETED" in source

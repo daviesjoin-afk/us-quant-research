@@ -631,6 +631,21 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
     own had seven consumers across four workspaces, so it got one canonical
     owner.  It is a single module rather than a package because it holds one
     ``int`` and nothing else.
+
+    ``orchestration/research/targeted/evidence/`` arrived with v2O-C5A: the
+    Targeted workspace's *research evidence* runtime -- the seven result
+    families, the two run selections, the replay/robustness requests, the
+    evidence projection and the evidence render -- moved out of ``MainWindow``.
+    It is nested under ``targeted/`` rather than being ``targeted/`` itself
+    because the targeted workspace held three unrelated things and only the
+    evidence third moved: the target session/preflight is v2O-C5B and the Shadow
+    runtime is v2O-D, so a ``targeted/orchestrator.py`` owning all three would
+    have been a second ``MainWindow`` rather than a decomposition of the first.
+    ``models.py`` holds the pure refusal and commit rules, ``messages.py`` the
+    operator-facing text (including the result-dependent completion lines, which
+    must be built before the snapshot is committed), and ``projector.py`` the
+    snapshot-to-view-wiring adapter; each is a separate file because each is a
+    separate job that a reviewer needs to read on its own.
     """
 
     desktop_v2 = _SRC / "desktop_v2"
@@ -667,6 +682,12 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "orchestration/research/cross_section/__init__.py",
         "orchestration/research/cross_section/orchestrator.py",
         "orchestration/research/scenario_capital.py",
+        "orchestration/research/targeted/__init__.py",
+        "orchestration/research/targeted/evidence/__init__.py",
+        "orchestration/research/targeted/evidence/messages.py",
+        "orchestration/research/targeted/evidence/models.py",
+        "orchestration/research/targeted/evidence/orchestrator.py",
+        "orchestration/research/targeted/evidence/projector.py",
         "orchestration/tasking.py",
         "pages/__init__.py",
         "pages/account.py",

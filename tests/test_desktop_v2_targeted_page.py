@@ -29,7 +29,6 @@ from us_quant.desktop_v2.pages.research.targeted.models import (
     TargetedRowTone,
     TargetedSessionView,
     TargetedStrategyOption,
-    TargetedValidationView,
     TargetedWorkspace,
 )
 from us_quant.desktop_v2.pages.research.targeted.page import TargetedValidationPage
@@ -103,19 +102,22 @@ def _evidence(**overrides: object) -> TargetedEvidenceView:
     return TargetedEvidenceView(**values)  # type: ignore[arg-type]
 
 
-def _view(
+def _render(
+    page: TargetedValidationPage,
     session: TargetedSessionView | None = None,
     evidence: TargetedEvidenceView | None = None,
-    **overrides: object,
-) -> TargetedValidationView:
-    values = {
-        "session": session or _session(),
-        "evidence": evidence or _evidence(),
-        "active_workspace": None,
-        "active_evidence_tab": None,
-    }
-    values.update(overrides)
-    return TargetedValidationView(**values)  # type: ignore[arg-type]
+) -> None:
+    """Draw whichever half a test is exercising.
+
+    The page has no combined render any more: the session half and the evidence
+    half are separate entry points with separate owners, so a test names the one
+    it means instead of handing over a view model that carries both.
+    """
+
+    if session is not None:
+        page.render_session(session)
+    if evidence is not None:
+        page.render_evidence(evidence)
 
 
 def _select_key(table, key: str) -> None:
@@ -250,7 +252,7 @@ def test_render_updates_cards_tables_and_preflight(page: TargetedValidationPage)
             (TargetPreflightRow("identity", ("标的身份", "通过", "AAPL", "美股", "标的", "阻断启动")),),
         ),
     )
-    page.render(_view(session=session))
+    _render(page, session=session)
     assert page.layout().indexOf(page.session_panel) >= 0
     assert page.session_panel.status_card.value_label.text() == "运行中"
     assert page.session_panel.position_table.rowCount() == 1
@@ -270,7 +272,7 @@ def test_render_updates_all_seven_evidence_tabs(page: TargetedValidationPage) ->
         review_history_rows=(ReviewHistoryRow("rev", ("rev", "AAPL")),),
         review_gate_rows=(ReviewGateRow("gate", ("硬门", "通过")),),
     )
-    page.render(_view(evidence=evidence))
+    _render(page, evidence=evidence)
     assert page.evidence_panel.tabs.count() == 7
     assert page.evidence_panel.replay_table.rowCount() == 1
     assert page.evidence_panel.robustness_table.rowCount() == 1
@@ -284,25 +286,23 @@ def test_robustness_selection_emits_and_survives_a_repaint(page: TargetedValidat
         RobustnessRunRow("run-a", ("aaa", "AAPL")),
         RobustnessRunRow("run-b", ("bbb", "MSFT")),
     )
-    page.render(
-        _view(
-            evidence=_evidence(
-                robustness_rows=rows,
-                selected_robustness_run_id="run-a",
-            )
-        )
+    _render(
+        page,
+        evidence=_evidence(
+            robustness_rows=rows,
+            selected_robustness_run_id="run-a",
+        ),
     )
     seen: list[str] = []
     page.robustness_run_selected.connect(seen.append)
     _select_key(page.evidence_panel.robustness_table, "run-b")
     assert seen == ["run-b"]
-    page.render(
-        _view(
-            evidence=_evidence(
-                robustness_rows=rows,
-                selected_robustness_run_id="run-b",
-            )
-        )
+    _render(
+        page,
+        evidence=_evidence(
+            robustness_rows=rows,
+            selected_robustness_run_id="run-b",
+        ),
     )
     assert page.evidence_panel.robustness_table.selected_key() == "run-b"
 
@@ -312,52 +312,80 @@ def test_review_selection_emits_and_survives_a_repaint(page: TargetedValidationP
         ReviewHistoryRow("review-a", ("aaa", "AAPL")),
         ReviewHistoryRow("review-b", ("bbb", "MSFT")),
     )
-    page.render(
-        _view(
-            evidence=_evidence(
-                review_history_rows=rows,
-                selected_review_run_id="review-a",
-            )
-        )
+    _render(
+        page,
+        evidence=_evidence(
+            review_history_rows=rows,
+            selected_review_run_id="review-a",
+        ),
     )
     seen: list[str] = []
     page.review_run_selected.connect(seen.append)
     _select_key(page.evidence_panel.review_history_table, "review-b")
     assert seen == ["review-b"]
-    page.render(
-        _view(
-            evidence=_evidence(
-                review_history_rows=rows,
-                selected_review_run_id="review-b",
-            )
-        )
+    _render(
+        page,
+        evidence=_evidence(
+            review_history_rows=rows,
+            selected_review_run_id="review-b",
+        ),
     )
     assert page.evidence_panel.review_history_table.selected_key() == "review-b"
 
 
-def test_active_tabs_are_one_shot_and_do_not_reset_user_choice(page: TargetedValidationPage) -> None:
-    page.workspace_tabs.setCurrentIndex(3)
-    page.evidence_panel.tabs.setCurrentIndex(6)
-    page.render(_view())
-    assert page.workspace_tabs.currentIndex() == 3
-    assert page.evidence_panel.tabs.currentIndex() == 6
-    page.render(_view(active_workspace=1, active_evidence_tab=2))
-    assert page.workspace_tabs.currentIndex() == 1
-    assert page.evidence_panel.tabs.currentIndex() == 2
+def test_a_repaint_leaves_the_operators_tab_choice_alone(
+    page: TargetedValidationPage,
+) -> None:
+    """Painting is not navigating.
+
+    The page used to carry a one-shot ``active_workspace`` / ``active_evidence_tab``
+    pair on its combined view so a finished suite could switch tabs on the next
+    repaint.  Those fields are gone: navigation is the page's own semantic API
+    now, and a render -- of either half -- must never move the operator's tabs.
+    """
+
+    page.set_active_workspace(TargetedWorkspace.EVIDENCE)
+    page.set_active_evidence_workspace(TargetedEvidenceWorkspace.REVIEW)
+    _render(page, session=_session(), evidence=_evidence())
+    assert page.workspace_tabs.currentIndex() == int(
+        TargetedWorkspace.EVIDENCE
+    )
+    assert page.evidence_panel.tabs.currentIndex() == int(
+        TargetedEvidenceWorkspace.REVIEW
+    )
+
+
+def test_each_half_renders_only_its_own_widgets(
+    page: TargetedValidationPage,
+) -> None:
+    """The session paint must not touch the evidence tables, and vice versa.
+
+    This is the point of splitting the render: before it, every market tick,
+    preflight refresh and minute-status update rebuilt all seven evidence tables.
+    """
+
+    _render(page, evidence=_evidence(replay_rows=(ReplayRow("r1", ("run", "AAPL")),)))
+    assert page.evidence_panel.replay_table.rowCount() == 1
+    before = page.session_panel.status_card.value_label.text()
+
+    _render(page, session=_session(status=TargetedMetricView("运行中", "影子")))
+    assert page.session_panel.status_card.value_label.text() == "运行中"
+    # The evidence paint is untouched by the session paint.
+    assert page.evidence_panel.replay_table.rowCount() == 1
+    assert before != "运行中"
 
 
 def test_palette_update_recolours_warning_cells(page: TargetedValidationPage) -> None:
     light = theme_palette("light")
     page.set_palette(light)
-    page.render(
-        _view(
-            session=_session(
-                preflight=TargetPreflightView(
-                    "暂不可启动",
-                    (TargetPreflightRow("identity", ("标的身份", "未通过", "—", "美股", "标的", "阻断启动"), tone=TargetedRowTone.ERROR),),
-                )
+    _render(
+        page,
+        session=_session(
+            preflight=TargetPreflightView(
+                "暂不可启动",
+                (TargetPreflightRow("identity", ("标的身份", "未通过", "—", "美股", "标的", "阻断启动"), tone=TargetedRowTone.ERROR),),
             )
-        )
+        ),
     )
     colour = page.preflight_table.item(0, 1).foreground().color()
     assert colour.name() == QColor(light.error).name()

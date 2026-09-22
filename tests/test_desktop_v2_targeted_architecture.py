@@ -106,7 +106,7 @@ LINE_BUDGETS = {
 }
 
 ALLOWED_PAGE_METHODS = {
-    "render",
+    "render_session",
     "set_palette",
     "set_target_symbol",
     "set_strategy_options",

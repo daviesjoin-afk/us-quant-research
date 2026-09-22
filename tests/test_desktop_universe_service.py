@@ -320,10 +320,42 @@ TARGETED_RESEARCH_V2_REMOVED_METHODS = (
 
 TARGETED_RESEARCH_V2_ADDED_METHODS = (
     "_connect_targeted_validation_page",
-    "_publish_targeted_view",
     "_targeted_controls",
     "_target_symbol_requested",
     "_target_subscribe_requested",
+)
+
+# v2O-C5A moved the Targeted workspace's *research evidence* runtime into
+# ``TargetedEvidenceOrchestrator``: the seven result families, the two run
+# selections and the two one-shot tab switches, plus the replay/robustness
+# requests, the evidence projection and the evidence render.  The window keeps
+# composition (``_connect_targeted_validation_page``), the session/Shadow
+# handlers, and the four bridges the capability publishes into: a refusal dialog,
+# a runtime event, the minute-status refresh and the research-route focus.
+#
+# ``_publish_targeted_view`` is *not* listed as added here: it was renamed to
+# ``_publish_targeted_session_view``, so relative to this file base commit it is
+# one name out and one name in.  It is declared below with the other net-zero
+# names rather than being counted twice.
+DESKTOP_TARGETED_EVIDENCE_ORCHESTRATION_V2_REMOVED_METHODS = (
+    "_run_targeted_replay",
+    "_run_targeted_robustness",
+    "_targeted_replay_finished",
+    "_targeted_robustness_finished",
+)
+DESKTOP_TARGETED_EVIDENCE_ORCHESTRATION_V2_ADDED_METHODS = (
+    "_focus_targeted_evidence",
+    "_publish_targeted_session_view",
+    "_record_targeted_evidence_runtime_event",
+    "_report_targeted_evidence_refusal",
+)
+#: The two window handlers that existed at this file base commit, were removed by
+#: v2O-C5A, and whose replacements did not exist at it either.  They are net zero
+#: in the added/removed deltas, so they are declared separately -- the same
+#: treatment the Scanner, Backtest and Cross Section net-zero sets got -- and
+#: asserted absent from both deltas *and* from the current tree.
+DESKTOP_TARGETED_EVIDENCE_ORCHESTRATION_V2_NET_ZERO_METHODS = (
+    "_publish_targeted_view",
     "_robustness_run_selected",
     "_review_run_selected",
 )
@@ -337,8 +369,6 @@ TARGETED_RESEARCH_V2_METHODS = (
     "_refresh_target_preflight",
     "_start_shadow",
     "_stop_shadow",
-    "_targeted_replay_finished",
-    "_targeted_robustness_finished",
 )
 
 RESEARCH_DATA_V2_REMOVED_METHODS = (
@@ -391,9 +421,6 @@ DESKTOP_RESEARCH_FOUNDATIONS_V2_METHODS = (
     "_build_ui",
     # ``_request_worker_stops`` calls the capability's shutdown lifecycle.
     "_request_worker_stops",
-    # The targeted-replay entry points read the universe at execution time.
-    "_run_targeted_replay",
-    "_run_targeted_robustness",
 )
 
 # v2O-C2 (Research scanner): the scan truth, the manual scan request, the
@@ -543,8 +570,6 @@ DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_METHODS = (
     "_apply_intraday_watchlist",
     "_load_local_state",
     "_prepare_auto_quant_candidates",
-    "_run_targeted_replay",
-    "_run_targeted_robustness",
 )
 
 DESKTOP_EXECUTION_V2_REMOVED_METHODS = (
@@ -1764,6 +1789,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS)
         | set(DESKTOP_SCANNER_ORCHESTRATION_V2_REMOVED_METHODS)
         | set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_REMOVED_METHODS)
+        | set(DESKTOP_TARGETED_EVIDENCE_ORCHESTRATION_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -1784,6 +1810,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_ADDED_METHODS)
         | set(DESKTOP_SCANNER_ORCHESTRATION_V2_ADDED_METHODS)
         | set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_ADDED_METHODS)
+        | set(DESKTOP_TARGETED_EVIDENCE_ORCHESTRATION_V2_ADDED_METHODS)
     )
 
     # The two methods the ScannerPage round added and this round removed exist
@@ -1847,6 +1874,30 @@ def test_only_the_declared_methods_changed() -> None:
     )
     assert not (
         set(DESKTOP_CROSS_SECTION_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & set(current_methods)
+    )
+    # v2O-C5A: ``_publish_targeted_view`` and the two evidence-selection
+    # handlers are net zero against this file base commit -- they existed at it,
+    # this round removed them, and the names that replace them did not exist at
+    # it either.  Asserted separately so the deletion is recorded rather than
+    # inferred from a missing declaration.
+    declared_targeted_evidence = set(
+        DESKTOP_TARGETED_EVIDENCE_ORCHESTRATION_V2_REMOVED_METHODS
+    ) | set(DESKTOP_TARGETED_EVIDENCE_ORCHESTRATION_V2_ADDED_METHODS)
+    assert not (
+        set(DESKTOP_TARGETED_EVIDENCE_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & declared_targeted_evidence
+    )
+    assert not (
+        set(DESKTOP_TARGETED_EVIDENCE_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & (set(base_methods) - set(current_methods))
+    )
+    assert not (
+        set(DESKTOP_TARGETED_EVIDENCE_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & (set(current_methods) - set(base_methods))
+    )
+    assert not (
+        set(DESKTOP_TARGETED_EVIDENCE_ORCHESTRATION_V2_NET_ZERO_METHODS)
         & set(current_methods)
     )
 

@@ -32,7 +32,8 @@ in one of those files instead. Every orchestration PR updates this table.
 | **Scanner** | `ScannerOrchestrator.scan` | `ScannerOrchestrator` | `DesktopMarketScanService` | `scan`, `request_scan`, `request_chart`, `restore_saved`, `adopt_external_scan`, `render_current`, signals | `scan_changed` → `_refresh_market_scope_summary`. AutoQuant **publishes** its finished scan in through `adopt_external_scan` (direction: AutoQuant → Scanner) | v2O-C2 complete |
 | **Backtest** | `BacktestOrchestrator._runs` (private) | `BacktestOrchestrator` | `DesktopBacktestService` | `refresh_strategy_options`, `request_selected`, `request_compare_all`, `select_run`, `render_current`, signals | None. `MainWindow` only constructs, connects and shows the refusal dialog; the strategy catalogue arrives as a provider callable | v2O-C3 complete |
 | **Cross Section** | `CrossSectionOrchestrator._report` (private) | `CrossSectionOrchestrator` | `DesktopCrossSectionService` | `request_capital_change`, `request_run`, `restore_saved`, `render_current`, signals | `capital_changed` → `_on_research_scenario_capital_changed` (Account presentation only). `report_changed` → `_on_cross_section_report_changed` (reloads the artifact catalogue, repaints the Dashboard). Startup `restore_saved()` publishes nothing | v2O-C4 complete |
-| **Targeted** | `MainWindow` (`_selected_robustness_run_id`, `_selected_review_run_id`, `_target_status`, …) | `MainWindow._publish_targeted_view` | the `targeted_*` modules (called inline) | none yet | Shares the target symbol with the market stream; scheduled for v2O-C5 | not started |
+| **Targeted Evidence** | `TargetedEvidenceOrchestrator.snapshot` (published: the terminal export reads all seven families) | `TargetedEvidenceOrchestrator` (evidence half only) | `DesktopTargetedEvidenceService` | `snapshot`, `request_replay`, `request_robustness`, `select_robustness_run`, `select_review_run`, `restore_saved`, `render_current`, signals | `refused` → `_report_targeted_evidence_refusal` (dialog). `runtime_event_requested` → `_record_targeted_evidence_runtime_event` (store). `minute_status_refresh_requested` → `_refresh_minute_data_status` (session status). `focus_requested` → `_focus_targeted_evidence` (research route + targeted workspace) | v2O-C5A complete |
+| **Targeted Session / Preflight** | `MainWindow` (`_target_status`, `_minute_status`, `target_preflight_result`, `shadow_snapshot`) | `MainWindow._publish_targeted_session_view` (session half only) | `targeted_preflight` (called inline) | none yet | Shares the target symbol with the market stream; needs the universe, the market, the account and the Shadow session. Scheduled for v2O-C5B | not started |
 | **Shadow** | `MainWindow.shadow_engine` | `MainWindow` | `ShadowPaperStore`, shadow workflow | none yet | Consumes the market snapshot and the account truth; scheduled for v2O-D | not started |
 | **Paper** | `PaperTradingService` / workflow controllers | `MainWindow` (execution page) | `us_quant.trading.*` | none yet | The largest remaining bridge; scheduled for v2O-E | not started |
 | **System** | `RuntimeEventStore`, `DesktopSettingsService` | the two System pages | `RuntimeEventStore`, `DesktopSettingsService` | none yet | Runtime events are *requested* by other capabilities rather than written by them; orchestration scheduled for v2O-F | pages done, orchestration not started |
@@ -82,6 +83,30 @@ report_changed   → MainWindow._on_cross_section_report_changed
 Neither the Dashboard nor the artifact catalogue is known to the capability.
 `restore_saved()` deliberately emits neither signal: the catalogue is read
 during the same startup pass, so announcing a re-read would fan out twice.
+
+**Targeted Evidence.** Four bridges, each for a fact that is *not* an evidence
+decision:
+
+```text
+refused                          → _report_targeted_evidence_refusal (QMessageBox)
+runtime_event_requested          → _record_targeted_evidence_runtime_event (store)
+minute_status_refresh_requested  → _refresh_minute_data_status (session status)
+focus_requested                  → _focus_targeted_evidence
+                                     (shell.navigate_to("research") +
+                                      research_page.set_active_workspace(TARGETED))
+```
+
+The first three exist so the capability holds no dialog, no event store and no
+minute-status ownership. The fourth is the split that matters: a completed suite
+navigates its **own page's** evidence workspace to REVIEW (the capability's
+presentation behaviour), and separately *asks* for the desktop route through
+`focus_requested` (shell composition, which stays on the window). The capability
+imports no shell, no route and no research page — see
+`tests/test_desktop_targeted_evidence_orchestration.py`.
+
+`restore_saved()` deliberately emits none of them, and a normal session refresh
+(`_publish_targeted_session_view`) emits none either: re-reading a local file is
+not new research, and a market tick is not an evidence event.
 
 ## Shared facts
 

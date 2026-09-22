@@ -281,9 +281,10 @@ def test_targeted_replay_reads_the_updated_canonical_capital(
 ) -> None:
     """The replay request freezes the canonical capital into ``initial_equity``.
 
-    The captured task is executed with a stubbed minute store and session
-    grouping, so the assertion is on the value the *executor* is called with
-    rather than on the window's own attribute.  The executor raises a sentinel
+    The request goes through the real path the button takes: the *capability*
+    freezes the capital on this thread and submits a task; the task is then
+    executed with a stubbed minute store and session grouping, so the assertion
+    is on the value the *executor* receives.  The executor raises a sentinel
     immediately after recording, which short-circuits the save and the result
     handling -- this round is not an occasion to rebuild a real replay.
     """
@@ -320,19 +321,23 @@ def test_targeted_replay_reads_the_updated_canonical_capital(
         lambda symbol, **kwargs: (SimpleNamespace(provider="p"),),
     )
     monkeypatch.setattr(
-        "us_quant.desktop.group_regular_sessions",
+        "us_quant.desktop_targeted_evidence_service.group_regular_sessions",
         lambda rows: (("2026-07-20", tuple(rows)),),
     )
     monkeypatch.setattr(
-        "us_quant.desktop.run_targeted_replay", fake_replay
+        "us_quant.desktop_targeted_evidence_service.run_targeted_replay",
+        fake_replay,
     )
+    # The capability captured ``_start_task`` when the window built it, so the
+    # stub goes on the orchestrator's own dependency rather than on the window
+    # attribute a late monkeypatch could no longer reach.
     monkeypatch.setattr(
-        window,
-        "_start_task",
+        window.targeted_evidence_orchestrator,
+        "_submit_task",
         lambda task, **kwargs: seen.setdefault("task", task) or False,
     )
 
-    window._run_targeted_replay()
+    window.targeted_evidence_orchestrator.request_replay()
 
     with pytest.raises(Sentinel):
         seen["task"](lambda message: None)
@@ -377,15 +382,16 @@ def test_targeted_robustness_reads_the_updated_canonical_capital(
         lambda symbol, **kwargs: (SimpleNamespace(provider="p"),),
     )
     monkeypatch.setattr(
-        "us_quant.desktop.run_targeted_robustness", fake_robustness
+        "us_quant.desktop_targeted_evidence_service.run_targeted_robustness",
+        fake_robustness,
     )
     monkeypatch.setattr(
-        window,
-        "_start_task",
+        window.targeted_evidence_orchestrator,
+        "_submit_task",
         lambda task, **kwargs: seen.setdefault("task", task) or False,
     )
 
-    window._run_targeted_robustness()
+    window.targeted_evidence_orchestrator.request_robustness()
 
     with pytest.raises(Sentinel):
         seen["task"](lambda message: None)

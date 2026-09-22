@@ -459,3 +459,132 @@ def test_the_completion_hook_does_not_need_a_worker_handle(
         # Always released: a failed assertion above must not leave a worker
         # thread parked for the rest of the session.
         release.set()
+
+
+# -- startup restoration paints exactly once ---------------------------
+
+
+def _count_startup_renders(window, monkeypatch, *, cache: str) -> list[int]:
+    """Drive ``_load_local_state`` and return how many times the page painted.
+
+    ``_load_local_state`` is scheduled by ``main()`` via
+    ``QTimer.singleShot(0, ...)``, so a window built directly never runs it and
+    it has to be driven explicitly.
+
+    ``window.universe_path`` is set explicitly: the constructor falls back to the
+    *bundled* snapshot when no writable one exists, and that file is present in
+    the repository, so the real "nothing cached" case cannot be produced by
+    pointing the state root at an empty directory.
+
+    The subject is the *render count*, not the resulting view.  Adopting a
+    snapshot changes what the page must show, so restoration has to paint -- and
+    exactly once.  The old shape painted twice: ``restore_snapshot`` painted and
+    ``_load_local_state`` painted again, rebuilding the whole table on every
+    ordinary startup.
+    """
+
+    from us_quant.desktop_v2.pages.research.universe import page as page_module
+
+    renders: list[int] = []
+    original = page_module.UniversePage.render
+
+    def counting_render(self, view) -> None:
+        renders.append(len(getattr(view, "rows", ()) or ()))
+        return original(self, view)
+
+    monkeypatch.setattr(page_module.UniversePage, "render", counting_render)
+
+    target = window.paths.user_data_root / "reference" / "universe.json"
+    window.universe_path = target
+    if cache != "absent":
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if cache == "valid":
+            from us_quant.universe import save_universe_snapshot
+
+            save_universe_snapshot(_universe("AAPL"), target)
+        else:
+            target.write_text("{ this is not json", encoding="utf-8")
+
+    window._load_local_state()
+    _APP.processEvents()
+    return renders
+
+
+def test_a_cached_universe_paints_the_page_exactly_once(
+    window, monkeypatch
+) -> None:
+    """Spec: restore + render, not restore then render again."""
+
+    renders = _count_startup_renders(window, monkeypatch, cache="valid")
+
+    assert len(renders) == 1, renders
+    # And the single paint is the restored one, not an empty placeholder.
+    assert renders[0] > 0
+    assert window.universe_orchestrator.snapshot is not None
+
+
+def test_an_absent_universe_paints_the_empty_page_exactly_once(
+    window, monkeypatch
+) -> None:
+    """The fallback path still paints: an unpainted page is a blank table."""
+
+    renders = _count_startup_renders(window, monkeypatch, cache="absent")
+
+    assert len(renders) == 1, renders
+    assert renders == [0]
+
+
+def test_an_invalid_cached_universe_paints_exactly_once(
+    window, monkeypatch
+) -> None:
+    """A failed restore paints once, and does not double-paint on the way out."""
+
+    renders = _count_startup_renders(window, monkeypatch, cache="invalid")
+
+    assert len(renders) == 1, renders
+    assert renders == [0]
+    assert window.universe_orchestrator.snapshot is None
+
+
+def test_restore_snapshot_stays_atomic(window, monkeypatch) -> None:
+    """Adopting a snapshot paints, so the caller must not paint again.
+
+    This is the other half of the single-paint rule: the fix is not "the window
+    stops painting", it is "the capability paints on adoption and the caller
+    therefore does not".  Pinned separately so that removing the paint from
+    ``restore_snapshot`` (which would silently make the window the painter
+    again) fails here rather than only showing up as a blank page.
+    """
+
+    from us_quant.desktop_v2.pages.research.universe import page as page_module
+
+    renders: list[int] = []
+    original = page_module.UniversePage.render
+    monkeypatch.setattr(
+        page_module.UniversePage,
+        "render",
+        lambda self, view: renders.append(len(getattr(view, "rows", ()) or ()))
+        or original(self, view),
+    )
+
+    window.universe_orchestrator.restore_snapshot(_universe("AAPL"))
+
+    assert len(renders) == 1, renders
+    assert renders[0] == 1
+    assert window.universe_orchestrator.snapshot is not None
+
+
+def test_restoration_announces_nothing(window, monkeypatch) -> None:
+    """Re-reading a local file is not a successful official refresh."""
+
+    published: list = []
+    logs: list[str] = []
+    window.universe_orchestrator.snapshot_changed.connect(published.append)
+    window.universe_orchestrator.log_requested.connect(logs.append)
+
+    window.universe_orchestrator.restore_snapshot(_universe("AAPL"))
+
+    assert published == []
+    assert logs == []
+
+

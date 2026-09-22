@@ -1545,17 +1545,24 @@ class MainWindow(QMainWindow):
         configure_table(table)
 
     def _load_local_state(self) -> None:
+        # Restoration, not a refresh: the orchestrator adopts the snapshot and
+        # publishes nothing, so a process that merely re-read a local file does
+        # not announce an official refresh.  It *does* paint, because adopting a
+        # snapshot changes what the page must show -- which is why the window
+        # does not paint again below.  The capability owns the page render, and a
+        # second call here would rebuild the whole 11k-row table for nothing.
+        restored = False
         if self.universe_path.exists():
             try:
-                # Restoration, not a refresh: the orchestrator adopts the
-                # snapshot and publishes nothing, so a process that merely
-                # re-read a local file does not announce an official refresh.
                 self.universe_orchestrator.restore_snapshot(
                     load_universe_snapshot(self.universe_path)
                 )
+                restored = True
             except Exception as error:
                 self._log(f"标的快照读取失败：{error}")
-        self.universe_orchestrator.render_current()
+        if not restored:
+            # Nothing was adopted, so the page still needs its first paint.
+            self.universe_orchestrator.render_current()
         self.history_orchestrator.render_current()
         self._probe_gateway()
         if self.scan_path.exists():

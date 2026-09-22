@@ -1827,6 +1827,22 @@ snapshot 的 canonical owner 只能是 desktop 层，即
 窗口所有读取改成显式 `self.universe_orchestrator.snapshot`，且**在任务执行时
 读取**而不是在排程时捕获：刷新在任务排队期间落地时，被扫描的必须是新快照。
 
+**startup 恢复只画一次。** `restore_snapshot()` 的语义是「adopt + render once」
+——采纳快照改变了页面必须显示的内容，所以它必须画。`_load_local_state()` 因此
+在恢复成功时**不再**补一次 `render_current()`：
+
+```text
+有 snapshot    → restore + render，恰好 1 次
+无 snapshot    → 空视图 render，恰好 1 次
+restore 失败   → 空视图 render，恰好 1 次
+```
+
+这一点由 `tests/test_desktop_research_foundations_wiring.py` 的三条
+render-count 回归钉住（真实 `MainWindow` + spy `UniversePage.render`）。修复前
+正常启动会画两次：`restore_snapshot` 一次、`_load_local_state` 再一次，等于每次
+启动都重建整张表。capability 是 page render 的唯一 owner，重复调用不只是性能
+问题——它让「一个 intent 对应一条 render path」不再成立。
+
 ### 18.3 History 为什么仍然不持有队列
 
 `DesktopHistoryService` / `HistoryJobStore` 已经是队列的 canonical truth：

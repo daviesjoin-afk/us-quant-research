@@ -51,6 +51,7 @@ from us_quant.desktop_v2.orchestration.account.models import (
 from us_quant.desktop_v2.orchestration.account.queries import (
     fresh_paper_net_liquidation,
 )
+from us_quant.desktop_v2.orchestration.tasking import TaskSubmitter
 from us_quant.trading.application.accounts import BrokerAccountApplication
 from us_quant.trading.domain.account import BrokerAccountPortfolio
 
@@ -94,7 +95,7 @@ class AccountOrchestrator(QObject):
         application: BrokerAccountApplication,
         ledger: AccountLedger,
         page: object,
-        submit_task: Callable[..., bool],
+        submit_task: TaskSubmitter,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)

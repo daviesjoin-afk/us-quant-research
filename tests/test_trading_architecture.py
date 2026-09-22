@@ -609,6 +609,18 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
     each workspace that owns runtime truth gets its own subpackage, and the
     absence of ``orchestration/research/orchestrator.py`` is itself asserted by
     ``tests/test_desktop_research_foundations_architecture.py``.
+
+    ``orchestration/research/backtest/`` arrived with v2O-C3: the backtest
+    workspace's runs, selection and busy flag moved out of ``MainWindow``.  It
+    carries a ``queries.py`` because the version-selection and
+    draft-to-request rules are pure, and keeping them Qt-free is what makes
+    them testable without a window.
+
+    ``orchestration/tasking.py`` arrived with the same round: every capability's
+    constructor used to declare the window's task boundary as
+    ``Callable[..., bool]``, which says nothing about what it expects.  The
+    module holds the ``TaskSubmitter`` protocol and two aliases and no runtime
+    behaviour -- the generic task lifecycle stays on ``MainWindow``.
     """
 
     desktop_v2 = _SRC / "desktop_v2"
@@ -639,6 +651,10 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "orchestration/research/scanner/__init__.py",
         "orchestration/research/scanner/models.py",
         "orchestration/research/scanner/orchestrator.py",
+        "orchestration/research/backtest/__init__.py",
+        "orchestration/research/backtest/queries.py",
+        "orchestration/research/backtest/orchestrator.py",
+        "orchestration/tasking.py",
         "pages/__init__.py",
         "pages/account.py",
         "pages/risk.py",

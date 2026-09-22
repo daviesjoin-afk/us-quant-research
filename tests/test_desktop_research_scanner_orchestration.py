@@ -62,6 +62,7 @@ ALLOWED_IMPORTS = {
         "PySide6.QtCore",
         "us_quant.desktop_market_scan_service",
         "us_quant.desktop_v2.orchestration.research.scanner.models",
+        "us_quant.desktop_v2.orchestration.tasking",
         "us_quant.desktop_v2.pages.research.scanner.models",
         "us_quant.desktop_v2.pages.research.scanner.presenter",
         "us_quant.scanner",
@@ -598,11 +599,19 @@ def test_the_scanner_capability_imports_no_forbidden_module() -> None:
 
 
 def test_the_scanner_capability_does_not_import_another_orchestrator() -> None:
-    """Spec 30: capabilities reach each other through callables, never objects."""
+    """Spec 30: capabilities reach each other through callables, never objects.
+
+    ``us_quant.desktop_v2.orchestration.tasking`` is the one exception, and it is
+    not a capability: it is a types-only module holding the ``TaskSubmitter``
+    protocol every capability's constructor is annotated with.  Importing it
+    couples Scanner to a signature, not to another workspace's runtime.
+    """
 
     offenders: list[tuple[str, str]] = []
     for path in _python_files(_SCANNER_DIR):
         for module in _module_imports(path):
+            if module == "us_quant.desktop_v2.orchestration.tasking":
+                continue
             if module.startswith(
                 "us_quant.desktop_v2.orchestration"
             ) and "research.scanner" not in module:

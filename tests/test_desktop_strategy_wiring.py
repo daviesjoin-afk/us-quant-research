@@ -440,7 +440,22 @@ def test_the_backtest_combo_excludes_the_other_families(window) -> None:
 
 
 def test_the_compare_all_branch_picks_one_version_per_family(window) -> None:
-    records = window._backtest_records(True, "")
+    """v2O-C3: the rule moved to ``backtest/queries.py``, unchanged.
+
+    Driven through the capability's provider rather than a window method,
+    because the window no longer declares ``_backtest_records``.
+    """
+
+    from us_quant.desktop_v2.orchestration.research.backtest.queries import (
+        select_backtest_versions,
+    )
+
+    versions = window.strategy_selection.options(
+        StrategySelectionPurpose.BACKTEST
+    )
+    records = select_backtest_versions(
+        versions, compare_all=True, selected_version_id=""
+    )
 
     assert records
     assert len({record.strategy_id for record in records}) == len(records)
@@ -455,25 +470,48 @@ def test_the_compare_all_branch_picks_one_version_per_family(window) -> None:
 
 
 def test_the_single_branch_resolves_the_combo_choice(window) -> None:
-    """The other half of ``_backtest_records``: it reads the combo's id.
+    """The other half of the rule: it matches the version id it was given.
 
     Both branches have to return versions the selection service considers
     eligible; the single branch additionally has to find the id it was given,
     which is the half a combo-only assertion would not exercise.
     """
 
+    from us_quant.desktop_v2.orchestration.research.backtest.queries import (
+        select_backtest_versions,
+    )
+
     window.backtest_page.controls.strategy_combo.setCurrentIndex(0)
     chosen = window.backtest_page.controls.strategy_combo.currentData()
 
-    records = window._backtest_records(False, str(chosen))
+    versions = window.strategy_selection.options(
+        StrategySelectionPurpose.BACKTEST
+    )
+    records = select_backtest_versions(
+        versions,
+        compare_all=False,
+        selected_version_id=str(chosen),
+    )
 
     assert len(records) == 1
     assert records[0].version_id == chosen
 
 
 def test_the_single_branch_returns_nothing_for_a_blank_combo(window) -> None:
+    from us_quant.desktop_v2.orchestration.research.backtest.queries import (
+        select_backtest_versions,
+    )
+
     window.backtest_page.controls.strategy_combo.clear()
-    assert window._backtest_records(False, "") == []
+    versions = window.strategy_selection.options(
+        StrategySelectionPurpose.BACKTEST
+    )
+    assert (
+        select_backtest_versions(
+            versions, compare_all=False, selected_version_id=""
+        )
+        == ()
+    )
 
 
 def test_a_stopped_version_drops_out_of_the_backtest_combo(window) -> None:

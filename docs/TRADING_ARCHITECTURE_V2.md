@@ -141,7 +141,8 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Universe Orchestration | MIGRATED（v2O-C1，`desktop_v2/orchestration/research/universe/`） |
 | History Orchestration | MIGRATED（v2O-C1，`desktop_v2/orchestration/research/history/`） |
 | Scanner Orchestration | MIGRATED（v2O-C2，`desktop_v2/orchestration/research/scanner/`） |
-| Research Orchestration | **IN PROGRESS**（v2O-C；Universe / History / Scanner 已完成，Backtest / Cross-Section / Targeted 未迁） |
+| Backtest Orchestration | MIGRATED（v2O-C3，`desktop_v2/orchestration/research/backtest/`） |
+| Research Orchestration | **IN PROGRESS**（v2O-C；Universe / History / Scanner / Backtest 已完成，Cross-Section / Targeted 未迁） |
 
 Shadow 子系统：
 
@@ -1639,6 +1640,153 @@ truth、startup exactly-once render）。旧 scope guards
 **v2O-C Research in progress**，Backtest / Cross-Section / Targeted 待续，
 不得标整个 Research 完成，也不得提前进入 Shadow。
 
+### 8.15 backtest orchestration 已抽出（v2O-C3）
+
+v2O-C2 之后，Backtest route 的桌面 truth 仍散在 `MainWindow`：
+`self.backtest_runs`、`self._selected_backtest_run_id`、`self._backtest_busy`
+三个属性，被八个 handler 在千行范围内反复读写。本轮全部迁入：
+
+```text
+src/us_quant/desktop_v2/orchestration/research/backtest/
+    __init__.py        53 行：导出 orchestrator 与 queries
+    queries.py        162 行：纯规则（Qt-free）
+    orchestrator.py   298 行：capability 本体
+```
+
+外加本轮唯一允许的 shared simplification：
+
+```text
+src/us_quant/desktop_v2/orchestration/tasking.py   86 行
+```
+
+#### 8.15.1 runs 不公开（本轮刻意为之）
+
+`BacktestOrchestrator._runs` 是当前 session 的 Backtest 桌面 truth，但**没有**
+`runs` / `selected_run` / `busy` accessor。理由不是省事：目前没有任何其他
+workflow 读取 `BacktestRun` 列表，而"以防以后需要"加的 accessor 会立刻被下一个
+capability 拿去用，Backtest workspace 就不再自洽。出现真实第二消费者时再加，
+并在本文件记录。
+
+#### 8.15.2 纯规则归 `queries.py`
+
+三条规则从窗口和 orchestrator 里拿出来，逐字义不变：
+
+- `strategy_options(versions)`：先 `STRATEGY_SPECS` family order（未知 family
+  排在 999），同 family 按 `semver`；
+- `select_backtest_versions(versions, *, compare_all, selected_version_id)`：
+  单版本只匹配给定 id（不命中即空，**不回退到最新**）；compare-all 每个
+  `strategy_id` 取 provider 列表中的**第一个**（即最新，因为 selection service
+  已按 newest-first 返回），最终按 `STRATEGY_SPECS` 顺序；
+- `build_backtest_requests(versions, draft)`：`Decimal` 转换与
+  `target_weight_percent / 100` 精度完全保持。
+
+`queries.py` 禁止 PySide6 / `QMessageBox` / `QObject` / Page / MainWindow /
+`DesktopBacktestService` / `TaskThread`——所以"策略选择"和"draft → request"
+可以不启动 Qt 就单元测试。
+
+#### 8.15.3 StrategySelection 走 provider，不走 service
+
+`BacktestOrchestrator` 不 import `StrategySelectionService` /
+`StrategyApplication`，只消费 `Callable[[], tuple[StrategyVersion, ...]]`。
+这样以后 strategy application 重构，Backtest 不跟着变。守卫同时锁定
+import 与符号两个方向。
+
+#### 8.15.4 busy ownership
+
+`_busy` 属于 orchestrator，且**不再**从 worker 列表推导。流程：
+
+```text
+request → validate → _busy = True → render → submit_task
+                                                    ↓ False（准入被拒）
+                                              _busy = False → render
+```
+
+failure → `_busy = False` + render + **保留 last-good runs**（不清空）。
+success → `_busy = False` + 替换 runs + 选第一条 + render + 完成日志。
+
+`_worker_finished` 现在完全不认识 Backtest：无关的 history worker 结束
+不会解锁回测控制。这是本轮最重要的回归断言。
+
+#### 8.15.5 拒绝 severity 不变，且不新建 Notice 框架
+
+三种拒绝保持原 severity 与文案：busy（`information` / 任务忙）、无版本
+（`warning` / 没有可运行版本）、日期非法（`warning` / 日期无效）。capability
+不发 `QMessageBox`，只发 `refused = Signal(str, str, str)`（level / title /
+message），窗口的 `_report_backtest_refusal` 只负责按 level 选 dialog，
+不含 business logic。
+
+本轮**没有**创建 `DesktopNoticeBus` / `NotificationService` /
+`DialogManager`：多个 capability 都有 `refused`，但 severity 模型尚不一致，
+等 Targeted / System 出现相同真实结构后再决定是否统一。
+
+#### 8.15.6 结果类型必须检查
+
+`_runs_finished` 不再 `list(result)` 直接相信任意 object：验证
+`result` 是 `tuple`/`list` 且每项是 `BacktestRun`，否则 `raise TypeError`。
+把错误 object 塞进 UI state 比当场失败难诊断得多。
+
+#### 8.15.7 依赖与 public surface
+
+`BacktestOrchestrator` 禁止 import：`MainWindow`、其他任何 orchestrator、
+`Paper*` / `Shadow*` / `Execution*` / `TradingRuntime` / `RiskApplication`、
+`StrategySelectionService` / `StrategyApplication`、`TaskThread` /
+`DesktopTaskController`。它是最干净的独立 Research capability，不 import
+Universe / History / Scanner / Cross-Section / Targeted 中的任何一个。
+
+public surface 精确为：
+
+```text
+signals:  log_requested, refused
+methods:  refresh_strategy_options, request_selected,
+          request_compare_all, select_run, render_current
+```
+
+#### 8.15.8 页面只有一个 caller
+
+`BacktestPage.render` 与 `BacktestPage.set_strategy_options` 的唯一 caller 是
+`BacktestOrchestrator`。窗口只允许 construct page、connect signals、
+`set_palette`（theme 是窗口的）。以后改 Backtest display 只需看
+`page/` + `presenter/` + `orchestrator/`。
+
+#### 8.15.9 未做的事（明确留给后续）
+
+- 没有 startup restore saved runs。看到 JSON artifacts 就擅自加载历史 run
+  属于产品行为变化，本轮不做；
+- 没有并发化 / asyncio / transaction rollback / cancellation。
+  `DesktopBacktestService.run(...)` 边界已合理，本轮不动；
+- 没有改任何 Decimal / commission / slippage / target_weight /
+  initial_equity / parameter_hash / code_hash / date filtering /
+  `BacktestEngine` / position sizing。本轮是 Desktop ownership extraction，
+  不是回测算法优化；
+- 没有碰 Cross Section（含 `research capital`）、Targeted、Shadow、Paper。
+
+#### 8.15.10 体积、守卫与突变结果
+
+`desktop.py`：**5351 → 5224 行（净减 127）**；
+`backtest/orchestrator.py` 298 行、`backtest/queries.py` 162 行、
+`tasking.py` 86 行。
+
+新增守卫：`tests/test_desktop_backtest_orchestrator.py`（23 项行为，无窗口）、
+`tests/test_desktop_research_backtest_orchestration.py`（79 项结构）、
+重写 `tests/test_desktop_v2_backtest_wiring.py`（18 项真实 `MainWindow`）。
+共享 AST helper 抽到 `tests/desktop_architecture_support.py`（本轮只提取
+机械查询函数，不重写历史测试）。
+
+15 项 mutation 全部由**对应的具名测试**捕获（RED）：窗口恢复 state / 加
+compatibility property / 恢复 `render` / 恢复 `set_strategy_options`、
+capability import `StrategySelectionService` / `TaskThread` /
+`ScannerOrchestrator`、compare-all 不再取 latest、compare-all 不跟
+`STRATEGY_SPECS` 顺序、invalid date 仍启动 service、no eligible strategy 仍启动
+service、admission 被拒后 busy 保持 True、failure 清空 last-good runs、success
+不选第一条 run、catalogue refresh 不更新 Backtest options。
+
+**v2O-C1 Universe + History + v2O-C2 Scanner + v2O-C3 Backtest ✅**；顶层路线仍为
+**v2O-C Research in progress**，Cross-Section / Targeted 待续。下一刀写
+**v2O-C4 Cross Section**（须先明确 `research capital` ownership），不得标整个
+Research 完成。
+
+维护导航见 `docs/DESKTOP_CAPABILITY_MAP.md`。
+
 ## 9. 已删除的旧架构
 
 ```text
@@ -2364,6 +2512,10 @@ shadow_paper.py                        ✅ 已删除（Shadow Framework v2）
                                         ✅ 已删除（v2O-C1 Research foundations）
 旧 MainWindow history queue intents / progress state
                                         ✅ 已删除（v2O-C1 Research foundations）
+旧 MainWindow scan truth / 三条到达路径 / chart read
+                                        ✅ 已删除（v2O-C2 Scanner orchestration）
+旧 MainWindow backtest runs / selection / busy + 8 个 handler
+                                        ✅ 已删除（v2O-C3 Backtest orchestration）
 旧 Paper-specific orchestration glue   ⏭ 后续
 旧 workflow duplicate state            ⏭ 后续
 旧页面 builder（其余 route）            ⏭ 后续
@@ -2375,13 +2527,18 @@ shadow_paper.py                        ✅ 已删除（Shadow Framework v2）
 ```text
 v2O-A Market orchestration      ✅ 已完成（§8.11）
 v2O-B Account orchestration     ✅ 已完成（§8.12）
-v2O-C Research orchestration    🔄 IN PROGRESS（§8.13 完成 Universe + History；
-                                   Scanner / Backtest / Cross-Section / Targeted 待续）
+v2O-C Research orchestration    🔄 IN PROGRESS（§8.13 Universe + History、
+                                   §8.14 Scanner、§8.15 Backtest 完成；
+                                   Cross-Section / Targeted 待续）
 v2O-D Shadow orchestration      ⏭ 后续
 v2O-E Paper orchestration       ⏭ 后续
 v2O-F System orchestration      ⏭ 后续
 MainWindow composition closure  ⏭ 后续
 ```
+
+维护导航：`docs/DESKTOP_CAPABILITY_MAP.md`（capability → truth owner /
+page render owner / service 依赖 / public API / cross-workflow bridge）。
+每个 orchestration PR 更新那一张表。
 
 ## 12. 本轮冻结的行为
 
@@ -2472,8 +2629,12 @@ history}/`；Research 内部刻意不设 aggregate。**v2O-C2 Scanner orchestrat
 loading 归 `DesktopMarketScanService`；AutoQuant preparation **仍然直接**
 `scan_market` / `save_market_scan`，只把完成的 scan fact 通过窗口
 `adopt_external_scan` 交给 Scanner，方向是 AutoQuant → Scanner，不形成反向依赖。
-`v2O-C Research orchestration` 整体仍是 **IN PROGRESS**（Backtest /
-Cross-Section / Targeted 待续）。
+**v2O-C3 Backtest orchestration 已完成**（§8.15），Backtest 的 runs / selection /
+busy 三个属性与 8 个 handler 已迁入
+`desktop_v2/orchestration/research/backtest/`，纯规则（option 顺序、版本选择、
+draft → request）归 Qt-free 的 `queries.py`，窗口只保留 composition 与
+refusal dialog bridge。`v2O-C Research orchestration` 整体仍是 **IN PROGRESS**
+（Cross-Section / Targeted 待续）。
 阶段 2 剩余：
 
 ```text
@@ -2483,7 +2644,8 @@ Desktop Dashboard v2
 后续 orchestration 抽取：
 
 ```text
-v2O-C Research orchestration    （🔄 IN PROGRESS，Universe + History + Scanner 已完成）
+v2O-C Research orchestration    （🔄 IN PROGRESS，Universe + History + Scanner
+                                   + Backtest 已完成）
 v2O-D Shadow orchestration
 v2O-E Paper orchestration
 v2O-F System orchestration

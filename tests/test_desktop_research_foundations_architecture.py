@@ -203,6 +203,19 @@ RETIRED_WINDOW_STATE = (
     "self._backtest_busy ",
     "self._backtest_busy:",
     "self._backtest_busy =",
+    # v2O-C4: the Cross-Section report and its artifact path belong to
+    # ``CrossSectionOrchestrator`` / ``DesktopCrossSectionService``, and the
+    # research scenario capital has its own canonical owner.  None of the three
+    # may be declared on the window any more.
+    "self.cross_section_report ",
+    "self.cross_section_report:",
+    "self.cross_section_report =",
+    "self.cross_section_path ",
+    "self.cross_section_path:",
+    "self.cross_section_path =",
+    "self._research_capital_value ",
+    "self._research_capital_value:",
+    "self._research_capital_value =",
 )
 
 #: The methods the window must no longer declare (spec 28).
@@ -229,6 +242,17 @@ RETIRED_WINDOW_METHODS = (
     "_load_scan_file",
     "_publish_scanner_view",
     "_scanner_symbol_selected",
+    # v2O-C4: the cross-section handlers and the research-capital accessor.
+    # ``_research_scenario_capital`` is included deliberately: it was the
+    # convenience reader that would let every consumer keep working without
+    # naming the canonical owner, so "who reads the research scenario capital?"
+    # stops being one grep the moment it exists.
+    "_publish_cross_section_view",
+    "_run_cross_section_research",
+    "_cross_section_finished",
+    "_load_cross_section_report",
+    "_research_scenario_capital",
+    "_research_capital_changed",
 )
 
 
@@ -297,11 +321,11 @@ FORBIDDEN_ACCESSORS = (
 #: found a real inconsistency rather than a stale comment.
 #:
 #: v2O-C2 moved Scanner out and v2O-C3 moved Backtest out, so both are gone from
-#: this list and pinned in ``RETIRED_WINDOW_STATE`` instead.  Cross-Section and
-#: Shadow remain here: they are still later slices.
+#: this list and pinned in ``RETIRED_WINDOW_STATE`` instead.  v2O-C4 moved the
+#: Cross-Section report *and* the research-capital scalar out, so those two are
+#: gone from here as well and pinned in ``RETIRED_WINDOW_STATE``.  Shadow
+#: remains: it is still a later slice.
 UNTOUCHED_WINDOW_STATE = (
-    "self.cross_section_report",
-    "self._research_capital_value",
     "self.shadow_engine",
 )
 

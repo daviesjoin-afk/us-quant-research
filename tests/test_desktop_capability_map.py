@@ -103,3 +103,42 @@ def test_the_map_does_not_reference_the_deleted_helper() -> None:
 
     text = _MAP.read_text(encoding="utf-8")
     assert "desktop_architecture_support" not in text
+
+
+def test_the_cross_section_row_points_at_the_capability() -> None:
+    """v2O-C4: the row must not still describe the window as the owner.
+
+    The failure this guards is a map that keeps saying "not started" while the
+    extraction is done, which sends the next maintainer to ``desktop.py`` for
+    state that is no longer there.
+    """
+
+    text = _MAP.read_text(encoding="utf-8")
+    row = next(
+        line
+        for line in text.splitlines()
+        if line.startswith("| **Cross Section**")
+    )
+    assert "CrossSectionOrchestrator._report" in row
+    assert "MainWindow.cross_section_report" not in row
+    assert "v2O-C4 complete" in row
+
+
+def test_the_shared_research_capital_fact_has_an_entry() -> None:
+    """The scalar is not a page capability, so it gets its own section.
+
+    Pinning it here is what stops a later round from quietly re-listing it as
+    Cross Section's state -- which would hide its seven other consumers.
+    """
+
+    text = _MAP.read_text(encoding="utf-8")
+    assert "ResearchScenarioCapitalState" in text
+    for consumer in (
+        "Scanner",
+        "AutoQuant",
+        "Targeted",
+        "Account presentation",
+    ):
+        assert consumer in text, consumer
+    # And the safety boundary must be stated, not merely implied.
+    assert "CapitalAllocator" in text

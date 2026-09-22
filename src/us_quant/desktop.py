@@ -56,6 +56,9 @@ from us_quant.desktop_history_service import DesktopHistoryService
 from us_quant.desktop_universe_service import DesktopUniverseService
 from us_quant.desktop_market_scan_service import DesktopMarketScanService
 from us_quant.desktop_backtest_service import DesktopBacktestService
+from us_quant.desktop_cross_section_service import (
+    DesktopCrossSectionService,
+)
 from us_quant.ibkr import IBKRConnectionConfig, probe_ibkr_socket
 from us_quant.trading.composition.accounts import (
     build_broker_account_application,
@@ -217,11 +220,11 @@ from us_quant.desktop_v2.pages.research.backtest import BacktestPage
 from us_quant.desktop_v2.pages.research.cross_section import (
     CrossSectionResearchPage,
 )
-from us_quant.desktop_v2.pages.research.cross_section.models import (
-    CrossSectionResearchDraft,
+from us_quant.desktop_v2.orchestration.research.cross_section import (
+    CrossSectionOrchestrator,
 )
-from us_quant.desktop_v2.pages.research.cross_section.presenter import (
-    build_cross_section_view,
+from us_quant.desktop_v2.orchestration.research.scenario_capital import (
+    ResearchScenarioCapitalState,
 )
 from us_quant.desktop_v2.pages.research import (
     ResearchPage,
@@ -312,10 +315,6 @@ from us_quant.intraday_universe import (
 from us_quant.cross_sectional import (
     run_cross_sectional_research,
     save_cross_sectional_research,
-)
-from us_quant.executable_research import (
-    run_executable_cross_sectional_research,
-    save_executable_research,
 )
 from us_quant.universe import (
     UniverseSnapshot,
@@ -415,9 +414,21 @@ class MainWindow(QMainWindow):
             fallback_data_root=self.bundled_data_root,
             output_root=self.paths.research_results_root / "backtests",
         )
-        self.cross_section_path = (
-            self.paths.research_results_root
-            / "cross_sectional_executable_research.json"
+        # The cross-sectional research procedure and its report artifact are
+        # owned by ``cross_section_service``.  Note what is *not* stored: there
+        # is no ``self.cross_section_path``, because the service owns the
+        # artifact boundary and the capability owns the report truth.  The
+        # config arrives as a provider rather than a value: the run reads the
+        # config that is current when the task executes, not the one that was
+        # live when the window was built.
+        self.cross_section_service = DesktopCrossSectionService(
+            config_provider=lambda: self.config,
+            report_path=(
+                self.paths.research_results_root
+                / "cross_sectional_executable_research.json"
+            ),
+            data_root=self.data_root,
+            fallback_data_root=self.bundled_data_root,
         )
         baseline_config = load_config(self.config_path)
         self.preferences_store = UserPreferencesStore(
@@ -557,8 +568,16 @@ class MainWindow(QMainWindow):
         self.targeted_execution_stress_results: list[
             TargetedExecutionStressResult
         ] = []
-        self.cross_section_report: dict | None = None
-        self._research_capital_value = int(self.config.initial_equity)
+        # Research Scenario Capital: the initial-equity figure historical
+        # research, replay, scan affordability and cross-sectional portfolio
+        # research run at.  It is *research-only* -- never broker equity, never
+        # buying power, never a sizing authority -- and it has seven consumers
+        # across four workspaces, so it is not a Cross Section fact.  The state
+        # object is its single canonical owner; the Cross Section page is its
+        # only editor and every other workflow reads it when it needs the value.
+        self.research_scenario_capital = ResearchScenarioCapitalState(
+            int(self.config.initial_equity)
+        )
         self.task_controller = DesktopTaskController[TaskThread]()
         self.workers = self.task_controller.workers
         # The universe, history and scanner routes keep their runtime in
@@ -805,11 +824,31 @@ class MainWindow(QMainWindow):
         self.backtest_orchestrator.refresh_strategy_options()
         self.backtest_orchestrator.render_current()
         self.cross_section_page = CrossSectionResearchPage(
-            research_capital=self._research_capital_value,
+            research_capital=self.research_scenario_capital.value,
             palette=self.theme,
         )
+        # The Cross Section route's desktop runtime -- the last valid report,
+        # the scenario-capital edit path, the run request and the page render --
+        # belongs to ``cross_section_orchestrator``.  Note what is *not* stored:
+        # there is no ``self.cross_section_report``, because the capability is
+        # the canonical desktop owner, and no ``self.cross_section_path``,
+        # because the service owns the artifact boundary.  The universe arrives
+        # as a provider so the capability never imports ``UniverseOrchestrator``;
+        # the capital state is passed in rather than owned, because it is shared
+        # with four other workspaces.
+        #
+        # The page is deliberately *not* painted here.  ``restore_saved()``
+        # during startup is the first paint, exactly once, so the build stage
+        # cannot produce a render that a later load would immediately repeat --
+        # the double-paint that the Universe round had to remove.
+        self.cross_section_orchestrator = CrossSectionOrchestrator(
+            service=self.cross_section_service,
+            page=self.cross_section_page,
+            submit_task=self._start_task,
+            universe_provider=lambda: self.universe_orchestrator.snapshot,
+            capital_state=self.research_scenario_capital,
+        )
         self._connect_cross_section_page()
-        self._publish_cross_section_view()
         self.research_page = ResearchPage(
             {
                 ResearchWorkspace.TARGETED: self.targeted_validation_page,
@@ -868,17 +907,18 @@ class MainWindow(QMainWindow):
             self._record_account_runtime_event
         )
         self.account_orchestrator.log_requested.connect(self._log)
+        # The research-capital widget lives on the Cross Section page and the
+        # research scenario scalar has its own state owner; this call pushes the
+        # *composed* presentation inputs -- the exposure multipliers and the
+        # scenario figure -- so the account route renders them through its own
+        # render.  There is deliberately no separate capital paint path here:
+        # ``AccountOrchestrator`` is the Account page's only render owner.
         self._publish_account_presentation_inputs()
         # The risk page renders the limits the risk layer enforces and the
         # standing safety boundaries.  It is read-only by construction: it has
         # no service to call and no control that could widen a ceiling.
         self.risk_page = RiskPage(palette=self.theme)
         self.risk_page.render(self.config.risk_limits)
-        # The research-capital widget lives on the Cross Section page; the
-        # window owns the scalar truth and paints the Account card from it.
-        # Initialising through the same handler keeps the first paint and every
-        # later change on one path.
-        self._research_capital_changed(self._research_capital_value)
         # The page's first paint goes through the same render entry point every
         # later refresh uses, so "never read" and "read" cannot diverge into two
         # rendering paths.
@@ -1441,7 +1481,7 @@ class MainWindow(QMainWindow):
         """
 
         return ScannerRunInputs.of(
-            capital=self._research_scenario_capital(),
+            capital=self.research_scenario_capital.decimal_value,
             max_position_risk_pct=(
                 self.config.risk_limits.max_position_exposure_pct
             ),
@@ -1459,14 +1499,71 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, title, message)
 
     def _connect_cross_section_page(self) -> None:
-        page = self.cross_section_page
-        page.run_requested.connect(self._run_cross_section_research)
-        page.capital_changed.connect(self._research_capital_changed)
+        """Wiring only: the page reports intent, the capability owns the work."""
 
-    def _publish_cross_section_view(self) -> None:
-        self.cross_section_page.render(
-            build_cross_section_view(self.cross_section_report)
+        page = self.cross_section_page
+        page.run_requested.connect(
+            self.cross_section_orchestrator.request_run
         )
+        page.capital_changed.connect(
+            self.cross_section_orchestrator.request_capital_change
+        )
+        orchestrator = self.cross_section_orchestrator
+        orchestrator.capital_changed.connect(
+            self._on_research_scenario_capital_changed
+        )
+        orchestrator.report_changed.connect(
+            self._on_cross_section_report_changed
+        )
+        orchestrator.refused.connect(self._report_cross_section_refusal)
+        orchestrator.log_requested.connect(self._log)
+
+    def _on_research_scenario_capital_changed(self, value: int) -> None:
+        """Publish a scenario-capital change to the account presentation.
+
+        This is the whole cross-workflow bridge, and it is deliberately thin.
+        The scalar's owner is ``ResearchScenarioCapitalState`` and this handler
+        stores nothing: it re-pushes the composed presentation inputs and asks
+        the account route to repaint, which is the only path by which the
+        Account card learns the number changed.
+
+        The Scanner, AutoQuant, Targeted and watchlist consumers are
+        deliberately *not* notified.  None of them needs to run when the
+        scenario figure changes -- each pulls the current value when it next
+        builds a request -- so there is no event bus here and no eager rework.
+        """
+
+        self._publish_account_presentation_inputs()
+        self.account_orchestrator.render_current()
+
+    def _on_cross_section_report_changed(self) -> None:
+        """Reload whatever reads the research artifact directory.
+
+        A successful run rewrites the report, so the Dashboard's catalogue is
+        stale.  That fan-out is not the Cross Section capability's business --
+        it must not import the Dashboard or the artifact catalogue -- so the
+        window routes it.  Startup restoration deliberately does not emit
+        ``report_changed``: the catalogue is read during the same startup pass,
+        and announcing a re-read would fan out a second time for nothing.
+        """
+
+        self.artifact_catalog = load_artifact_catalog(
+            self.paths.research_results_root
+        )
+        self._publish_dashboard_view()
+
+    def _report_cross_section_refusal(
+        self, title: str, message: str
+    ) -> None:
+        """Surface a request the cross-section layer refused before running.
+
+        ``information`` rather than ``warning``: this is the severity the
+        pre-extraction inline dialog used, and the extraction is not an
+        occasion to change how the operator is told.  The handler shows the
+        dialog and nothing else.
+        """
+
+        QMessageBox.information(self, title, message)
 
     def _target_symbol_requested(self, symbol: str) -> None:
         self.targeted_validation_page.set_target_symbol(symbol)
@@ -1609,8 +1706,11 @@ class MainWindow(QMainWindow):
         # neither parses the JSON nor repaints the page here.
         self.scanner_orchestrator.restore_saved()
         self._refresh_market_scope_summary()
-        if self.cross_section_path.exists():
-            self._load_cross_section_report()
+        # The cross-section capability owns the report artifact schema now: it
+        # restores the saved report and paints exactly once, and publishes
+        # nothing because re-reading a local file is not new research.  The
+        # window therefore neither parses the JSON nor checks for the file.
+        self.cross_section_orchestrator.restore_saved()
         for symbol in ("SPY", "QQQ", "DIA"):
             try:
                 points = load_close_series(
@@ -1706,85 +1806,6 @@ class MainWindow(QMainWindow):
             return
         raise ValueError(f"unknown backtest refusal level: {level!r}")
 
-    def _run_cross_section_research(
-        self,
-        draft: CrossSectionResearchDraft,
-    ) -> None:
-        universe = self.universe_orchestrator.snapshot
-        if universe is None:
-            QMessageBox.information(
-                self,
-                "缺少标的池",
-                "请先刷新官方标的。",
-            )
-            return
-
-        self._research_capital_value = draft.research_capital
-        research_capital = Decimal(draft.research_capital)
-
-        def task(progress: Callable[[str], None]) -> dict:
-            progress(
-                "正在按整股、组合风险预算、替代品风险倍数和买不起回填规则"
-                "比较8组参数；预计需要1–2分钟…"
-            )
-            research_config = replace(
-                self.config,
-                initial_equity=research_capital,
-            )
-            result = run_executable_cross_sectional_research(
-                research_config,
-                # Execution-time read: the same timing rule the scanner's
-                # manual request uses, so a refresh that landed while this
-                # task queued is the universe that gets researched.
-                self.universe_orchestrator.snapshot,
-                data_root=Path(self.data_root),
-                fallback_data_root=Path(
-                    self.bundled_data_root
-                ),
-            )
-            save_executable_research(
-                result,
-                Path(self.cross_section_path),
-            )
-            return result
-
-        self._start_task(
-            task,
-            on_success=self._cross_section_finished,
-            start_message="组合走样本外研究开始…",
-            resource_group="strategy",
-        )
-
-    def _cross_section_finished(self, result: object) -> None:
-        self.cross_section_report = result  # type: ignore[assignment]
-        self._publish_cross_section_view()
-        self.artifact_catalog = load_artifact_catalog(
-            self.paths.research_results_root
-        )
-        self._publish_dashboard_view()
-        metrics = self.cross_section_report["out_of_sample"]["strategy"]
-        self._log(
-            f"组合研究完成：OOS {metrics['total_return']:+.1%}，"
-            f"最大回撤 {metrics['max_drawdown']:.1%}。"
-        )
-
-    def _load_cross_section_report(self) -> None:
-        try:
-            self.cross_section_report = json.loads(
-                self.cross_section_path.read_text(encoding="utf-8")
-            )
-            # Projection is part of the load guard: valid JSON can still be a
-            # partially written or incompatible report, and startup must not
-            # fail because of one bad research artifact.
-            self._publish_cross_section_view()
-        except Exception as error:
-            self.cross_section_report = None
-            self._log(
-                f"风险一致研究产物读取失败："
-                f"{type(error).__name__}: {error}"
-            )
-            self._publish_cross_section_view()
-
     def _apply_intraday_watchlist(self) -> None:
         scan = self.scanner_orchestrator.scan
         if scan is None:
@@ -1792,8 +1813,12 @@ class MainWindow(QMainWindow):
         if self.market_orchestrator.is_live:
             return
         paper_capital = self.account_orchestrator.fresh_paper_net_liquidation()
+        # Fresh Paper net liquidation when there is one; the research scenario
+        # figure otherwise.  The fallback is a *research* scenario and is not
+        # promoted into Paper truth by this path -- the policy is unchanged, only
+        # the source of the fallback moved to the state object that owns it.
         selection_capital = (
-            paper_capital or self._research_scenario_capital()
+            paper_capital or self.research_scenario_capital.decimal_value
         )
         symbols = select_intraday_watchlist(
             scan,
@@ -2018,7 +2043,7 @@ class MainWindow(QMainWindow):
                 "才会进入实时轮动候选。"
             )
         )
-        research_capital = self._research_scenario_capital()
+        research_capital = self.research_scenario_capital.decimal_value
 
         def task(progress: Callable[[str], None]) -> MarketScan:
             progress(
@@ -3214,7 +3239,7 @@ class MainWindow(QMainWindow):
                     f"{symbol} 未通过当前非中概研究资格门。",
                 )
                 return
-        initial_equity = self._research_scenario_capital()
+        initial_equity = self.research_scenario_capital.decimal_value
 
         def task(
             progress: Callable[[str], None],
@@ -3314,7 +3339,7 @@ class MainWindow(QMainWindow):
                     f"{symbol} 未通过当前非中概研究资格门。",
                 )
                 return
-        initial_equity = self._research_scenario_capital()
+        initial_equity = self.research_scenario_capital.decimal_value
 
         def task(
             progress: Callable[[str], None],
@@ -3572,35 +3597,29 @@ class MainWindow(QMainWindow):
             ),
         )
 
-    def _research_scenario_capital(self) -> Decimal:
-        return Decimal(self._research_capital_value)
-
-    def _research_capital_changed(self, value: int) -> None:
-        self._research_capital_value = int(value)
-        if not hasattr(self, "account_page"):
-            return
-        # Through the page's named method, never ``research_capital_card``: the
-        # card is the page's widget, and reaching into it from here is the
-        # widget reach-through this round removes.  Research capital is still
-        # *not* account truth -- the window owns the scalar and only publishes
-        # it here; v2O-C Research decides who finally owns this fan-out.
-        self.account_page.set_research_capital(
-            f"${value:,.0f}",
-            "历史研究情景；不是 Paper/Live 账户余额",
-        )
-
     def _publish_account_presentation_inputs(self) -> None:
-        """Push the configured exposure multipliers to the account route.
+        """Push the composed presentation facts to the account route.
 
-        The multiplier is a *risk* fact: it comes from the substitution rules in
-        the app config, which the account orchestrator may not import.  The
-        window knows where it comes from and hands over a frozen snapshot, so
-        the account route only ever learns "symbol -> presentation multiplier".
+        Two facts travel, for the same reason: the account route may not import
+        where either comes from.
+
+        * the exposure multiplier is a *risk* fact -- it comes from the
+          substitution rules in the app config -- so the window hands over a
+          frozen snapshot and the account route only ever learns
+          "symbol -> presentation multiplier";
+        * the research scenario capital is edited by the Cross Section page, and
+          the account route must not learn that capability exists.  It is shown
+          on this route purely as a scenario figure, never as broker equity.
+
+        This is the *only* path that gives the Account page a scenario number,
+        and it does so through the page's own ``render``: there is no separate
+        capital paint path and no ``AccountPage.set_research_capital``.
         """
 
         self.account_orchestrator.set_presentation_inputs(
             AccountPresentationInputs.of(
-                self._configured_exposure_multipliers()
+                self._configured_exposure_multipliers(),
+                research_capital=self.research_scenario_capital.value,
             )
         )
 

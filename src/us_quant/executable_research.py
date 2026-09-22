@@ -696,6 +696,39 @@ def save_executable_research(result: dict, path: Path) -> Path:
     return path
 
 
+def load_executable_research(path: Path) -> dict:
+    """Read a report written by :func:`save_executable_research`.
+
+    Deliberately the *pair* of the writer rather than a neighbour of the
+    desktop caller: the artifact format is described once, so a future change
+    to how a report is serialised is made in the module that both writes and
+    reads it, and the service that loads the file never has to guess the
+    schema.
+
+    Three outcomes, and they stay distinct:
+
+    * the file is absent -> :class:`FileNotFoundError` propagates.  This
+      function is the *loader*; deciding that "no saved research yet" is
+      ordinary is the caller's policy, not this boundary's;
+    * the file parses to a mapping -> that mapping;
+    * malformed JSON, or a top-level value that is not an object -> raises.
+      A partially written or wrongly shaped artifact is a real problem, and
+      silently degrading it to "no report" would hide it.
+
+    It does **not** validate the report schema.  Whether a report has the keys
+    the page can project is a question for the projector; duplicating that
+    contract here would create two places to update when it changes.
+    """
+
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise TypeError(
+            f"executable research artifact must be a JSON object, "
+            f"got {type(value).__name__}"
+        )
+    return value
+
+
 def _curve_metrics(
     initial_equity: float,
     curve: tuple[tuple[date, float], ...],

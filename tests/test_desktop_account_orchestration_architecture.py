@@ -162,10 +162,16 @@ PAGE_RENDER_ENTRY_POINTS = ("render",)
 
 #: The only temporary cross-capability presentation APIs ``MainWindow`` may
 #: still call on ``AccountPage`` directly.  ``set_notice`` is the strategy
-#: notice strip; ``set_research_capital`` is the research-capital card.
+#: notice strip.
+#:
+#: ``set_research_capital`` was on this list until v2O-C4.  That round gave the
+#: research scenario scalar a canonical owner and folded its presentation into
+#: the existing ``AccountPresentationInputs`` -> ``render_current`` ->
+#: ``AccountPage.render`` path, so the second paint route is gone: the
+#: orchestrator is now the Account page's only render owner, which is the
+#: property ``test_the_window_never_sets_the_research_capital_card`` pins.
 ACCOUNT_PAGE_WINDOW_WHITELIST = (
     "set_notice",
-    "set_research_capital",
     "refresh_requested",
 )
 
@@ -477,13 +483,26 @@ def test_the_window_never_reaches_into_account_page_widgets() -> None:
         assert f"account_page.{forbidden}" not in source, forbidden
 
 
-def test_the_page_exposes_the_named_research_capital_boundary() -> None:
-    source = _PAGE_PATH.read_text(encoding="utf-8")
-    assert "def set_research_capital" in source
-    # The window must call the method, not reach the card.
-    assert "account_page.set_research_capital" in _DESKTOP_PATH.read_text(
-        encoding="utf-8"
-    )
+def test_the_window_never_sets_the_research_capital_card() -> None:
+    """v2O-C4: the research scenario figure has one render path, not two.
+
+    ``AccountPage.set_research_capital`` is retired, so the window cannot paint
+    the card directly at all.  The scenario number now travels with the other
+    composed presentation facts through ``AccountPresentationInputs`` and is
+    drawn by ``AccountPage.render``, which only ``AccountOrchestrator`` calls --
+    that is what makes "the orchestrator is the page's only render owner" true
+    rather than aspirational.  The behavioural half lives in
+    ``test_desktop_v2_cross_section_wiring.py``.
+    """
+
+    page_source = _PAGE_PATH.read_text(encoding="utf-8")
+    desktop_source = _DESKTOP_PATH.read_text(encoding="utf-8")
+
+    assert "def set_research_capital" not in page_source
+    assert "account_page.set_research_capital" not in desktop_source
+    # And the card is still the page's own widget: the window reaches into
+    # neither the card nor a named writer.
+    assert "account_page.research_capital_card" not in desktop_source
 
 
 # -- Guard C: the orchestrator knows only the account capability ---------

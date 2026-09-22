@@ -1388,10 +1388,17 @@ scan_market(
 | `self.config.risk_limits.max_position_exposure_pct` | task 执行时读取 |
 | `self.config.substitutions` | task 执行时读取 |
 
+> v2O-C4 后第一行改读 `research_scenario_capital.decimal_value`，时机不变。
+
 `research_capital = self._research_scenario_capital()` 发生在 `_start_task()`
 之前；其余三项在 worker 内部读取。**不能**在 `_run_scan()` 前提前写
 `universe = self.universe` 再让 worker 用那个快照，也**不能**把
 `_research_scenario_capital()` 挪进 task——那会改变 UI 线程与 worker 线程的求值时机。
+
+> **v2O-C4 更新**：读取方已从 `_research_scenario_capital()` 改为
+> `self.research_scenario_capital.decimal_value`（`ResearchScenarioCapitalState`，
+> 见 §21）。**求值时机完全未变**——仍在 UI 线程、仍在 `_start_task()` 之前冻结；
+> 只是 truth 换成了 canonical owner。上表其余三项同样未变。
 
 测试用「捕获 task 但不执行 → 替换 `universe` / `config` → 再执行 task」的方式钉住：
 `capital` 必须是替换前的 `CAPITAL_A`，而 `universe` / `risk_pct` / `substitutions`
@@ -1464,6 +1471,11 @@ AST 结构守卫（`__init__` 正文的调用集合不得含 `mkdir`/`exists`/`o
 `_research_scenario_capital` 恒返回同一值，在 UI 线程算还是在 worker 里算看起来
 一样 → 改成第二次调用返回不同值）；`on-success-callback-changed`（突变体是**多加了
 一个 keyword**，而断言只查键存在 → 补 `set(kwargs)` 键集合断言）。
+
+> **v2O-C4 更新**：这里的 harness 命中的是「第二次调用返回不同值」。该手法跟着
+> `_research_scenario_capital` 一起退休了——现在改成「捕获 task 后**改写 canonical
+> state**，再执行 task，断言 worker 用的是改写前的值」，验证的是同一件事：capital 在
+> request 时冻结。见 `tests/test_desktop_market_scan_service.py::test_the_evaluation_timing_is_preserved`。
 
 ③ 一个 harness 缺陷：`scan-exceptions-swallowed` 的替换文本产生了不成对的 `try`，
 `ast.parse` 拦下了它并**中止整个 sweep**。`ast.parse` 前置校验是对的（没有写坏文件），
@@ -2205,7 +2217,257 @@ Cross Section（含 `research capital`）、Targeted、Shadow、Paper。
 
 维护导航见 `docs/DESKTOP_CAPABILITY_MAP.md`。
 
-## 21. Maintenance：preview tooling 修复（不计作 capability 阶段）
+## 21. 第二十步：`desktop_v2/orchestration/research/cross_section/`（Cross Section capability 边界）+ Research Scenario Capital
+
+### 21.1 本轮真正的问题有两个
+
+```text
+1. Cross Section 的 report / task / render 仍在 MainWindow
+
+2. research capital 仍是 MainWindow 的全局 scalar
+```
+
+第二个是这一刀的关键。`self._research_capital_value` 当时已被 **7 个**独立工作流消费：
+
+```text
+Cross Section research
+Scanner 手动扫描
+AutoQuant candidate preparation
+Market watchlist fallback
+Targeted replay
+Targeted robustness
+Account presentation
+```
+
+所以它既不能定义成「Cross Section 的 widget value」，也不能继续让 MainWindow
+做它的 truth owner。
+
+### 21.2 Research Scenario Capital（研究情景资金）
+
+本轮正式命名并单独立 owner：
+
+```text
+orchestration/research/scenario_capital.py  ->  ResearchScenarioCapitalState
+```
+
+语义（同时写进代码 docstring 与 capability map）：
+
+```text
+它表示：历史研究 / replay / scan affordability / cross-sectional research
+        使用的情景初始资金
+
+它不是：IBKR Paper NetLiquidation / Live 账户资金 / 可用购买力 /
+        Risk capital / 真实仓位资金 / Capital allocation authority
+```
+
+**为什么现在才抽象**：此前规定「没有真实重复消费者 → 不抽象」。这里已经有 7 个
+被代码证实的消费者，所以这是 shared boundary，不是 premature abstraction；与上一轮
+删除 premature AST helper 并不矛盾。
+
+**为什么不能叫 `CapitalAllocator`**：终极架构里 allocator 建立在 broker truth +
+portfolio risk + strategy allocation 之上。研究情景 scalar 没有任何真实账户资金权限，
+一旦叫这个名字就很容易被误带进 Live sizing。名字本身就是安全边界。
+
+这个模块 **78 行**，只允许 `decimal` + 普通 class；禁止 PySide6 / QObject /
+Signal / MainWindow / Account / Broker / Risk / Execution / Paper / Shadow /
+CrossSection executor / Config / repository。它只是一个 scalar 的 canonical owner，
+不是 event bus，也不是 `ResearchState` bag（`self._value` 是唯一实例属性，
+有 guard）。
+
+### 21.3 新增 service 与 artifact pair
+
+```text
+src/us_quant/desktop_cross_section_service.py   （120 行）
+```
+
+与 `DesktopMarketScanService` / `DesktopBacktestService` 同构：Cross Section research
+procedure + artifact load/save boundary。public surface 仅：
+
+```text
+run(universe, *, research_capital: int) -> dict
+load_saved() -> dict | None
+```
+
+**两条时间语义刻意相反，且都保持原样**：
+
+* `config` 在 **task 真正执行时** 通过 `config_provider` 读取 —— provider 在 `run()`
+  内调用，不在 constructor 调用，否则会捕获 stale startup config；
+* `research_capital` 在 **request 时冻结** —— 排队期间再改页面 capital 不得改变已提交
+  的本次 run。
+
+`load_executable_research(path)` 放在 `save_executable_research` **旁边**
+（`executable_research.py`），只做 read UTF-8 / `json.loads` / top-level 必须 dict。
+理由是降低维护检索成本：以后 artifact format 改动只需读一个模块，不必到 desktop
+service 猜 JSON。它不复制整个 report schema validator —— 那是 presenter 的事。
+
+### 21.4 CrossSectionOrchestrator
+
+```text
+desktop_v2/orchestration/research/cross_section/orchestrator.py   （267 行）
+desktop_v2/orchestration/research/cross_section/__init__.py
+```
+
+不为了对称增加 `models.py` / `queries.py`：当前没有真实需求。
+
+**owner**：`_report`（private，无 getter —— 没有其他 workflow 消费 raw report，
+与 Backtest runs 同理）。
+
+**public surface 精确为**：
+
+```text
+request_capital_change(value)
+request_run(draft)
+restore_saved()
+render_current()
+signals: capital_changed / report_changed / refused / log_requested
+```
+
+**report truth 的唯一 owner 是它**；`CrossSectionResearchPage.render` 在 production
+中只有它一个调用者。
+
+**success 顺序是契约**：
+
+```text
+validate（必须 dict）
+  ↓
+project（build_cross_section_view，此时 last-good report 还在）
+  ↓
+build completion message（含数值格式化 —— 这也是会失败的一步）
+  ↓
+commit（_report = result）        ← 过了这条线就不得再因 result 失败
+  ↓
+render
+  ↓
+report_changed + completion log
+```
+
+禁止「先 commit 再 render」：presenter 随后失败会把 last-good 污染成画不出来的对象。
+
+**并且：commit 之后不得再有任何可能因 result 失败的操作。** 这条比「先 project」更强，
+它是由 review 发现的真实缺陷换来的。presenter 用 `float(...)` 强转，所以带**数字字符串**
+的报告（`"total_return": "0.2"`）能正常投影；但完成日志用裸 `{:+.1%}` 格式化同一个值会抛
+`ValueError`。原先日志在 commit 之后构建，于是出现：
+
+```text
+_report 已被替换 → 页面已 render → report_changed 已发出
+（Dashboard artifact bridge 已跑）→ 然后 exception，且没有完成日志
+```
+
+即「UI 已接受、logger 才失败」的中间状态：truth 已移动、bridge 已触发、日志缺失。
+现在把**完整成功输出所需的一切**（含日志文案）都在 commit 前准备好；失败统一在边界上
+normalize 成 `TypeError`（`__cause__` 保留原始 `KeyError` / `ValueError`），因此
+
+```text
+能投影 ⇒ 整条 success path 一定能跑完
+```
+
+回归在 `test_desktop_cross_section_orchestrator.py`
+（`test_numeric_string_metrics_complete_the_whole_success_path`、
+`test_every_unusable_shape_fails_before_any_side_effect`）与
+`test_desktop_v2_cross_section_wiring.py`
+（`test_numeric_string_metrics_still_refresh_the_artifact_bridge`，走真实窗口验证 bridge）；
+顺序本身由 `test_desktop_research_cross_section_orchestration.py` 的
+`test_the_success_path_prepares_everything_before_it_commits` 结构钉死。
+
+task failure 不清 `_report` —— 一次失败的 run 不能作为上一份报告错误的证据，与
+Account / Universe / Backtest 的 last-good 原则一致。
+
+**startup restore 三条路径，各自 exactly-once render**：
+
+| 路径 | 行为 |
+| --- | --- |
+| 无产物 | `_report = None`，render 一次，不 emit `report_changed`，无完成日志 |
+| 有效产物 | load + project + commit，render 一次，不 emit `report_changed` |
+| 产物损坏 | catch，`_report = None`，render 一次，log `风险一致研究产物读取失败：…`，不 emit |
+
+build 阶段**不再** paint（删除了 `_publish_cross_section_view()` 的构造期调用），
+由 `restore_saved()` 统一第一次 render —— 这正是早期 Universe double-render 的同类
+问题。
+
+### 21.5 MainWindow 最终 C4 形状
+
+删除的 state（无 compatibility alias）：
+
+```text
+self.cross_section_report
+self.cross_section_path
+self._research_capital_value
+```
+
+删除的 method（无 forwarding wrapper）：
+
+```text
+_publish_cross_section_view
+_run_cross_section_research
+_cross_section_finished
+_load_cross_section_report
+_research_scenario_capital
+_research_capital_changed
+```
+
+保留的只有 construct + connect + 三个 cross-workflow bridge：
+
+```text
+_on_research_scenario_capital_changed  （capital fact → Account presentation）
+_on_cross_section_report_changed       （success → ArtifactCatalog + Dashboard）
+_report_cross_section_refusal          （只做 QMessageBox.information）
+```
+
+**为什么不建 ResearchCapitalChangedEventBus**：capital 改变时 Scanner / AutoQuant /
+Targeted / watchlist 都不需要立即运行，它们在下一次 request 时 pull 最新值即可。
+只有 Account presentation 需要立刻跟随，所以只有这一条 bridge。
+
+**Account 收正**：`AccountPage.set_research_capital` 退休，card 改由 `AccountPage.render`
+的 `research_capital: int | None` 参数绘制，值通过已有的
+`AccountPresentationInputs.research_capital` 传进来。于是恢复了真正的
+「`AccountOrchestrator` = AccountPage 唯一 render owner」，Account 说明卡也从「第二条
+paint path」变成 presentation projection。
+
+### 21.6 明确不接进来的东西
+
+**Backtest 不绑进这个 shared state**：它有自己的 draft / initial-equity 输入，不是
+research scenario capital 的直接消费者。为了「统一研究资金」强行接上会改变产品行为。
+
+**研究精度完全冻结**：`run_executable_cross_sectional_research`、simulation math、
+candidate ranking、walk-forward folds、training Sharpe selection、whole-share sizing、
+risk multiplier、gross/position risk percentage、commission、minimum commission、
+slippage、cost 2x、substitution holding limit、unaffordable backfill、promotion gate ——
+全部未改。`Decimal(draft.research_capital)` 迁移后仍等价于
+`Decimal(research_capital_int)`，没有 float round-trip。artifact 的 key /
+`research_version` / `promotion_gate` / `scope` schema / `chart_data` 全部保持兼容，
+旧 JSON 仍能 startup restore。
+
+**没有创建 `ResearchOrchestrator` / `CapitalAllocator`**；也没有碰 Targeted 算法、
+Shadow engine、Paper workflow、IBKR adapter、Risk limits、ExecutionApplication、
+strategy promotion、AI、Live mode。
+
+### 21.7 体积与测试
+
+| 文件 | 行数 | 预算 |
+| --- | --- | --- |
+| `desktop.py` | 5243 行（迁移前 5224，**净增 19**） | 只减不增不是成功标准 |
+| `scenario_capital.py` | 78 | 80 |
+| `cross_section/orchestrator.py` | 267 | 300 |
+| `desktop_cross_section_service.py` | 120 | 180 |
+
+`desktop.py` 本轮略增，原因是新增了 3 个 bridge 与 2 处 composition 注释，同时删掉了
+6 个 handler。**没有**为了少几十行引入 `ResearchController` / `CapitalContext` —— 那才是
+失败。
+
+新增测试：`tests/test_desktop_research_scenario_capital.py`（21 项）、
+`tests/test_desktop_cross_section_service.py`（16 项）、
+`tests/test_desktop_cross_section_orchestrator.py`（20 项行为，无窗口）、
+`tests/test_desktop_research_cross_section_orchestration.py`（44 项结构）；
+重写 `tests/test_desktop_v2_cross_section_wiring.py`（25 项真实 `MainWindow`）。
+四个旧 guard 文件各自追加本轮的 delta 声明（removed / added / net-zero / changed），
+并把 `_research_capital_changed` 从上一轮的 changed 列表移到本轮 removed 列表。
+
+**没有新建 shared AST helper**。上一轮已经明确「测试工具抽象也要有真实重复证据」，
+本轮仍先在各 guard 内写少量机械查询；不为了抽取主动改旧 tests 制造消费者。
+
+**突变结果：见 PR 描述。** 维护导航见 `docs/DESKTOP_CAPABILITY_MAP.md`。
+
+## 22. Maintenance：preview tooling 修复（不计作 capability 阶段）
 
 C1–C3 的三次迁移各自退休了一批 `MainWindow` widget 属性与 private handler，
 `scripts/render_desktop_preview.py` 仍引用它们，因此已无法完整运行（`window.scan`
@@ -2240,6 +2502,33 @@ code。`desktop.py` 本轮 **0 行改动**：目标正是让 tooling 适配已�
 （Execution/Paper → v2O-E）、`_refresh_minute_data_status`（Targeted → v2O-C5）。
 
 ownership、roadmap 与 capability map 均未改变；preview 的 fixture 数据、Scanner 候选
-选择算法、Targeted 研究算法与 Execution/Paper 状态机全部冻结。下一刀仍是
-**v2O-C4 Cross Section**。
+选择算法、Targeted 研究算法与 Execution/Paper 状态机全部冻结。下一刀当时仍是
+**v2O-C4 Cross Section**（已完成，见 §21）。
+
+## 23. 路线状态（v2O-C4 之后）
+
+```text
+v2O-A Market        ✅
+v2O-B Account       ✅
+
+v2O-C Research
+  C1 Universe       ✅
+  C1 History        ✅
+  C2 Scanner        ✅
+  C3 Backtest       ✅
+  Preview repair    ✅
+  C4 Cross Section  ✅   （含 Research Scenario Capital 单 owner 化）
+  C5 Targeted       ← 下一刀
+
+v2O-D Shadow
+v2O-E Paper
+v2O-F System
+
+MainWindow composition closure
+Final Architecture Closure
+```
+
+C5 是 Research 中最复杂的一刀，因此 C4 先把 `research scenario capital` 这个共享
+事实收干净：C5 的 Targeted replay / robustness 已经是它的消费者，现在它们读的是唯一
+owner，拼接期间不存在两套资金真值。
 

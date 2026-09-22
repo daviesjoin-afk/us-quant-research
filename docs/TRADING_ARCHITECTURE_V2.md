@@ -1081,6 +1081,31 @@ models/presenter、lazy package initializer、MainWindow public surface、centra
 dependency 与 per-file line budgets。v2R-F 完成后一级 native route 计数为
 **6 / 8**。
 
+#### 8.8.1 v2O-C4：上表的 ownership 已被取代
+
+上一节记录的是 v2E 当时的边界（report 真值与 research capital 都在 MainWindow）。
+**v2O-C4 已把两者都搬走**，此处只留结论，详细设计见
+`docs/DESKTOP_DECOMPOSITION.md` §21：
+
+```text
+report truth        -> CrossSectionOrchestrator._report（private）
+report artifact     -> DesktopCrossSectionService（load/save pair 在 executable_research.py）
+research capital    -> ResearchScenarioCapitalState（7 个消费者的唯一 owner）
+page render         -> CrossSectionOrchestrator（唯一 production caller）
+```
+
+MainWindow 上不再有 `self.cross_section_report` / `self.cross_section_path` /
+`self._research_capital_value`，也不再声明 `_research_scenario_capital()` 或
+`_research_capital_changed()` —— 没有 compatibility alias，也没有 forwarding wrapper，
+所以 grep `research_scenario_capital` 就能看到全部消费者。
+
+**commit 线契约（review 修正后）**：`_report_finished` 必须在 commit *之前* 把整条
+success path 可能失败的东西全部准备完（type check / projection / **完成日志文案及其数值
+格式化**），commit 之后不得再有任何可能因 result 失败的操作。原因是投影用 `float(...)`
+强转、而日志用裸 `{:+.1%}`，数字字符串报告会出现「投影成功但 logger 抛
+`ValueError`」，而那时 truth 已移动、页面已重画、artifact bridge 已触发。失败统一
+normalize 成 `TypeError`（`__cause__` 保留原始异常）。
+
 ### 8.9 research aggregate 页已完成（Desktop Research v2R-F）
 
 Research 一级 route 已由 `ResearchPage` aggregate 承接，旧的 MainWindow-owned Research
@@ -1991,6 +2016,39 @@ Trading Runtime（连接、券商状态、对账视图），不是 Execution v2 
 不允许互相 import。
 
 ## 10. 现有模块的未来归宿（roadmap）
+
+### 10.-1 Future seam：Research Scenario Capital ≠ Broker Equity
+
+v2O-C4 把研究情景资金单独立 owner（`ResearchScenarioCapitalState`）。这一刀不是在做
+Live capital allocation，它的意义是**语义隔离**：
+
+```text
+Research Scenario Capital                Broker Account Truth
+        │                                        │
+        ├─ historical research                   └─ future CapitalAllocator
+        ├─ scanner affordability                         ↓
+        ├─ targeted replay                         Portfolio Risk
+        └─ exploratory portfolio research                ↓
+                                                     Risk Kernel
+                                                         ↓
+                                                     Execution
+```
+
+**未来 `CapitalAllocator` 必须**从以下三者之上计算：
+
+```text
+fresh broker / account truth
+strategy allocations
+portfolio risk constraints
+```
+
+**绝不能**是 `CapitalAllocator = ResearchScenarioCapitalState`。研究情景金额不是
+`NetLiquidation`、不是购买力、不是 risk capital、也不是真实仓位资金；它没有真实账户
+资金权限。名字本身是这条边界的一部分：任何 AI / 策略接入时都不得把
+`research scenario dollars` 误当成可下单资金。
+
+本轮不实现 allocator；只钉住这条 seam，供 Paper Autonomous Trading → Live-ready
+Execution / Risk Kernel → Risk Kernel → Small-capital Live Canary 阶段使用。
 
 ```text
 market_data_service.py    → trading/application/market_data.py   ✅ 已迁移

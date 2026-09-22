@@ -192,11 +192,22 @@ def test_window_no_longer_owns_cross_section_widgets() -> None:
         assert name not in attributes
 
 
-def test_research_capital_reads_the_central_scalar() -> None:
-    source = _method_source(_DESKTOP_PATH, "_research_scenario_capital")
-    assert "_research_capital_value" in source
-    for forbidden in ("research_capital_input", "cross_section_page", "QSpinBox"):
-        assert forbidden not in source
+def test_the_window_no_longer_reads_a_local_research_capital() -> None:
+    """v2O-C4: the research scenario scalar has one canonical owner.
+
+    ``_research_scenario_capital`` was the window's convenience reader.  It is
+    retired rather than kept as a wrapper: a forwarding method would let every
+    consumer keep working without ever naming the owner, so "who reads the
+    research scenario capital?" would stop being one grep.  The consumer
+    migration, the Decimal precision and the full ownership guard live in
+    ``tests/test_desktop_research_cross_section_orchestration.py``.
+    """
+
+    methods = _method_names(_DESKTOP_PATH)
+    assert "_research_scenario_capital" not in methods
+    assert "_research_capital_changed" not in methods
+    source = _DESKTOP_PATH.read_text(encoding="utf-8")
+    assert "_research_capital_value" not in source
 
 
 def test_cross_section_package_imports_no_executor() -> None:
@@ -270,9 +281,16 @@ assert "us_quant.desktop_v2.pages.research.cross_section.page" not in sys.module
 
 
 def test_window_uses_only_cross_section_page_surface() -> None:
+    """v2O-C4: the window composes the page and does not paint or edit it.
+
+    ``render`` and ``set_research_capital`` are gone from the window's own
+    surface: the capability is the page's only render owner and the page's
+    control is the only capital editor.  ``capital_changed`` and
+    ``run_requested`` remain because they are the two *signals* the window
+    connects, and connecting a signal is composition.
+    """
+
     assert _page_methods(_DESKTOP_PATH, "cross_section_page") <= {
-        "render",
-        "set_research_capital",
         "current_draft",
         "set_palette",
         "run_requested",
@@ -280,6 +298,8 @@ def test_window_uses_only_cross_section_page_surface() -> None:
     }
     source = _DESKTOP_PATH.read_text(encoding="utf-8")
     for private_surface in (
+        "cross_section_page.render",
+        "cross_section_page.set_research_capital",
         "cross_section_page.controls",
         "cross_section_page.chart",
         "cross_section_page.candidate_table",

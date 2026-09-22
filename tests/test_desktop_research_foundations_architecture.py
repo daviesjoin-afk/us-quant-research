@@ -66,6 +66,7 @@ ALLOWED_IMPORTS = {
         "threading",
         "PySide6.QtCore",
         "us_quant.desktop_universe_service",
+        "us_quant.desktop_v2.orchestration.tasking",
         "us_quant.desktop_v2.pages.research.universe.presenter",
         "us_quant.universe",
     },
@@ -78,6 +79,7 @@ ALLOWED_IMPORTS = {
         "collections.abc",
         "PySide6.QtCore",
         "us_quant.desktop_history_service",
+        "us_quant.desktop_v2.orchestration.tasking",
         "us_quant.desktop_v2.pages.research.history.presenter",
         "us_quant.ibkr",
         "us_quant.universe",
@@ -99,6 +101,7 @@ ALLOWED_IMPORTS = {
         "PySide6.QtCore",
         "us_quant.desktop_market_scan_service",
         "us_quant.desktop_v2.orchestration.research.scanner.models",
+        "us_quant.desktop_v2.orchestration.tasking",
         "us_quant.desktop_v2.pages.research.scanner.models",
         "us_quant.desktop_v2.pages.research.scanner.presenter",
         "us_quant.scanner",
@@ -179,6 +182,8 @@ _CAPABILITY_DIRS = {
 #: The runtime state the window must no longer hold (spec 27/42).  v2O-C2 adds
 #: the Scanner half: the scan is the capability's fact now, so the window must
 #: declare no ``self.scan`` of its own -- and no compatibility property either.
+#: v2O-C3 adds the Backtest half: the runs, the selection and the busy flag are
+#: the capability's, so none of the three may be declared here.
 RETIRED_WINDOW_STATE = (
     "self.universe ",
     "self.universe:",
@@ -189,6 +194,15 @@ RETIRED_WINDOW_STATE = (
     "self.scan ",
     "self.scan:",
     "self.scan =",
+    "self.backtest_runs ",
+    "self.backtest_runs:",
+    "self.backtest_runs =",
+    "self._selected_backtest_run_id ",
+    "self._selected_backtest_run_id:",
+    "self._selected_backtest_run_id =",
+    "self._backtest_busy ",
+    "self._backtest_busy:",
+    "self._backtest_busy =",
 )
 
 #: The methods the window must no longer declare (spec 28).
@@ -282,13 +296,10 @@ FORBIDDEN_ACCESSORS = (
 #: migrated" in one guard and "Scanner state still in MainWindow" in another has
 #: found a real inconsistency rather than a stale comment.
 #:
-#: v2O-C2 moved Scanner out, so ``self.scan`` is gone from this list and pinned
-#: in ``RETIRED_WINDOW_STATE`` instead.  Backtest, Cross-Section and Shadow
-#: remain here: they are still later slices.
+#: v2O-C2 moved Scanner out and v2O-C3 moved Backtest out, so both are gone from
+#: this list and pinned in ``RETIRED_WINDOW_STATE`` instead.  Cross-Section and
+#: Shadow remain here: they are still later slices.
 UNTOUCHED_WINDOW_STATE = (
-    "self.backtest_runs",
-    "self._selected_backtest_run_id",
-    "self._backtest_busy",
     "self.cross_section_report",
     "self._research_capital_value",
     "self.shadow_engine",

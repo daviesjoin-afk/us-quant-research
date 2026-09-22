@@ -154,7 +154,11 @@ STRATEGY_V2_METHODS = frozenset(
         "_apply_theme",
         "_auto_order_service_connected",
         "_auto_quant_preflight",
-        "_backtest_records",
+        # ``_backtest_records`` is no longer listed here: Strategy v2 rewrote it
+        # to read the selection service, and v2O-C3 then deleted it when the
+        # rule moved into ``backtest/queries.py``.  A method that does not exist
+        # cannot be "changed in place", so its deletion is declared in
+        # ``DESKTOP_BACKTEST_ORCHESTRATION_V2_REMOVED_METHODS`` instead.
         "_selected_auto_strategy_record",
         "_selected_shadow_strategy_record",
     }
@@ -476,6 +480,34 @@ BACKTEST_V2_REMOVED_METHODS = (
 )
 BACKTEST_V2_ADDED_METHODS = (
     "_connect_backtest_page",
+)
+#: Methods the BacktestPage round changed *in place*.  v2O-C3 removed three of
+#: the original five, so they moved to the removal declaration below and only
+#: the two that still exist are listed here.
+BACKTEST_V2_METHODS = (
+    "_worker_finished",
+    "_apply_theme",
+)
+
+# v2O-C3 moved the Backtest workspace's desktop runtime into
+# ``BacktestOrchestrator``: the runs, the selection and the busy flag, plus the
+# two request entry points, the render and the option projection.  The window
+# keeps composition (``_connect_backtest_page``) and one dialog bridge
+# (``_report_backtest_refusal``).
+DESKTOP_BACKTEST_ORCHESTRATION_V2_REMOVED_METHODS = (
+    "_backtest_records",
+    "_run_backtest_workspace",
+    "_backtest_workspace_finished",
+)
+DESKTOP_BACKTEST_ORCHESTRATION_V2_ADDED_METHODS = (
+    "_report_backtest_refusal",
+)
+#: Net zero relative to this file's base commit: the BacktestPage round *added*
+#: these six window handlers and v2O-C3 *deleted* them, so they exist at neither
+#: revision.  Declared separately because dropping them from
+#: ``BACKTEST_V2_ADDED_METHODS`` without a record would hide a real deletion --
+#: the same treatment ``DESKTOP_SCANNER_ORCHESTRATION_V2_NET_ZERO_METHODS`` got.
+DESKTOP_BACKTEST_ORCHESTRATION_V2_NET_ZERO_METHODS = (
     "_publish_backtest_strategy_options",
     "_publish_backtest_view",
     "_backtest_run_selected",
@@ -483,12 +515,15 @@ BACKTEST_V2_ADDED_METHODS = (
     "_run_all_backtests",
     "_backtest_task_failed",
 )
-BACKTEST_V2_METHODS = (
-    "_backtest_records",
-    "_run_backtest_workspace",
-    "_backtest_workspace_finished",
-    "_worker_finished",
-    "_apply_theme",
+DESKTOP_BACKTEST_ORCHESTRATION_V2_METHODS = (
+    # Nothing to declare here.  Relative to *this* file's base commit the two
+    # methods v2O-C3 rewrote (``_connect_backtest_page`` and
+    # ``_populate_strategy_selection_combos``) do not exist yet, so they are
+    # additions, not changes -- they are already covered by
+    # ``BACKTEST_V2_ADDED_METHODS`` and ``STRATEGY_V2_ADDED_METHODS``.
+    # The "changed relative to the v2O-C3 base" half is guarded in
+    # ``tests/test_desktop_research_backtest_orchestration.py``, against that
+    # round's own parent commit.
 )
 
 CROSS_SECTION_V2_REMOVED_METHODS = (
@@ -1564,17 +1599,24 @@ def test_the_window_does_not_build_a_second_paths_object(
 # -- 46/47/48: the window's imports and method body --------------------
 
 
-def test_the_run_loop_no_longer_calls_the_domain_directly() -> None:
-    """Spec 46: only the workspace method, not the whole file."""
+def test_the_capability_owns_the_run_loop_not_the_domain_directly() -> None:
+    """Spec 46: only the capability, not the whole file."""
 
-    source = (_REPO_ROOT / "src/us_quant/desktop.py").read_text(
-        encoding="utf-8"
+    path = (
+        _REPO_ROOT
+        / "src"
+        / "us_quant"
+        / "desktop_v2"
+        / "orchestration"
+        / "research"
+        / "backtest"
+        / "orchestrator.py"
     )
-    method = _find_method(source, "_run_backtest_workspace")
+    source = path.read_text(encoding="utf-8")
 
-    assert "run_backtest(" not in method
-    assert "save_backtest_run(" not in method
-    assert "self.backtest_service.run(" in method
+    assert "run_backtest(" not in source
+    assert "save_backtest_run(" not in source
+    assert "self._service.run(" in source
 
 
 def test_the_window_no_longer_imports_the_run_helpers() -> None:
@@ -1589,17 +1631,18 @@ def test_the_window_no_longer_imports_the_run_helpers() -> None:
     assert "save_backtest_run" not in imported
 
 
-def test_the_window_keeps_the_request_and_run_types() -> None:
-    """Spec 48: the window still builds requests and types the result."""
+def test_the_window_keeps_the_backtest_service() -> None:
+    """Spec 48: v2O-C3 moved the request construction out, but the window still
+    composes the service and hands it to the capability."""
 
     source = (_REPO_ROOT / "src/us_quant/desktop.py").read_text(
         encoding="utf-8"
     )
     imported = _imported_names(source)
 
-    assert "BacktestRequest" in imported
-    assert "BacktestRun" in imported
-    assert "STRATEGY_SPECS" in imported
+    assert "DesktopBacktestService" in imported
+    assert "BacktestOrchestrator" in imported
+    assert "BacktestPage" in imported
 
 
 def test_the_domain_module_still_owns_the_run_helpers() -> None:
@@ -1612,18 +1655,40 @@ def test_the_domain_module_still_owns_the_run_helpers() -> None:
     assert "us_quant.backtest_workspace" in _module_imports(service)
 
 
-# -- 49/50/51: the window's validation, requests and progress ----------
+# -- 49/50/51: the capability's validation, requests and progress ------
+#
+# v2O-C3 moved these rules into ``BacktestOrchestrator``: the window no longer
+# declares ``_run_backtest_workspace`` or ``_backtest_records``.  The assertions
+# are kept verbatim where the behaviour is unchanged -- the refusals, the
+# request fields and the progress copy are the same contract -- but they are now
+# driven through the capability, because that is where the code lives.  What the
+# window still owns is checked in ``test_desktop_v2_backtest_wiring.py``.
 
 
-def _draft(window):
-    return window.backtest_page.controls.draft()
+def _draft(window, *, strategy_version_id: str | None = None):
+    draft = window.backtest_page.controls.draft()
+    if strategy_version_id is None:
+        return draft
+    from dataclasses import replace
+
+    return replace(draft, strategy_version_id=strategy_version_id)
 
 
-def _capture_task(window, monkeypatch):
-    """Run ``_run_backtest_workspace`` and hand back the started task.
+def _capture_task(
+    window,
+    monkeypatch,
+    *,
+    strategy_version_id: str | None = None,
+    compare_all: bool = False,
+):
+    """Ask the capability to run and hand back the task it submitted.
 
-    Dialogs are stubbed because a modal ``QMessageBox`` blocks forever
-    under ``QT_QPA_PLATFORM=offscreen``.
+    ``compare_all`` runs one version per strategy family; otherwise the draft
+    names exactly one version.  Either way the request construction is the same
+    code path, which is what these tests are about.
+
+    Dialogs are stubbed because a modal ``QMessageBox`` blocks forever under
+    ``QT_QPA_PLATFORM=offscreen``.
     """
 
     from PySide6.QtWidgets import QMessageBox
@@ -1633,16 +1698,74 @@ def _capture_task(window, monkeypatch):
 
     captured: list = []
     monkeypatch.setattr(
-        window,
-        "_start_task",
+        window.backtest_orchestrator,
+        "_submit_task",
         lambda task, **kwargs: captured.append((task, kwargs)) or True,
     )
-    window._run_backtest_workspace(False, _draft(window))
+    draft = _draft(window, strategy_version_id=strategy_version_id)
+    if compare_all:
+        window.backtest_orchestrator.request_compare_all(draft)
+    else:
+        window.backtest_orchestrator.request_selected(draft)
     return captured[0] if captured else None
 
 
+def _version(strategy_id: str, *, version_id: str):
+    """A real ``StrategyVersion``, so the provider contract is honest."""
+
+    from datetime import datetime, timezone
+
+    from us_quant.trading.domain.strategy import (
+        StrategyDefinition,
+        StrategyIdentity,
+        StrategyMode,
+        StrategyStatus,
+        StrategyVersion,
+    )
+
+    now = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
+    return StrategyVersion(
+        definition=StrategyDefinition(
+            strategy_id=strategy_id,
+            name=f"{strategy_id} name",
+            description="test",
+        ),
+        identity=StrategyIdentity(
+            strategy_id=strategy_id,
+            version_id=version_id,
+            parameter_hash=f"ph-{version_id}",
+        ),
+        semver="1.0.0",
+        status=StrategyStatus.RESEARCH,
+        mode=StrategyMode.RESEARCH,
+        parameters={"lookback": 20},
+        universe_hash="uh",
+        code_hash=f"ch-{version_id}",
+        risk_budget_pct=Decimal("0.01"),
+        gate_passed=True,
+        gate_reason="",
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _provider(window, versions):
+    """Point the capability's catalogue provider at a fixed list."""
+
+    def provider():
+        return tuple(versions)
+
+    window.backtest_orchestrator._strategy_versions_provider = provider
+    return provider
+
+
 def test_a_busy_backtest_worker_blocks_the_run(monkeypatch, tmp_path) -> None:
-    """Spec 49: an already-running backtest worker means "busy"."""
+    """Spec 49: an already-running backtest worker means "busy".
+
+    Registered through the controller, which is what the capability's admission
+    pre-check asks.  Rebinding ``window.workers`` would not reach it: that
+    attribute is a view onto the controller's own list.
+    """
 
     from PySide6.QtWidgets import QMessageBox
 
@@ -1654,7 +1777,7 @@ def test_a_busy_backtest_worker_blocks_the_run(monkeypatch, tmp_path) -> None:
             def isRunning(self) -> bool:
                 return True
 
-        window.workers = [_Worker()]
+        window.task_controller.register(_Worker())
 
         shown: list[tuple] = []
         monkeypatch.setattr(
@@ -1662,7 +1785,9 @@ def test_a_busy_backtest_worker_blocks_the_run(monkeypatch, tmp_path) -> None:
         )
         started: list = []
         monkeypatch.setattr(
-            window, "_start_task", lambda *a, **k: started.append(a) or True
+            window.backtest_orchestrator,
+            "_submit_task",
+            lambda *a, **k: started.append(a) or True,
         )
         ran: list = []
         monkeypatch.setattr(
@@ -1671,7 +1796,7 @@ def test_a_busy_backtest_worker_blocks_the_run(monkeypatch, tmp_path) -> None:
             lambda *a, **k: ran.append(a) or (),
         )
 
-        window._run_backtest_workspace(False, _draft(window))
+        window.backtest_orchestrator.request_selected(_draft(window))
 
         assert started == []
         assert ran == []
@@ -1688,7 +1813,7 @@ def test_no_records_blocks_the_run(monkeypatch, tmp_path) -> None:
 
     window = _window(monkeypatch, tmp_path)
     try:
-        monkeypatch.setattr(window, "_backtest_records", lambda _all, _id: [])
+        _provider(window, ())
 
         shown: list[tuple] = []
         monkeypatch.setattr(
@@ -1696,7 +1821,9 @@ def test_no_records_blocks_the_run(monkeypatch, tmp_path) -> None:
         )
         started: list = []
         monkeypatch.setattr(
-            window, "_start_task", lambda *a, **k: started.append(a) or True
+            window.backtest_orchestrator,
+            "_submit_task",
+            lambda *a, **k: started.append(a) or True,
         )
         ran: list = []
         monkeypatch.setattr(
@@ -1705,7 +1832,7 @@ def test_no_records_blocks_the_run(monkeypatch, tmp_path) -> None:
             lambda *a, **k: ran.append(a) or (),
         )
 
-        window._run_backtest_workspace(False, _draft(window))
+        window.backtest_orchestrator.request_selected(_draft(window))
 
         assert started == []
         assert ran == []
@@ -1722,14 +1849,7 @@ def test_an_invalid_date_range_blocks_the_run(monkeypatch, tmp_path) -> None:
 
     window = _window(monkeypatch, tmp_path)
     try:
-        record = _Record()
-        monkeypatch.setattr(
-            window, "_backtest_records", lambda _all, _id: [record]
-        )
-        # Start strictly after end, whatever "today" happens to be.
-        window.backtest_page.controls.start_date.setDate(
-            window.backtest_page.controls.end_date.date().addDays(10)
-        )
+        _provider(window, (_version("breakout", version_id="v1"),))
 
         shown: list[tuple] = []
         monkeypatch.setattr(
@@ -1737,7 +1857,9 @@ def test_an_invalid_date_range_blocks_the_run(monkeypatch, tmp_path) -> None:
         )
         started: list = []
         monkeypatch.setattr(
-            window, "_start_task", lambda *a, **k: started.append(a) or True
+            window.backtest_orchestrator,
+            "_submit_task",
+            lambda *a, **k: started.append(a) or True,
         )
         ran: list = []
         monkeypatch.setattr(
@@ -1746,7 +1868,17 @@ def test_an_invalid_date_range_blocks_the_run(monkeypatch, tmp_path) -> None:
             lambda *a, **k: ran.append(a) or (),
         )
 
-        window._run_backtest_workspace(False, _draft(window))
+        # Start strictly after end, whatever "today" happens to be.
+        draft = _draft(window, strategy_version_id="v1")
+        from dataclasses import replace
+        from datetime import timedelta
+
+        draft = replace(
+            draft,
+            start_date=draft.end_date + timedelta(days=10),
+        )
+
+        window.backtest_orchestrator.request_selected(draft)
 
         assert started == []
         assert ran == []
@@ -1756,25 +1888,24 @@ def test_an_invalid_date_range_blocks_the_run(monkeypatch, tmp_path) -> None:
         window.deleteLater()
 
 
-class _Record:
-    """A strategy record stand-in with the fields the form reads."""
-
-    strategy_id = "breakout"
-    version_id = "v1"
-    parameter_hash = "p-hash"
-    code_hash = "c-hash"
-    parameters = {"lookback": 20}
-
-
 def test_the_requests_come_from_the_form_controls(
     monkeypatch, tmp_path
 ) -> None:
-    """Spec 50: the window still converts controls into domain requests."""
+    """Spec 50: the capability converts controls into domain requests.
+
+    Driven as a compare-all batch so there are two requests to check: the
+    property under test is that *every* request carries the form's values, and
+    the ordering is ``STRATEGY_SPECS`` order (``buy-hold`` first).
+    """
 
     window = _window(monkeypatch, tmp_path)
     try:
-        monkeypatch.setattr(
-            window, "_backtest_records", lambda _all, _id: [_Record(), _Record()]
+        _provider(
+            window,
+            (
+                _version("buy-hold", version_id="v1"),
+                _version("dual-ma-trend", version_id="v1"),
+            ),
         )
         window.backtest_page.controls.symbol_input.setText("aapl")
         window.backtest_page.controls.capital_spin.setValue(2500)
@@ -1783,7 +1914,7 @@ def test_the_requests_come_from_the_form_controls(
         window.backtest_page.controls.minimum_commission_spin.setValue(1.25)
         window.backtest_page.controls.slippage_spin.setValue(4)
 
-        captured = _capture_task(window, monkeypatch)
+        captured = _capture_task(window, monkeypatch, compare_all=True)
         assert captured is not None
         task, kwargs = captured
 
@@ -1799,10 +1930,10 @@ def test_the_requests_come_from_the_form_controls(
         requests = seen[0]
         assert len(requests) == 2
         request = requests[0]
-        assert request.strategy_id == "breakout"
+        assert request.strategy_id == "buy-hold"
         assert request.strategy_version_id == "v1"
-        assert request.parameter_hash == "p-hash"
-        assert request.code_hash == "c-hash"
+        assert request.parameter_hash == "ph-v1"
+        assert request.code_hash == "ch-v1"
         assert request.symbol == "AAPL"
         assert isinstance(request.initial_equity, Decimal)
         assert request.initial_equity == Decimal("2500")
@@ -1815,6 +1946,12 @@ def test_the_requests_come_from_the_form_controls(
         assert isinstance(request.slippage_bps, Decimal)
         assert request.slippage_bps == Decimal("4")
         assert kwargs["resource_group"] == "backtest"
+        # The form values reach every request in the batch, not just the first.
+        assert [row.symbol for row in requests] == ["AAPL", "AAPL"]
+        assert [row.initial_equity for row in requests] == [
+            Decimal("2500"),
+            Decimal("2500"),
+        ]
     finally:
         window.deleteLater()
 
@@ -1824,10 +1961,10 @@ def test_the_progress_copy_is_verbatim(monkeypatch, tmp_path) -> None:
 
     window = _window(monkeypatch, tmp_path)
     try:
-        monkeypatch.setattr(
-            window, "_backtest_records", lambda _all, _id: [_Record()]
+        _provider(window, (_version("breakout", version_id="v1"),))
+        captured = _capture_task(
+            window, monkeypatch, strategy_version_id="v1"
         )
-        captured = _capture_task(window, monkeypatch)
         assert captured is not None
         task, _kwargs = captured
 
@@ -1856,17 +1993,22 @@ def test_the_start_task_contract_is_unchanged(monkeypatch, tmp_path) -> None:
 
     window = _window(monkeypatch, tmp_path)
     try:
-        monkeypatch.setattr(
-            window, "_backtest_records", lambda _all, _id: [_Record(), _Record()]
+        _provider(
+            window,
+            (
+                _version("buy-hold", version_id="v1"),
+                _version("dual-ma-trend", version_id="v1"),
+            ),
         )
-        captured = _capture_task(window, monkeypatch)
+        captured = _capture_task(window, monkeypatch, compare_all=True)
         assert captured is not None
         _task, kwargs = captured
 
-        assert kwargs["on_success"] == window._backtest_workspace_finished
+        orchestrator = window.backtest_orchestrator
+        assert kwargs["on_success"] == orchestrator._runs_finished
         assert kwargs["start_message"] == "正在运行 2 个版本绑定回测…"
         assert kwargs["resource_group"] == "backtest"
-        assert kwargs["on_failure"] == window._backtest_task_failed
+        assert kwargs["on_failure"] == orchestrator._runs_failed
         assert set(kwargs) == {
             "on_success",
             "on_failure",
@@ -1880,15 +2022,11 @@ def test_the_start_task_contract_is_unchanged(monkeypatch, tmp_path) -> None:
 def test_publish_disables_run_buttons_before_the_task_starts(
     monkeypatch, tmp_path
 ) -> None:
-    """Spec 25/28: busy is published before _start_task, never by workers."""
+    """Spec 25/28: busy is rendered before _start_task, never by workers."""
 
     window = _window(monkeypatch, tmp_path)
     try:
-        monkeypatch.setattr(
-            window,
-            "_backtest_records",
-            lambda _all, _id: [_Record()],
-        )
+        _provider(window, (_version("breakout", version_id="v1"),))
 
         from PySide6.QtWidgets import QMessageBox
 
@@ -1896,42 +2034,48 @@ def test_publish_disables_run_buttons_before_the_task_starts(
         monkeypatch.setattr(QMessageBox, "warning", lambda *a: None)
 
         order: list[str] = []
-        original_publish = window._publish_backtest_view
+        orchestrator = window.backtest_orchestrator
+        original_render = orchestrator.render_current
 
-        def publish() -> None:
-            original_publish()
+        def render() -> None:
+            original_render()
             order.append(
-                "publish-disabled"
+                "render-disabled"
                 if not window.backtest_page.controls.run_selected_button.isEnabled()
-                else "publish-enabled"
+                else "render-enabled"
             )
 
-        def start_task(task, **kwargs):
+        def submit_task(task, **kwargs):
             del task, kwargs
             order.append("start_task")
             return True
 
-        monkeypatch.setattr(window, "_publish_backtest_view", publish)
-        monkeypatch.setattr(window, "_start_task", start_task)
+        monkeypatch.setattr(orchestrator, "render_current", render)
+        monkeypatch.setattr(orchestrator, "_submit_task", submit_task)
 
-        window._run_backtest_workspace(False, _draft(window))
+        orchestrator.request_selected(
+            _draft(window, strategy_version_id="v1")
+        )
 
-        assert order == ["publish-disabled", "start_task"]
+        assert order == ["render-disabled", "start_task"]
     finally:
         window.deleteLater()
 
 
-def test_the_window_does_not_catch_service_failures(
-    monkeypatch, tmp_path
-) -> None:
-    """Spec 52: no try/except in the workspace method."""
+def test_the_capability_does_not_catch_service_failures() -> None:
+    """Spec 52: no try/except around the service call."""
 
-    source = (_REPO_ROOT / "src/us_quant/desktop.py").read_text(
-        encoding="utf-8"
+    path = (
+        _REPO_ROOT
+        / "src"
+        / "us_quant"
+        / "desktop_v2"
+        / "orchestration"
+        / "research"
+        / "backtest"
+        / "orchestrator.py"
     )
-    method = _find_method(source, "_run_backtest_workspace")
-
-    tree = ast.parse(textwrap.dedent(method))
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     assert [
         node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)
     ] == []
@@ -2033,6 +2177,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_REMOVED_METHODS)
         | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_REMOVED_METHODS)
         | set(DESKTOP_SCANNER_ORCHESTRATION_V2_REMOVED_METHODS)
+        | set(DESKTOP_BACKTEST_ORCHESTRATION_V2_REMOVED_METHODS)
     )
     assert set(current_methods) - set(base_methods) == (
         set(LATER_ROUND_ADDED_METHODS)
@@ -2051,6 +2196,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_ADDED_METHODS)
         | set(DESKTOP_RESEARCH_FOUNDATIONS_V2_ADDED_METHODS)
         | set(DESKTOP_SCANNER_ORCHESTRATION_V2_ADDED_METHODS)
+        | set(DESKTOP_BACKTEST_ORCHESTRATION_V2_ADDED_METHODS)
     )
 
     # The two methods the ScannerPage round added and this round removed exist
@@ -2069,6 +2215,31 @@ def test_only_the_declared_methods_changed() -> None:
     assert not (
         set(DESKTOP_SCANNER_ORCHESTRATION_V2_NET_ZERO_METHODS)
         & (set(current_methods) - set(base_methods))
+    )
+
+    # v2O-C3: the six BacktestPage handlers are net zero against *this* file's
+    # base commit.  Asserted the same way, and separately, so their deletion is
+    # recorded rather than inferred from a missing declaration.
+    declared_backtest = set(
+        DESKTOP_BACKTEST_ORCHESTRATION_V2_REMOVED_METHODS
+    ) | set(DESKTOP_BACKTEST_ORCHESTRATION_V2_ADDED_METHODS)
+    assert not (
+        set(DESKTOP_BACKTEST_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & declared_backtest
+    )
+    assert not (
+        set(DESKTOP_BACKTEST_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & (set(base_methods) - set(current_methods))
+    )
+    assert not (
+        set(DESKTOP_BACKTEST_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & (set(current_methods) - set(base_methods))
+    )
+    # And they really are gone: a net-zero declaration that named a surviving
+    # method would be a lie.
+    assert not (
+        set(DESKTOP_BACKTEST_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & set(current_methods)
     )
 
     changed = []
@@ -2124,7 +2295,11 @@ def test_only_the_declared_methods_changed() -> None:
     assert set(DESKTOP_MARKET_ORCHESTRATION_V2_METHODS) <= set(changed)
     assert set(DESKTOP_ACCOUNT_ORCHESTRATION_V2_METHODS) <= set(changed)
     assert set(DESKTOP_SCANNER_ORCHESTRATION_V2_METHODS) <= set(changed)
-    assert "_run_backtest_workspace" in changed
+    # v2O-C3: ``_worker_finished`` and ``_apply_theme`` are the only methods
+    # this round touched that already existed here, and both are declared in
+    # ``BACKTEST_V2_METHODS``.  The two the round *rewrote*
+    # (``_connect_backtest_page``, ``_populate_strategy_selection_combos``) did
+    # not exist at this base commit, so they are additions rather than changes.
 
 
 def test_the_other_frozen_modules_are_untouched() -> None:

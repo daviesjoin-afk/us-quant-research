@@ -186,6 +186,11 @@ from us_quant.desktop_v2.orchestration.research.scanner import (
     ScannerOrchestrator,
     ScannerRunInputs,
 )
+from us_quant.desktop_v2.orchestration.research.backtest import (
+    BacktestOrchestrator,
+    REFUSAL_INFORMATION,
+    REFUSAL_WARNING,
+)
 from us_quant.desktop_v2.pages.execution import ExecutionPage
 from us_quant.desktop_v2.pages.execution.presenter import (
     build_candidates_view,
@@ -209,13 +214,6 @@ from us_quant.desktop_v2.pages.research.universe import UniversePage
 from us_quant.desktop_v2.pages.research.history import HistoryPage
 from us_quant.desktop_v2.pages.research.scanner import ScannerPage
 from us_quant.desktop_v2.pages.research.backtest import BacktestPage
-from us_quant.desktop_v2.pages.research.backtest.models import (
-    BacktestFormDraft,
-    BacktestStrategyOption,
-)
-from us_quant.desktop_v2.pages.research.backtest.presenter import (
-    build_backtest_view,
-)
 from us_quant.desktop_v2.pages.research.cross_section import (
     CrossSectionResearchPage,
 )
@@ -336,11 +334,6 @@ from us_quant.user_settings import (
     UserPreferencesStore,
     UserSettingsError,
 )
-from us_quant.backtest_workspace import (
-    STRATEGY_SPECS,
-    BacktestRequest,
-    BacktestRun,
-)
 
 
 APP_TITLE = "美股量化研究台"
@@ -450,9 +443,6 @@ class MainWindow(QMainWindow):
             baseline_config,
             ibkr=ibkr_config_from_preferences(self.preferences),
         )
-        self.backtest_runs: list[BacktestRun] = []
-        self._selected_backtest_run_id: str | None = None
-        self._backtest_busy = False
         self.artifact_catalog: ArtifactCatalog = load_artifact_catalog(
             self.paths.research_results_root
         )
@@ -791,9 +781,29 @@ class MainWindow(QMainWindow):
             slippage_bps=self.config.execution.slippage_bps,
             palette=self.theme,
         )
+        # The backtest route's desktop runtime -- this session's runs, the
+        # comparison selection and the busy flag -- belongs to
+        # ``backtest_orchestrator``, constructed here with its dependencies
+        # injected.  Note what is *not* stored: there is no
+        # ``self.backtest_runs``, because this orchestrator is the canonical
+        # desktop owner and the page is painted only from it.  The strategy
+        # catalogue arrives as a provider, so the capability never imports
+        # ``StrategySelectionService`` and a change to strategy application does
+        # not reach it.
+        self.backtest_orchestrator = BacktestOrchestrator(
+            service=self.backtest_service,
+            page=self.backtest_page,
+            submit_task=self._start_task,
+            task_available=lambda group: self.task_controller.can_start(
+                group
+            ),
+            strategy_versions_provider=lambda: self.strategy_selection.options(
+                StrategySelectionPurpose.BACKTEST
+            ),
+        )
         self._connect_backtest_page()
-        self._publish_backtest_strategy_options()
-        self._publish_backtest_view()
+        self.backtest_orchestrator.refresh_strategy_options()
+        self.backtest_orchestrator.render_current()
         self.cross_section_page = CrossSectionResearchPage(
             research_capital=self._research_capital_value,
             palette=self.theme,
@@ -1660,181 +1670,41 @@ class MainWindow(QMainWindow):
         self._publish_targeted_view()
 
     def _connect_backtest_page(self) -> None:
+        """Wiring only: the page reports intent, the capability owns the work."""
+
         page = self.backtest_page
-        page.run_selected_requested.connect(self._run_selected_backtest)
-        page.compare_all_requested.connect(self._run_all_backtests)
-        page.run_selected.connect(self._backtest_run_selected)
-
-    def _publish_backtest_strategy_options(self) -> None:
-        if not hasattr(self, "backtest_page"):
-            return
-        versions = self.strategy_selection.options(
-            StrategySelectionPurpose.BACKTEST
+        page.run_selected_requested.connect(
+            self.backtest_orchestrator.request_selected
         )
-        order = {
-            spec.strategy_id: index
-            for index, spec in enumerate(STRATEGY_SPECS)
-        }
-        ordered = sorted(
-            versions,
-            key=lambda item: (
-                order.get(item.strategy_id, 999),
-                item.semver,
-            ),
+        page.compare_all_requested.connect(
+            self.backtest_orchestrator.request_compare_all
         )
-        self.backtest_page.set_strategy_options(
-            tuple(
-                BacktestStrategyOption(
-                    version.version_id,
-                    f"{version.name} · {version.semver}",
-                )
-                for version in ordered
-            )
-        )
+        page.run_selected.connect(self.backtest_orchestrator.select_run)
+        orchestrator = self.backtest_orchestrator
+        orchestrator.log_requested.connect(self._log)
+        # A refusal is the window's to show: the backtest capability holds no
+        # widget, which is what keeps it free of dialogs.  The severity travels
+        # with the message, so this handler never has to interpret a title.
+        orchestrator.refused.connect(self._report_backtest_refusal)
 
-    def _publish_backtest_view(self) -> None:
-        if not hasattr(self, "backtest_page"):
-            return
-        self.backtest_page.render(
-            build_backtest_view(
-                tuple(self.backtest_runs),
-                self._selected_backtest_run_id,
-                busy=self._backtest_busy,
-            )
-        )
-
-    def _backtest_run_selected(self, run_id: str) -> None:
-        self._selected_backtest_run_id = run_id
-        self._publish_backtest_view()
-
-    def _backtest_records(
-        self,
-        compare_all: bool,
-        selected_version_id: str,
-    ) -> list[StrategyVersion]:
-        versions = self.strategy_selection.options(
-            StrategySelectionPurpose.BACKTEST
-        )
-        if compare_all:
-            latest: dict[str, StrategyVersion] = {}
-            for version in versions:
-                latest.setdefault(version.strategy_id, version)
-            return [
-                latest[spec.strategy_id]
-                for spec in STRATEGY_SPECS
-                if spec.strategy_id in latest
-            ]
-        return [
-            version
-            for version in versions
-            if version.version_id == selected_version_id
-        ]
-
-    def _run_selected_backtest(self, draft: BacktestFormDraft) -> None:
-        self._run_backtest_workspace(False, draft)
-
-    def _run_all_backtests(self, draft: BacktestFormDraft) -> None:
-        self._run_backtest_workspace(True, draft)
-
-    def _run_backtest_workspace(
-        self,
-        compare_all: bool,
-        draft: BacktestFormDraft,
+    def _report_backtest_refusal(
+        self, level: str, title: str, message: str
     ) -> None:
-        if any(
-            worker.isRunning()
-            and worker.resource_group == "backtest"
-            for worker in self.workers
-        ):
-            QMessageBox.information(
-                self,
-                "任务忙",
-                "请等待当前数据或研究任务完成后再运行回测。",
-            )
+        """Surface a request the backtest layer refused before running.
+
+        The severity is not a policy decision made here: the capability already
+        chose ``information`` for "busy" and ``warning`` for the two validation
+        refusals, and this round is not an occasion to change how the operator
+        is told.  This handler shows the dialog and nothing else.
+        """
+
+        if level == REFUSAL_WARNING:
+            QMessageBox.warning(self, title, message)
             return
-        records = self._backtest_records(
-            compare_all,
-            draft.strategy_version_id,
-        )
-        if not records:
-            QMessageBox.warning(
-                self,
-                "没有可运行版本",
-                "策略目录中没有与回测工厂匹配的研究版本。",
-            )
+        if level == REFUSAL_INFORMATION:
+            QMessageBox.information(self, title, message)
             return
-        if draft.start_date > draft.end_date:
-            QMessageBox.warning(
-                self, "日期无效", "起始日期不能晚于结束日期。"
-            )
-            return
-        requests = [
-            BacktestRequest(
-                strategy_id=record.strategy_id,
-                strategy_version_id=record.version_id,
-                parameter_hash=record.parameter_hash,
-                code_hash=record.code_hash,
-                parameters=record.parameters,
-                symbol=draft.symbol,
-                start_date=draft.start_date,
-                end_date=draft.end_date,
-                initial_equity=Decimal(draft.initial_equity),
-                target_weight=(
-                    Decimal(draft.target_weight_percent)
-                    / Decimal("100")
-                ),
-                per_share_commission=Decimal(
-                    draft.per_share_commission
-                ),
-                minimum_commission=Decimal(
-                    draft.minimum_commission
-                ),
-                slippage_bps=Decimal(draft.slippage_bps),
-            )
-            for record in records
-        ]
-
-        def task(
-            progress: Callable[[str], None],
-        ) -> tuple[BacktestRun, ...]:
-            return self.backtest_service.run(
-                requests,
-                on_progress=lambda index, total, request: progress(
-                    f"回测 {index}/{total}："
-                    f"{request.strategy_id} {request.symbol}"
-                ),
-            )
-
-        self._backtest_busy = True
-        self._publish_backtest_view()
-        started = self._start_task(
-            task,
-            on_success=self._backtest_workspace_finished,
-            on_failure=self._backtest_task_failed,
-            start_message=(
-                f"正在运行 {len(requests)} 个版本绑定回测…"
-            ),
-            resource_group="backtest",
-        )
-        if not started:
-            self._backtest_busy = False
-            self._publish_backtest_view()
-
-    def _backtest_task_failed(self, _message: str) -> None:
-        self._backtest_busy = False
-        self._publish_backtest_view()
-
-    def _backtest_workspace_finished(self, result: object) -> None:
-        self._backtest_busy = False
-        runs = list(result)  # type: ignore[arg-type]
-        self.backtest_runs = runs
-        self._selected_backtest_run_id = (
-            runs[0].run_id if runs else None
-        )
-        self._publish_backtest_view()
-        self._log(
-            f"回测完成：{len(runs)} 个不可变 run 已保存到用户研究目录"
-        )
+        raise ValueError(f"unknown backtest refusal level: {level!r}")
 
     def _run_cross_section_research(
         self,
@@ -3851,8 +3721,11 @@ class MainWindow(QMainWindow):
     def _populate_strategy_selection_combos(self) -> None:
         """Point every runtime-selection combo at the selection service."""
 
-        if hasattr(self, "backtest_page"):
-            self._publish_backtest_strategy_options()
+        if hasattr(self, "backtest_orchestrator"):
+            # The backtest option order is the capability's rule, not the
+            # window's: this asks it to re-read the catalogue rather than
+            # recomputing the projection here.
+            self.backtest_orchestrator.refresh_strategy_options()
         if hasattr(self, "targeted_validation_page"):
             purpose = StrategySelectionPurpose.TARGETED_SHADOW
             selected = self.strategy_selection.restore_or_default(purpose)

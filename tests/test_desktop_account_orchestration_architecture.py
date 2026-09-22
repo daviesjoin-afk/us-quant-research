@@ -65,6 +65,7 @@ ALLOWED_ORCHESTRATOR_IMPORTS = (
     "PySide6.QtCore",
     "us_quant.account_ledger",
     "us_quant.desktop_v2.orchestration.account",
+    "us_quant.desktop_v2.orchestration.tasking",
     "us_quant.trading.application.accounts",
     "us_quant.trading.domain.account",
     "us_quant.trading.domain.common",

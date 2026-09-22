@@ -29,26 +29,36 @@ class _FakeBacktestPage:
         return self._draft
 
 
+class _FakeBacktestOrchestrator:
+    def __init__(self) -> None:
+        self.requests: list[object] = []
+
+    def request_selected(self, draft: object) -> None:
+        self.requests.append(draft)
+
+
 class _FakeWindow:
     def __init__(self, draft: object) -> None:
         self.backtest_page = _FakeBacktestPage(draft)
-        self.seen: list[tuple[bool, object]] = []
+        self.backtest_orchestrator = _FakeBacktestOrchestrator()
 
-    def _run_backtest_workspace(self, compare_all: bool, draft: object) -> None:
-        self.seen.append((compare_all, draft))
+    @property
+    def seen(self) -> list[object]:
+        return self.backtest_orchestrator.requests
 
 
 def test_preview_uses_current_draft_for_backtest_orchestration() -> None:
     draft = object()
     window = _FakeWindow(draft)
     _preview_module()._start_backtest_preview(window)
-    assert window.seen == [(False, draft)]
+    assert window.seen == [draft]
 
 
-def test_preview_does_not_call_the_retired_one_argument_signature() -> None:
+def test_preview_does_not_call_the_retired_window_handler() -> None:
     source = _PREVIEW_PATH.read_text(encoding="utf-8")
-    assert "_run_backtest_workspace(False)" not in source
+    assert "_run_backtest_workspace" not in source
     assert "backtest_page.current_draft()" in source
+    assert "backtest_orchestrator.request_selected" in source
 
 
 class _FakeShell:

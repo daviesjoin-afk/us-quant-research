@@ -40,6 +40,7 @@ from collections.abc import Callable
 from PySide6.QtCore import QObject, Signal
 
 from us_quant.desktop_history_service import DesktopHistoryService
+from us_quant.desktop_v2.orchestration.tasking import TaskSubmitter
 from us_quant.desktop_v2.pages.research.history.presenter import (
     build_history_view,
 )
@@ -83,7 +84,7 @@ class HistoryOrchestrator(QObject):
         *,
         service: DesktopHistoryService,
         page: object,
-        submit_task: Callable[..., bool],
+        submit_task: TaskSubmitter,
         universe_provider: Callable[[], UniverseSnapshot | None],
         ibkr_config_provider: Callable[[], IBKRConnectionConfig],
         parent: QObject | None = None,

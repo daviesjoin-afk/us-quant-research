@@ -32,7 +32,7 @@ from us_quant.trading.runtime.models import AutoQuantCandidate  # noqa: E402
 
 def _start_backtest_preview(window) -> None:
     draft = window.backtest_page.current_draft()
-    window._run_backtest_workspace(False, draft)
+    window.backtest_orchestrator.request_selected(draft)
 
 
 def _process_events() -> None:

@@ -55,6 +55,7 @@ from us_quant.desktop_universe_service import (
     DesktopUniverseService,
     UniverseRefreshProgress,
 )
+from us_quant.desktop_v2.orchestration.tasking import TaskSubmitter
 from us_quant.desktop_v2.pages.research.universe.presenter import (
     build_universe_view,
 )
@@ -109,7 +110,7 @@ class UniverseOrchestrator(QObject):
         *,
         service: DesktopUniverseService,
         page: object,
-        submit_task: Callable[..., bool],
+        submit_task: TaskSubmitter,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)

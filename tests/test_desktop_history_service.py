@@ -73,7 +73,10 @@ REFACTORED_METHODS = (
 LATER_ROUND_METHODS = (
     "_settings_tab",  # step 11: the Settings page moved into a panel
     "_refresh_universe",  # step 13: the refresh moved into a service
-    "_run_backtest_workspace",  # step 15: the batch loop moved into a service
+    # ``_run_backtest_workspace`` moved out in v2O-C3: the request
+    # construction and the busy lifecycle are the capability's now, so its
+    # deletion is declared in
+    # ``DESKTOP_BACKTEST_ORCHESTRATION_V2_REMOVED_METHODS`` rather than here.
 )
 
 # Trading Core v2: this round deleted the legacy/unified shell builders and
@@ -161,7 +164,11 @@ STRATEGY_V2_METHODS = frozenset(
         "_apply_theme",
         "_auto_order_service_connected",
         "_auto_quant_preflight",
-        "_backtest_records",
+        # ``_backtest_records`` is no longer listed: Strategy v2 rewrote it to
+        # read the selection service, and v2O-C3 then deleted it when the rule
+        # moved into ``backtest/queries.py``.  A method that does not exist
+        # cannot be "changed in place", so its deletion is declared in
+        # ``DESKTOP_BACKTEST_ORCHESTRATION_V2_REMOVED_METHODS`` instead.
         "_selected_auto_strategy_record",
         "_selected_shadow_strategy_record",
     }
@@ -411,19 +418,36 @@ BACKTEST_V2_REMOVED_METHODS = (
 )
 BACKTEST_V2_ADDED_METHODS = (
     "_connect_backtest_page",
+)
+BACKTEST_V2_METHODS = (
+    "_worker_finished",
+    "_apply_theme",
+)
+
+# v2O-C3 moved the Backtest workspace's desktop runtime into
+# ``BacktestOrchestrator``: the runs, the selection and the busy flag, plus the
+# two request entry points, the render and the option projection.  The window
+# keeps composition (``_connect_backtest_page``) and one dialog bridge
+# (``_report_backtest_refusal``).
+DESKTOP_BACKTEST_ORCHESTRATION_V2_REMOVED_METHODS = (
+    "_backtest_records",
+    "_run_backtest_workspace",
+    "_backtest_workspace_finished",
+)
+DESKTOP_BACKTEST_ORCHESTRATION_V2_ADDED_METHODS = (
+    "_report_backtest_refusal",
+)
+#: Net zero relative to this file's base commit: the BacktestPage round *added*
+#: these six window handlers and v2O-C3 *deleted* them, so they exist at neither
+#: revision.  Declared separately because dropping them from
+#: ``BACKTEST_V2_ADDED_METHODS`` without a record would hide a real deletion.
+DESKTOP_BACKTEST_ORCHESTRATION_V2_NET_ZERO_METHODS = (
     "_publish_backtest_strategy_options",
     "_publish_backtest_view",
     "_backtest_run_selected",
     "_run_selected_backtest",
     "_run_all_backtests",
     "_backtest_task_failed",
-)
-BACKTEST_V2_METHODS = (
-    "_backtest_records",
-    "_run_backtest_workspace",
-    "_backtest_workspace_finished",
-    "_worker_finished",
-    "_apply_theme",
 )
 
 CROSS_SECTION_V2_REMOVED_METHODS = (
@@ -1549,6 +1573,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(RESEARCH_DATA_V2_REMOVED_METHODS)
         | set(SCANNER_V2_REMOVED_METHODS)
         | set(BACKTEST_V2_REMOVED_METHODS)
+        | set(DESKTOP_BACKTEST_ORCHESTRATION_V2_REMOVED_METHODS)
         | set(CROSS_SECTION_V2_REMOVED_METHODS)
         | set(SYSTEM_V2_REMOVED_METHODS)
         | set(DASHBOARD_V2_REMOVED_METHODS)
@@ -1567,6 +1592,7 @@ def test_only_the_declared_methods_changed() -> None:
         | set(RESEARCH_DATA_V2_ADDED_METHODS)
         | set(SCANNER_V2_ADDED_METHODS)
         | set(BACKTEST_V2_ADDED_METHODS)
+        | set(DESKTOP_BACKTEST_ORCHESTRATION_V2_ADDED_METHODS)
         | set(CROSS_SECTION_V2_ADDED_METHODS)
         | set(SYSTEM_V2_ADDED_METHODS)
         | set(DASHBOARD_V2_ADDED_METHODS)
@@ -1593,6 +1619,29 @@ def test_only_the_declared_methods_changed() -> None:
     assert not (
         set(DESKTOP_SCANNER_ORCHESTRATION_V2_NET_ZERO_METHODS)
         & (set(current_methods) - set(base_methods))
+    )
+
+    # v2O-C3: the six BacktestPage handlers are net zero against this file's
+    # base commit.  Asserted separately so their deletion is recorded rather
+    # than inferred from a missing declaration.
+    declared_backtest = set(
+        DESKTOP_BACKTEST_ORCHESTRATION_V2_REMOVED_METHODS
+    ) | set(DESKTOP_BACKTEST_ORCHESTRATION_V2_ADDED_METHODS)
+    assert not (
+        set(DESKTOP_BACKTEST_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & declared_backtest
+    )
+    assert not (
+        set(DESKTOP_BACKTEST_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & (set(base_methods) - set(current_methods))
+    )
+    assert not (
+        set(DESKTOP_BACKTEST_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & (set(current_methods) - set(base_methods))
+    )
+    assert not (
+        set(DESKTOP_BACKTEST_ORCHESTRATION_V2_NET_ZERO_METHODS)
+        & set(current_methods)
     )
 
     changed = []

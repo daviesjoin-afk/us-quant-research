@@ -2093,3 +2093,114 @@ bridge 全链路 + 不写手动日志、page filter 不改 truth、scope summary
 capability、startup exactly-once render 三态）。
 
 **突变结果：见 PR 描述（15/15）。**
+
+## 20. 第十九步：`desktop_v2/orchestration/research/backtest/`（Backtest capability 边界）
+
+v2O-C2 之后，Backtest route 的桌面 truth 仍散在 `MainWindow`：
+`self.backtest_runs` / `self._selected_backtest_run_id` / `self._backtest_busy`
+三个属性被八个 handler 反复读写。本轮把这三项与它们的行为迁入：
+
+```text
+desktop_v2/orchestration/research/backtest/
+  __init__.py              导出 BacktestOrchestrator 与 queries
+  queries.py          162 行：纯规则（Qt-free）
+  orchestrator.py     298 行：capability 本体
+```
+
+外加本轮唯一允许的 shared simplification：`orchestration/tasking.py`（86 行），
+只放 `TaskSubmitter` protocol 与两个 callable alias，不放运行逻辑。
+
+### 20.1 Backtest canonical Desktop owner = `BacktestOrchestrator`
+
+`_runs` 是当前 session 的 Backtest 桌面 truth。窗口不再持有
+`self.backtest_runs`，也没有 compatibility property，所以"谁拥有回测 runs?"
+只需一次 grep。**本轮不公开 runs**：目前没有其他 workflow 读取
+`BacktestRun` 列表，为"可能以后需要"加 accessor 会立刻被下一个 capability 使用，
+Backtest workspace 就不再自洽。
+
+### 20.2 纯规则归 `queries.py`
+
+三条规则逐字义迁出，语义不变：
+
+| 规则 | 保持的行为 |
+| --- | --- |
+| `strategy_options(versions)` | `STRATEGY_SPECS` family order（未知 family = 999），同 family 按 `semver` |
+| `select_backtest_versions(compare_all=False)` | 只匹配 `selected_version_id`；不命中返回空，**不回退最新** |
+| `select_backtest_versions(compare_all=True)` | 每个 `strategy_id` 取 provider 列表第一个（= 最新），最终按 `STRATEGY_SPECS` 顺序 |
+| `build_backtest_requests(versions, draft)` | 所有 `Decimal` 转换与 `target_weight_percent / 100` 精度不变 |
+
+`queries.py` 禁止 PySide6 / `QMessageBox` / `QObject` / Page / MainWindow /
+`DesktopBacktestService` / `TaskThread`，因此策略选择与 draft → request 都可以
+不启动 Qt 就单元测试。
+
+### 20.3 busy ownership 与 last-good runs
+
+`_busy` 属于 orchestrator，不从 worker 列表推导：
+
+```text
+request → validate → _busy = True → render → submit_task
+                                                 ↓ False（准入被拒）
+                                           _busy = False → render
+```
+
+failure：`_busy = False` + render + **保留上一次完整 runs**（不清空，与
+Account / Universe 一致）；success：`_busy = False` + 替换 runs + 选第一条 +
+render + 完成日志。`_worker_finished` 现在完全不认识 Backtest。
+
+### 20.4 拒绝 severity 与 dialog bridge
+
+三种拒绝保持原 severity：busy = `information` / 任务忙，无版本 = `warning` /
+没有可运行版本，日期非法 = `warning` / 日期无效。capability 不 import
+`QMessageBox`，只发 `refused = Signal(str, str, str)`；窗口
+`_report_backtest_refusal(level, title, message)` 只按 level 选 dialog，不含
+business logic。本轮**没有**创建 `DesktopNoticeBus` / `NotificationService` /
+`DialogManager`——severity 模型尚未统一，等 Targeted / System 出现相同结构再定。
+
+busy 预检（`task_available`）在其他校验**之前**，与迁移前顺序一致；
+`_start_task` 仍做 authoritative admission，orchestrator 不读 `workers`。
+
+### 20.5 页面唯一 caller
+
+`BacktestPage.render` 与 `BacktestPage.set_strategy_options` 的唯一 caller 是
+`BacktestOrchestrator`。窗口只允许 construct page、connect signals、
+`set_palette`。以后改 Backtest display 只需看 `page/` + `presenter/` +
+`orchestrator/`。
+
+### 20.6 依赖与 public surface
+
+禁止 import：`MainWindow`、其他任何 orchestrator、`Paper*` / `Shadow*` /
+`Execution*` / `TradingRuntime` / `RiskApplication`、
+`StrategySelectionService` / `StrategyApplication`、`TaskThread` /
+`DesktopTaskController`。strategy catalogue 走
+`Callable[[], tuple[StrategyVersion, ...]]` provider，不走 service。
+
+public surface 精确为 `log_requested` / `refused` /
+`refresh_strategy_options` / `request_selected` / `request_compare_all` /
+`select_run` / `render_current`。
+
+### 20.7 体积与测试
+
+| 文件 | 迁移前 | 迁移后 |
+| --- | --- | --- |
+| `desktop.py` | 5351 行 | 5224 行（净减 127） |
+| `backtest/orchestrator.py` | — | 298 行 |
+| `backtest/queries.py` | — | 162 行 |
+| `tasking.py` | — | 86 行 |
+
+新增 `tests/test_desktop_backtest_orchestrator.py`（27 项行为，无窗口）、
+`tests/test_desktop_research_backtest_orchestration.py`（79 项结构）、重写
+`tests/test_desktop_v2_backtest_wiring.py`（17 项真实 `MainWindow`）。
+architecture guards keep their rules local; shared AST support is deferred until
+at least three real consumers exist. 两个 consumer 不足以支撑多一层跳转，
+所以每个 guard 自带它实际需要的机械查询函数。
+
+### 20.8 本轮明确不做的事
+
+没有 startup restore saved runs（产品行为变化）；没有并发化 / asyncio /
+rollback / cancellation（`DesktopBacktestService` 边界保持稳定）；没有改任何
+`Decimal` / commission / slippage / `BacktestEngine` / position sizing；没有碰
+Cross Section（含 `research capital`）、Targeted、Shadow、Paper。
+
+**突变结果：见 PR 描述（15/15，全部由对应具名测试捕获）。**
+
+维护导航见 `docs/DESKTOP_CAPABILITY_MAP.md`。

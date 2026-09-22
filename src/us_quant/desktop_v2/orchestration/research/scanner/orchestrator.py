@@ -65,6 +65,7 @@ from us_quant.desktop_market_scan_service import DesktopMarketScanService
 from us_quant.desktop_v2.orchestration.research.scanner.models import (
     ScannerRunInputs,
 )
+from us_quant.desktop_v2.orchestration.tasking import TaskSubmitter
 from us_quant.desktop_v2.pages.research.scanner.models import ScannerChartView
 from us_quant.desktop_v2.pages.research.scanner.presenter import (
     build_scanner_view,
@@ -109,7 +110,7 @@ class ScannerOrchestrator(QObject):
         *,
         service: DesktopMarketScanService,
         page: object,
-        submit_task: Callable[..., bool],
+        submit_task: TaskSubmitter,
         universe_provider: Callable[[], UniverseSnapshot | None],
         run_inputs_provider: Callable[[], ScannerRunInputs],
         parent: QObject | None = None,

@@ -1,3 +1,23 @@
+"""Offscreen screenshots of the Desktop UI v2 routes.
+
+This is tooling, not a second window.  It navigates the real shell, seeds the
+synthetic evidence a screenshot needs, emits the same operator intents a button
+emits, selects a presentation section by its semantic key, and captures the
+frame.  It does not hold business truth, does not write a business widget
+directly, and does not re-decide anything the orchestration already decided.
+
+Three boundaries are deliberate:
+
+* the scan is read from ``window.scanner_orchestrator.scan`` -- the capability
+  that owns it -- rather than from a window attribute that no longer exists;
+* every panel switch goes through the page's own semantic navigation API
+  (``set_active_detail``, ``set_active_workspace``, ...), so a page that later
+  replaces a ``QTabWidget`` with a sidebar does not change this script;
+* waiting for background work reads ``task_controller.active_count``, a public
+  query, rather than the mutable worker collection, and fails loudly on timeout
+  instead of capturing a screen whose task had not finished.
+"""
+
 from __future__ import annotations
 
 import os
@@ -20,7 +40,16 @@ sys.path.insert(0, str(ROOT / "src"))
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from us_quant.desktop import MainWindow, configure_chinese_font  # noqa: E402
+from us_quant.desktop_v2.pages.execution import (  # noqa: E402
+    ExecutionDetailWorkspace,
+)
 from us_quant.desktop_v2.pages.research import ResearchWorkspace  # noqa: E402
+from us_quant.desktop_v2.pages.research.targeted import (  # noqa: E402
+    TargetedEvidenceWorkspace,
+    TargetedReviewDetail,
+    TargetedRobustnessDetail,
+    TargetedWorkspace,
+)
 from us_quant.desktop_v2.pages.system import SystemWorkspace  # noqa: E402
 from us_quant.trading.domain.market import (  # noqa: E402
     MarketDataMode,
@@ -28,6 +57,15 @@ from us_quant.trading.domain.market import (  # noqa: E402
     MarketSnapshot,
 )
 from us_quant.trading.runtime.models import AutoQuantCandidate  # noqa: E402
+
+ARTIFACTS = ROOT / "research" / "artifacts"
+
+#: Per-step task budgets, in seconds.  They are deliberately generous: the
+#: robustness evaluation is a real multi-session research run, and shortening it
+#: to make this script quicker would trade review value for iteration speed.
+REPLAY_TIMEOUT_SECONDS = 15.0
+BACKTEST_TIMEOUT_SECONDS = 15.0
+ROBUSTNESS_TIMEOUT_SECONDS = 240.0
 
 
 def _start_backtest_preview(window) -> None:
@@ -39,6 +77,53 @@ def _process_events() -> None:
     application = QApplication.instance()
     if application is not None:
         application.processEvents()
+
+
+def _save_preview(window, name: str) -> Path:
+    """Capture the current frame to ``research/artifacts/<name>``."""
+
+    output = ARTIFACTS / name
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if not window.grab().save(str(output)):
+        raise RuntimeError(f"{name} could not be saved")
+    return output
+
+
+def _wait_for_tasks(
+    window,
+    application,
+    *,
+    timeout_seconds: float,
+    step: str,
+) -> None:
+    """Pump events until no background task is running.
+
+    The count reaching zero is not on its own enough to return.  A worker
+    queues its completion signal to this thread *before* its thread stops, so
+    the drain after the count drops is what actually publishes the result onto
+    the page; returning on the bare zero would occasionally capture a screen
+    whose task had finished but whose result had not been drawn yet.
+
+    A timeout raises rather than falling through: a screenshot of an unfinished
+    task looks like evidence while being none.
+    """
+
+    deadline = monotonic() + timeout_seconds
+    while True:
+        application.processEvents()
+        if window.task_controller.active_count == 0:
+            # One more drain: the worker's ``succeeded``/``finished`` signals
+            # are queued, not direct, so the render happens after the thread
+            # stops rather than before it.
+            sleep(0.05)
+            application.processEvents()
+            return
+        if monotonic() >= deadline:
+            raise TimeoutError(
+                f"{step} 未在 {timeout_seconds:g} 秒内完成；"
+                "预览不会截图未完成的任务画面。"
+            )
+        sleep(0.05)
 
 
 def select(window, route: str) -> None:
@@ -70,24 +155,51 @@ def select_system(
     _process_events()
 
 
-def main() -> int:
-    application = QApplication.instance() or QApplication([])
-    configure_chinese_font(application)
-    window = MainWindow()
-    window.resize(1440, 900)
-    window.show()
-    application.processEvents()
-    output = ROOT / "research" / "artifacts" / "desktop_preview.png"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    if not window.grab().save(str(output)):
-        raise RuntimeError("desktop preview could not be saved")
+def select_targeted_workspace(
+    window,
+    workspace: TargetedWorkspace,
+) -> None:
+    """Show one targeted workspace by its semantic key."""
 
-    preview_candidates = []
-    if window.scan is not None:
+    window.targeted_validation_page.set_active_workspace(workspace)
+    _process_events()
+
+
+def select_targeted_evidence(
+    window,
+    workspace: TargetedEvidenceWorkspace,
+    *,
+    robustness_detail: TargetedRobustnessDetail | None = None,
+    review_detail: TargetedReviewDetail | None = None,
+) -> None:
+    """Show one targeted evidence section, and its nested detail if named."""
+
+    page = window.targeted_validation_page
+    page.set_active_workspace(TargetedWorkspace.EVIDENCE)
+    page.set_active_evidence_workspace(workspace)
+    if robustness_detail is not None:
+        page.set_active_robustness_detail(robustness_detail)
+    if review_detail is not None:
+        page.set_active_review_detail(review_detail)
+    _process_events()
+
+
+def seed_auto_quant_preview(window) -> None:
+    """Publish the preview shortlist from the scanner's canonical scan.
+
+    The scan is read once, from the capability that owns it.  The candidate
+    tuple is still written onto the window because AutoQuant's own preparation
+    path lives there until v2O-E Paper; this is a deliberate pre-v2O-E bridge,
+    not a new surface.
+    """
+
+    preview_candidates: list[AutoQuantCandidate] = []
+    scan = window.scanner_orchestrator.scan
+    if scan is not None:
         for row in sorted(
             (
                 item
-                for item in window.scan.results
+                for item in scan.results
                 if item.trade_eligible
             ),
             key=lambda item: -item.score,
@@ -111,44 +223,21 @@ def main() -> int:
                 break
     window.auto_quant_candidates = tuple(preview_candidates)
     window._populate_auto_quant_candidates()
-    window.auto_summary_label.setText(
-        f"已整理 {len(preview_candidates)} 个广域候选；"
-        "等待实时订阅与用户逐会话武装 IBKR Paper。"
+    window.execution_page.render_context(
+        summary=(
+            f"已整理 {len(preview_candidates)} 个广域候选；"
+            "等待实时订阅与用户逐会话武装 IBKR Paper。"
+        )
     )
-    select(window, "execution")
-    auto_output = (
-        ROOT / "research" / "artifacts" / "desktop_auto_quant_preview.png"
-    )
-    if not window.grab().save(str(auto_output)):
-        raise RuntimeError("auto quant preview could not be saved")
-    window.auto_detail_tabs.setCurrentIndex(2)
-    application.processEvents()
-    auto_orders_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_auto_orders_preview.png"
-    )
-    if not window.grab().save(str(auto_orders_output)):
-        raise RuntimeError("auto orders preview could not be saved")
-    window.auto_detail_tabs.setCurrentIndex(0)
 
-    select(window, "account")
-    application.processEvents()
-    account_output = (
-        ROOT / "research" / "artifacts" / "desktop_account_preview.png"
-    )
-    if not window.grab().save(str(account_output)):
-        raise RuntimeError("account preview could not be saved")
-    select(window, "market")
-    quotes_output = (
-        ROOT / "research" / "artifacts" / "desktop_quotes_preview.png"
-    )
-    if not window.grab().save(str(quotes_output)):
-        raise RuntimeError("quotes preview could not be saved")
-    select_research(window, ResearchWorkspace.TARGETED)
-    window.target_symbol_input.setText("AAPL")
-    window._apply_target_symbol()
+
+def seed_targeted_minute_quotes(window) -> None:
+    """Record the synthetic minute session the targeted replay consumes.
+
+    346 rows per weekday over 25 weekdays, at the fixed preview start, is the
+    fixture this script has always used; it is not re-derived here.
+    """
+
     replay_start = datetime(
         2026, 7, 20, 14, 0, tzinfo=timezone.utc
     )
@@ -205,306 +294,190 @@ def main() -> int:
                 evidence_origin="synthetic_preview",
             )
     window._refresh_minute_data_status("AAPL")
-    window._run_targeted_replay()
-    replay_deadline = monotonic() + 10
-    while window.workers and monotonic() < replay_deadline:
-        application.processEvents()
-        sleep(0.05)
-    application.processEvents()
-    shadow_output = (
-        ROOT / "research" / "artifacts" / "desktop_shadow_preview.png"
+
+
+def _capture_targeted_suite(window, suffix: str) -> list[Path]:
+    """Capture the seven evidence screenshots, dark (``""``) or light.
+
+    The Shadow frame is not here: it is captured on the strategy workspace, and
+    at a different point in each theme's flow, so it stays at its own call site.
+    """
+
+    saved: list[Path] = []
+
+    select_targeted_evidence(
+        window,
+        TargetedEvidenceWorkspace.ROBUSTNESS,
+        robustness_detail=TargetedRobustnessDetail.SCENARIOS,
     )
-    if not window.grab().save(str(shadow_output)):
-        raise RuntimeError("shadow preview could not be saved")
-    window._run_targeted_robustness()
-    robustness_deadline = monotonic() + 240
-    while window.workers and monotonic() < robustness_deadline:
-        application.processEvents()
-        sleep(0.05)
-    window.targeted_workspace_tabs.setCurrentIndex(3)
-    window.targeted_research_tabs.setCurrentIndex(1)
-    window.targeted_robustness_detail_tabs.setCurrentIndex(1)
-    application.processEvents()
-    robustness_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_robustness_preview.png"
+    saved.append(
+        _save_preview(window, f"desktop_robustness_preview{suffix}.png")
     )
-    if not window.grab().save(str(robustness_output)):
-        raise RuntimeError("robustness preview could not be saved")
-    window.targeted_research_tabs.setCurrentIndex(2)
-    application.processEvents()
-    walk_forward_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_walk_forward_preview.png"
+
+    select_targeted_evidence(window, TargetedEvidenceWorkspace.WALK_FORWARD)
+    saved.append(
+        _save_preview(window, f"desktop_walk_forward_preview{suffix}.png")
     )
-    if not window.grab().save(str(walk_forward_output)):
-        raise RuntimeError("walk-forward preview could not be saved")
-    window.targeted_research_tabs.setCurrentIndex(3)
-    application.processEvents()
-    overfit_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_overfit_preview.png"
+
+    select_targeted_evidence(window, TargetedEvidenceWorkspace.OVERFIT)
+    saved.append(
+        _save_preview(window, f"desktop_overfit_preview{suffix}.png")
     )
-    if not window.grab().save(str(overfit_output)):
-        raise RuntimeError("overfit preview could not be saved")
-    window.targeted_research_tabs.setCurrentIndex(4)
-    application.processEvents()
-    quality_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_data_quality_preview.png"
+
+    select_targeted_evidence(window, TargetedEvidenceWorkspace.DATA_QUALITY)
+    saved.append(
+        _save_preview(window, f"desktop_data_quality_preview{suffix}.png")
     )
-    if not window.grab().save(str(quality_output)):
-        raise RuntimeError("data-quality preview could not be saved")
-    window.targeted_research_tabs.setCurrentIndex(5)
-    application.processEvents()
-    stress_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_execution_stress_preview.png"
+
+    select_targeted_evidence(
+        window, TargetedEvidenceWorkspace.EXECUTION_STRESS
     )
-    if not window.grab().save(str(stress_output)):
-        raise RuntimeError("execution-stress preview could not be saved")
-    window.targeted_research_tabs.setCurrentIndex(6)
-    window.targeted_review_detail_tabs.setCurrentIndex(1)
-    application.processEvents()
-    review_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_review_preview.png"
+    saved.append(
+        _save_preview(window, f"desktop_execution_stress_preview{suffix}.png")
     )
-    if not window.grab().save(str(review_output)):
-        raise RuntimeError("review preview could not be saved")
-    window.targeted_workspace_tabs.setCurrentIndex(4)
-    application.processEvents()
-    preflight_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_target_preflight_preview.png"
+
+    select_targeted_evidence(
+        window,
+        TargetedEvidenceWorkspace.REVIEW,
+        review_detail=TargetedReviewDetail.GATES,
     )
-    if not window.grab().save(str(preflight_output)):
-        raise RuntimeError("target preflight preview could not be saved")
+    saved.append(
+        _save_preview(window, f"desktop_review_preview{suffix}.png")
+    )
+
+    select_targeted_workspace(window, TargetedWorkspace.PREFLIGHT)
+    saved.append(
+        _save_preview(window, f"desktop_target_preflight_preview{suffix}.png")
+    )
+    return saved
+
+
+def _capture_targeted_console(window, suffix: str) -> Path:
+    """Capture the strategy workspace: the target, minute evidence and replay.
+
+    The Shadow frame has always shown the console rather than the evidence
+    archive, because the target status and the minute-evidence line live there.
+    """
+
+    page = window.targeted_validation_page
+    page.set_active_workspace(TargetedWorkspace.STRATEGY)
+    page.set_active_evidence_workspace(TargetedEvidenceWorkspace.REPLAY)
+    _process_events()
+    return _save_preview(window, f"desktop_shadow_preview{suffix}.png")
+
+
+def main() -> int:
+    application = QApplication.instance() or QApplication([])
+    configure_chinese_font(application)
+    window = MainWindow()
+    window.resize(1440, 900)
+    window.show()
+    application.processEvents()
+
+    saved: list[Path] = []
+    saved.append(_save_preview(window, "desktop_preview.png"))
+
+    seed_auto_quant_preview(window)
+    select(window, "execution")
+    saved.append(
+        _save_preview(window, "desktop_auto_quant_preview.png")
+    )
+    window.execution_page.set_active_detail(ExecutionDetailWorkspace.ORDERS)
+    application.processEvents()
+    saved.append(
+        _save_preview(window, "desktop_auto_orders_preview.png")
+    )
+    window.execution_page.set_active_detail(
+        ExecutionDetailWorkspace.PORTFOLIO
+    )
+
+    select(window, "account")
+    application.processEvents()
+    saved.append(_save_preview(window, "desktop_account_preview.png"))
+    select(window, "market")
+    saved.append(_save_preview(window, "desktop_quotes_preview.png"))
+
+    select_research(window, ResearchWorkspace.TARGETED)
+    # Emit the operator intent, not the handler: this is the same path the
+    # "应用标的" button takes, through the page's real wiring.
+    window.targeted_validation_page.target_apply_requested.emit("AAPL")
+    application.processEvents()
+    seed_targeted_minute_quotes(window)
+    window.targeted_validation_page.replay_requested.emit()
+    _wait_for_tasks(
+        window,
+        application,
+        timeout_seconds=REPLAY_TIMEOUT_SECONDS,
+        step="分钟回放（shadow preview）",
+    )
+    application.processEvents()
+    saved.append(_capture_targeted_console(window, ""))
+
+    window.targeted_validation_page.robustness_requested.emit()
+    _wait_for_tasks(
+        window,
+        application,
+        timeout_seconds=ROBUSTNESS_TIMEOUT_SECONDS,
+        step="多日稳健性评估",
+    )
+    saved.extend(_capture_targeted_suite(window, ""))
+
     select(window, "strategy")
-    manager_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_strategy_manager_preview.png"
+    saved.append(
+        _save_preview(window, "desktop_strategy_manager_preview.png")
     )
-    if not window.grab().save(str(manager_output)):
-        raise RuntimeError("strategy manager preview could not be saved")
+
     select_research(window, ResearchWorkspace.BACKTEST)
     _start_backtest_preview(window)
-    deadline = monotonic() + 15
-    while window.workers and monotonic() < deadline:
-        application.processEvents()
-        sleep(0.05)
+    _wait_for_tasks(
+        window,
+        application,
+        timeout_seconds=BACKTEST_TIMEOUT_SECONDS,
+        step="回测（backtest preview）",
+    )
     application.processEvents()
-    backtest_output = (
-        ROOT / "research" / "artifacts" / "desktop_backtest_preview.png"
-    )
-    if not window.grab().save(str(backtest_output)):
-        raise RuntimeError("backtest preview could not be saved")
+    saved.append(_save_preview(window, "desktop_backtest_preview.png"))
+
     select_research(window, ResearchWorkspace.SCANNER)
-    scanner_output = (
-        ROOT / "research" / "artifacts" / "desktop_scanner_preview.png"
-    )
-    if not window.grab().save(str(scanner_output)):
-        raise RuntimeError("scanner preview could not be saved")
+    saved.append(_save_preview(window, "desktop_scanner_preview.png"))
     select_research(window, ResearchWorkspace.CROSS_SECTION)
-    strategy_output = (
-        ROOT / "research" / "artifacts" / "desktop_strategy_preview.png"
-    )
-    if not window.grab().save(str(strategy_output)):
-        raise RuntimeError("strategy preview could not be saved")
+    saved.append(_save_preview(window, "desktop_strategy_preview.png"))
+
     select_system(window, SystemWorkspace.RUNTIME_EVENTS)
-    runtime_output = (
-        ROOT / "research" / "artifacts" / "desktop_runtime_preview.png"
-    )
-    if not window.grab().save(str(runtime_output)):
-        raise RuntimeError("runtime preview could not be saved")
+    saved.append(_save_preview(window, "desktop_runtime_preview.png"))
     select_system(window, SystemWorkspace.SETTINGS)
     application.processEvents()
-    settings_output = (
-        ROOT / "research" / "artifacts" / "desktop_settings_dark.png"
-    )
-    if not window.grab().save(str(settings_output)):
-        raise RuntimeError("dark settings preview could not be saved")
+    saved.append(_save_preview(window, "desktop_settings_dark.png"))
 
     window.settings_page.set_theme("light", emit_change=True)
     select(window, "dashboard")
-    light_output = (
-        ROOT / "research" / "artifacts" / "desktop_preview_light.png"
-    )
-    if not window.grab().save(str(light_output)):
-        raise RuntimeError("light preview could not be saved")
+    saved.append(_save_preview(window, "desktop_preview_light.png"))
     select(window, "execution")
-    light_auto_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_auto_quant_preview_light.png"
+    saved.append(
+        _save_preview(window, "desktop_auto_quant_preview_light.png")
     )
-    if not window.grab().save(str(light_auto_output)):
-        raise RuntimeError("light auto quant preview could not be saved")
-    window.auto_detail_tabs.setCurrentIndex(2)
+    window.execution_page.set_active_detail(ExecutionDetailWorkspace.ORDERS)
     application.processEvents()
-    light_auto_orders_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_auto_orders_preview_light.png"
+    saved.append(
+        _save_preview(window, "desktop_auto_orders_preview_light.png")
     )
-    if not window.grab().save(str(light_auto_orders_output)):
-        raise RuntimeError(
-            "light auto orders preview could not be saved"
-        )
-    window.auto_detail_tabs.setCurrentIndex(0)
+    window.execution_page.set_active_detail(
+        ExecutionDetailWorkspace.PORTFOLIO
+    )
     select(window, "market")
-    light_quotes_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_quotes_preview_light.png"
-    )
-    if not window.grab().save(str(light_quotes_output)):
-        raise RuntimeError("light quotes preview could not be saved")
+    saved.append(_save_preview(window, "desktop_quotes_preview_light.png"))
+
     select_research(window, ResearchWorkspace.TARGETED)
-    window.targeted_workspace_tabs.setCurrentIndex(0)
-    window.targeted_research_tabs.setCurrentIndex(0)
-    light_shadow_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_shadow_preview_light.png"
-    )
-    if not window.grab().save(str(light_shadow_output)):
-        raise RuntimeError("light shadow preview could not be saved")
-    window.targeted_workspace_tabs.setCurrentIndex(3)
-    window.targeted_research_tabs.setCurrentIndex(1)
-    window.targeted_robustness_detail_tabs.setCurrentIndex(1)
-    application.processEvents()
-    light_robustness_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_robustness_preview_light.png"
-    )
-    if not window.grab().save(str(light_robustness_output)):
-        raise RuntimeError("light robustness preview could not be saved")
-    window.targeted_research_tabs.setCurrentIndex(2)
-    application.processEvents()
-    light_walk_forward_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_walk_forward_preview_light.png"
-    )
-    if not window.grab().save(str(light_walk_forward_output)):
-        raise RuntimeError("light walk-forward preview could not be saved")
-    window.targeted_research_tabs.setCurrentIndex(3)
-    application.processEvents()
-    light_overfit_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_overfit_preview_light.png"
-    )
-    if not window.grab().save(str(light_overfit_output)):
-        raise RuntimeError("light overfit preview could not be saved")
-    window.targeted_research_tabs.setCurrentIndex(4)
-    application.processEvents()
-    light_quality_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_data_quality_preview_light.png"
-    )
-    if not window.grab().save(str(light_quality_output)):
-        raise RuntimeError("light data-quality preview could not be saved")
-    window.targeted_research_tabs.setCurrentIndex(5)
-    application.processEvents()
-    light_stress_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_execution_stress_preview_light.png"
-    )
-    if not window.grab().save(str(light_stress_output)):
-        raise RuntimeError("light execution-stress preview could not be saved")
-    window.targeted_research_tabs.setCurrentIndex(6)
-    window.targeted_review_detail_tabs.setCurrentIndex(1)
-    application.processEvents()
-    light_review_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_review_preview_light.png"
-    )
-    if not window.grab().save(str(light_review_output)):
-        raise RuntimeError("light review preview could not be saved")
-    window.targeted_workspace_tabs.setCurrentIndex(4)
-    application.processEvents()
-    light_preflight_output = (
-        ROOT
-        / "research"
-        / "artifacts"
-        / "desktop_target_preflight_preview_light.png"
-    )
-    if not window.grab().save(str(light_preflight_output)):
-        raise RuntimeError(
-            "light target preflight preview could not be saved"
-        )
+    saved.append(_capture_targeted_console(window, "_light"))
+    saved.extend(_capture_targeted_suite(window, "_light"))
+
     select_system(window, SystemWorkspace.SETTINGS)
     application.processEvents()
-    light_settings_output = (
-        ROOT / "research" / "artifacts" / "desktop_settings_light.png"
-    )
-    if not window.grab().save(str(light_settings_output)):
-        raise RuntimeError("light settings preview could not be saved")
+    saved.append(_save_preview(window, "desktop_settings_light.png"))
+
     window.close()
-    print(output)
-    print(auto_output)
-    print(auto_orders_output)
-    print(account_output)
-    print(quotes_output)
-    print(shadow_output)
-    print(robustness_output)
-    print(walk_forward_output)
-    print(overfit_output)
-    print(quality_output)
-    print(stress_output)
-    print(review_output)
-    print(preflight_output)
-    print(manager_output)
-    print(backtest_output)
-    print(scanner_output)
-    print(strategy_output)
-    print(runtime_output)
-    print(settings_output)
-    print(light_output)
-    print(light_auto_output)
-    print(light_auto_orders_output)
-    print(light_quotes_output)
-    print(light_shadow_output)
-    print(light_robustness_output)
-    print(light_walk_forward_output)
-    print(light_overfit_output)
-    print(light_quality_output)
-    print(light_stress_output)
-    print(light_review_output)
-    print(light_preflight_output)
-    print(light_settings_output)
+    for path in saved:
+        print(path)
     return 0
 
 

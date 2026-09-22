@@ -20,13 +20,17 @@ from us_quant.desktop_v2.pages.research.targeted.models import (
     TargetPreflightView,
     TargetedControlView,
     TargetedEvidenceView,
+    TargetedEvidenceWorkspace,
     TargetedFillRow,
     TargetedMetricView,
     TargetedPositionRow,
+    TargetedReviewDetail,
+    TargetedRobustnessDetail,
     TargetedRowTone,
     TargetedSessionView,
     TargetedStrategyOption,
     TargetedValidationView,
+    TargetedWorkspace,
 )
 from us_quant.desktop_v2.pages.research.targeted.page import TargetedValidationPage
 from us_quant.ui_theme import theme_palette
@@ -357,3 +361,223 @@ def test_palette_update_recolours_warning_cells(page: TargetedValidationPage) ->
     )
     colour = page.preflight_table.item(0, 1).foreground().color()
     assert colour.name() == QColor(light.error).name()
+
+
+# -- semantic navigation ---------------------------------------------------
+#
+# The page publishes its own vocabulary for "show me this panel".  A caller --
+# tooling, a shortcut, a future sidebar -- names a workspace instead of reaching
+# for ``workspace_tabs`` or ``evidence_panel``, and names an index instead of
+# writing a bare integer.  None of these methods runs an evaluation: that stays
+# an explicit operator intent through ``replay_requested`` /
+# ``robustness_requested``.
+
+
+def test_the_workspace_keys_are_the_documented_panels(
+    page: TargetedValidationPage,
+) -> None:
+    assert [workspace.name for workspace in TargetedWorkspace] == [
+        "STRATEGY",
+        "POSITIONS",
+        "FILLS",
+        "EVIDENCE",
+        "PREFLIGHT",
+    ]
+    assert page.workspace_tabs.count() == len(TargetedWorkspace)
+    assert [
+        workspace.name for workspace in TargetedEvidenceWorkspace
+    ] == [
+        "REPLAY",
+        "ROBUSTNESS",
+        "WALK_FORWARD",
+        "OVERFIT",
+        "DATA_QUALITY",
+        "EXECUTION_STRESS",
+        "REVIEW",
+    ]
+    assert page.evidence_panel.tabs.count() == len(
+        TargetedEvidenceWorkspace
+    )
+
+
+@pytest.mark.parametrize("workspace", list(TargetedWorkspace))
+def test_every_workspace_key_selects_its_own_panel(
+    page: TargetedValidationPage, workspace: TargetedWorkspace
+) -> None:
+    page.set_active_workspace(workspace)
+
+    assert page.workspace_tabs.currentIndex() == int(workspace)
+
+
+@pytest.mark.parametrize(
+    "workspace", list(TargetedEvidenceWorkspace)
+)
+def test_every_evidence_key_selects_its_own_section(
+    page: TargetedValidationPage,
+    workspace: TargetedEvidenceWorkspace,
+) -> None:
+    page.set_active_evidence_workspace(workspace)
+
+    assert page.evidence_panel.tabs.currentIndex() == int(workspace)
+
+
+@pytest.mark.parametrize("detail", list(TargetedRobustnessDetail))
+def test_every_robustness_detail_key_selects_its_own_view(
+    page: TargetedValidationPage, detail: TargetedRobustnessDetail
+) -> None:
+    page.set_active_robustness_detail(detail)
+
+    assert page.evidence_panel.robustness_detail_tabs.currentIndex() == int(
+        detail
+    )
+
+
+@pytest.mark.parametrize("detail", list(TargetedReviewDetail))
+def test_every_review_detail_key_selects_its_own_view(
+    page: TargetedValidationPage, detail: TargetedReviewDetail
+) -> None:
+    page.set_active_review_detail(detail)
+
+    assert page.evidence_panel.review_detail_tabs.currentIndex() == int(
+        detail
+    )
+
+
+def _shows(panel_widget, table) -> bool:
+    """Does the visible panel carry ``table``, directly or as its own child?
+
+    Some sections add the table straight as the tab and some wrap it in a
+    panel, so the test asks the question that actually matters -- is this the
+    table the operator is now looking at -- rather than pinning the wrapper.
+    """
+
+    return panel_widget is table or panel_widget.isAncestorOf(table)
+
+
+def test_the_named_details_address_the_tables_the_page_shows(
+    page: TargetedValidationPage,
+) -> None:
+    """The semantic key lands on the table the operator expects to read."""
+
+    page.set_active_robustness_detail(TargetedRobustnessDetail.SCENARIOS)
+    assert _shows(
+        page.evidence_panel.robustness_detail_tabs.currentWidget(),
+        page.evidence_panel.scenario_table,
+    )
+    page.set_active_robustness_detail(TargetedRobustnessDetail.HISTORY)
+    assert _shows(
+        page.evidence_panel.robustness_detail_tabs.currentWidget(),
+        page.evidence_panel.robustness_table,
+    )
+
+    page.set_active_review_detail(TargetedReviewDetail.GATES)
+    assert _shows(
+        page.evidence_panel.review_detail_tabs.currentWidget(),
+        page.evidence_panel.review_gate_table,
+    )
+    page.set_active_review_detail(TargetedReviewDetail.HISTORY)
+    assert _shows(
+        page.evidence_panel.review_detail_tabs.currentWidget(),
+        page.evidence_panel.review_history_table,
+    )
+
+
+def test_navigation_does_not_run_an_evaluation(
+    page: TargetedValidationPage,
+) -> None:
+    """Showing the evidence archive is not running the evidence."""
+
+    seen: list[str] = []
+    for name in (
+        "replay_requested",
+        "robustness_requested",
+        "shadow_start_requested",
+        "shadow_stop_requested",
+    ):
+        getattr(page, name).connect(lambda _name=name: seen.append(_name))
+
+    page.set_active_workspace(TargetedWorkspace.EVIDENCE)
+    page.set_active_evidence_workspace(
+        TargetedEvidenceWorkspace.ROBUSTNESS
+    )
+    page.set_active_robustness_detail(TargetedRobustnessDetail.SCENARIOS)
+    page.set_active_review_detail(TargetedReviewDetail.GATES)
+
+    assert seen == []
+
+
+def test_the_navigation_keys_are_pinned_to_their_panels(
+    page: TargetedValidationPage,
+) -> None:
+    """The mapping from key to panel label, not just "index equals index".
+
+    Without this, a key pointed at the wrong panel would still satisfy every
+    "``currentIndex() == int(workspace)``" assertion above.
+    """
+
+    workspace_labels = {
+        TargetedWorkspace.STRATEGY: "策略",
+        TargetedWorkspace.POSITIONS: "持仓",
+        TargetedWorkspace.FILLS: "委托",
+        TargetedWorkspace.EVIDENCE: "档案",
+        TargetedWorkspace.PREFLIGHT: "风控",
+    }
+    for workspace, label in workspace_labels.items():
+        page.set_active_workspace(workspace)
+        assert page.workspace_tabs.tabText(page.workspace_tabs.currentIndex()) == label
+
+    evidence_labels = {
+        TargetedEvidenceWorkspace.REPLAY: "单会话回放",
+        TargetedEvidenceWorkspace.ROBUSTNESS: "多日稳健性",
+        TargetedEvidenceWorkspace.WALK_FORWARD: "时间隔离验证",
+        TargetedEvidenceWorkspace.OVERFIT: "过拟合诊断",
+        TargetedEvidenceWorkspace.DATA_QUALITY: "数据质量",
+        TargetedEvidenceWorkspace.EXECUTION_STRESS: "执行压力",
+        TargetedEvidenceWorkspace.REVIEW: "独立评审",
+    }
+    for workspace, label in evidence_labels.items():
+        page.set_active_evidence_workspace(workspace)
+        assert page.evidence_panel.tabs.tabText(
+            page.evidence_panel.tabs.currentIndex()
+        ) == label
+
+    robustness_labels = {
+        TargetedRobustnessDetail.HISTORY: "评估历史",
+        TargetedRobustnessDetail.SCENARIOS: "参数扰动",
+    }
+    for detail, label in robustness_labels.items():
+        page.set_active_robustness_detail(detail)
+        assert page.evidence_panel.robustness_detail_tabs.tabText(
+            page.evidence_panel.robustness_detail_tabs.currentIndex()
+        ) == label
+
+    review_labels = {
+        TargetedReviewDetail.HISTORY: "评审历史",
+        TargetedReviewDetail.GATES: "硬门明细",
+    }
+    for detail, label in review_labels.items():
+        page.set_active_review_detail(detail)
+        assert page.evidence_panel.review_detail_tabs.tabText(
+            page.evidence_panel.review_detail_tabs.currentIndex()
+        ) == label
+
+
+def test_the_navigation_keys_carry_no_behaviour() -> None:
+    """Plain ``IntEnum`` positions, not a workflow phase with methods."""
+
+    from enum import IntEnum
+
+    for enum_type in (
+        TargetedWorkspace,
+        TargetedEvidenceWorkspace,
+        TargetedRobustnessDetail,
+        TargetedReviewDetail,
+    ):
+        assert issubclass(enum_type, IntEnum), enum_type
+        for member in enum_type:
+            own = {
+                name
+                for name in vars(member)
+                if not name.startswith("_") and name not in vars(IntEnum)
+            }
+            assert not own, (member.name, own)

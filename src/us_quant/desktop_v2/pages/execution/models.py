@@ -21,7 +21,24 @@ Two shapes are worth explaining:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, IntEnum
+
+
+class ExecutionDetailWorkspace(IntEnum):
+    """Which detail section is on screen, as a name rather than an index.
+
+    A caller that wants the order table has no way to say so in ``int`` without
+    hard-coding a tab position, and a position is exactly what changes when the
+    page is re-laid out.  These keys are *presentation vocabulary*: they select
+    a tab the page already owns and carry no workflow meaning, so nothing here
+    can be read as a session phase or used to start, arm or stop anything.
+    """
+
+    PORTFOLIO = 0
+    SHADOW = 1
+    LATENCY = 2
+    CANDIDATES = 3
+    ORDERS = 4
 
 
 class Tone(str, Enum):

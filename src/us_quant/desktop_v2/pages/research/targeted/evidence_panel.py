@@ -13,6 +13,9 @@ from PySide6.QtWidgets import (
 
 from us_quant.desktop_v2.pages.research.targeted.models import (
     TargetedEvidenceView,
+    TargetedEvidenceWorkspace,
+    TargetedReviewDetail,
+    TargetedRobustnessDetail,
 )
 from us_quant.desktop_v2.pages.research.targeted.tables import TargetedTable
 from us_quant.ui_theme import ThemePalette, theme_palette
@@ -87,6 +90,7 @@ class TargetedEvidencePanel(QWidget):
         detail.setDocumentMode(True)
         detail.addTab(self.robustness_table, "评估历史")
         detail.addTab(self.scenario_table, "参数扰动")
+        self.robustness_detail_tabs = detail
         self.tabs.addTab(
             self._panel("多日稳健性评估", detail, summary=self.robustness_summary),
             "多日稳健性",
@@ -179,10 +183,30 @@ class TargetedEvidencePanel(QWidget):
         detail.setDocumentMode(True)
         detail.addTab(self.review_history_table, "评审历史")
         detail.addTab(self.review_gate_table, "硬门明细")
+        self.review_detail_tabs = detail
         self.tabs.addTab(
             self._panel("独立评审", detail, summary=self.review_summary),
             "独立评审",
         )
+
+    def set_active_workspace(
+        self, workspace: TargetedEvidenceWorkspace
+    ) -> None:
+        """Show one evidence section by its semantic key."""
+
+        self.tabs.setCurrentIndex(int(workspace))
+
+    def set_active_robustness_detail(
+        self, detail: TargetedRobustnessDetail
+    ) -> None:
+        """Show one robustness detail view by its semantic key."""
+
+        self.robustness_detail_tabs.setCurrentIndex(int(detail))
+
+    def set_active_review_detail(self, detail: TargetedReviewDetail) -> None:
+        """Show one review detail view by its semantic key."""
+
+        self.review_detail_tabs.setCurrentIndex(int(detail))
 
     def render(self, view: TargetedEvidenceView) -> None:
         self.replay_table.render_rows(view.replay_rows)

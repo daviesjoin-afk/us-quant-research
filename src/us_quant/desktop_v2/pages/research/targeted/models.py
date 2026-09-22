@@ -8,7 +8,49 @@ inputs; the window and the presenters remain the only producers of truth.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, IntEnum
+
+
+class TargetedWorkspace(IntEnum):
+    """The five top-level targeted workspaces, as semantic keys.
+
+    Presentation vocabulary only: these select which panel the page shows and
+    carry no workflow meaning.  A caller naming ``EVIDENCE`` is asking to *look*
+    at the evidence workspace, never to run an evaluation -- the run stays an
+    explicit operator intent through the page's own signals.
+    """
+
+    STRATEGY = 0
+    POSITIONS = 1
+    FILLS = 2
+    EVIDENCE = 3
+    PREFLIGHT = 4
+
+
+class TargetedEvidenceWorkspace(IntEnum):
+    """The seven evidence sections inside the evidence workspace."""
+
+    REPLAY = 0
+    ROBUSTNESS = 1
+    WALK_FORWARD = 2
+    OVERFIT = 3
+    DATA_QUALITY = 4
+    EXECUTION_STRESS = 5
+    REVIEW = 6
+
+
+class TargetedRobustnessDetail(IntEnum):
+    """The two detail views inside the robustness evidence section."""
+
+    HISTORY = 0
+    SCENARIOS = 1
+
+
+class TargetedReviewDetail(IntEnum):
+    """The two detail views inside the review evidence section."""
+
+    HISTORY = 0
+    GATES = 1
 
 
 class TargetedRowTone(str, Enum):
@@ -163,13 +205,17 @@ __all__ = [
     "TargetPreflightView",
     "TargetedControlView",
     "TargetedEvidenceView",
+    "TargetedEvidenceWorkspace",
     "TargetedFillRow",
     "TargetedMetricView",
     "TargetedPositionRow",
+    "TargetedReviewDetail",
+    "TargetedRobustnessDetail",
     "TargetedRowTone",
     "TargetedSessionView",
     "TargetedStrategyOption",
     "TargetedTableRow",
     "TargetedValidationView",
+    "TargetedWorkspace",
     "WalkForwardRow",
 ]

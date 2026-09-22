@@ -39,6 +39,7 @@ from us_quant.desktop_v2.pages.execution.controls import ExecutionControls
 from us_quant.desktop_v2.pages.execution.models import (
     ExecutionCandidatesView,
     ExecutionControlState,
+    ExecutionDetailWorkspace,
     ExecutionRuntimeView,
 )
 from us_quant.desktop_v2.pages.execution.tables import ExecutionDetailTabs
@@ -181,6 +182,16 @@ class ExecutionPage(QWidget):
 
     def render_execution_health(self, text: str) -> None:
         self.details.set_execution_health_text(text)
+
+    def set_active_detail(self, workspace: ExecutionDetailWorkspace) -> None:
+        """Show one of the page's own detail sections by its semantic key.
+
+        Presentation navigation only: the tab position stops being part of the
+        page's public contract, so re-laying the details out -- a sidebar, a
+        stacked widget -- leaves this call and its callers unchanged.
+        """
+
+        self.details.tabs.setCurrentIndex(int(workspace))
 
     def set_control_state(self, state: ExecutionControlState) -> None:
         """Apply exactly the controls the caller says are available."""

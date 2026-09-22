@@ -580,18 +580,101 @@ def test_success_with_no_runs_selects_nothing() -> None:
     assert orchestrator._busy is False
 
 
-def test_a_wrong_result_type_fails_loudly() -> None:
-    orchestrator, _, _, _ = _orchestrator(versions=(_version("buy-hold"),))
+@pytest.mark.parametrize(
+    "bad_result",
+    [
+        pytest.param(object(), id="not-a-sequence"),
+        pytest.param(("not-a-run",), id="sequence-of-non-runs"),
+        pytest.param(None, id="none"),
+        pytest.param(42, id="int"),
+    ],
+)
+def test_a_wrong_result_releases_busy_and_preserves_last_good(
+    bad_result: object,
+) -> None:
+    """A wrong success result must not wedge the capability.
+
+    This handler runs as the worker's ``succeeded`` slot, so an exception here
+    escapes the signal emission and the generic cleanup that follows releases
+    the *worker* -- not this capability's busy flag.  Raising before releasing
+    it would therefore leave ``_busy`` set forever, with the run buttons
+    disabled and no task left to clear them.
+
+    The state below is the real one: a batch is genuinely in flight
+    (``_busy`` True) and a previous good result is on the page, so this asserts
+    the three things at once -- the failure is loud, the last good result
+    survives, and the controls come back.
+    """
+
+    last_good = (_run("run-A"), _run("run-B"))
+    orchestrator, page, _, _ = _orchestrator(
+        versions=(_version("buy-hold"),)
+    )
+    orchestrator._runs = last_good
+    orchestrator._selected_run_id = "run-A"
+    orchestrator._busy = True
+    logs: list[str] = []
+    orchestrator.log_requested.connect(logs.append)
 
     with pytest.raises(TypeError):
-        orchestrator._runs_finished(object())
+        orchestrator._runs_finished(bad_result)
+
+    # Loud, not swallowed.
+    assert logs == []
+    # The capability is operable again.
+    assert orchestrator._busy is False
+    assert page.renders[-1].controls.run_selected_enabled is True
+    assert page.renders[-1].controls.compare_all_enabled is True
+    # The last good result is intact and still displayed.
+    assert orchestrator._runs == last_good
+    assert orchestrator._selected_run_id == "run-A"
+    assert page.renders[-1].selected_run_id == "run-A"
+    assert page.renders[-1].detail.run_id == "run-A"
 
 
-def test_a_batch_containing_a_non_run_fails_loudly() -> None:
-    orchestrator, _, _, _ = _orchestrator(versions=(_version("buy-hold"),))
+def test_a_mixed_batch_releases_busy_and_preserves_last_good() -> None:
+    """The partial case: a real run mixed with a non-run is still invalid.
+
+    Worth its own test rather than a parametrized case, because the guard is
+    ``all(...)``: an implementation that checked only the first element would
+    pass the empty/None cases above and fail here.
+    """
+
+    last_good = (_run("run-A"),)
+    orchestrator, page, _, _ = _orchestrator(
+        versions=(_version("buy-hold"),)
+    )
+    orchestrator._runs = last_good
+    orchestrator._selected_run_id = "run-A"
+    orchestrator._busy = True
+    logs: list[str] = []
+    orchestrator.log_requested.connect(logs.append)
 
     with pytest.raises(TypeError):
-        orchestrator._runs_finished((_run("run-A"), object()))
+        orchestrator._runs_finished((_run("run-B"), object()))
+
+    assert logs == []
+    assert orchestrator._busy is False
+    assert page.renders[-1].controls.run_selected_enabled is True
+    assert orchestrator._runs == last_good
+    assert orchestrator._selected_run_id == "run-A"
+
+
+def test_a_valid_result_is_still_committed() -> None:
+    """The positive half: the reordering did not turn success into failure."""
+
+    orchestrator, page, _, _ = _orchestrator(
+        versions=(_version("buy-hold"),)
+    )
+    orchestrator._busy = True
+    runs = (_run("run-A"), _run("run-B"))
+
+    orchestrator._runs_finished(runs)
+
+    assert orchestrator._busy is False
+    assert orchestrator._runs == runs
+    assert orchestrator._selected_run_id == "run-A"
+    assert page.renders[-1].controls.run_selected_enabled is True
 
 
 # -- selection ---------------------------------------------------------

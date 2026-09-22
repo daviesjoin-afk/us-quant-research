@@ -2187,11 +2187,12 @@ public surface 精确为 `log_requested` / `refused` /
 | `backtest/queries.py` | — | 162 行 |
 | `tasking.py` | — | 86 行 |
 
-新增 `tests/test_desktop_backtest_orchestrator.py`（23 项行为，无窗口）、
+新增 `tests/test_desktop_backtest_orchestrator.py`（27 项行为，无窗口）、
 `tests/test_desktop_research_backtest_orchestration.py`（79 项结构）、重写
-`tests/test_desktop_v2_backtest_wiring.py`（18 项真实 `MainWindow`）。共享 AST
-helper 抽到 `tests/desktop_architecture_support.py`，只提取机械查询函数，不重写
-历史测试。
+`tests/test_desktop_v2_backtest_wiring.py`（17 项真实 `MainWindow`）。
+architecture guards keep their rules local; shared AST support is deferred until
+at least three real consumers exist. 两个 consumer 不足以支撑多一层跳转，
+所以每个 guard 自带它实际需要的机械查询函数。
 
 ### 20.8 本轮明确不做的事
 

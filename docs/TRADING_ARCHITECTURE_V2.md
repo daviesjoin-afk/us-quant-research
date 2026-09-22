@@ -1766,11 +1766,11 @@ methods:  refresh_strategy_options, request_selected,
 `backtest/orchestrator.py` 298 行、`backtest/queries.py` 162 行、
 `tasking.py` 86 行。
 
-新增守卫：`tests/test_desktop_backtest_orchestrator.py`（23 项行为，无窗口）、
+新增守卫：`tests/test_desktop_backtest_orchestrator.py`（27 项行为，无窗口）、
 `tests/test_desktop_research_backtest_orchestration.py`（79 项结构）、
-重写 `tests/test_desktop_v2_backtest_wiring.py`（18 项真实 `MainWindow`）。
-共享 AST helper 抽到 `tests/desktop_architecture_support.py`（本轮只提取
-机械查询函数，不重写历史测试）。
+重写 `tests/test_desktop_v2_backtest_wiring.py`（17 项真实 `MainWindow`）。
+architecture guards keep their rules local; shared AST support is deferred until
+at least three real consumers exist（本轮只有两个 consumer，不足以支撑抽公共库）。
 
 15 项 mutation 全部由**对应的具名测试**捕获（RED）：窗口恢复 state / 加
 compatibility property / 恢复 `render` / 恢复 `set_strategy_options`、

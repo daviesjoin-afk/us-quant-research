@@ -402,27 +402,33 @@ def test_an_unrelated_worker_finish_does_not_unlock_an_active_backtest(
     )
 
 
-def test_the_worker_finished_handler_knows_nothing_about_backtest(
-    window,
-) -> None:
-    """The source half of the rule above: the handler cannot name backtest."""
+def test_a_wrong_result_restores_the_real_page_controls(window) -> None:
+    """The wrong-result path, driven against the real page.
 
-    import ast
-    import pathlib
+    The capability's own test asserts the view objects; this one asserts the
+    actual widgets, because "the controls come back" is a claim about the page
+    the operator sees.  The state is the real one: a batch in flight and a
+    previous good result already displayed.
+    """
 
-    from tests.desktop_architecture_support import method_source
+    runs = _runs()
+    orchestrator = window.backtest_orchestrator
+    orchestrator._runs_finished(runs)
+    _APP.processEvents()
+    assert window.backtest_page.comparison_table.rowCount() == 2
 
-    source = method_source(
-        pathlib.Path(__file__).resolve().parents[1]
-        / "src"
-        / "us_quant"
-        / "desktop.py",
-        "_worker_finished",
-    )
-    assert source is not None
-    assert "backtest" not in source.casefold()
-    # And it parses, so the assertion above is about real code.
-    assert ast.parse(source)
+    orchestrator._busy = True
+    orchestrator.render_current()
+
+    with pytest.raises(TypeError):
+        orchestrator._runs_finished(object())
+
+    assert orchestrator._busy is False
+    assert window.backtest_page.controls.run_selected_button.isEnabled() is True
+    assert window.backtest_page.controls.compare_all_button.isEnabled() is True
+    # The last good result is still on the page, not blanked.
+    assert orchestrator._runs == runs
+    assert window.backtest_page.comparison_table.rowCount() == 2
 
 
 def test_a_rejected_admission_restores_the_controls(window, monkeypatch) -> None:

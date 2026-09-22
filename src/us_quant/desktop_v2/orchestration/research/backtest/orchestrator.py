@@ -268,14 +268,30 @@ class BacktestOrchestrator(QObject):
         arbitrary object would put whatever the service returned into the page
         state, and a wrong object in the table is far harder to diagnose than a
         loud failure here.
+
+        The busy flag is released **before** the check, and that order is the
+        contract rather than an accident.  This handler runs as the worker's
+        ``succeeded`` slot, so an exception here propagates out of the signal
+        emission: the generic cleanup that follows releases the *worker*, not
+        this capability's presentation state.  Raising first would therefore
+        leave ``_busy`` set forever, with the run buttons disabled and no task
+        left to clear them -- a wrong result would permanently wedge the page.
+
+        So the three requirements are met in this order: fail loudly (the
+        ``TypeError`` still propagates), keep the last good result (``_runs``
+        and the selection are untouched on the invalid path, and the page is
+        repainted from them), and stay operable (the controls come back).  The
+        bad object never reaches the truth.
         """
+
+        self._busy = False
 
         if not isinstance(result, (tuple, list)) or not all(
             isinstance(run, BacktestRun) for run in result
         ):
+            self.render_current()
             raise TypeError("unexpected backtest run batch")
 
-        self._busy = False
         self._runs = tuple(result)
         self._selected_run_id = self._runs[0].run_id if self._runs else None
         self.render_current()

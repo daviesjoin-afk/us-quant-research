@@ -27,21 +27,10 @@ new dependency has to be declared on purpose here, in a place a reviewer sees.
 
 from __future__ import annotations
 
+import ast
 import pathlib
 
 import pytest
-
-from tests.desktop_architecture_support import (
-    calls_attribute,
-    imported_names,
-    method_names,
-    method_source,
-    module_imports,
-    public_names,
-    python_files,
-    receiver_methods,
-    self_attributes,
-)
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _SRC = _REPO_ROOT / "src" / "us_quant"
@@ -49,6 +38,122 @@ _DESKTOP = _SRC / "desktop.py"
 _ORCHESTRATION = _SRC / "desktop_v2" / "orchestration"
 _BACKTEST_DIR = _ORCHESTRATION / "research" / "backtest"
 _TASKING = _ORCHESTRATION / "tasking.py"
+
+
+# -- mechanical AST queries --------------------------------------------
+#
+# Kept local on purpose.  A shared ``tests/desktop_architecture_support.py``
+# would have exactly two consumers today (this file and the wiring test), which
+# is not enough to justify the extra hop: the rule of three applies to test
+# helpers too.  When a third real guard needs the same queries, extract them
+# then -- not in advance.
+
+
+def _python_files(root: pathlib.Path) -> list[pathlib.Path]:
+    """Every ``.py`` file under ``root``, sorted, without ``__pycache__``."""
+
+    return sorted(
+        path
+        for path in root.rglob("*.py")
+        if "__pycache__" not in path.parts
+    )
+
+
+def _parse(path: pathlib.Path) -> ast.Module:
+    return ast.parse(path.read_text(encoding="utf-8"))
+
+
+def _module_imports(path: pathlib.Path) -> set[str]:
+    """Every dotted module path the file imports (absolute imports only)."""
+
+    found: set[str] = set()
+    for node in ast.walk(_parse(path)):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                found.add(alias.name)
+        elif isinstance(node, ast.ImportFrom) and not node.level:
+            found.add(node.module or "")
+    return found
+
+
+def _imported_names(path: pathlib.Path) -> set[str]:
+    """Every name the file binds from an import, as written."""
+
+    found: set[str] = set()
+    for node in ast.walk(_parse(path)):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                found.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                found.add(alias.asname or alias.name)
+    return found
+
+
+def _method_source(path: pathlib.Path, name: str) -> str | None:
+    """The source text of one ``MainWindow`` method, or ``None``."""
+
+    for node in _main_window().body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return ast.get_source_segment(
+                path.read_text(encoding="utf-8"), node
+            )
+    return None
+
+
+def _receiver_methods(path: pathlib.Path, receiver: str) -> set[str]:
+    """Every ``<receiver>.<method>`` attribute reached anywhere in the file."""
+
+    methods: set[str] = set()
+    for node in ast.walk(_parse(path)):
+        if not isinstance(node, ast.Attribute):
+            continue
+        if (
+            isinstance(node.value, ast.Attribute)
+            and node.value.attr == receiver
+        ):
+            methods.add(node.attr)
+    return methods
+
+
+
+def _class_names(path: pathlib.Path) -> set[str]:
+    """Every class name declared in one file."""
+
+    return {
+        node.name
+        for node in ast.walk(_parse(path))
+        if isinstance(node, ast.ClassDef)
+    }
+
+def _public_names(path: pathlib.Path, class_name: str) -> set[str]:
+    """Class-level names a caller may use: signals, properties, methods."""
+
+    names: set[str] = set()
+    for node in ast.walk(_parse(path)):
+        if not isinstance(node, ast.ClassDef) or node.name != class_name:
+            continue
+        for item in node.body:
+            if isinstance(item, ast.FunctionDef):
+                names.add(item.name)
+            elif isinstance(item, (ast.Assign, ast.AnnAssign)):
+                targets = (
+                    item.targets
+                    if isinstance(item, ast.Assign)
+                    else [item.target]
+                )
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        names.add(target.id)
+        break
+    return {name for name in names if not name.startswith("_")}
+
+
+def _main_window() -> ast.ClassDef:
+    for node in ast.parse(_DESKTOP.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.ClassDef) and node.name == "MainWindow":
+            return node
+    raise AssertionError("MainWindow is gone")
 
 #: Spec 36: the per-file line budget.  Exceeding it means a responsibility
 #: leaked in (Cross-Section, Targeted, the strategy catalogue, the task
@@ -240,23 +345,13 @@ def test_the_backtest_package_has_its_own_orchestrator() -> None:
 
 def test_no_backtest_or_research_god_object_is_declared() -> None:
     offenders: list[tuple[str, str]] = []
-    for path in python_files(_ORCHESTRATION):
-        for node in _classes(path):
+    for path in _python_files(_ORCHESTRATION):
+        for node in _class_names(path):
             if node in FORBIDDEN_AGGREGATES:
                 offenders.append(
                     (str(path.relative_to(_SRC)), node)
                 )
     assert not offenders, offenders
-
-
-def _classes(path: pathlib.Path) -> set[str]:
-    import ast
-
-    return {
-        node.name
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-        if isinstance(node, ast.ClassDef)
-    }
 
 
 def test_the_shared_tasking_module_is_types_only() -> None:
@@ -292,6 +387,54 @@ def test_the_shared_tasking_module_is_types_only() -> None:
     ] == ["__call__"]
 
 
+def test_the_task_submitter_protocol_matches_the_window_signature() -> None:
+    """The protocol must describe ``MainWindow._start_task`` exactly.
+
+    ``TaskSubmitter`` is not a wrapper and no adapter is constructed -- the
+    window's method satisfies it structurally.  That only holds while the two
+    signatures agree, so the parameter names, their defaults and the return type
+    are compared here.  A new keyword added to ``_start_task`` without being
+    declared on the protocol (or a protocol parameter the window does not
+    accept) fails.
+
+    Compared by parsing both sources rather than by importing either object:
+    this is a source-level contract, and importing ``desktop`` would drag in Qt
+    for an assertion about a signature.
+    """
+
+    def signature(path: pathlib.Path, name: str) -> dict[str, object]:
+        for node in ast.walk(_parse(path)):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                args = node.args
+                names = [a.arg for a in args.posonlyargs + args.args]
+                names += [a.arg for a in args.kwonlyargs]
+                defaults = [
+                    ast.unparse(default) if default is not None else None
+                    for default in args.kw_defaults
+                ]
+                return {
+                    "names": names,
+                    "defaults": defaults,
+                    "returns": (
+                        ast.unparse(node.returns) if node.returns else None
+                    ),
+                }
+        raise AssertionError(f"{name} not found in {path}")
+
+    protocol = signature(_TASKING, "__call__")
+    window = signature(_DESKTOP, "_start_task")
+
+    # Both declare ``self`` explicitly -- the protocol because ``__call__`` is
+    # written as a method, the window because it is one -- so the two lists are
+    # compared whole rather than with an offset.
+    assert protocol["names"] == window["names"], (
+        protocol["names"],
+        window["names"],
+    )
+    assert protocol["defaults"] == window["defaults"]
+    assert protocol["returns"] == window["returns"] == "bool"
+
+
 def test_the_tasking_module_has_no_runtime_behaviour() -> None:
     """Spec 5: no worker, no thread, no resource-group state.
 
@@ -322,7 +465,7 @@ def test_the_tasking_module_has_no_runtime_behaviour() -> None:
             offenders.append(node.module or "")
     assert not offenders, offenders
 
-    assert module_imports(_TASKING) == {"__future__", "collections.abc", "typing"}
+    assert _module_imports(_TASKING) == {"__future__", "collections.abc", "typing"}
 
 
 # -- spec 25/28: the window's backtest surface is gone -----------------
@@ -330,7 +473,7 @@ def test_the_tasking_module_has_no_runtime_behaviour() -> None:
 
 @pytest.mark.parametrize("name", RETIRED_WINDOW_METHODS)
 def test_the_window_no_longer_declares_the_retired_method(name: str) -> None:
-    assert method_source(_DESKTOP, name) is None, f"{name} must be retired"
+    assert _method_source(_DESKTOP, name) is None, f"{name} must be retired"
 
 
 @pytest.mark.parametrize("needle", RETIRED_WINDOW_STATE)
@@ -452,7 +595,7 @@ def test_the_window_never_sets_the_backtest_strategy_options() -> None:
     state.
     """
 
-    reached = receiver_methods(_DESKTOP, "backtest_page")
+    reached = _receiver_methods(_DESKTOP, "backtest_page")
     assert "set_strategy_options" not in reached, reached
     assert "render" not in reached, reached
     assert "set_palette" in reached
@@ -460,7 +603,7 @@ def test_the_window_never_sets_the_backtest_strategy_options() -> None:
     # The generic pages keep their own calls: this is a scoping assertion, and
     # without it the test above would pass even if the window had stopped
     # refreshing every combo.
-    assert "set_strategy_options" in receiver_methods(
+    assert "set_strategy_options" in _receiver_methods(
         _DESKTOP, "execution_page"
     )
 
@@ -482,10 +625,10 @@ def test_only_the_window_obtains_a_backtest_page() -> None:
     page_package = _SRC / "desktop_v2" / "pages" / "research" / "backtest"
     holders = [
         str(path.relative_to(_SRC))
-        for path in python_files(_SRC)
+        for path in _python_files(_SRC)
         if page_package not in path.parents
         and (
-            "BacktestPage" in imported_names(path)
+            "BacktestPage" in _imported_names(path)
             or "BacktestPage(" in path.read_text(encoding="utf-8")
         )
     ]
@@ -495,14 +638,14 @@ def test_only_the_window_obtains_a_backtest_page() -> None:
 def test_the_capability_does_drive_the_page() -> None:
     """The positive half: the page the window builds is the one Backtest paints."""
 
-    reached = receiver_methods(_BACKTEST_DIR / "orchestrator.py", "_page")
+    reached = _receiver_methods(_BACKTEST_DIR / "orchestrator.py", "_page")
     assert {"render", "set_strategy_options"} <= reached, reached
 
 
 def test_the_window_uses_only_the_declared_backtest_page_surface() -> None:
     """Spec 34: the page surface the window may touch, compared exactly."""
 
-    reached = receiver_methods(_DESKTOP, "backtest_page")
+    reached = _receiver_methods(_DESKTOP, "backtest_page")
     assert reached <= {
         "render",
         "set_strategy_options",
@@ -520,7 +663,7 @@ def test_the_window_constructs_the_backtest_page_exactly_once() -> None:
     import ast
 
     offenders: list[str] = []
-    for path in python_files(_SRC):
+    for path in _python_files(_SRC):
         for node in ast.walk(
             ast.parse(path.read_text(encoding="utf-8"))
         ):
@@ -545,7 +688,7 @@ def test_the_connect_method_is_wiring_only() -> None:
 
     import ast
 
-    source = method_source(_DESKTOP, "_connect_backtest_page")
+    source = _method_source(_DESKTOP, "_connect_backtest_page")
     assert source is not None
 
     called = {
@@ -564,7 +707,7 @@ def test_the_refusal_bridge_holds_no_business_logic() -> None:
     policy -- but it must not read the draft, the runs or the service.
     """
 
-    source = method_source(_DESKTOP, "_report_backtest_refusal")
+    source = _method_source(_DESKTOP, "_report_backtest_refusal")
     assert source is not None
     for forbidden in (
         "draft",
@@ -584,7 +727,7 @@ def test_each_backtest_file_imports_only_its_declared_modules() -> None:
     for relative, allowed in ALLOWED_IMPORTS.items():
         path = _BACKTEST_DIR / relative
         assert path.exists(), f"{relative} is missing"
-        undeclared = sorted(module_imports(path) - allowed)
+        undeclared = sorted(_module_imports(path) - allowed)
         if undeclared:
             offenders.append((relative, undeclared))
     assert not offenders, offenders
@@ -595,7 +738,7 @@ def test_every_declared_import_is_actually_used() -> None:
 
     offenders: list[tuple[str, list[str]]] = []
     for relative, allowed in ALLOWED_IMPORTS.items():
-        actual = module_imports(_BACKTEST_DIR / relative)
+        actual = _module_imports(_BACKTEST_DIR / relative)
         unused = sorted(allowed - actual)
         if unused:
             offenders.append((relative, unused))
@@ -607,8 +750,8 @@ def test_the_backtest_capability_imports_no_forbidden_symbol(
     name: str,
 ) -> None:
     offenders: list[str] = []
-    for path in python_files(_BACKTEST_DIR):
-        if name in imported_names(path):
+    for path in _python_files(_BACKTEST_DIR):
+        if name in _imported_names(path):
             offenders.append(str(path.relative_to(_SRC)))
     assert offenders == [], f"{name} imported by {offenders}"
 
@@ -624,8 +767,8 @@ def test_the_backtest_capability_imports_no_forbidden_module() -> None:
     """
 
     offenders: list[tuple[str, str]] = []
-    for path in python_files(_BACKTEST_DIR):
-        for module in module_imports(path):
+    for path in _python_files(_BACKTEST_DIR):
+        for module in _module_imports(path):
             if module in ALLOWED_DESKTOP_MODULES:
                 continue
             for prefix in FORBIDDEN_MODULE_PREFIXES:
@@ -644,8 +787,8 @@ def test_the_backtest_capability_does_not_import_another_orchestrator() -> None:
     """
 
     offenders: list[tuple[str, str]] = []
-    for path in python_files(_BACKTEST_DIR):
-        for module in module_imports(path):
+    for path in _python_files(_BACKTEST_DIR):
+        for module in _module_imports(path):
             if module == "us_quant.desktop_v2.orchestration.tasking":
                 continue
             if module.startswith(
@@ -666,7 +809,7 @@ def test_the_backtest_capability_never_names_a_worker() -> None:
     import ast
 
     offenders: list[str] = []
-    for path in python_files(_BACKTEST_DIR):
+    for path in _python_files(_BACKTEST_DIR):
         for node in ast.walk(
             ast.parse(path.read_text(encoding="utf-8"))
         ):
@@ -690,7 +833,7 @@ def test_the_backtest_capability_never_names_a_worker() -> None:
 def test_the_backtest_queries_are_qt_free() -> None:
     """Spec 12: the pure rules must be testable without starting Qt."""
 
-    for module in module_imports(_BACKTEST_DIR / "queries.py"):
+    for module in _module_imports(_BACKTEST_DIR / "queries.py"):
         assert not (
             module == "PySide6" or module.startswith("PySide6.")
         ), module
@@ -699,8 +842,8 @@ def test_the_backtest_queries_are_qt_free() -> None:
 def test_the_backtest_capability_holds_no_dialog() -> None:
     """Spec 18: a refusal is a signal; the window owns every dialog."""
 
-    for path in python_files(_BACKTEST_DIR):
-        imported = imported_names(path)
+    for path in _python_files(_BACKTEST_DIR):
+        imported = _imported_names(path)
         for forbidden in ("QMessageBox", "QWidget"):
             assert forbidden not in imported, (path.name, forbidden)
 
@@ -716,13 +859,13 @@ def test_the_capability_does_not_import_the_strategy_service() -> None:
     not the same as importing it.
     """
 
-    source = module_imports(_BACKTEST_DIR / "orchestrator.py")
+    source = _module_imports(_BACKTEST_DIR / "orchestrator.py")
     assert "us_quant.trading.application.strategy_selection" not in source
     assert "us_quant.trading.application.strategies" not in source
-    assert "StrategySelectionService" not in imported_names(
+    assert "StrategySelectionService" not in _imported_names(
         _BACKTEST_DIR / "orchestrator.py"
     )
-    assert "StrategyApplication" not in imported_names(
+    assert "StrategyApplication" not in _imported_names(
         _BACKTEST_DIR / "orchestrator.py"
     )
     assert (
@@ -742,7 +885,7 @@ def test_the_public_surface_is_exactly_the_declared_one() -> None:
     declared.
     """
 
-    assert public_names(
+    assert _public_names(
         _BACKTEST_DIR / "orchestrator.py", "BacktestOrchestrator"
     ) == set(PUBLIC_SURFACE)
 
@@ -751,7 +894,7 @@ def test_the_public_surface_is_exactly_the_declared_one() -> None:
 def test_no_internal_is_exposed_as_a_public_name(name: str) -> None:
     """Spec 9/35: these are not capability API."""
 
-    names = public_names(
+    names = _public_names(
         _BACKTEST_DIR / "orchestrator.py", "BacktestOrchestrator"
     )
     assert name not in names, name
@@ -817,11 +960,3 @@ def test_the_window_no_longer_imports_the_backtest_builders() -> None:
     assert "BacktestStrategyOption" not in source
     assert "BacktestFormDraft" not in source
 
-
-def _main_window():
-    import ast
-
-    for node in ast.parse(_DESKTOP.read_text(encoding="utf-8")).body:
-        if isinstance(node, ast.ClassDef) and node.name == "MainWindow":
-            return node
-    raise AssertionError("MainWindow is gone")

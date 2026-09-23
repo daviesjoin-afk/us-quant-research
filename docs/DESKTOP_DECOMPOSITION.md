@@ -2719,7 +2719,7 @@ precision（Decimal、returns、commissions、slippage、execution stress、
 PBO/DSR、Newey-West、walk-forward partitions）全部未改。
 
 Shadow（engine / start-stop / stream ingestion）完全冻结，本轮不 import、
-不迁移，属 v2O-D。Target symbol、minute-status、preflight、strategy-selection
+不迁移，属 v2O-D（**后来已在 §26 完成**）。Target symbol、minute-status、preflight、strategy-selection
 的 ownership 属 C5B（见 §25）。
 
 ## 25. v2O-C5B：Targeted Session + Preflight 提取
@@ -2739,7 +2739,9 @@ MainWindow（未来 ShadowOrchestrator）  Shadow runtime：仿真实际在跑�
 `shadow_snapshot_provider`，但没有 `shadow_engine`；它在 `render_current()` 里
 **每次绘制时读取**快照，从不保存。`_start_shadow` / `_stop_shadow` /
 `shadow_engine` / `shadow_snapshot` / `shadow_store` / `ShadowWorkflow` 全部留在
-`MainWindow`，属 v2O-D。architecture test 反向锁定：
+`MainWindow`，属 v2O-D。（**该轮后来已完成：见 §26。** 前四项已迁入
+`ShadowOrchestrator`，`shadow_store` 与 `shadow_workflow` 作为 composition fact 留在
+窗口。）architecture test 反向锁定：
 `TargetedSessionSnapshot` 的字段集恰好是
 `{target_draft, target_status, minute_status, preflight}`，且 capability 的源码里
 不出现 `shadow_engine` / `set_shadow_snapshot`。

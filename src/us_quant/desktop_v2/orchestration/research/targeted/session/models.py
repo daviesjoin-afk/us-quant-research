@@ -68,8 +68,9 @@ class TargetedSessionSnapshot:
 
     Four facts and nothing else.  :attr:`preflight` is a *derived* fact: it is
     ``None`` until a refresh has succeeded, and it is committed only when the
-    evaluator returned, so a provider failure leaves the last good presentation
-    standing rather than inventing an all-pass or all-fail result.
+    evaluator returned.  A failed refresh leaves this field untouched *and* raises
+    -- the caller must learn that the verdict on screen is no longer fresh, rather
+    than reading a stale one as current.
     """
 
     target_draft: str = ""

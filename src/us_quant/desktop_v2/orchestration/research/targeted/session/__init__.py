@@ -34,9 +34,9 @@ The timing and safety rules the capability owns, each frozen and tested:
   and the canonical draft to the symbol the engine is actually trading;
 * 订阅该标的行情 refuses while the feed is live, and refreshes the preflight
   *before* requesting the start;
-* the preflight is derived.  It is committed only when the evaluator returned, so
-  a provider failure leaves the last good panel standing rather than inventing an
-  all-pass or an all-fail result;
+* the preflight is derived.  It is committed only when the evaluator returned, and
+  a failure **propagates** with the previous verdict untouched -- never a silently
+  swallowed error leaving a stale verdict looking current;
 * ``broker_orders_available`` is hard-disabled in the service, so no caller can
   give Research Targeted broker execution authority.
 """

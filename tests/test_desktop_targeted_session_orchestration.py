@@ -771,6 +771,24 @@ def test_the_capability_declares_its_signals(name: str) -> None:
     assert name in source, name
 
 
+def test_the_capability_swallows_no_error() -> None:
+    """No ``except`` in the session package: a failure must reach its caller.
+
+    The preflight is committed only when the evaluator returned, and a failing
+    refresh must not leave the previous verdict looking current -- so the error
+    propagates rather than being absorbed here.  This is the inherited behaviour
+    (the retired ``_refresh_target_preflight`` raised too), and an error boundary
+    belongs to composition, not to the capability that owns the truth.
+    """
+
+    offenders: list[tuple[str, str]] = []
+    for path in _python_files(_SESSION_DIR):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ExceptHandler):
+                offenders.append((path.name, ast.unparse(node)))
+    assert not offenders, offenders
+
+
 @pytest.mark.parametrize("name", FORBIDDEN_REFRESH_AGGREGATES)
 def test_the_capability_has_no_refresh_everything_method(name: str) -> None:
     """Each change refreshes what it actually affects -- no implicit fan-out."""

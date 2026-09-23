@@ -2901,8 +2901,17 @@ Targeted Evidence Replay/Robustness → ResearchScenarioCapital（研究情景�
 Targeted Preflight whole-share 容量 → fresh Paper account truth（券商真值）
 ```
 
-Preflight 是 **derived fact**：只有 evaluator 返回了才 commit；provider/service
-抛异常时保留 last-good presentation，绝不 catch 后制造「全通过 / 全失败」假结果。
+Preflight 是 **derived fact**：只有 evaluator 返回了才 commit。失败时**异常继续传播**
+（fail loudly），`snapshot.preflight` 保持不动且**不 repaint** —— 面板继续显示上一次
+verdict，同时 caller / log / 任何 runtime-event 边界都能看到这次刷新失败了。
+
+这一条是**继承**而非新选择：base 的 `_refresh_target_preflight()` 没有 try/except，
+任何 Universe / Market / Account / provider / store / evaluator 异常都会显式暴露。
+在 capability 里写 `except Exception: return` 不是 extraction，而是错误语义变化，而且
+是更危险的那种：操作员会把**过期的 verdict 继续当成当前的**读，而它携带的 gate
+（Paper account freshness、行情 freshness、whole-share 容量）恰恰是刷新失败后绝不能
+看起来仍然有效的那几个。吸收异常属于 composition / error boundary 的职责，不是
+capability 的。
 
 `render_current()` 每次绘制时通过 provider 读 Shadow snapshot，然后
 `session_view(...)` + `page.render_session(view)`。它**只**画 session 一半；

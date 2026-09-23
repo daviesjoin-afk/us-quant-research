@@ -260,31 +260,33 @@ class TargetedSessionOrchestrator(QObject):
         would let the panel describe a market that has since moved.  The capital
         values pass through untouched: the multiplier and the account's
         ``net_liquidation`` stay ``Decimal`` end to end, because the evaluator does
-        its own whole-share arithmetic and a ``float()`` would change it.  A
-        failure keeps the last good result, so a provider error cannot present as
-        all-pass.
-        """
+        its own whole-share arithmetic and a ``float()`` would change it.
 
+        **A failure propagates.**  Any provider, store or evaluator error escapes
+        with ``snapshot.preflight`` untouched and no repaint, so the panel keeps the
+        previous verdict while the caller, the log and any runtime-event boundary
+        all see that this refresh failed.  Swallowing it here would be worse than
+        noisy: the operator would go on reading a stale verdict as current, and the
+        gates it carries -- Paper account freshness, quote freshness, whole-share
+        capacity -- are exactly the ones that must not look valid after a failed
+        refresh.  The retired ``_refresh_target_preflight`` raised too, so this is
+        inherited; absorbing an error is composition's decision, not this one's.
+        """
         symbol = self._snapshot.target_draft
-        try:
-            result = self._service.evaluate_preflight(
-                symbol,
-                universe_record=queries.find_universe_record(
-                    self._universe_provider(), symbol
-                ),
-                quote=queries.find_market_quote(
-                    self._market_snapshot_provider(), symbol
-                ),
-                account=self._account_provider(),
-                strategy=self._selected_strategy_provider(),
-                exposure_multiplier=(
-                    self._exposure_multipliers_provider().get(
-                        symbol, Decimal("1")
-                    )
-                ),
-            )
-        except Exception:
-            return
+        result = self._service.evaluate_preflight(
+            symbol,
+            universe_record=queries.find_universe_record(
+                self._universe_provider(), symbol
+            ),
+            quote=queries.find_market_quote(
+                self._market_snapshot_provider(), symbol
+            ),
+            account=self._account_provider(),
+            strategy=self._selected_strategy_provider(),
+            exposure_multiplier=(
+                self._exposure_multipliers_provider().get(symbol, Decimal("1"))
+            ),
+        )
         self._snapshot = replace(self._snapshot, preflight=result)
         self.render_current()
 

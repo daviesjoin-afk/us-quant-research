@@ -1846,8 +1846,16 @@ orchestrator，也不能 poll / stop / switch market 或选择 provider。
 draft signal       → 只记录 draft（每个字符一次赋值，零 fan-out）
 refresh_minute     → 不重算 preflight
 refresh_preflight  → 不跑 evidence
-preflight          → derived fact；只有 evaluator 返回才 commit（失败保 last-good）
+preflight          → derived fact；只有 evaluator 返回才 commit；
+                     失败继续传播（不吞异常，不 repaint 过期 verdict）
 ```
+
+**错误契约（继承，不是新策略）**：`refresh_preflight()` 里**没有** try/except。
+base 的 `_refresh_target_preflight()` 也没有 —— 任何 Universe / Market / Account /
+provider / store / evaluator 异常原本都会显式暴露。在 capability 里加
+`except Exception: return` 会静默吞掉全部失败，让操作员把过期 verdict 继续当成当前
+的读，而它携带的 Paper account freshness / 行情 freshness / whole-share gate 恰恰是
+刷新失败后绝不能看起来仍然有效的那几个。吸收异常属于 composition / error boundary。
 
 **Safety 语义**（逐字保持）：invalid symbol = warning；active Shadow 时拒绝切
 target（page 与 canonical draft 同时回到引擎实际在做的 symbol）；Market live 时拒绝

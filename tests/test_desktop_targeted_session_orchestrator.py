@@ -19,6 +19,8 @@ from decimal import Decimal
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
+
 from us_quant.desktop_targeted_session_service import (
     DesktopTargetedSessionService,
 )
@@ -784,11 +786,18 @@ def test_the_service_hard_disables_the_broker_route() -> None:
     ).parameters
 
 
-def test_a_failing_preflight_keeps_the_last_good_result() -> None:
-    """Nothing is committed unless the evaluator returned.
+def test_a_failing_preflight_propagates_and_changes_nothing() -> None:
+    """The failure must be visible, and the stale verdict must not be repainted.
 
-    A caught failure that wrote an all-pass or an all-fail result would present a
-    verdict nobody computed; keeping the last good one is the honest state.
+    Three assertions, and all three matter.  The retired
+    ``_refresh_target_preflight`` let the exception escape, so swallowing it here
+    would be an error-semantics change dressed as an extraction -- and a silent one
+    is worse than noisy: the operator would keep reading the previous verdict as
+    current, while the gates it carries (Paper account freshness, quote freshness,
+    whole-share capacity) are exactly the ones that must not look valid after a
+    failed refresh.
+
+    So: it raises, the last good result is untouched, and nothing is repainted.
     """
 
     store = _Store()
@@ -817,10 +826,32 @@ def test_a_failing_preflight_keeps_the_last_good_result() -> None:
     painted = len(page.rendered)
 
     evaluator.raises = RuntimeError("provider down")
-    orchestrator.refresh_preflight()
+    with pytest.raises(RuntimeError, match="provider down"):
+        orchestrator.refresh_preflight()
 
     assert orchestrator.snapshot.preflight is first, "the last good result stands"
     assert len(page.rendered) == painted, "a failure must not repaint a verdict"
+
+
+def test_a_failing_provider_propagates_too() -> None:
+    """Not only the evaluator: a provider read is a refresh step like any other.
+
+    A ``Universe``/``Market``/``Account`` provider that raises must surface as
+    well, otherwise the swallow would just move one frame up the call.
+    """
+
+    def broken() -> None:
+        raise RuntimeError("provider down")
+
+    orchestrator, _page, _store, _evaluator, _seen = _build(
+        result=_preflight("AAPL")
+    )
+    orchestrator.adopt_target_draft("AAPL")
+    orchestrator.refresh_preflight()
+
+    orchestrator._universe_provider = broken
+    with pytest.raises(RuntimeError, match="provider down"):
+        orchestrator.refresh_preflight()
 
 
 # -- render ----------------------------------------------------------------

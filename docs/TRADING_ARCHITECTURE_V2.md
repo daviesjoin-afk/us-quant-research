@@ -143,6 +143,7 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Scanner Orchestration | MIGRATED（v2O-C2，`desktop_v2/orchestration/research/scanner/`） |
 | Backtest Orchestration | MIGRATED（v2O-C3，`desktop_v2/orchestration/research/backtest/`） |
 | Research Orchestration | **COMPLETE**（v2O-C；Universe / History / Scanner / Backtest / Cross-Section / Targeted Evidence / Targeted Session 全部已迁） |
+| Shadow Orchestration | MIGRATED（v2O-D，`desktop_v2/orchestration/shadow/`） |
 
 Shadow 子系统：
 
@@ -854,7 +855,8 @@ desktop_v2/pages/research/targeted/
 职责边界：
 
 ```text
-MainWindow                 取数、Shadow engine ownership、research pipeline、result caches
+MainWindow                 取数、research pipeline、result caches
+                           （Shadow engine ownership 已于 v2O-D 迁出，见 §8.17）
 presenters / rows          facts → immutable presentation view（Qt-free）
 TargetedValidationPage     只 render + emit intent
 ```
@@ -1807,8 +1809,9 @@ service、admission 被拒后 busy 保持 True、failure 清空 last-good runs�
 
 **v2O-C1 Universe + History + v2O-C2 Scanner + v2O-C3 Backtest ✅**；
 **v2O-C4 Cross Section ✅**；**v2O-C5A Targeted Evidence ✅**；
-**v2O-C5B Targeted Session + Preflight ✅** —— 顶层路线现在是
-**v2O-C Research COMPLETE**。下一刀是 **v2O-D Shadow orchestration**。
+**v2O-C5B Targeted Session + Preflight ✅**；**v2O-D Shadow orchestration ✅** ——
+顶层路线现在是 **v2O-C Research COMPLETE**。下一刀是
+**v2O-E Paper orchestration**。
 
 维护导航见 `docs/DESKTOP_CAPABILITY_MAP.md`；C5B 的设计依据见
 `DESKTOP_DECOMPOSITION.md` §25，本文的 §8.16 只记该轮改变了哪些 boundary。
@@ -1831,9 +1834,10 @@ symbol，Shadow start 需要 target。**不**提供四个独立 accessor。
 
 **它不拥有 Shadow。** `shadow_snapshot_provider` 让它在 `render_current()` 里每次
 绘制时读取快照；`shadow_engine` / `shadow_snapshot` / `_start_shadow` /
-`_stop_shadow` / `ShadowPaperStore` / `ShadowWorkflow` 全部仍在 `MainWindow`，属
-v2O-D。因此名字是 `TargetedSessionOrchestrator`，不是
-`ShadowSessionOrchestrator` —— 这里的 session 指 Targeted 工作区的呈现会话。
+`_stop_shadow` 属 v2O-D，**已迁入** `ShadowOrchestrator`（见 §8.17），
+`ShadowPaperStore` 与 `ShadowWorkflow` 作为 composition fact 留在窗口。因此名字是
+`TargetedSessionOrchestrator`，不是 `ShadowSessionOrchestrator` —— 这里的 session
+指 Targeted 工作区的呈现会话。
 
 **依赖全部是 Callable / immutable domain fact**：universe、market snapshot、
 account、strategy selection、exposure multipliers、Shadow snapshot 六个 provider，
@@ -1866,6 +1870,57 @@ market start。`broker_orders_available` 在 service 里硬编码 `False` 且不
 （各自的 capability）；`MainWindow` 不再画 Targeted 页面的任何一半。MainWindow
 退休了 `_target_status` / `_minute_status` / `target_preflight_result` 三个状态和
 十个 handler，且不留任何 compatibility property。
+
+### 8.17 shadow orchestration 已抽出（v2O-D）
+
+C5B 之后，Shadow runtime 仍是 `MainWindow` 上的一组散落属性，被六个地方读写：
+
+```text
+_start_shadow / _stop_shadow       两个页面 intent
+_on_market_snapshot_changed        stream ingress + session repaint
+_stop_market_data                  Paper / Shadow 停止 interlock
+_start_auto_quant                  Paper 启动前的互斥门
+closeEvent                         关闭时停止
+_export_terminal_state             shadow_store.recent_fills(500)
+```
+
+全部收口到 `desktop_v2/orchestration/shadow/`（30 / 220 / 276 / 334 行）：
+
+```text
+models.py        冻结 request、拒绝 shape、runtime event shape、ShadowLease 协议
+queries.py       十道启动门，纯规则、Qt-free、无 I/O
+orchestrator.py  只做 sequencing：读一次事实 → 过门 → 建引擎 → 启动 → 喂快照 → 发布
+```
+
+**单一 truth 不变。** `ShadowPaperEngine` 仍是 session id / active / cash / PnL /
+position / fills / marks 的唯一 owner；orchestrator 只持有引擎**引用**与引擎最后产出的
+snapshot，`is_active` 问引擎（不缓存布尔），`recent_fills` 委托 store。它不算 PnL、
+不模拟 fill、不写 store —— Shadow 算法 / fill math / 手续费 / 滑点一行未动。
+
+**import 边界。** 该 package 不 import Market / Account / Research 的 orchestrator，
+也不 import `desktop_v2/workflows.py`。后者是个真实陷阱：`ShadowWorkflowController`
+与 `PaperWorkflowController` 同住一个模块，直接 import 会让 Shadow → Paper 成为依赖。
+解法是 `models.py` 里的 `ShadowLease` Protocol——窗口把**共享**的
+`ExecutionLeaseManager` 句柄传进去，Paper 拿到的是同一个，所以"Shadow 与 Paper 不能
+同时持有执行权"仍是结构性的，而 orchestrator 从不 import 那个模块。
+
+**两处逐字保留的行为：**
+
+```text
+资金金额   在资金门读；资金来源（account alias）只在建引擎时读
+           ⇒ 被拒绝的启动从不触碰 portfolio（退休 handler 的原始顺序）
+shutdown() 只停引擎 + 释放 lease；不重绘、不记录事件、不改 snapshot
+           ⇒ 关闭不会把操作员从未停止的会话写成"已停止"
+```
+
+**窗口剩下的 Shadow 代码**只有：构造与接线、五个 composition helper、两处
+cross-capability interlock 读取，以及两个非 runtime truth 的属性——
+`shadow_store`（导出经 capability 读取的持久化）与 `shadow_workflow`（与 Paper 共享的
+lease 句柄）。`_selected_shadow_strategy_record` 是 strategy selection 的 composition
+读取，本轮不改名。
+
+Shadow 研究算法、Paper workflow 生命周期、Risk / Execution 都未触碰，Paper
+ownership 留给 v2O-E。
 
 ## 9. 已删除的旧架构
 
@@ -2640,10 +2695,8 @@ shadow_paper.py                        ✅ 已删除（Shadow Framework v2）
 ```text
 v2O-A Market orchestration      ✅ 已完成（§8.11）
 v2O-B Account orchestration     ✅ 已完成（§8.12）
-v2O-C Research orchestration    🔄 IN PROGRESS（§8.13 Universe + History、
-                                   §8.14 Scanner、§8.15 Backtest 完成；
-                                   Cross-Section / Targeted 待续）
-v2O-D Shadow orchestration      ⏭ 后续
+v2O-C Research orchestration    ✅ COMPLETE（§8.13–§8.16）
+v2O-D Shadow orchestration      ✅ 已完成（§8.17）
 v2O-E Paper orchestration       ⏭ 后续
 v2O-F System orchestration      ⏭ 后续
 MainWindow composition closure  ⏭ 后续
@@ -2778,7 +2831,7 @@ Desktop Dashboard v2
 
 ```text
 v2O-C Research orchestration    ✅ COMPLETE（C1–C5B 全部完成）
-v2O-D Shadow orchestration
+v2O-D Shadow orchestration      ✅ 已完成（§8.17）
 v2O-E Paper orchestration
 v2O-F System orchestration
 MainWindow composition closure
@@ -2859,6 +2912,30 @@ v2O-C2 刻意没有做的事，留给更后面：
 - 没有为了"命名好看"大规模 rename `DesktopMarketScanService`，也没有改
   `scanner.py` 的扫描算法、score policy、China exclusion policy、whole-share
   sizing 或 History scheduling 行为。
+
+v2O-D 刻意没有做的事，留给更后面：
+
+- 只抽 Shadow，没有 Paper / System orchestration，也没有 `ShadowManager` /
+  `ShadowCoordinator` / `ShadowContext` / `ApplicationContext` / services bag；
+- 没有搬 Paper session 生命周期：connect / promote / discard、workflow 状态迁移、
+  HALT / recovery、reconciliation、finalization、lease-facing sequencing 全部仍是
+  `MainWindow` 的，属 v2O-E。Shadow orchestrator 只拿到共享 lease 的窄 Protocol，
+  从不 import `desktop_v2/workflows.py`（`PaperWorkflowController` 就住在那儿）；
+- 没有搬 generic task lifecycle（`TaskThread` / `DesktopTaskController` / worker
+  列表 / busy dialog）：Shadow start 是在调用线程上的同步操作（仿真由 market
+  snapshot 驱动，没有自己的 worker），因此本轮不需要 `submit_task`，
+  也没有造 `ShadowWorker` / `ShadowTaskRegistry`；
+- 没有持有 `QMessageBox`：拒绝走 `refused` 信号，窗口用 `_report_shadow_refusal`
+  以原有 severity 显示；
+- 没有为了"架构好看"拆出 `manager.py` / `controller.py` / `service.py` /
+  `facade.py` / `workflow.py` / `context.py` / `state.py` / `helpers.py` /
+  `utils.py`：三个文件（models / queries / orchestrator）够用；
+- 没有改 Shadow 引擎 / trade_logic / store / models / config，没有改 fill math、
+  手续费、滑点、warmup、momentum、force-flat 或跨交易日行为；十道门的顺序与文案
+  逐字保留，`_money` 语义（含 `不可用`）逐字保留；
+- 没有提前建 `CapitalAllocator` / Risk Kernel / Champion-Challenger / AI / Live
+  broker / Live order：未来目标不进这一轮；
+- 没有清理本轮之外的 legacy。
 
 Framework v2C 刻意没有做的事，留给更后面：
 

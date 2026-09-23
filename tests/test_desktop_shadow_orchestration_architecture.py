@@ -161,14 +161,15 @@ PUBLIC_SIGNALS = ("refused", "runtime_event_requested", "log_requested")
 #: Per-file line caps.  The orchestrator is *sequencing*, so it stays small: §7 of
 #: the round says a 700-1000 line orchestrator means core logic was copied in.
 #: These caps are set from the real sizes with headroom for a fix, not chosen to
-#: be tight -- roughly 182 of the orchestrator's lines are code, and the rest is
-#: the docstrings that record the ordering constraints a maintainer would
-#: otherwise have to rediscover.
+#: be tight -- roughly 189 of the orchestrator's lines are code, and the rest is
+#: the docstrings that record the ordering and lease-safety constraints a
+#: maintainer would otherwise have to rediscover (and, on the evidence of the two
+#: lease bugs, get wrong).
 LINE_BUDGETS = {
     "__init__.py": 60,
     "models.py": 240,
     "queries.py": 300,
-    "orchestrator.py": 360,
+    "orchestrator.py": 400,
 }
 
 #: Every ``self.shadow_orchestrator.<name>`` the window may reach for.
@@ -303,6 +304,21 @@ def _called_names(path: pathlib.Path) -> set[str]:
             if name:
                 names.add(str(name))
     return names
+
+
+def _function_source(path: pathlib.Path, name: str) -> str:
+    """The source of a ``ShadowOrchestrator`` method, for ordering assertions."""
+
+    source = path.read_text(encoding="utf-8")
+    for node in ast.walk(_tree(path)):
+        if isinstance(node, ast.ClassDef) and node.name == "ShadowOrchestrator":
+            for member in node.body:
+                if (
+                    isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and member.name == name
+                ):
+                    return ast.get_source_segment(source, member) or ""
+    raise AssertionError(f"ShadowOrchestrator.{name} not found")
 
 
 # -- Guard A: the window no longer runs the Shadow runtime ---------------
@@ -637,6 +653,90 @@ def test_the_provenance_is_read_at_build_time_not_at_gate_time() -> None:
     source = _ORCHESTRATOR_PATH.read_text(encoding="utf-8")
     build_start = source.index("def _build_engine")
     assert "self._account_alias_provider()" in source[build_start:]
+
+
+# -- Guard D2: the Shadow / Paper execution mutex ------------------------
+#
+# ``ShadowWorkflowController`` and ``PaperWorkflowController`` share one
+# ``ExecutionLeaseManager``, so the lease *is* the Shadow XOR Paper invariant.  A
+# Shadow path that releases a lease it did not acquire un-enforces it: the
+# simulation keeps running while Paper may take execution.  These three guards
+# make that class of mistake fail structurally rather than only behaviourally.
+
+
+def test_the_orchestrator_only_releases_a_lease_it_acquired() -> None:
+    """The release path must not key off ``self._lease.active``.
+
+    That condition is true whenever *anyone* holds the lease, including Paper --
+    so releasing on it hands back a mutex this capability never took.  It was the
+    root cause of two real bugs: a second ``start()`` released a live session's
+    lease from its failure path, and a ``stop()`` following an already-stopped
+    Shadow released whichever lease Paper had taken meanwhile.  Both are one line
+    away from returning, so the release is centralized and flag-gated.
+    """
+
+    source = _ORCHESTRATOR_PATH.read_text(encoding="utf-8")
+    assert "if self._lease.active:" not in source, (
+        "release must be gated on a flag this capability set, not on lease.active"
+    )
+    assert "if not self._holds_lease:" in source
+
+
+def test_the_lease_is_released_in_exactly_one_place() -> None:
+    """One guarded helper releases it, so the two bugs cannot diverge again."""
+
+    calls: list[int] = []
+    for node in ast.walk(_tree(_ORCHESTRATOR_PATH)):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "_lease"
+            and node.func.attr == "stop"
+        ):
+            calls.append(node.lineno)
+    assert len(calls) == 1, calls
+
+    # And every teardown path goes through it.
+    for name in ("stop", "shutdown"):
+        assert "self._release_lease()" in _function_source(
+            _ORCHESTRATOR_PATH, name
+        ), name
+    assert "self._release_lease()" in _function_source(
+        _ORCHESTRATOR_PATH, "start"
+    )
+
+
+def test_the_hold_flag_is_set_only_by_the_acquiring_call() -> None:
+    """``_holds_lease = True`` sits immediately after the lease is taken."""
+
+    start_source = _function_source(_ORCHESTRATOR_PATH, "start")
+    assert "self._lease.start()" in start_source
+    assert start_source.index("self._lease.start()") < start_source.index(
+        "self._holds_lease = True"
+    )
+
+
+def test_the_orchestrator_refuses_a_start_while_already_active() -> None:
+    """``start()`` opens with an own-active gate, before any fact is read."""
+
+    start_source = _function_source(_ORCHESTRATOR_PATH, "start")
+    assert "if self.is_active:" in start_source
+    # The gate must come first: a second start may not read a fact, build an
+    # engine or touch the lease before it returns.
+    assert start_source.index("if self.is_active:") < start_source.index(
+        "queries.plan_start("
+    )
+
+
+def test_the_orchestrator_never_stops_the_lease_outside_the_guarded_helper() -> None:
+    """``_holds_lease`` is the only gate; no caller releases inline."""
+
+    source = _ORCHESTRATOR_PATH.read_text(encoding="utf-8")
+    # One release call, inside the helper that guards it.
+    assert source.count("self._lease.stop()") == 1
+    helper = _function_source(_ORCHESTRATOR_PATH, "_release_lease")
+    assert "self._lease.stop()" in helper
 
 
 # -- Guard E: the public surface is exactly the declared one -------------

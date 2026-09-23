@@ -936,6 +936,11 @@ def test_shadow_stop_calls_engine_and_workflow(window: MainWindow, monkeypatch) 
     workflow.active = True
     window.shadow_orchestrator._engine = engine  # type: ignore[assignment]
     window.shadow_orchestrator._lease = workflow  # type: ignore[assignment]
+    # Shadow is the holder of the shared lease in this scenario, which is what
+    # entitles the stop to hand it back.  The flag is set explicitly because the
+    # release is gated on *this capability* holding the lease, not on the lease
+    # being active -- Paper may be the holder instead.
+    window.shadow_orchestrator._holds_lease = True
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "render_current", lambda: None
     )
@@ -945,3 +950,65 @@ def test_shadow_stop_calls_engine_and_workflow(window: MainWindow, monkeypatch) 
 
     assert window.shadow_orchestrator.snapshot is stopped
     assert workflow.active is False
+
+
+def _arm_shadow_start(window: MainWindow, monkeypatch) -> None:
+    """Make a real start succeed through the wiring: live market, capital, strategy."""
+
+    monkeypatch.setattr(
+        window, "_selected_shadow_strategy_record", lambda: _valid_strategy()
+    )
+    monkeypatch.setattr(
+        window.account_orchestrator,
+        "fresh_paper_net_liquidation",
+        lambda: Decimal("10000"),
+    )
+    monkeypatch.setattr(
+        shadow_orchestrator_module,
+        "build_targeted_shadow_config",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(shadow_orchestrator_module, "ShadowPaperEngine", _Engine)
+    monkeypatch.setattr(
+        window.targeted_session_orchestrator, "render_current", lambda: None
+    )
+    monkeypatch.setattr(window, "_record_runtime_event", lambda **kwargs: None)
+    monkeypatch.setattr(window, "_log", lambda *args, **kwargs: None)
+    _fake_live_market(window, _ready_stream())
+    window.universe_orchestrator.restore_snapshot(_eligible_universe())
+    window.broker_account._portfolio = SimpleNamespace(
+        account=SimpleNamespace(account_alias="Paper")
+    )
+    window.targeted_session_orchestrator.adopt_target_draft("AAPL")
+    _Engine.created.clear()
+
+
+def test_two_shadow_start_requests_leave_one_session_holding_one_lease(
+    window: MainWindow, monkeypatch
+) -> None:
+    """The page signal twice must not produce a second session or a free lease.
+
+    This is the safety property the capability extraction had to get right: the
+    shared ``ExecutionLeaseManager`` *is* the Shadow XOR Paper invariant, so a
+    duplicate start that released it would leave the simulation running while
+    Paper could take execution.  Driven through the real signal, not by calling
+    ``start()`` directly, so the wiring is covered too.
+    """
+
+    _arm_shadow_start(window, monkeypatch)
+    lease = window.shadow_orchestrator._lease
+
+    page = window.targeted_validation_page
+    page.shadow_start_requested.emit()
+    first_engine = _Engine.created[0]
+    first_snapshot = window.shadow_orchestrator.snapshot
+
+    page.shadow_start_requested.emit()
+
+    assert len(_Engine.created) == 1, "a second engine must not be built"
+    assert window.shadow_orchestrator.is_active is True
+    assert window.shadow_orchestrator.snapshot is first_snapshot
+    assert first_engine.active is True
+    # The shared lease is still held, so Paper still cannot take execution.
+    assert lease.active is True
+    assert window.shadow_workflow.active is True

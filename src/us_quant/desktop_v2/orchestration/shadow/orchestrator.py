@@ -134,6 +134,11 @@ class ShadowOrchestrator(QObject):
         # owner of the session id, the cash, the P&L, the position and the fills.
         self._engine: ShadowPaperEngine | None = None
         self._snapshot: ShadowSnapshot | None = None
+        # Whether *this capability* currently holds the shared execution lease.
+        # Never read off the lease itself: the lease is held by whichever of
+        # Shadow and Paper took it, so ``_lease.active`` cannot distinguish "mine"
+        # from "Paper's".  See :meth:`_release_lease`.
+        self._holds_lease = False
 
     # -- read-only facts the rest of the desktop may consume -------------
 
@@ -174,6 +179,19 @@ class ShadowOrchestrator(QObject):
     def start(self) -> None:
         """Run the gates, build the engine and begin the simulation.
 
+        A start requested while a simulation already runs is a **no-op**: the
+        request's desired end state already holds, so nothing is built, no fact is
+        read, no lease is touched and the running session's truth is left exactly
+        as it is.
+
+        That gate is load-bearing rather than defensive.  Without it, a second
+        start would build a second engine, be refused by the shared lease (the
+        first run holds it), and then -- in the failure path -- *release that first
+        run's lease*.  The result was a session that was still trading with the
+        Shadow/Paper mutex released, which is precisely the invariant the lease
+        exists to enforce.  The gate is this capability's own lifecycle integrity,
+        not Paper logic: it needs no change to the shadow core.
+
         Every fact is read **once** and frozen into the request before the engine
         exists, so a run cannot be assembled from a strategy the operator changed
         halfway through or from a target typed after the gates were checked.  A
@@ -181,6 +199,13 @@ class ShadowOrchestrator(QObject):
         published and the lease is handed back, so a retry is possible and the
         previous state is not overwritten by a fabricated one.
         """
+
+        if self.is_active:
+            # Already running: this is the same request, not a new one, and the
+            # page has already replaced 启动 with 停止.  Returning here keeps the
+            # engine, the lease and the snapshot untouched -- see the class
+            # docstring's Shadow XOR Paper rule.
+            return
 
         request = queries.plan_start(
             runtime_is_active=self._runtime_is_active(),
@@ -201,16 +226,20 @@ class ShadowOrchestrator(QObject):
             # and it is shared with Paper: if Paper holds it, this raises and the
             # run does not start at all.
             self._lease.start()
-            self._engine = engine
-            self._snapshot = engine.start()
+            self._holds_lease = True
+            snapshot = engine.start()
         except Exception as error:
-            # Recover only what this layer owns.  The engine's own truth is left
-            # alone -- a failed start must not be reported as a stopped session.
-            if self._lease.active:
-                self._lease.stop()
-            self._engine = None
+            # Recover only what this call owns, and publish the failure.  The
+            # engine and snapshot references are deliberately *not* assigned
+            # until the engine has actually started, so a failed start leaves the
+            # previously published truth exactly as it was rather than overwriting
+            # it with a half-built run.  The release is the guarded one, so a
+            # refusal never hands back a lease that is not this run's.
+            self._release_lease()
             self.refused.emit(START_FAILED_TITLE, str(error))
             return
+        self._engine = engine
+        self._snapshot = snapshot
         self._render_session()
         self.runtime_event_requested.emit(
             ShadowRuntimeEvent(
@@ -244,8 +273,7 @@ class ShadowOrchestrator(QObject):
         if engine is None:
             return
         self._snapshot = engine.stop()
-        if self._lease.active:
-            self._lease.stop()
+        self._release_lease()
         self._render_session()
         self.runtime_event_requested.emit(
             ShadowRuntimeEvent(
@@ -276,8 +304,7 @@ class ShadowOrchestrator(QObject):
         if engine is None or not engine.active:
             return
         engine.stop()
-        if self._lease.active:
-            self._lease.stop()
+        self._release_lease()
 
     # -- ingress ---------------------------------------------------------
 
@@ -299,6 +326,27 @@ class ShadowOrchestrator(QObject):
         self._render_session()
 
     # -- internals -------------------------------------------------------
+
+    def _release_lease(self) -> None:
+        """Hand back the execution lease -- only if *this capability* took it.
+
+        The shared ``ExecutionLeaseManager`` is the Shadow XOR Paper invariant, so
+        releasing a lease Shadow does not hold is not a harmless no-op: it would
+        un-enforce mutual exclusion while the simulation or a Paper session keeps
+        running.
+
+        ``self._lease.active`` cannot answer "do I hold it?" -- it is true whenever
+        *anyone* does, including Paper.  Both cases that once keyed on it were real
+        bugs: a second ``start()`` released a live session's lease from its failure
+        path, and a ``stop()`` after Shadow had already stopped released whichever
+        lease Paper had taken in the meantime.  Hence an explicit flag, set only by
+        the one ``lease.start()`` call that this class makes.
+        """
+
+        if not self._holds_lease:
+            return
+        self._lease.stop()
+        self._holds_lease = False
 
     def _build_engine(
         self, request: ShadowStartRequest

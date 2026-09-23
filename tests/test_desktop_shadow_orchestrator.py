@@ -57,12 +57,16 @@ class _Lease:
 
     Both refusals the real controller raises are modelled, because both are
     behaviour this round must preserve: an already-active Shadow run refuses a
-    second start, and a lease held by Paper refuses any start at all.  A fake that
-    only tracked a boolean would let a duplicate-start regression through.
+    second start, and a lease held by Paper refuses any start at all.
+
+    ``refuse=True`` models the *second* case faithfully: the lease really is held
+    (by Paper), so :attr:`active` is ``True`` while Shadow's ``start()`` raises.
+    That distinction is the whole point of the guard it supports -- a failing
+    caller must not release a lease that is active but was not its to take.
     """
 
     def __init__(self, *, refuse: bool = False) -> None:
-        self.active = False
+        self.active = refuse
         self.starts = 0
         self.stops = 0
         self._refuse = refuse
@@ -338,9 +342,8 @@ def test_a_lease_refusal_rolls_back_bookkeeping_and_propagates() -> None:
     """A start that cannot acquire execution is reported, not silently dropped.
 
     The lease is shared with Paper, so acquiring it while Paper holds it raises.
-    What must happen: this layer's own references are cleared, the previous truth
-    is *not* overwritten with a fabricated stopped session, and the operator is
-    told.
+    What must happen: nothing is published as running, no truth is fabricated, and
+    the operator is told.
     """
 
     lease = _Lease(refuse=True)
@@ -349,16 +352,125 @@ def test_a_lease_refusal_rolls_back_bookkeeping_and_propagates() -> None:
     orchestrator.start()
 
     assert lease.starts == 0
+    # The refusal is Paper's, so this call must not release Paper's lease either.
+    assert lease.stops == 0
     assert orchestrator.is_active is False
     assert orchestrator.snapshot is None
     assert paints == []
     assert len(events.refusals) == 1
     assert events.refusals[0][0] == "内部影子仿真未启动"
     assert "PAPER" in events.refusals[0][1]
-    # And a later retry is possible: nothing was left half-initialized.
+    # A later retry is possible once Paper gives the lease back: nothing was left
+    # half-initialized by the refused attempt.
     lease._refuse = False
+    lease.stop()  # Paper releases the execution lease
     orchestrator.start()
     assert orchestrator.is_active is True
+
+
+def test_a_failed_start_never_releases_a_lease_it_did_not_acquire() -> None:
+    """The root cause of the duplicate-start hole, pinned independently.
+
+    The old failure path released ``self._lease`` whenever it was active, without
+    asking whether *this call* had acquired it.  That is what let a second start
+    hand back the first run's mutex.  Here the lease refuses because Paper holds
+    it, so this call acquired nothing -- and must therefore release nothing, even
+    though the lease is active.
+    """
+
+    lease = _Lease(refuse=True)
+    orchestrator, _lease, _store, _events, _paints = _build(lease=lease)
+
+    orchestrator.start()
+
+    assert lease.active is True, "the lease belongs to Paper and stays held"
+    assert lease.stops == 0, "a caller that acquired nothing must release nothing"
+
+
+def test_a_stop_never_releases_a_lease_paper_took_afterwards() -> None:
+    """The same bug class in ``stop()``, found by the guard that pins it.
+
+    Shadow starts, stops (releasing its own lease), and leaves ``_engine`` on
+    record because a stop publishes the engine's final snapshot rather than
+    clearing the reference.  If Paper then takes the shared lease, a second
+    ``stop()`` must not hand it back: Shadow holds nothing at that point, and
+    releasing here would un-enforce Shadow XOR Paper for a *Paper* session.
+    """
+
+    orchestrator, lease, _store, _events, _paints = _build()
+    orchestrator.start()
+    orchestrator.stop()
+    assert lease.active is False
+    stops_after_shadow = lease.stops
+
+    # Paper acquires the shared execution lease.
+    lease.starts += 1
+    lease.active = True
+
+    orchestrator.stop()
+
+    assert lease.active is True, "Paper's lease must survive Shadow's stop"
+    assert lease.stops == stops_after_shadow, "Shadow released a lease it did not hold"
+
+
+def test_shutdown_never_releases_a_lease_paper_took_afterwards() -> None:
+    """The close-time path has the same obligation as ``stop()``."""
+
+    orchestrator, lease, _store, _events, _paints = _build()
+    orchestrator.start()
+    engine = _Engine.created[0]
+    orchestrator.stop()
+    # A stop leaves the engine on record but inactive; simulate the window closing
+    # after Paper has taken the lease.
+    engine.active = True
+    lease.starts += 1
+    lease.active = True
+    stops_before = lease.stops
+
+    orchestrator.shutdown()
+
+    assert lease.active is True
+    assert lease.stops == stops_before
+
+
+def test_a_failed_start_leaves_a_previously_running_session_untouched() -> None:
+    """A refusal must not disturb the session that is already tracking.
+
+    The engine's own start raising is the other way this path is reached.  The
+    published truth and the tracked reference must survive it, and the lease must
+    be handed back only because this call really did acquire it.
+    """
+
+    orchestrator, lease, _store, events, _paints = _build()
+    orchestrator.start()
+    first_engine = _Engine.created[0]
+    orchestrator.stop()
+    # Baseline *after* the clean start/stop pair, so the assertions below are about
+    # the failing call only -- and the snapshot under test is the one a stop
+    # published, which is the truth a failed start must leave alone.
+    first_snapshot = orchestrator.snapshot
+    starts_before = lease.starts
+    stops_before = lease.stops
+
+    class _ExplodingEngine(_Engine):
+        def start(self):
+            raise RuntimeError("engine refused")
+
+    module.ShadowPaperEngine = _ExplodingEngine  # type: ignore[assignment]
+    try:
+        orchestrator.start()
+    finally:
+        module.ShadowPaperEngine = _Engine  # type: ignore[assignment]
+
+    assert lease.starts == starts_before + 1
+    assert lease.stops == stops_before + 1, (
+        "this call acquired the lease, so it hands it back"
+    )
+    assert lease.active is False
+    # The previous truth is intact: no fabricated stopped session, no lost engine.
+    assert orchestrator.snapshot is first_snapshot
+    assert first_engine.active is False
+    assert events.refusals[0][0] == "内部影子仿真未启动"
 
 
 def test_a_failed_start_does_not_report_a_stopped_session() -> None:
@@ -400,33 +512,75 @@ def test_a_lease_acquired_then_failing_is_released() -> None:
 # -- duplicate / stop / ingress behaviour --------------------------------
 
 
-def test_a_second_start_while_running_behaves_exactly_as_the_retired_handler() -> None:
-    """The duplicate-start behaviour, preserved including its odd part.
+def test_a_second_start_preserves_the_running_session_and_lease() -> None:
+    """A second start while running is a no-op, and must not break the mutex.
 
-    There is no local busy guard, exactly as before: a second start re-runs the
-    gates, builds an engine, and is then refused by the lease because the first
-    run holds it.  The retired handler's except-branch then released the *first*
-    run's lease and dropped the engine reference -- so the previously running
-    session is no longer tracked.  That is the behaviour being pinned: odd, but
-    inherited verbatim rather than quietly "fixed" in a round that is only
-    supposed to move ownership.
+    This test replaces one that pinned the *opposite* -- inherited duplicate-start
+    behaviour in which a second start built a second engine, was refused by the
+    shared lease, and then released the **first** run's lease in its failure path.
+    That left a session still trading with the Shadow/Paper mutex released, so
+    Paper could acquire it: the exact invariant the shared ``ExecutionLeaseManager``
+    exists to enforce, silently void.
+
+    The round's spec says the old behaviour may be preserved where it is product
+    semantics.  This is not product semantics -- it is a safety hole, and freezing
+    it into the new canonical Shadow owner (with a test protecting it) would have
+    made v2O-E harder and more dangerous.  So the contract is now:
+
+        already active -> refuse/no-op -> no second engine, no lease traffic,
+        no lost reference, no changed snapshot.
     """
 
     orchestrator, lease, _store, events, _paints = _build()
 
     orchestrator.start()
-    assert orchestrator.is_active is True
     first_engine = _Engine.created[0]
+    first_snapshot = orchestrator.snapshot
+    assert orchestrator.is_active is True
+    assert lease.active is True
 
     orchestrator.start()
 
-    assert len(_Engine.created) == 2
+    # No second engine was built, and the lease saw no traffic at all.
+    assert len(_Engine.created) == 1
     assert lease.starts == 1
-    assert lease.active is False
-    assert events.refusals[0][0] == "内部影子仿真未启动"
-    assert orchestrator.is_active is False
-    # The first engine is left as it was; only the reference was dropped.
+    assert lease.stops == 0
+    # The running session is still the tracked, published one.
+    assert orchestrator.is_active is True
+    assert orchestrator.snapshot is first_snapshot
     assert first_engine.active is True
+    # And nothing was reported to the operator, because nothing went wrong.
+    assert events.refusals == []
+
+
+def test_repeated_starts_neither_leak_a_lease_nor_a_session() -> None:
+    """Hammering the button must leave exactly one session holding one lease."""
+
+    orchestrator, lease, _store, _events, _paints = _build()
+
+    for _ in range(5):
+        orchestrator.start()
+
+    assert len(_Engine.created) == 1
+    assert lease.starts == 1
+    assert lease.stops == 0
+    assert orchestrator.is_active is True
+    assert lease.active is True
+
+
+def test_a_second_start_after_stop_starts_a_fresh_session() -> None:
+    """The gate is "already active", not "ever started": stop then start works."""
+
+    orchestrator, lease, _store, _events, _paints = _build()
+
+    orchestrator.start()
+    orchestrator.stop()
+    orchestrator.start()
+
+    assert len(_Engine.created) == 2
+    assert lease.starts == 2
+    assert lease.active is True
+    assert orchestrator.is_active is True
 
 
 def test_stop_publishes_the_stop_event_and_repaints() -> None:

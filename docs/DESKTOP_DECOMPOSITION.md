@@ -2719,7 +2719,7 @@ precision（Decimal、returns、commissions、slippage、execution stress、
 PBO/DSR、Newey-West、walk-forward partitions）全部未改。
 
 Shadow（engine / start-stop / stream ingestion）完全冻结，本轮不 import、
-不迁移，属 v2O-D。Target symbol、minute-status、preflight、strategy-selection
+不迁移，属 v2O-D（**后来已在 §26 完成**）。Target symbol、minute-status、preflight、strategy-selection
 的 ownership 属 C5B（见 §25）。
 
 ## 25. v2O-C5B：Targeted Session + Preflight 提取
@@ -2739,7 +2739,9 @@ MainWindow（未来 ShadowOrchestrator）  Shadow runtime：仿真实际在跑�
 `shadow_snapshot_provider`，但没有 `shadow_engine`；它在 `render_current()` 里
 **每次绘制时读取**快照，从不保存。`_start_shadow` / `_stop_shadow` /
 `shadow_engine` / `shadow_snapshot` / `shadow_store` / `ShadowWorkflow` 全部留在
-`MainWindow`，属 v2O-D。architecture test 反向锁定：
+`MainWindow`，属 v2O-D。（**该轮后来已完成：见 §26。** 前四项已迁入
+`ShadowOrchestrator`，`shadow_store` 与 `shadow_workflow` 作为 composition fact 留在
+窗口。）architecture test 反向锁定：
 `TargetedSessionSnapshot` 的字段集恰好是
 `{target_draft, target_status, minute_status, preflight}`，且 capability 的源码里
 不出现 `shadow_engine` / `set_shadow_snapshot`。
@@ -3022,13 +3024,15 @@ Page
  ├─ robustness_requested       → Evidence.request_robustness
  ├─ robustness_run_selected    → Evidence.select_robustness_run
  ├─ review_run_selected        → Evidence.select_review_run
- ├─ shadow_start_requested     → MainWindow._start_shadow
- └─ shadow_stop_requested      → MainWindow._stop_shadow
+ ├─ shadow_start_requested     → ShadowOrchestrator.start     （v2O-D）
+ └─ shadow_stop_requested      → ShadowOrchestrator.stop      （v2O-D）
 ```
 
-Shadow 两个 intent 必须仍然去 MainWindow：把它们接到 Session 就是把引擎交给一个
-不该拥有它的对象。Session 与 Evidence 互不 import，唯一共享事实是
-`Session.snapshot.target_draft`，通过 provider 传递。
+C5B 当时把 Shadow 两个 intent 留在 MainWindow，因为把它们接到 Session 就是把引擎
+交给一个不该拥有它的对象。v2O-D 落成后它们改接 `ShadowOrchestrator`——仍然**不**接
+Session，理由不变。Session 与 Evidence 互不 import，唯一共享事实是
+`Session.snapshot.target_draft`，通过 provider 传递；Shadow 也通过 provider 读它，
+同样不 import。
 
 ### 25.11 启动
 
@@ -3065,3 +3069,154 @@ loop；Shadow start/stop 被迁入 Session；Evidence render 被 Session refresh
 
 
 
+
+## 26. v2O-D：Shadow orchestration 提取
+
+### 26.1 这一刀移走什么
+
+Shadow runtime 原本是 MainWindow 上的一组散落属性，被六个地方读写：
+
+```text
+_start_shadow / _stop_shadow       两个页面 intent
+_on_market_snapshot_changed        stream ingress + session repaint
+_stop_market_data                  Paper/Shadow 停止 interlock
+_start_auto_quant                  Paper 启动前的互斥门
+closeEvent                         关闭时停止
+_export_terminal_state             shadow_store.recent_fills(500)
+```
+
+全部收口到 `desktop_v2/orchestration/shadow/`：
+
+```text
+models.py        冻结事实、拒绝文案、ShadowLease 协议。Qt-free
+queries.py       纯规则：十道启动门、symbol 校验、capital source 文案。Qt-free、无 I/O
+orchestrator.py  sequencing：读一次事实 → 过门 → 建引擎 → 启动 → 喂快照 → 发布
+```
+
+### 26.2 单一 truth
+
+`ShadowPaperEngine` 仍然是 session id / active / cash / PnL / position / fills /
+marks 的唯一 owner。`ShadowOrchestrator` 只持有**引擎引用**和**引擎最后产出的
+snapshot**，`snapshot` property 读它，`is_active` 问引擎。它不算 PnL、不模拟 fill、
+不写 store。`_store` 只通过 `recent_fills()` 委托给终端导出。
+
+**`_holds_lease` 不违反这条规则。** orchestrator 另有一个 capability-local 布尔
+`_holds_lease`，回答的是另一个问题：**"本 capability 是否取得了共享执行租约"**。
+共享 `ExecutionLeaseManager` 是 Shadow 与 Paper 共用的，`lease.active` 在任何一方持有
+时都为真，无法表达 ownership —— 需要判断"该不该释放"时只能由本地记录回答。它**不**
+镜像 `engine.active`、**不**镜像任何交易或 session 状态，所以不是第二份交易真相。
+
+这条边界是安全要求而非风格，而且是踩过两次坑才定下来的：
+
+```text
+重复 start()         → 失败路径释放了"正在运行"会话的租约
+                       （第二个 engine 被 lease 拒绝后，旧代码释放了第一个的租约）
+stop() / shutdown()  → Shadow 已停、Paper 之后取得 lease 时，释放了 Paper 的租约
+```
+
+两处都会让 "Shadow XOR Paper" 静默失效。现在 `self._lease.stop()` 全文件**只有一处**
+（`_release_lease()` 内），由 `_holds_lease` 把关。**禁止改回 `self._lease.active`。**
+
+**重复启动是 no-op（安全不变量）。** `start()` 最前面有 own-active gate：已 active 时
+不读任何 provider、不构造第二个 engine、不碰 lease、不改 snapshot、不丢 `_engine`。
+这是本 capability 自己的生命周期完整性，不是 Paper 逻辑，也不需要改 Shadow core。
+
+### 26.3 依赖注入
+
+12 个显式依赖，全部是 callable 而非对象句柄：
+
+```python
+ShadowOrchestrator(
+    store=..., lease=...,                        # 引擎的东西
+    strategy_provider=..., target_provider=...,  # 输入事实
+    capital_provider=..., account_alias_provider=...,
+    market_stream_provider=..., market_is_live=...,
+    universe_provider=..., runtime_is_active=...,
+    exposure_multipliers_provider=...,
+    render_session=...,                          # 唯一输出动作
+)
+```
+
+所以这个 package **不** import Market / Account / Research 的 orchestrator，也不
+import 它们所在的页面。`lease` 是 `WorkflowController` 组合出的**共享**
+`ExecutionLeaseManager` 句柄，Paper 拿到的是同一个，所以"Shadow 与 Paper 不能同时
+持有执行权"仍是结构性的；orchestrator 通过 `ShadowLease` Protocol 拿它，从不
+import `desktop_v2/workflows.py`（那个模块里坐着 `PaperWorkflowController`）。
+
+### 26.4 一个容易改错的行为细节
+
+`_start_shadow` 里资金**金额**和资金**来源**是在不同时刻读的：金额在资金门读，
+来源（account alias）只在真正构建 engine 时才读。因此一个被拒绝的启动**从不**
+触碰 portfolio。提取时把两者合并成一个 eager read 会改变这个行为——我第一版就是
+这么写的，`tests/test_desktop_v2_targeted_wiring.py` 里三条 `test_shadow_start_rejects_*`
+当场变红。现在由 `test_a_refused_start_never_reads_the_account_alias` 正向锁定（断言
+拒绝路径下 alias provider 的调用列表为空）。所以分成
+`_shadow_capital_fact()`（门）与 `_shadow_account_alias()`（构建）两个 provider。
+
+### 26.5 三层 shutdown 语义
+
+```text
+stop()      操作员停止：停引擎 + 释放 lease + 重绘 + 记 SHADOW_STOP 事件
+shutdown()  关闭时：只停引擎 + 释放 lease。不重绘、不记录、不改 snapshot
+start()     已 active 时 no-op（不读 provider、不建 engine、不碰 lease）
+on_market_snapshot()  无运行时时是 no-op
+```
+
+三条路径的释放**都**经由 `_release_lease()`，且只在 Shadow 自己持有租约时生效
+（见 §26.2）。这不是统一风格的整理：`stop()` 会保留 `_engine` 以便发布引擎最后一个
+snapshot，因此"Shadow 已停 + Paper 之后取得 lease + 再次 stop()"是可达状态，内联
+`lease.active` 判断在这里会误释放 Paper 的租约。
+
+`shutdown()` 比 `stop()` 安静是刻意的：关闭时没有窗口可画，且 runtime teardown
+自己会报告；如果它写一条"已停止"事件，就会把操作员从未停止的会话记录成停止。
+snapshot 也不重新赋值——退休的 `closeEvent` 就是 `engine.stop()` 后丢弃返回值。
+
+### 26.6 MainWindow 剩下什么
+
+```python
+self.shadow_orchestrator = ShadowOrchestrator(...)   # 构造
+self.shadow_orchestrator.refused.connect(...)        # 接线
+self.shadow_orchestrator.log_requested.connect(...)
+self.shadow_orchestrator.runtime_event_requested.connect(...)
+page.shadow_start_requested.connect(self.shadow_orchestrator.start)
+page.shadow_stop_requested.connect(self.shadow_orchestrator.stop)
+```
+
+加上五个 composition helper（`_shadow_capital_fact`、`_shadow_account_alias`、
+`_report_shadow_refusal`、`_record_shadow_runtime_event`、
+`_paper_runtime_is_active`）和两处 cross-capability interlock 读取
+（`_stop_market_data` 的停止、`_start_auto_quant` 的互斥门）。
+
+仍留在窗口的两个 Shadow 属性都不是 runtime truth：`shadow_store` 是终端导出经
+capability 读取的持久化，`shadow_workflow` 是与 Paper 共享的执行租约句柄。
+`_selected_shadow_strategy_record` 是 strategy selection 的 composition 读取，
+不是 Shadow runtime。
+
+### 26.7 冻结范围
+
+Shadow 引擎 / trade_logic / store / models / 算法 / fill math / 手续费与滑点**完全未改**；
+`_money` 的语义（含 `不可用` 与无 `+` 号）在 `queries.format_money` 里逐字保留；
+十道门的**顺序**与每道门的**文案**逐字保留；Paper workflow 生命周期一行未动。
+
+**唯一一处刻意不"逐字保留"的行为：** 退休 `_start_shadow` 的重复启动后果没有迁移。
+旧行为下第二次启动会构造第二个 engine、被 lease 拒绝，然后在失败路径释放**第一个**
+run 的租约，使一个仍在运行的会话失去共享租约。这是安全漏洞而非产品语义，原样迁移
+（再补一个保护它的测试）会把漏洞固化进新的 canonical owner。现在的契约是
+`active → no-op`，见 §26.2。
+
+mutation 必须 RED 的关键项（手工验证）：把 `shadow_engine` / `shadow_snapshot`
+加回 MainWindow；恢复 `_start_shadow` / `_stop_shadow`；让 Shadow package import
+MarketOrchestrator / AccountOrchestrator / ResearchOrchestrator / PaperWorkflowController；
+让 `orchestrator.py` 摸 widget（`QtWidgets`）；把 `shutdown()` 换成会记录事件的
+`stop()`；把金额与来源合并成一次 eager read；让 `on_market_snapshot` 在无运行时
+仍然重绘。
+
+两条**最重要**的安全 invariant（本轮由 review 发现，必须有 guard）：
+
+```text
+duplicate start      → 只能有一个 engine、一个 lease；不改 snapshot、不丢 _engine
+                       删掉 start() 的 own-active gate 必须 RED
+Shadow never releases a lease it did not acquire
+                       把 _release_lease 改回 if self._lease.active 必须 RED
+                       （同时覆盖 stop() / shutdown() 在 Paper 持租约时的误释放）
+```

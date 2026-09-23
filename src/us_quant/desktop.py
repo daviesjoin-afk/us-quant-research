@@ -130,9 +130,6 @@ from us_quant.trading.domain.strategy import (
 )
 from us_quant.runtime_events import RuntimeEventStore
 from us_quant.export_service import export_terminal_bundle
-from us_quant.shadow.config import build_targeted_shadow_config
-from us_quant.shadow.engine import ShadowPaperEngine
-from us_quant.shadow.models import ShadowSnapshot
 from us_quant.shadow.store import ShadowPaperStore
 from us_quant.trading.composition.session_config import (
     build_auto_rotation_config,
@@ -228,6 +225,8 @@ from us_quant.desktop_v2.orchestration.research.targeted.session import (
     REFUSAL_INFORMATION,
     TargetedSessionOrchestrator,
 )
+from us_quant.desktop_v2.orchestration.shadow import ShadowOrchestrator
+from us_quant.desktop_v2.orchestration.shadow.models import ShadowCapitalFact
 from us_quant.desktop_v2.pages.research import (
     ResearchPage,
     ResearchWorkspace,
@@ -477,18 +476,26 @@ class MainWindow(QMainWindow):
         # target status?" would stop being one grep.  The *evidence* half moved one
         # round earlier.
         self._dashboard_chart_view = DashboardChartView(None, ())
-        # Shadow runtime state: the engine, its snapshot as mutable truth, the
-        # store and the workflow.  Deliberately still here -- the session
-        # capability *renders* a Shadow snapshot through a provider and does not
-        # own one, and the runtime itself is v2O-D.
-        self.shadow_engine: ShadowPaperEngine | None = None
-        self.shadow_snapshot: ShadowSnapshot | None = None
+        # Shadow runtime state used to live here: the engine, its snapshot as
+        # mutable truth, the store and the workflow.  It belongs to
+        # ``shadow_orchestrator``, built below.  Note what is *not* stored: no
+        # ``shadow_engine``, no ``shadow_snapshot``, no ``shadow_workflow``, and
+        # no forwarding property either -- a property would keep every unmigrated
+        # caller working, so "who owns the Shadow runtime?" would stop being one
+        # grep.  The store is still owned here because the terminal export reads
+        # it through the orchestrator, and the lease is still the shared one the
+        # workflow controller composes.
         self.trading_runtime: TradingRuntime | None = None
         self.auto_quant_snapshot: AutoQuantSnapshot | None = None
         self.paper_execution_health: PaperExecutionHealth | None = None
         # Paper and internal Shadow simulation share one explicit execution
         # lease.  The desktop renders controller results but never owns the
-        # normal Paper event ordering itself.
+        # normal Paper event ordering itself.  The Shadow *handle* stays here
+        # next to Paper's for the same reason it always did: one
+        # ``ExecutionLeaseManager`` is composed by ``WorkflowController`` and
+        # given to both, so "Shadow and Paper cannot both hold execution" is
+        # structural.  Passing the handle into ``shadow_orchestrator`` keeps the
+        # lease shared; the orchestrator never learns that Paper exists.
         self.workflow_controller = WorkflowController()
         self.paper_workflow = self.workflow_controller.paper
         self.shadow_workflow = self.workflow_controller.shadow
@@ -713,7 +720,7 @@ class MainWindow(QMainWindow):
             strategy_options_provider=self._targeted_strategy_options,
             strategy_selector=self._targeted_strategy_selected,
             exposure_multipliers_provider=self._configured_exposure_multipliers,
-            shadow_snapshot_provider=lambda: self.shadow_snapshot,
+            shadow_snapshot_provider=lambda: self.shadow_orchestrator.snapshot,
             market_set_subscription=self.market_orchestrator.set_subscription_symbols,
             market_start=self.market_orchestrator.start,
         )
@@ -753,6 +760,49 @@ class MainWindow(QMainWindow):
             ),
             capital_state=self.research_scenario_capital,
         )
+        # The Targeted workspace's *internal simulation* runtime -- the engine,
+        # its snapshot, the start gates, the stream ingress and the stop path --
+        # belongs to ``shadow_orchestrator``, constructed here with its
+        # dependencies injected.  It is built after the session capability
+        # because its target provider reads the session's canonical draft, and
+        # after the account route because its capital provider reads the Paper
+        # portfolio.  What stays on the window is composition and the routing of
+        # the facts it publishes.  Note what is *not* stored: no ``shadow_engine``
+        # and no ``shadow_snapshot``, because this orchestrator is the canonical
+        # desktop owner.
+        #
+        # Every dependency is a callable onto a fact the window can currently
+        # answer rather than another capability, so this module never imports
+        # Account, Market, Universe or the targeted session.  The lease is the
+        # *shared* one the workflow controller composed, so "Shadow and Paper
+        # cannot both hold execution" stays structural rather than checked here.
+        self.shadow_orchestrator = ShadowOrchestrator(
+            store=self.shadow_store,
+            lease=self.shadow_workflow,
+            strategy_provider=lambda: self._selected_shadow_strategy_record(),
+            target_provider=(
+                lambda: self.targeted_session_orchestrator.snapshot.target_draft
+            ),
+            capital_provider=lambda: self._shadow_capital_fact(),
+            account_alias_provider=self._shadow_account_alias,
+            market_stream_provider=lambda: self.market_orchestrator.snapshot,
+            market_is_live=lambda: self.market_orchestrator.is_live,
+            universe_provider=lambda: self.universe_orchestrator.snapshot,
+            runtime_is_active=lambda: self._paper_runtime_is_active(),
+            exposure_multipliers_provider=(
+                lambda: self._configured_exposure_multipliers()
+            ),
+            render_session=(
+                lambda: self.targeted_session_orchestrator.render_current()
+            ),
+        )
+        self.shadow_orchestrator.refused.connect(self._report_shadow_refusal)
+        self.shadow_orchestrator.log_requested.connect(self._log)
+        self.shadow_orchestrator.runtime_event_requested.connect(
+            self._record_shadow_runtime_event
+        )
+        # Wired last, because the Shadow intents reach the orchestrator built
+        # just above rather than a window handler.
         self._connect_targeted_validation_page()
         self.universe_page = UniversePage(palette=self.theme)
         # The universe route's desktop runtime -- the official snapshot, the
@@ -1246,10 +1296,9 @@ class MainWindow(QMainWindow):
                 "在途订单完成对账后才能停止行情。",
             )
             return False
-        if self.shadow_engine is not None and self.shadow_engine.active:
-            self._stop_shadow()
+        if self.shadow_orchestrator.is_active:
+            self.shadow_orchestrator.stop()
         return self.market_orchestrator.stop()
-
     def _report_market_refusal(self, title: str, message: str) -> None:
         """Surface a request the market layer refused before touching the feed."""
 
@@ -1319,15 +1368,10 @@ class MainWindow(QMainWindow):
                 )
             except WorkflowStateError as error:
                 self._log(str(error))
-        if self.shadow_engine is not None and self.shadow_engine.active:
-            self.shadow_snapshot = self.shadow_engine.on_stream(snapshot)
-            # The engine produced a new snapshot, so the session panel's cards,
-            # positions and fills are stale.  The window owns the snapshot and
-            # *asks* the session capability to repaint -- it never hands the
-            # snapshot over, because a copy there would be a second mutable
-            # Shadow truth.  Note what this does not do: it does not repaint the
-            # evidence tables.  A market tick is a session event.
-            self.targeted_session_orchestrator.render_current()
+        # The internal simulation consumes the same market fact.  It is handed
+        # the snapshot and repaints its own session panel -- a no-op when nothing
+        # runs, so this bridge stays a fan-out rather than a Shadow decision.
+        self.shadow_orchestrator.on_market_snapshot(snapshot)
 
     def _on_market_snapshot_invalidated(self) -> None:
         """The feed's snapshot was invalidated; the dashboard card must follow."""
@@ -1385,9 +1429,10 @@ class MainWindow(QMainWindow):
           handle all four itself;
         * **evidence intents** go to ``targeted_evidence_orchestrator``, which has
           owned them since v2O-C5A;
-        * **Shadow intents** stay here.  Starting and stopping the internal
-          simulation is the Shadow runtime, which is v2O-D, so wiring them to the
-          session capability would hand the session an engine it must not own.
+        * **Shadow intents** go to ``shadow_orchestrator`` (v2O-D).  Starting and
+          stopping the internal simulation is the Shadow runtime, which the session
+          capability must not own -- so it reaches its own orchestrator directly,
+          and the window has no handler for either any more.
 
         Nothing is interpreted -- every line is a connect.
         """
@@ -1400,9 +1445,9 @@ class MainWindow(QMainWindow):
         page.strategy_selected.connect(session.request_strategy_selection)
         page.target_apply_requested.connect(session.request_target_apply)
         page.target_subscribe_requested.connect(session.request_target_subscribe)
-        # Shadow intents: still the window's, and deliberately not the session's.
-        page.shadow_start_requested.connect(self._start_shadow)
-        page.shadow_stop_requested.connect(self._stop_shadow)
+        # Shadow intents: the Shadow runtime's own capability.
+        page.shadow_start_requested.connect(self.shadow_orchestrator.start)
+        page.shadow_stop_requested.connect(self.shadow_orchestrator.stop)
         # Evidence intents: the evidence capability's.  A replay or robustness
         # request validates, freezes its inputs, submits its own task and paints
         # its own evidence -- the window has no handler for either any more.
@@ -1425,6 +1470,67 @@ class MainWindow(QMainWindow):
             session.refresh_minute_status
         )
         evidence.focus_requested.connect(self._focus_targeted_evidence)
+
+    # -- Shadow composition inputs and routes ------------------------------
+    #
+    # Composition, not behaviour: each of these answers "what is the current value
+    # of a fact this window can see?" for the Shadow capability, or routes a fact
+    # it published.  None of them decides anything, and none of them touches the
+    # engine, the store or the lease.
+
+    def _shadow_capital_fact(self) -> ShadowCapitalFact | None:
+        """The Paper amount a simulation may be sized from, or ``None``.
+
+        Only the *amount* is read here, because this is the gate's input: the
+        freshness rule itself belongs to the account capability, whose query this
+        delegates to, so the simulator can never be sized from an account the
+        preflight would reject.  The account it came from is named separately and
+        later -- see :meth:`_shadow_account_alias`.
+        """
+
+        capital = self.account_orchestrator.fresh_paper_net_liquidation()
+        if capital is None:
+            return None
+        return ShadowCapitalFact(net_liquidation=capital)
+
+    def _shadow_account_alias(self) -> str:
+        """The Paper account the run's capital came from, for its provenance line.
+
+        Read only while an engine is being built, i.e. after every gate passed, so
+        a refusing start never touches the portfolio.  That ordering is the
+        retired handler's and it is preserved here rather than tidied into one
+        eager read.
+        """
+
+        return self.account_orchestrator.portfolio.account.account_alias
+
+    def _paper_runtime_is_active(self) -> bool:
+        """Whether the IBKR Paper runtime already owns the capital truth.
+
+        Read here because the competing session's lifecycle is the execution
+        route's, not Shadow's: the Shadow orchestrator must not learn that an
+        auto-rotation session exists, only whether it may start.
+        """
+
+        return (
+            self.trading_runtime is not None
+            and self.trading_runtime.session.active
+        )
+
+    def _report_shadow_refusal(self, title: str, message: str) -> None:
+        """Surface a start the Shadow layer refused before building anything."""
+
+        QMessageBox.warning(self, title, message)
+
+    def _record_shadow_runtime_event(self, event: object) -> None:
+        """Record one Shadow runtime event; the store is the window's."""
+
+        self._record_runtime_event(
+            severity=event.severity,
+            component=event.component,
+            code=event.code,
+            message=event.message,
+        )
 
     # -- Targeted session presentation inputs -----------------------------
     #
@@ -2423,10 +2529,7 @@ class MainWindow(QMainWindow):
                 "当前启动检查仍在进行中，请不要重复启动。",
             )
             return
-        if (
-            self.shadow_engine is not None
-            and self.shadow_engine.active
-        ):
+        if self.shadow_orchestrator.is_active:
             self.execution_page.set_arm_confirmed(False)
             QMessageBox.warning(
                 self,
@@ -3662,206 +3765,6 @@ class MainWindow(QMainWindow):
 
 
 
-
-    def _start_shadow(self) -> None:
-        universe = self.universe_orchestrator.snapshot
-        if (
-            self.trading_runtime is not None
-            and self.trading_runtime.session.active
-        ):
-            QMessageBox.warning(
-                self,
-                "IBKR Paper 自动量化运行中",
-                "同一资金真值不能同时运行自动量化和内部仿真。",
-            )
-            return
-        strategy = self._selected_shadow_strategy_record()
-        if strategy is None:
-            QMessageBox.warning(
-                self,
-                "请选择策略版本",
-                "请先在“策略目录与版本”中选择指定标的日内 T 版本。",
-            )
-            return
-        if (
-            strategy.strategy_id != "intraday-targeted-t"
-        ):
-            QMessageBox.warning(
-                self,
-                "策略类型不匹配",
-                (
-                    "针对性日内 T 必须绑定“指定标的日内 T”策略版本。"
-                    "请先在“策略目录与版本”中选择该策略。"
-                ),
-            )
-            return
-        if (
-            strategy.status
-            not in {StrategyStatus.RESEARCH, StrategyStatus.PAPER_SHADOW}
-            or (
-                strategy.status is StrategyStatus.PAPER_SHADOW
-                and not strategy.gate_passed
-            )
-        ):
-            QMessageBox.warning(
-                self,
-                "策略状态不可运行",
-                (
-                    "只有 research 探索版本或已通过证据门的 Paper Shadow "
-                    "版本可以运行内部影子盘。停止或暂停版本不能启动。"
-                ),
-            )
-            return
-        paper_capital = self.account_orchestrator.fresh_paper_net_liquidation()
-        if paper_capital is None:
-            QMessageBox.warning(
-                self,
-                "缺少 IBKR Paper 资金真值",
-                (
-                    "请先在“账户与持仓”页读取 IBKR Paper 账户。"
-                    "模拟盘必须使用券商返回的 NetLiquidation 建账，"
-                    "不会用任何历史研究资金情景代替。"
-                ),
-            )
-            return
-        stream = self.market_orchestrator.snapshot
-        if (
-            not self.market_orchestrator.is_live
-            or stream is None
-            or not stream.realtime_ready
-        ):
-            QMessageBox.warning(
-                self,
-                "行情门未通过",
-                (
-                    "请先在“实时行情”页启动外部实时流，并等待至少一个"
-                    "代码显示 READY。延迟或 stale 行情不能启动日内影子盘。"
-                ),
-            )
-            return
-        if universe is None:
-            QMessageBox.warning(
-                self,
-                "标的门未通过",
-                "缺少已核验标的池，无法执行“不做中概股”硬过滤。",
-            )
-            return
-        # The target is read once, from the session capability's snapshot -- the
-        # one canonical draft -- and never again from the editor.  A second read
-        # of the widget could pick up a symbol the operator typed after the gates
-        # above were checked.
-        target_symbol = self.targeted_session_orchestrator.snapshot.target_draft
-        if not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", target_symbol):
-            QMessageBox.warning(
-                self,
-                "请输入标的",
-                "针对性日内 T 需要输入一个有效的美股或 ETF 代码。",
-            )
-            return
-        research_eligible = {
-            row.symbol
-            for row in universe.records
-            if row.eligible_for_research
-        }
-        if target_symbol not in research_eligible:
-            QMessageBox.warning(
-                self,
-                "标的门未通过",
-                (
-                    f"{target_symbol} 不在当前已排除中概风险的研究标的池内。"
-                    "请先刷新广域标的池与国家证据。"
-                ),
-            )
-            return
-        target_quote = next(
-            (
-                quote
-                for quote in stream.quotes
-                if quote.symbol == target_symbol
-            ),
-            None,
-        )
-        if target_quote is None or not target_quote.realtime_ready:
-            QMessageBox.warning(
-                self,
-                "目标行情未就绪",
-                (
-                    f"{target_symbol} 尚未获得 fresh bid/ask。"
-                    "请先点击“订阅该标的行情”，等行情页显示 READY。"
-                ),
-            )
-            return
-        stream_symbols = (target_symbol,)
-        engine = ShadowPaperEngine(
-            store=self.shadow_store,
-            allowed_symbols=stream_symbols,
-            config=build_targeted_shadow_config(
-                strategy.parameters,
-                initial_cash=paper_capital,
-                capital_source=(
-                    "IBKR Paper "
-                    f"{self.account_orchestrator.portfolio.account.account_alias} "
-                    "NetLiquidation"
-                ),
-                daily_loss_limit=paper_capital * Decimal("0.01"),
-                symbol_risk_multipliers=(
-                    self._configured_exposure_multipliers()
-                ),
-            ),
-            strategy_version_id=strategy.version_id,
-            parameter_hash=strategy.parameter_hash,
-            target_symbol=target_symbol,
-        )
-        try:
-            self.shadow_workflow.start()
-            self.shadow_engine = engine
-            self.shadow_snapshot = engine.start()
-        except Exception as error:
-            if self.shadow_workflow.active:
-                self.shadow_workflow.stop()
-            self.shadow_engine = None
-            QMessageBox.warning(self, "内部影子仿真未启动", str(error))
-            return
-        # The Shadow snapshot just changed, so the session panel is stale.  The
-        # window owns the snapshot; the capability is asked to repaint and is
-        # never handed it, which is what keeps Shadow truth out of the session
-        # snapshot.
-        self.targeted_session_orchestrator.render_current()
-        self._record_runtime_event(
-            severity="info",
-            component="shadow_paper",
-            code="SHADOW_START",
-            message=(
-                f"针对性日内 T 影子盘启动；模式 {strategy.status}；"
-                f"标的 {target_symbol}；"
-                f"初始资金 {_money(paper_capital)} 来自 IBKR Paper "
-                "NetLiquidation；无券商订单权限"
-            ),
-        )
-        self._log(
-            f"针对性日内 T 影子盘已启动：{target_symbol}，"
-            f"策略 {strategy.semver}；资金 {_money(paper_capital)} "
-            "来自 IBKR Paper；等待分钟预热。"
-        )
-
-    def _stop_shadow(self) -> None:
-        engine = self.shadow_engine
-        if engine is None:
-            return
-        self.shadow_snapshot = engine.stop()
-        if self.shadow_workflow.active:
-            self.shadow_workflow.stop()
-        self.targeted_session_orchestrator.render_current()
-        self._record_runtime_event(
-            severity="info",
-            component="shadow_paper",
-            code="SHADOW_STOP",
-            message="内部影子盘停止；最后持仓按最后有效 mark 影子平仓",
-        )
-
-
-
-
     def _register_runtime_components(self) -> None:
         """Hand generic runtime lifecycle to the supervisor.
 
@@ -4077,10 +3980,10 @@ class MainWindow(QMainWindow):
         if self.paper_trading.has_order_service():
             self.paper_trading.disconnect()
             self.paper_trading.clear_active()
-        if self.shadow_engine is not None and self.shadow_engine.active:
-            self.shadow_engine.stop()
-            if self.shadow_workflow.active:
-                self.shadow_workflow.stop()
+        # The internal simulation is stopped through its own capability, which
+        # is quieter than the operator's stop: no repaint, no event, no log, so a
+        # close cannot write a "stopped" event over a session nobody stopped.
+        self.shadow_orchestrator.shutdown()
         # Generic runtime teardown: stop new work, release the heartbeats and
         # the market data stream, join the workers, and keep going even if
         # one of them fails.  Trading-safety ordering above is unchanged --
@@ -4357,7 +4260,7 @@ class MainWindow(QMainWindow):
                 stream=self.market_orchestrator.snapshot,
                 strategies=self.strategies.list_versions(),
                 events=self.runtime_events.list_recent(500),
-                shadow_fills=self.shadow_store.recent_fills(500),
+                shadow_fills=self.shadow_orchestrator.recent_fills(500),
                 targeted_replays=evidence.replay_results,
                 targeted_robustness=evidence.robustness_results,
                 targeted_walk_forward=evidence.walk_forward_results,

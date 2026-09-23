@@ -219,18 +219,21 @@ RETIRED_WINDOW_METHODS = (
 )
 
 #: Every window method whose name starts with a targeted word, after this round.
-#: The four composition helpers answer "what is the current value of a fact this
-#: window can see?" and decide nothing; the Shadow pair stays because the Shadow
-#: runtime is v2O-D.
+#: The composition helpers answer "what is the current value of a fact this
+#: window can see?" and decide nothing.  The Shadow pair is gone as of v2O-D: the
+#: runtime has its own capability now, so the window holds no Shadow handler.
 ALLOWED_WINDOW_TARGETED_METHODS = (
     "_connect_targeted_validation_page",
     "_report_targeted_session_refusal",
     "_report_targeted_evidence_refusal",
     "_record_targeted_evidence_runtime_event",
     "_focus_targeted_evidence",
-    "_start_shadow",
-    "_stop_shadow",
     "_selected_shadow_strategy_record",
+    "_shadow_capital_fact",
+    "_shadow_account_alias",
+    "_report_shadow_refusal",
+    "_record_shadow_runtime_event",
+    "_paper_runtime_is_active",
     "_targeted_account_snapshot",
     "_targeted_displayed_strategy",
     "_targeted_strategy_options",
@@ -387,18 +390,35 @@ def test_the_window_declares_the_composition_helpers_it_needs(name: str) -> None
     assert name in _declared_names(_DESKTOP), name
 
 
-def test_the_window_keeps_the_shadow_runtime_it_still_owns() -> None:
-    """v2O-D is the next round; this one must not have taken Shadow with it."""
+def test_the_window_no_longer_owns_the_shadow_runtime() -> None:
+    """v2O-D took the Shadow runtime; the window only composes it.
+
+    This guard used to assert the opposite -- that the window still held
+    ``_start_shadow``/``_stop_shadow``/``shadow_engine``/``shadow_snapshot``
+    because Shadow was "a later slice".  That slice has landed, so the assertion
+    is inverted: the names must be gone, and the capability that owns them must
+    be present.  Inverting rather than deleting is the point -- a later round that
+    hands the runtime back to the window fails here.
+    """
 
     declared = _declared_names(_DESKTOP)
     for name in (
         "_start_shadow",
         "_stop_shadow",
-        "_selected_shadow_strategy_record",
         "shadow_engine",
         "shadow_snapshot",
     ):
-        assert name in declared, name
+        assert name not in declared, name
+    assert "shadow_orchestrator" in declared
+    # Two Shadow-named handles legitimately stay, and neither is runtime truth:
+    # the *store* is the persistence the terminal export reads through the
+    # capability, and the *lease* is the shared execution handle
+    # ``WorkflowController`` gives to both Paper and Shadow, so keeping it here is
+    # what makes "only one of them holds execution" structural.
+    assert "shadow_store" in declared
+    assert "shadow_workflow" in declared
+    # The strategy-selection helper is *composition*, not runtime, so it stays.
+    assert "_selected_shadow_strategy_record" in declared
 
 
 # -- Guard B: exactly one owner of the session render ----------------------
@@ -523,13 +543,17 @@ def test_the_window_never_reaches_through_the_page_for_session_truth() -> None:
 
 
 def test_the_shadow_snapshot_bridge_repaints_the_session() -> None:
-    """Shadow truth reaches the page by asking for a repaint, not by a copy."""
+    """The bridge hands the snapshot to the Shadow capability, which repaints.
+
+    Until v2O-D the window fed the engine itself and then asked for the repaint.
+    Now the engine is the capability's, so the bridge makes exactly one call: the
+    capability feeds its own engine and repaints its own session panel.  The
+    property that matters is unchanged -- the Shadow truth reaches the page by
+    *asking for a repaint*, never by being copied into the session snapshot.
+    """
 
     method = _method_source(_DESKTOP, "_on_market_snapshot_changed")
-    assert "self.shadow_snapshot = self.shadow_engine.on_stream(snapshot)" in method
-    assert (
-        "self.targeted_session_orchestrator.render_current()" in method
-    ), "the engine produced a new snapshot, so the session panel is stale"
+    assert "self.shadow_orchestrator.on_market_snapshot(snapshot)" in method
 
 
 def _method_source(path: pathlib.Path, name: str) -> str:

@@ -34,9 +34,40 @@ def test_manual_resume_cannot_resubmit_pending_orders() -> None:
 
 
 def test_shadow_uses_the_shared_lease_and_releases_it_on_stop() -> None:
-    assert "self.shadow_workflow.start()" in _source("_start_shadow")
-    assert "self.shadow_workflow.stop()" in _source("_stop_shadow")
-    assert "self.shadow_workflow.stop()" in _source("closeEvent")
+    """The lease is still shared with Paper; its holder moved in v2O-D.
+
+    ``ShadowOrchestrator`` acquires and releases the same ``ExecutionLeaseManager``
+    handle ``WorkflowController`` gives to the Paper workflow, so "Shadow and
+    Paper cannot both hold execution" stays structural.
+
+    Every teardown path hands the lease back through **one guarded helper** rather
+    than calling ``lease.stop()`` inline.  That is a safety requirement, not
+    tidiness: the lease is shared, so ``lease.active`` cannot tell this capability
+    whether *it* is the holder, and releasing on that condition once let a
+    duplicate start un-enforce the mutex while a simulation kept running.  See
+    ``test_desktop_shadow_orchestration_architecture`` for the guards.
+    """
+
+    from us_quant.desktop_v2.orchestration.shadow import ShadowOrchestrator
+
+    start = inspect.getsource(ShadowOrchestrator.start)
+    stop = inspect.getsource(ShadowOrchestrator.stop)
+    shutdown = inspect.getsource(ShadowOrchestrator.shutdown)
+    release = inspect.getsource(ShadowOrchestrator._release_lease)
+    assert "self._lease.start()" in start
+    assert "self._release_lease()" in stop
+    assert "self._release_lease()" in shutdown
+    # The one place the lease is actually handed back, gated on this capability
+    # holding it.  That the *condition* is never ``self._lease.active`` is pinned
+    # by ``test_the_orchestrator_only_releases_a_lease_it_acquired`` in
+    # ``test_desktop_shadow_orchestration_architecture`` -- asserting it here as a
+    # substring would trip on the helper's own docstring, which names the bad
+    # condition in order to explain why it is wrong.
+    assert "self._lease.stop()" in release
+    assert "if not self._holds_lease:" in release
+    # And the window hands over the shared handle rather than composing its own.
+    desktop_source = inspect.getsource(MainWindow)
+    assert "lease=self.shadow_workflow" in desktop_source
 
 
 def test_close_blocks_unfinalized_paper_before_any_disconnect() -> None:

@@ -599,7 +599,12 @@ def test_a_normal_switch_is_refused_while_a_paper_session_holds(
 
 
 def test_an_active_shadow_session_is_stopped_first(monkeypatch) -> None:
-    """A market stop must take the internal shadow book down with it."""
+    """A market stop must take the internal shadow book down with it.
+
+    The interlock still lives on the window -- the market orchestrator may not
+    name the Shadow book -- but the stop itself is the Shadow capability's, so
+    the assertion is on the capability call rather than a window handler.
+    """
 
     window = _window()
     try:
@@ -609,9 +614,9 @@ def test_an_active_shadow_session_is_stopped_first(monkeypatch) -> None:
         class _Engine:
             active = True
 
-        window.shadow_engine = _Engine()
+        window.shadow_orchestrator._engine = _Engine()
         monkeypatch.setattr(
-            window, "_stop_shadow", lambda: stopped.append("shadow")
+            window.shadow_orchestrator, "stop", lambda: stopped.append("shadow")
         )
 
         window.market_orchestrator._worker = _FakeWorker(running=True)
@@ -619,7 +624,7 @@ def test_an_active_shadow_session_is_stopped_first(monkeypatch) -> None:
         assert window._stop_market_data() is True
         assert stopped == ["shadow"]
     finally:
-        window.shadow_engine = None
+        window.shadow_orchestrator._engine = None
         window.market_orchestrator._worker = None
         window.close()
         window.deleteLater()

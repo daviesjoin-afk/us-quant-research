@@ -275,6 +275,8 @@ def test_a_snapshot_reaches_a_running_paper_session(window, quiet_minutes) -> No
 
 
 def test_a_snapshot_refreshes_an_active_shadow_book(window, quiet_minutes) -> None:
+    """The Shadow fan-out survives the v2O-D move; only its owner changed."""
+
     received: list[object] = []
 
     class _Engine:
@@ -282,13 +284,13 @@ def test_a_snapshot_refreshes_an_active_shadow_book(window, quiet_minutes) -> No
 
         def on_stream(self, snapshot):
             received.append(snapshot)
-            return window.shadow_snapshot
+            return window.shadow_orchestrator.snapshot
 
-    window.shadow_engine = _Engine()  # type: ignore[assignment]
+    window.shadow_orchestrator._engine = _Engine()  # type: ignore[assignment]
     try:
         window.market_orchestrator._on_snapshot(_snapshot())
     finally:
-        window.shadow_engine = None  # type: ignore[assignment]
+        window.shadow_orchestrator._engine = None  # type: ignore[assignment]
 
     assert len(received) == 1
 

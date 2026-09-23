@@ -228,6 +228,15 @@ RETIRED_WINDOW_STATE = (
     "self._research_capital_value ",
     "self._research_capital_value:",
     "self._research_capital_value =",
+    # v2O-D: the Shadow engine and its last snapshot belong to
+    # ``ShadowOrchestrator``.  Only the store and the shared lease handle remain
+    # on the window -- both composed facts rather than runtime state.
+    "self.shadow_engine ",
+    "self.shadow_engine:",
+    "self.shadow_engine =",
+    "self.shadow_snapshot ",
+    "self.shadow_snapshot:",
+    "self.shadow_snapshot =",
 )
 
 #: The methods the window must no longer declare (spec 28).
@@ -335,11 +344,15 @@ FORBIDDEN_ACCESSORS = (
 #: v2O-C2 moved Scanner out and v2O-C3 moved Backtest out, so both are gone from
 #: this list and pinned in ``RETIRED_WINDOW_STATE`` instead.  v2O-C4 moved the
 #: Cross-Section report *and* the research-capital scalar out, so those two are
-#: gone from here as well and pinned in ``RETIRED_WINDOW_STATE``.  Shadow
-#: remains: it is still a later slice.
-UNTOUCHED_WINDOW_STATE = (
-    "self.shadow_engine",
-)
+#: gone from here as well and pinned in ``RETIRED_WINDOW_STATE``.  v2O-D moved the
+#: Shadow runtime out, so ``self.shadow_engine`` is now retired too and this list
+#: is empty.
+#:
+#: The empty tuple and its parametrized guard are gone rather than kept: an empty
+#: parameter set makes pytest report a *skip*, which would be a second skip in a
+#: suite that has exactly one, and a guard that cannot fail is not a guard.  Every
+#: later slice now has its own positive pin in ``RETIRED_WINDOW_STATE`` below,
+#: which is the stronger assertion anyway.
 
 
 #: Spec 18: history queue truth must not be copied into the capability.
@@ -494,19 +507,6 @@ def test_each_research_workspace_has_its_own_orchestrator() -> None:
 def test_the_window_no_longer_holds_research_state(needle: str) -> None:
     source = _DESKTOP.read_text(encoding="utf-8")
     assert needle not in source, f"{needle!r} must not appear in desktop.py"
-
-
-@pytest.mark.parametrize("needle", UNTOUCHED_WINDOW_STATE)
-def test_the_later_slices_state_is_still_where_it_was(needle: str) -> None:
-    """Spec 32/33/34: Scanner / Backtest / Cross-Section / Shadow stay put.
-
-    Asserted positively rather than left implicit: a comment saying "not
-    migrated this round" cannot fail, so a later round that half-moves one of
-    these would have no guard to contradict it.
-    """
-
-    source = _DESKTOP.read_text(encoding="utf-8")
-    assert needle in source, f"{needle!r} moved without its slice"
 
 
 @pytest.mark.parametrize("name", RETIRED_WINDOW_METHODS)

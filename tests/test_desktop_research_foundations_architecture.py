@@ -139,6 +139,13 @@ FORBIDDEN_SYMBOLS = (
 #: immutable fact the capability publishes -- is declared.  The ban that still
 #: matters is on Scanner reaching *other* capabilities' domains, and on the
 #: orchestrators themselves (see ``FORBIDDEN_SYMBOLS``).
+#:
+#: ``us_quant.shadow`` is here as the *runtime*, and ``ALLOWED_SHADOW_MODULES``
+#: below carves out the one module that is not runtime: ``shadow.models`` is plain
+#: frozen data, and ``ShadowSnapshot`` is the type of the fact the Targeted Session
+#: capability renders.  v2O-C5B renders a Shadow snapshot without owning the
+#: engine, the store or the trade logic -- those stay banned, which is the half
+#: that would mean the capability had taken the runtime with it.
 FORBIDDEN_MODULE_PREFIXES = (
     "us_quant.desktop",
     "us_quant.desktop_workers",
@@ -153,6 +160,11 @@ FORBIDDEN_MODULE_PREFIXES = (
     "us_quant.backtest",
     "us_quant.cross_section",
 )
+
+#: The one ``us_quant.shadow`` module a research capability may reach.  Declared
+#: separately so the prefix ban above stays a ban rather than an exception list
+#: buried inside it -- the same shape ``ALLOWED_DESKTOP_MODULES`` uses.
+ALLOWED_SHADOW_MODULES = ("us_quant.shadow.models",)
 
 #: The one ``us_quant.desktop*`` module each capability is allowed to reach:
 #: its own stateless service.  Declared separately so the prefix ban above stays
@@ -715,11 +727,35 @@ def test_the_research_capabilities_import_no_forbidden_module() -> None:
         for module in _module_imports(path):
             if module in ALLOWED_DESKTOP_MODULES:
                 continue
+            if module in ALLOWED_SHADOW_MODULES:
+                continue
             for prefix in FORBIDDEN_MODULE_PREFIXES:
                 if module == prefix or module.startswith(prefix + "."):
                     offenders.append((str(path.relative_to(_SRC)), module))
                     break
     assert not offenders, offenders
+
+
+def test_the_shadow_ban_still_covers_the_runtime() -> None:
+    """The carve-out is the plain-data models, not the engine.
+
+    A capability that imported ``shadow.engine`` or ``shadow.store`` would have
+    taken the runtime with it; the exception exists for a value type, so it must
+    not have widened into a general Shadow permission.
+    """
+
+    forbidden = {
+        "us_quant.shadow.engine",
+        "us_quant.shadow.store",
+        "us_quant.shadow.config",
+        "us_quant.shadow.trade_logic",
+    }
+    for module in sorted(forbidden):
+        assert module not in ALLOWED_SHADOW_MODULES, module
+        assert any(
+            module == prefix or module.startswith(prefix + ".")
+            for prefix in FORBIDDEN_MODULE_PREFIXES
+        ), module
 
 
 @pytest.mark.parametrize(

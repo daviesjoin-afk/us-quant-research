@@ -169,6 +169,78 @@ def test_target_apply_and_subscribe_emit_normalized_intent(page: TargetedValidat
     assert seen == [("apply", "NVDA"), ("subscribe", "NVDA")]
 
 
+def test_typing_publishes_the_normalized_draft(page: TargetedValidationPage) -> None:
+    """Each edit publishes the normalized input, and it reaches the page's signal.
+
+    The draft is the operator's *input*, not a request: Replay and Robustness read
+    it even before 应用标的 is clicked, which is why it travels separately from the
+    two command signals.
+    """
+
+    seen: list[str] = []
+    page.target_draft_changed.connect(seen.append)
+    page.session_panel.controls.target_symbol_input.setText("aapl")
+    assert seen == ["AAPL"]
+
+    seen.clear()
+    page.session_panel.controls.target_symbol_input.setText(" nvda ")
+    assert seen == ["NVDA"]
+
+    seen.clear()
+    page.session_panel.controls.target_symbol_input.setText("")
+    assert seen == [""], "clearing the field clears the draft rather than freezing it"
+
+
+def test_typing_emits_no_command(page: TargetedValidationPage) -> None:
+    """A keystroke is not an apply and not a subscribe.
+
+    If typing reached either command, the whole session would run once per
+    character -- the fan-out this signal exists to avoid.
+    """
+
+    seen: list[str] = []
+    page.target_apply_requested.connect(lambda _v: seen.append("apply"))
+    page.target_subscribe_requested.connect(lambda _v: seen.append("subscribe"))
+    for text in ("a", "aa", "aap", "aapl"):
+        page.session_panel.controls.target_symbol_input.setText(text)
+    assert seen == []
+
+
+def test_the_programmatic_target_setter_is_silent(page: TargetedValidationPage) -> None:
+    """``set_target_symbol`` must not publish a draft back at its caller.
+
+    The session capability sets the field *because* it already committed the same
+    value; letting ``textChanged`` fire would call straight back into it as if the
+    operator had typed -- an orchestrator -> page -> orchestrator loop that would
+    also rewrite the canonical draft from the widget it just told what to show.
+    """
+
+    drafts: list[str] = []
+    page.target_draft_changed.connect(drafts.append)
+    page.set_target_symbol("msft")
+
+    assert page.session_panel.controls.target_symbol() == "MSFT"
+    assert page.session_panel.controls.target_symbol_input.text() == "MSFT"
+    assert drafts == []
+
+
+def test_a_theme_change_emits_no_business_intent(page: TargetedValidationPage) -> None:
+    for name in (
+        "strategy_selected",
+        "target_draft_changed",
+        "target_apply_requested",
+        "target_subscribe_requested",
+        "shadow_start_requested",
+        "shadow_stop_requested",
+        "replay_requested",
+        "robustness_requested",
+    ):
+        seen: list[object] = []
+        getattr(page, name).connect(lambda *_a, seen=seen: seen.append(1))
+        page.set_palette(theme_palette("light"))
+        assert seen == [], name
+
+
 def test_replay_and_robustness_clicks_only_emit(page: TargetedValidationPage) -> None:
     seen: list[str] = []
     page.replay_requested.connect(lambda: seen.append("replay"))

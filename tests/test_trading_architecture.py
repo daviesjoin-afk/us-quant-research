@@ -646,6 +646,17 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
     must be built before the snapshot is committed), and ``projector.py`` the
     snapshot-to-view-wiring adapter; each is a separate file because each is a
     separate job that a reviewer needs to read on its own.
+
+    ``orchestration/research/targeted/session/`` arrived with v2O-C5B: the second
+    half of that split -- the operator's target draft, the target status, the
+    local minute-evidence status, the last preflight result and the session-side
+    page paint.  It is a sibling package rather than a module inside
+    ``evidence/`` because the two halves share exactly one fact (the target
+    draft) and share it through a provider, so neither imports the other.
+    ``models.py`` holds the immutable snapshot and the operator text,
+    ``queries.py`` the pure rules (normalization, the symbol gate, the Universe
+    and quote lookups, the two status lines, the controls projection) and
+    ``orchestrator.py`` the commands, the ordering and the render.
     """
 
     desktop_v2 = _SRC / "desktop_v2"
@@ -688,6 +699,10 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "orchestration/research/targeted/evidence/models.py",
         "orchestration/research/targeted/evidence/orchestrator.py",
         "orchestration/research/targeted/evidence/projector.py",
+        "orchestration/research/targeted/session/__init__.py",
+        "orchestration/research/targeted/session/models.py",
+        "orchestration/research/targeted/session/orchestrator.py",
+        "orchestration/research/targeted/session/queries.py",
         "orchestration/tasking.py",
         "pages/__init__.py",
         "pages/account.py",

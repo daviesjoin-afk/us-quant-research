@@ -1,12 +1,10 @@
 # Desktop Capability Map
 
-A navigation index, not a design document. The purpose is one thing: when a
-reviewer or maintainer needs to change a desktop capability, they should know
-which files to open **without reading `desktop.py`**.
-
-Design rationale stays in `docs/TRADING_ARCHITECTURE_V2.md` and
-`docs/DESKTOP_DECOMPOSITION.md`. If a note here needs five paragraphs, it belongs
-in one of those files instead. Every orchestration PR updates this table.
+A navigation index, not a design document: when a reviewer or maintainer needs to
+change a desktop capability, they should know which files to open **without
+reading `desktop.py`**. Design rationale stays in `docs/TRADING_ARCHITECTURE_V2.md`
+and `docs/DESKTOP_DECOMPOSITION.md`; if a note here needs five paragraphs it
+belongs in one of those. Every orchestration PR updates this table.
 
 ## How to read a row
 
@@ -18,8 +16,7 @@ in one of those files instead. Every orchestration PR updates this table.
 - **Public orchestration API** — the surface a caller outside the capability may
   use. Anything not listed is private by construction.
 - **Cross-workflow bridge** — what `MainWindow` still owns *because* it combines
-  this capability with facts from another one. See the section below the table
-  for the bridges whose wiring is not one signal to one handler.
+  this capability with facts from another one. See the section below the table.
 
 ## Capabilities
 
@@ -32,23 +29,24 @@ in one of those files instead. Every orchestration PR updates this table.
 | **Scanner** | `ScannerOrchestrator.scan` | `ScannerOrchestrator` | `DesktopMarketScanService` | `scan`, `request_scan`, `request_chart`, `restore_saved`, `adopt_external_scan`, `render_current`, signals | `scan_changed` → `_refresh_market_scope_summary`. AutoQuant **publishes** its finished scan in through `adopt_external_scan` (direction: AutoQuant → Scanner) | v2O-C2 complete |
 | **Backtest** | `BacktestOrchestrator._runs` (private) | `BacktestOrchestrator` | `DesktopBacktestService` | `refresh_strategy_options`, `request_selected`, `request_compare_all`, `select_run`, `render_current`, signals | None. `MainWindow` only constructs, connects and shows the refusal dialog; the strategy catalogue arrives as a provider callable | v2O-C3 complete |
 | **Cross Section** | `CrossSectionOrchestrator._report` (private) | `CrossSectionOrchestrator` | `DesktopCrossSectionService` | `request_capital_change`, `request_run`, `restore_saved`, `render_current`, signals | `capital_changed` → `_on_research_scenario_capital_changed` (Account presentation only). `report_changed` → `_on_cross_section_report_changed` (reloads the artifact catalogue, repaints the Dashboard). Startup `restore_saved()` publishes nothing | v2O-C4 complete |
-| **Targeted Evidence** | `TargetedEvidenceOrchestrator.snapshot` (published: the terminal export reads all seven families) | `TargetedEvidenceOrchestrator` (evidence half only) | `DesktopTargetedEvidenceService` | `snapshot`, `request_replay`, `request_robustness`, `select_robustness_run`, `select_review_run`, `restore_saved`, `render_current`, signals | `refused` → `_report_targeted_evidence_refusal` (dialog). `runtime_event_requested` → `_record_targeted_evidence_runtime_event` (store). `minute_status_refresh_requested` → `_refresh_minute_data_status` (session status). `focus_requested` → `_focus_targeted_evidence` (research route + targeted workspace) | v2O-C5A complete |
-| **Targeted Session / Preflight** | `MainWindow` (`_target_status`, `_minute_status`, `target_preflight_result`, `shadow_snapshot`) | `MainWindow._publish_targeted_session_view` (session half only) | `targeted_preflight` (called inline) | none yet | Shares the target symbol with the market stream; needs the universe, the market, the account and the Shadow session. Scheduled for v2O-C5B | not started |
-| **Shadow** | `MainWindow.shadow_engine` | `MainWindow` | `ShadowPaperStore`, shadow workflow | none yet | Consumes the market snapshot and the account truth; scheduled for v2O-D | not started |
+| **Targeted Evidence** | `TargetedEvidenceOrchestrator.snapshot` (published: the terminal export reads all seven families) | `TargetedEvidenceOrchestrator` (evidence half only) | `DesktopTargetedEvidenceService` | `snapshot`, `request_replay`, `request_robustness`, `select_robustness_run`, `select_review_run`, `restore_saved`, `render_current`, signals | `refused` → `_report_targeted_evidence_refusal` (dialog). `runtime_event_requested` → `_record_targeted_evidence_runtime_event` (store). `minute_status_refresh_requested` → `TargetedSessionOrchestrator.refresh_minute_status`. `focus_requested` → `_focus_targeted_evidence` (research route + targeted workspace) | v2O-C5A complete |
+| **Targeted Session / Preflight** | `TargetedSessionOrchestrator.snapshot` (target draft / target status / minute status / preflight) | `TargetedSessionOrchestrator` | `DesktopTargetedSessionService` | `snapshot`, `refresh_strategy_options`, `adopt_target_draft`, `request_strategy_selection`, `request_target_apply`, `request_target_subscribe`, `refresh_minute_status`, `refresh_preflight`, `render_current`, signals | Market snapshot → `refresh_preflight`. Account portfolio → `refresh_preflight`. Evidence replay completion → `refresh_minute_status`. Shadow snapshot change → `render_current` (repaint only). Subscription and start go out through two narrow injected Market commands | v2O-C5B complete |
+| **Shadow** | `MainWindow.shadow_engine` / `shadow_snapshot` | `MainWindow` | `ShadowPaperStore`, shadow workflow | none yet | Consumes the market snapshot and the account truth. Targeted Session only *renders* its snapshot through a provider | v2O-D next |
 | **Paper** | `PaperTradingService` / workflow controllers | `MainWindow` (execution page) | `us_quant.trading.*` | none yet | The largest remaining bridge; scheduled for v2O-E | not started |
 | **System** | `RuntimeEventStore`, `DesktopSettingsService` | the two System pages | `RuntimeEventStore`, `DesktopSettingsService` | none yet | Runtime events are *requested* by other capabilities rather than written by them; orchestration scheduled for v2O-F | pages done, orchestration not started |
 
-## Bridges that are not one signal to one handler
+## Bridges that need spelling out
 
-These are the entries above that need the wiring spelled out, because the
-direction and the trigger are what a reader gets wrong.
+These are the entries above where the direction and the trigger are what a reader
+gets wrong.
 
 **Market.** Three separate paths, and they must not be collapsed:
 
 ```text
 snapshot_changed            → MainWindow._on_market_snapshot_changed
     → workflow readiness, minute snapshot evidence, Dashboard,
-      AutoQuant candidate presentation, Targeted preflight,
+      AutoQuant candidate presentation, targeted preflight refresh,
+      the targeted session repaint (when Shadow is active),
       and stream ingress for an active Paper / Shadow workflow
 
 shell_health_changed        → MainWindow._render_market_shell_health
@@ -68,7 +66,7 @@ The AutoQuant preparation path does schedule history gaps and render the History
 page, but that direction is **AutoQuant → History** — AutoQuant calls the
 capability. It is not `history_changed → AutoQuant`.
 
-**Cross Section.** Two bridges, and neither is a second truth:
+**Cross Section.** Two bridges, neither a second truth:
 
 ```text
 capital_changed  → MainWindow._on_research_scenario_capital_changed
@@ -81,8 +79,8 @@ report_changed   → MainWindow._on_cross_section_report_changed
 ```
 
 Neither the Dashboard nor the artifact catalogue is known to the capability.
-`restore_saved()` deliberately emits neither signal: the catalogue is read
-during the same startup pass, so announcing a re-read would fan out twice.
+`restore_saved()` deliberately emits neither signal: the catalogue is read during
+the same startup pass, so announcing a re-read would fan out twice.
 
 **Targeted Evidence.** Four bridges, each for a fact that is *not* an evidence
 decision:
@@ -90,7 +88,7 @@ decision:
 ```text
 refused                          → _report_targeted_evidence_refusal (QMessageBox)
 runtime_event_requested          → _record_targeted_evidence_runtime_event (store)
-minute_status_refresh_requested  → _refresh_minute_data_status (session status)
+minute_status_refresh_requested  → TargetedSessionOrchestrator.refresh_minute_status
 focus_requested                  → _focus_targeted_evidence
                                      (shell.navigate_to("research") +
                                       research_page.set_active_workspace(TARGETED))
@@ -100,13 +98,27 @@ The first three exist so the capability holds no dialog, no event store and no
 minute-status ownership. The fourth is the split that matters: a completed suite
 navigates its **own page's** evidence workspace to REVIEW (the capability's
 presentation behaviour), and separately *asks* for the desktop route through
-`focus_requested` (shell composition, which stays on the window). The capability
-imports no shell, no route and no research page — see
+`focus_requested` (shell composition, which stays on the window). See
 `tests/test_desktop_targeted_evidence_orchestration.py`.
 
-`restore_saved()` deliberately emits none of them, and a normal session refresh
-(`_publish_targeted_session_view`) emits none either: re-reading a local file is
-not new research, and a market tick is not an evidence event.
+**Targeted Session.** Two bridges out, four facts in:
+
+```text
+refused        → _report_targeted_session_refusal (QMessageBox; level honoured --
+                 warning for a mistyped symbol, information for a running Shadow
+                 session or a live feed)
+log_requested  → _log
+
+Market snapshot    → refresh_preflight       (a new quote changes the verdict)
+Account portfolio  → refresh_preflight       (broker truth is half the gates)
+Evidence replay    → refresh_minute_status   (fresh local rows landed)
+Shadow snapshot    → render_current          (positions and fills moved)
+```
+
+The Shadow line is the boundary: the window owns the snapshot and asks the
+capability to **repaint**; the capability never receives it, so there is no second
+mutable Shadow truth, and `render_current()` never repaints the evidence tables.
+Rationale: `DESKTOP_DECOMPOSITION.md` §25.
 
 ## Shared facts
 

@@ -148,12 +148,13 @@ def test_the_evidence_row_points_at_the_capability() -> None:
     assert "_publish_targeted_view" not in row
 
 
-def test_the_session_row_says_it_is_still_the_windows() -> None:
-    """The deliberate intermediate state: evidence moved, session did not.
+def test_the_session_row_points_at_the_capability() -> None:
+    """v2O-C5B: the second half of the Targeted split moved, and its row says so.
 
-    Recording this honestly is what stops the next maintainer from assuming the
-    whole Targeted workspace is done, and stops a later round from quietly
-    folding the session half into the evidence capability.
+    The intermediate state C5A recorded -- evidence migrated, session still on the
+    window -- is over.  The failure this guards is a map that keeps saying
+    "not started" while the extraction is done, which sends the next maintainer to
+    ``desktop.py`` for state that is no longer there.
     """
 
     text = _MAP.read_text(encoding="utf-8")
@@ -162,9 +163,35 @@ def test_the_session_row_says_it_is_still_the_windows() -> None:
         for line in text.splitlines()
         if line.startswith("| **Targeted Session / Preflight**")
     )
-    assert "MainWindow" in row
-    assert "v2O-C5B" in row
-    assert "not started" in row
+    assert "TargetedSessionOrchestrator.snapshot" in row
+    assert "DesktopTargetedSessionService" in row
+    assert "v2O-C5B complete" in row
+    # The window must not still be described as the session owner.  Checked as
+    # `self.`-prefixed attributes, because `refresh_minute_status` legitimately
+    # contains `_minute_status` and is the capability's own command.
+    for retired in (
+        "self._target_status",
+        "self._minute_status",
+        "self.target_preflight_result",
+        "_publish_targeted_session_view",
+    ):
+        assert retired not in row, retired
+
+
+def test_the_shadow_row_still_says_the_runtime_is_the_windows() -> None:
+    """Targeted Session *renders* a Shadow snapshot; it does not own the runtime.
+
+    Pinning this stops a later round from reading "Targeted Session is complete"
+    as "the Shadow engine moved too" -- the engine, its store and its start/stop
+    are v2O-D's, and the session capability only reaches them through a provider.
+    """
+
+    text = _MAP.read_text(encoding="utf-8")
+    row = next(
+        line for line in text.splitlines() if line.startswith("| **Shadow**")
+    )
+    assert "MainWindow.shadow_engine" in row
+    assert "v2O-D" in row
 
 
 def test_the_shared_research_capital_fact_has_an_entry() -> None:

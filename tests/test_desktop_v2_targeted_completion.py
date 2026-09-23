@@ -353,7 +353,7 @@ def test_a_normal_session_refresh_preserves_the_evidence_and_its_selection(
         lambda view: session_paints.append(view),
     )
 
-    window._publish_targeted_session_view()
+    window.targeted_session_orchestrator.render_current()
 
     assert session_paints, "the session half should have been painted"
     assert evidence_paints == [], "a session refresh must not repaint evidence"

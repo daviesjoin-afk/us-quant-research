@@ -209,6 +209,10 @@ FORBIDDEN_PATHS = (
 
 #: Spec: the window state the extraction deleted rather than shimmed.  The three
 #: spellings per name cover an annotated declaration, a plain assignment and a read.
+#:
+#: The session half joined this list in v2O-C5B: the target status, the minute
+#: status and the last preflight result left the window with the capability that
+#: now owns them.
 RETIRED_WINDOW_STATE = (
     "self.targeted_replay_results",
     "self.targeted_robustness_results",
@@ -221,9 +225,15 @@ RETIRED_WINDOW_STATE = (
     "self._selected_review_run_id",
     "self._targeted_active_workspace",
     "self._targeted_active_evidence_tab",
+    "self._target_status",
+    "self._minute_status",
+    "self.target_preflight_result",
 )
 
-#: The window methods the extraction deleted rather than forwarded.
+#: The window methods the extraction deleted rather than forwarded.  The first
+#: group went with the evidence half (v2O-C5A); the second went with the session
+#: half (v2O-C5B), where a compatibility property or forwarding method would have
+#: kept the window working as a second owner.
 RETIRED_WINDOW_METHODS = (
     "_run_targeted_replay",
     "_targeted_replay_finished",
@@ -232,6 +242,16 @@ RETIRED_WINDOW_METHODS = (
     "_robustness_run_selected",
     "_review_run_selected",
     "_publish_targeted_view",
+    "_current_target_symbol",
+    "_target_symbol_requested",
+    "_target_subscribe_requested",
+    "_apply_target_symbol",
+    "_sync_targeted_symbol_to_stream",
+    "_refresh_minute_data_status",
+    "_refresh_target_preflight",
+    "_targeted_controls",
+    "_publish_targeted_session_view",
+    "_shadow_strategy_selection_changed",
 )
 
 #: The retired presentation model.  A combined view model would let the window
@@ -243,24 +263,25 @@ RETIRED_PAGE_MODELS = ("TargetedValidationView",)
 RETIRED_PAGE_METHODS = ("render",)
 
 #: The only window methods whose name starts with a targeted word.
+#:
+#: v2O-C5B removed the session half's handlers -- the target apply/subscribe
+#: commands, the minute and preflight refreshes, the controls projection and the
+#: session paint -- and added the small composition helpers the session capability
+#: reads its inputs through.  Those helpers answer "what is the current value of a
+#: fact this window can see?"; none of them decides anything.
 ALLOWED_WINDOW_TARGETED_METHODS = (
     "_connect_targeted_validation_page",
-    "_current_target_symbol",
-    "_apply_target_symbol",
-    "_sync_targeted_symbol_to_stream",
-    "_refresh_minute_data_status",
-    "_refresh_target_preflight",
-    "_targeted_controls",
-    "_publish_targeted_session_view",
-    "_target_symbol_requested",
-    "_target_subscribe_requested",
+    "_report_targeted_session_refusal",
     "_report_targeted_evidence_refusal",
     "_record_targeted_evidence_runtime_event",
     "_focus_targeted_evidence",
     "_start_shadow",
     "_stop_shadow",
-    "_shadow_strategy_selection_changed",
     "_selected_shadow_strategy_record",
+    "_targeted_account_snapshot",
+    "_targeted_displayed_strategy",
+    "_targeted_strategy_options",
+    "_targeted_strategy_selected",
 )
 
 
@@ -395,7 +416,7 @@ def test_the_window_declares_the_four_bridges_it_needs() -> None:
         "_report_targeted_evidence_refusal",
         "_record_targeted_evidence_runtime_event",
         "_focus_targeted_evidence",
-        "_publish_targeted_session_view",
+        "_report_targeted_session_refusal",
     ):
         assert name in declared, name
 
@@ -421,15 +442,53 @@ def test_the_evidence_capability_is_the_only_render_evidence_caller() -> None:
     assert callers == [("orchestrator.py", "self._page")], callers
 
 
-def test_the_window_calls_the_session_render_only() -> None:
-    """The window owns the session half; it must not paint the evidence half."""
+def _session_render_callers() -> list[tuple[str, str]]:
+    """Production modules that call ``render_session``, as ``(file, owner)``.
 
-    pieces = {
-        attr
-        for _owner, attr in _called_pieces(_DESKTOP)
-    }
-    assert "render_session" in pieces
+    v2O-C5B closed this list to exactly one: the session capability.  Before it,
+    the window was the session painter; the asymmetry with ``render_evidence``
+    (which has always had one caller) is now gone, and both halves have exactly
+    the owner that holds their truth.
+    """
+
+    callers: list[tuple[str, str]] = []
+    for path in _python_files(_SRC):
+        if path == _PAGE_PATH:
+            continue
+        for owner, attr in _called_pieces(path):
+            if attr == "render_session":
+                callers.append((path.name, owner))
+    return callers
+
+
+def test_the_session_capability_is_the_only_render_session_caller() -> None:
+    callers = _session_render_callers()
+    assert callers == [("orchestrator.py", "self._page")], callers
+
+
+def test_the_window_paints_neither_half_of_the_targeted_page() -> None:
+    """It composes the capabilities and routes their facts; it draws neither half."""
+
+    pieces = {attr for _owner, attr in _called_pieces(_DESKTOP)}
+    assert "render_session" not in pieces
     assert "render_evidence" not in pieces
+
+
+def test_the_window_never_reaches_through_the_page_for_session_truth() -> None:
+    """The page's editor is not a truth the window may read.
+
+    The retired ``_current_target_symbol`` read the ``QLineEdit``; the target now
+    comes from the session snapshot, so a surviving window-side read of
+    ``target_symbol()`` would be the second owner coming back.
+    """
+
+    page_reads = {
+        attr
+        for owner, attr in _called_pieces(_DESKTOP)
+        if owner == "self.targeted_validation_page"
+    }
+    assert "target_symbol" not in page_reads, sorted(page_reads)
+    assert "selected_strategy_version_id" not in page_reads, sorted(page_reads)
 
 
 def test_the_capability_never_calls_the_session_render() -> None:
@@ -593,14 +652,21 @@ def test_no_forbidden_aggregate_is_declared() -> None:
 
 
 def test_the_capability_package_is_not_its_own_home() -> None:
-    """The targeted root holds the split's first half only -- no shared models."""
+    """The targeted root holds the split's two halves -- and no shared models.
+
+    v2O-C5A moved the evidence half in and v2O-C5B the session half, so the root
+    now has two children.  What must never appear there is a ``models.py``,
+    ``orchestrator.py`` or ``context.py``: one object owning evidence *and*
+    session *and* Shadow would be the second ``MainWindow`` this split exists to
+    prevent.
+    """
 
     children = {
         path.name
         for path in (_RESEARCH / "targeted").iterdir()
         if path.name != "__pycache__"
     }
-    assert children == {"__init__.py", "evidence"}, children
+    assert children == {"__init__.py", "evidence", "session"}, children
 
 
 # -- Guard F: line budgets ------------------------------------------------

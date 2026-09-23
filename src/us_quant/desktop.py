@@ -206,11 +206,7 @@ from us_quant.desktop_v2.pages.execution.presenter import (
 from us_quant.desktop_v2.pages.market import MarketPage
 from us_quant.desktop_v2.pages.research.targeted import TargetedValidationPage
 from us_quant.desktop_v2.pages.research.targeted.models import (
-    TargetedControlView,
     TargetedStrategyOption,
-)
-from us_quant.desktop_v2.pages.research.targeted.session_presenter import (
-    session_view,
 )
 from us_quant.desktop_v2.pages.research.universe import UniversePage
 from us_quant.desktop_v2.pages.research.history import HistoryPage
@@ -227,6 +223,10 @@ from us_quant.desktop_v2.orchestration.research.scenario_capital import (
 )
 from us_quant.desktop_v2.orchestration.research.targeted.evidence import (
     TargetedEvidenceOrchestrator,
+)
+from us_quant.desktop_v2.orchestration.research.targeted.session import (
+    REFUSAL_INFORMATION,
+    TargetedSessionOrchestrator,
 )
 from us_quant.desktop_v2.pages.research import (
     ResearchPage,
@@ -263,9 +263,8 @@ from us_quant.desktop_widgets import (
 )
 from us_quant.desktop_v2.workflows import WorkflowController
 from us_quant.minute_data import MinuteQuoteStore
-from us_quant.targeted_preflight import (
-    TargetPreflightResult,
-    evaluate_target_preflight,
+from us_quant.desktop_targeted_session_service import (
+    DesktopTargetedSessionService,
 )
 from us_quant.intraday_universe import (
     select_intraday_watchlist,
@@ -469,22 +468,21 @@ class MainWindow(QMainWindow):
         # group serializes it, so an unrelated task finishing must not be able
         # to release the route on the probe's behalf.
         self._channel_check_inflight = False
-        # Targeted workspace facts the page renders but does not own.  These are
-        # the *session* half -- the target symbol's status and the local minute
-        # evidence summary -- and they stay here for v2O-C5B.  The *evidence*
-        # half (seven result families, two run selections, two one-shot tab
-        # switches) moved into ``targeted_evidence_orchestrator``, which is now
-        # the canonical owner: answering "who owns the robustness evidence?" is
-        # one grep, and the window can no longer hold a mirrored list that
-        # disagrees with the owner.
-        self._target_status = "未指定"
-        self._minute_status = (
-            "分钟证据：输入代码后显示本地已录数据；只回放 fresh bid/ask。"
-        )
+        # The Targeted workspace's *session* half -- the target draft, its status,
+        # the local minute evidence and the preflight -- belongs to
+        # ``targeted_session_orchestrator``, built below.  Note what is *not*
+        # stored: no ``_target_status``, no ``_minute_status``, no
+        # ``target_preflight_result``, and no forwarding property either -- a
+        # property would keep every unmigrated caller working, so "who owns the
+        # target status?" would stop being one grep.  The *evidence* half moved one
+        # round earlier.
         self._dashboard_chart_view = DashboardChartView(None, ())
+        # Shadow runtime state: the engine, its snapshot as mutable truth, the
+        # store and the workflow.  Deliberately still here -- the session
+        # capability *renders* a Shadow snapshot through a provider and does not
+        # own one, and the runtime itself is v2O-D.
         self.shadow_engine: ShadowPaperEngine | None = None
         self.shadow_snapshot: ShadowSnapshot | None = None
-        self.target_preflight_result: TargetPreflightResult | None = None
         self.trading_runtime: TradingRuntime | None = None
         self.auto_quant_snapshot: AutoQuantSnapshot | None = None
         self.paper_execution_health: PaperExecutionHealth | None = None
@@ -685,6 +683,40 @@ class MainWindow(QMainWindow):
         self._connect_market_page()
 
         self.targeted_validation_page = TargetedValidationPage(palette=self.theme)
+        # The Targeted workspace's *session* half -- the target draft, the target
+        # status, the minute-evidence status, the preflight and the one session
+        # paint -- belongs to ``targeted_session_orchestrator``, built just below.
+        #
+        # It is built *first* because the evidence capability's target provider
+        # reads this session's snapshot: one shared fact, passed as a provider
+        # rather than an object handle, so neither capability imports the other.
+        # That is also what makes "the operator typed AAPL but did not apply it"
+        # work -- the draft is the input, and Replay and Robustness read it as the
+        # run's symbol.
+        #
+        # Every dependency is a callable onto a *fact the window can currently
+        # answer* rather than another capability.  The two Market commands are
+        # injected as narrow callables -- subscribe and start -- because the
+        # session may ask for a stream and must not own one.
+        self.targeted_session_service = DesktopTargetedSessionService(
+            minute_quote_store=self.minute_quote_store,
+        )
+        self.targeted_session_orchestrator = TargetedSessionOrchestrator(
+            page=self.targeted_validation_page,
+            service=self.targeted_session_service,
+            universe_provider=lambda: self.universe_orchestrator.snapshot,
+            market_snapshot_provider=lambda: self.market_orchestrator.snapshot,
+            market_is_live=lambda: self.market_orchestrator.is_live,
+            account_provider=self._targeted_account_snapshot,
+            selected_strategy_provider=self._selected_shadow_strategy_record,
+            displayed_strategy_provider=self._targeted_displayed_strategy,
+            strategy_options_provider=self._targeted_strategy_options,
+            strategy_selector=self._targeted_strategy_selected,
+            exposure_multipliers_provider=self._configured_exposure_multipliers,
+            shadow_snapshot_provider=lambda: self.shadow_snapshot,
+            market_set_subscription=self.market_orchestrator.set_subscription_symbols,
+            market_start=self.market_orchestrator.start,
+        )
         # The targeted workspace's *research evidence* runtime -- the seven result
         # families, the two run selections, the replay and robustness requests and
         # the evidence render -- belongs to ``targeted_evidence_orchestrator``.
@@ -698,9 +730,10 @@ class MainWindow(QMainWindow):
         # so the capability never imports ``UniverseOrchestrator``; the strategy
         # as a ``Callable`` onto the selection service, so a change to strategy
         # application does not reach it; the target symbol as a ``Callable`` onto
-        # the page's own editor, so the capability never reaches through
-        # ``session_panel``; and the research capital is the one shared state
-        # object, which this capability reads but does not own.
+        # the session snapshot, so the capability never reaches through
+        # ``session_panel`` into an editor and never imports its sibling; and the
+        # research capital is the one shared state object, which this capability
+        # reads but does not own.
         #
         # Each request-time provider is read **once per request**, which is what
         # makes "the strategy and capital the operator saw" true of a run that
@@ -716,7 +749,7 @@ class MainWindow(QMainWindow):
             universe_provider=lambda: self.universe_orchestrator.snapshot,
             strategy_provider=lambda: self._selected_shadow_strategy_record(),
             target_symbol_provider=(
-                self.targeted_validation_page.target_symbol
+                lambda: self.targeted_session_orchestrator.snapshot.target_draft
             ),
             capital_state=self.research_scenario_capital,
         )
@@ -1270,7 +1303,7 @@ class MainWindow(QMainWindow):
         self._record_minute_snapshot(snapshot)
         self._publish_dashboard_view()
         self._populate_auto_quant_candidates()
-        self._refresh_target_preflight()
+        self.targeted_session_orchestrator.refresh_preflight()
         if (
             not getattr(self, "_paper_finalization_inflight", False)
             and self.paper_trading.phase() in {
@@ -1288,7 +1321,13 @@ class MainWindow(QMainWindow):
                 self._log(str(error))
         if self.shadow_engine is not None and self.shadow_engine.active:
             self.shadow_snapshot = self.shadow_engine.on_stream(snapshot)
-            self._publish_targeted_session_view()
+            # The engine produced a new snapshot, so the session panel's cards,
+            # positions and fills are stale.  The window owns the snapshot and
+            # *asks* the session capability to repaint -- it never hands the
+            # snapshot over, because a copy there would be a second mutable
+            # Shadow truth.  Note what this does not do: it does not repaint the
+            # evidence tables.  A market tick is a session event.
+            self.targeted_session_orchestrator.render_current()
 
     def _on_market_snapshot_invalidated(self) -> None:
         """The feed's snapshot was invalidated; the dashboard card must follow."""
@@ -1339,40 +1378,115 @@ class MainWindow(QMainWindow):
     def _connect_targeted_validation_page(self) -> None:
         """Wire the targeted page's intents to their owners.  No business here.
 
-        The two groups have different owners, so they are kept apart: the
-        session/Shadow intents still belong to this window (v2O-C5B and v2O-D),
-        while the evidence intents belong to the capability that owns the
-        evidence truth.  Nothing is interpreted -- every line is a connect.
+        Three groups, three owners, and the split is the point of this round:
+
+        * **session intents** go to ``targeted_session_orchestrator`` -- the target
+          draft, the strategy choice, 应用标的 and 订阅该标的行情.  The window used to
+          handle all four itself;
+        * **evidence intents** go to ``targeted_evidence_orchestrator``, which has
+          owned them since v2O-C5A;
+        * **Shadow intents** stay here.  Starting and stopping the internal
+          simulation is the Shadow runtime, which is v2O-D, so wiring them to the
+          session capability would hand the session an engine it must not own.
+
+        Nothing is interpreted -- every line is a connect.
         """
 
         page = self.targeted_validation_page
+        session = self.targeted_session_orchestrator
         evidence = self.targeted_evidence_orchestrator
-        # Session and Shadow intents: still the window's.
-        page.strategy_selected.connect(self._shadow_strategy_selection_changed)
-        page.target_apply_requested.connect(self._target_symbol_requested)
-        page.target_subscribe_requested.connect(self._target_subscribe_requested)
+        # Session intents: the capability's.
+        page.target_draft_changed.connect(session.adopt_target_draft)
+        page.strategy_selected.connect(session.request_strategy_selection)
+        page.target_apply_requested.connect(session.request_target_apply)
+        page.target_subscribe_requested.connect(session.request_target_subscribe)
+        # Shadow intents: still the window's, and deliberately not the session's.
         page.shadow_start_requested.connect(self._start_shadow)
         page.shadow_stop_requested.connect(self._stop_shadow)
-        # Evidence intents: the capability's.  A replay or robustness request
-        # validates, freezes its inputs, submits its own task and paints its own
-        # evidence -- the window has no handler for either any more.
+        # Evidence intents: the evidence capability's.  A replay or robustness
+        # request validates, freezes its inputs, submits its own task and paints
+        # its own evidence -- the window has no handler for either any more.
         page.replay_requested.connect(evidence.request_replay)
         page.robustness_requested.connect(evidence.request_robustness)
         page.robustness_run_selected.connect(evidence.select_robustness_run)
         page.review_run_selected.connect(evidence.select_review_run)
-        # The capability publishes finished facts; the window routes them.  A
+        # The capabilities publish finished facts; the window routes them.  A
         # refusal is a dialog, a log line is the footer, a runtime event is the
-        # store, a minute refresh is the session panel's own status, and focus is
-        # the research route -- none of which is an evidence decision.
+        # store, a minute refresh is the session capability's own command, and
+        # focus is the research route -- none of which is a capability's decision.
+        session.refused.connect(self._report_targeted_session_refusal)
+        session.log_requested.connect(self._log)
         evidence.refused.connect(self._report_targeted_evidence_refusal)
         evidence.log_requested.connect(self._log)
         evidence.runtime_event_requested.connect(
             self._record_targeted_evidence_runtime_event
         )
         evidence.minute_status_refresh_requested.connect(
-            self._refresh_minute_data_status
+            session.refresh_minute_status
         )
         evidence.focus_requested.connect(self._focus_targeted_evidence)
+
+    # -- Targeted session presentation inputs -----------------------------
+    #
+    # Composition, not behaviour: each of these answers "what is the current
+    # value of a fact this window can see?" for the session capability, which
+    # reads them through callables.  None of them decides anything.
+
+    def _targeted_account_snapshot(
+        self,
+    ) -> BrokerAccountSnapshot | None:
+        """The canonical broker account truth, or ``None``.
+
+        Read from the account route's portfolio -- the Paper capital gate reads
+        *broker* truth, never the research scenario figure.  The two are different
+        facts with different trust levels and must not be conflated.
+        """
+
+        portfolio = self.account_orchestrator.portfolio
+        return portfolio.account if portfolio is not None else None
+
+    def _targeted_strategy_options(
+        self,
+    ) -> tuple[TargetedStrategyOption, ...]:
+        """The targeted-shadow selection's eligible versions, as combo options.
+
+        The label projection lives here rather than in the capability so the
+        capability imports no page module for it; the order and the eligibility
+        are the selection service's.
+        """
+
+        purpose = StrategySelectionPurpose.TARGETED_SHADOW
+        return tuple(
+            TargetedStrategyOption(
+                version.version_id,
+                strategy_option_label(version),
+            )
+            for version in self.strategy_selection.options(purpose)
+        )
+
+    def _targeted_displayed_strategy(self) -> StrategyVersion | None:
+        """The version the targeted combo should display, adopting a replacement.
+
+        ``restore_or_default``, not ``selected``: the combo is a view of the
+        service's choice, and a version stopped since the last paint must move the
+        combo on rather than leave it showing a version the runtime will not run.
+        """
+
+        return self.strategy_selection.restore_or_default(
+            StrategySelectionPurpose.TARGETED_SHADOW
+        )
+
+    def _targeted_strategy_selected(self, version_id: str) -> None:
+        """Adopt the operator's targeted strategy choice as the runtime selection.
+
+        The seat of truth stays ``StrategySelectionService``: the capability hands
+        over the id the page emitted and never caches a version.
+        """
+
+        self._record_runtime_strategy_selection(
+            StrategySelectionPurpose.TARGETED_SHADOW,
+            version_id,
+        )
 
     def _connect_universe_page(self) -> None:
         """Wire the universe page to its capability; no business logic here.
@@ -1565,13 +1679,24 @@ class MainWindow(QMainWindow):
 
         QMessageBox.information(self, title, message)
 
-    def _target_symbol_requested(self, symbol: str) -> None:
-        self.targeted_validation_page.set_target_symbol(symbol)
-        self._apply_target_symbol()
+    def _report_targeted_session_refusal(
+        self, level: str, title: str, message: str
+    ) -> None:
+        """Surface a target command the session capability refused.
 
-    def _target_subscribe_requested(self, symbol: str) -> None:
-        self.targeted_validation_page.set_target_symbol(symbol)
-        self._sync_targeted_symbol_to_stream()
+        The capability chose both the wording *and* the severity, and this handler
+        shows the dialog and nothing else -- which is what keeps the capability
+        free of widgets.  The severity is honoured rather than reduced to one
+        call: an invalid symbol is a warning because the operator mistyped, while a
+        running Shadow session or a live feed is information because nothing is
+        wrong -- the request is simply unavailable right now.  Collapsing the two
+        would tell the operator something false.
+        """
+
+        if level == REFUSAL_INFORMATION:
+            QMessageBox.information(self, title, message)
+        else:
+            QMessageBox.warning(self, title, message)
 
     def _report_targeted_evidence_refusal(
         self, title: str, message: str
@@ -1605,44 +1730,6 @@ class MainWindow(QMainWindow):
 
         self.shell.navigate_to("research")
         self.research_page.set_active_workspace(ResearchWorkspace.TARGETED)
-
-    def _targeted_controls(self) -> TargetedControlView:
-        shadow_active = bool(
-            self.shadow_snapshot is not None and self.shadow_snapshot.active
-        )
-        return TargetedControlView(
-            strategy_enabled=not shadow_active,
-            target_enabled=not shadow_active,
-            subscribe_enabled=not shadow_active,
-            shadow_start_enabled=not shadow_active,
-            shadow_stop_enabled=shadow_active,
-            replay_enabled=True,
-            robustness_enabled=True,
-        )
-
-    def _publish_targeted_session_view(self) -> None:
-        """Project the *session* half of the targeted workspace and draw it.
-
-        This method used to be ``_publish_targeted_view`` and it also built the
-        seven-family evidence projection.  That made every caller -- a market
-        tick, a preflight refresh, a minute-status update, a Shadow start or stop
-        -- rebuild seven research evidence tables that had not changed.
-
-        The evidence half has its own owner and its own paint now, so this method
-        knows nothing about it: no result lists, no selected run ids, no active
-        tab.  Two capabilities, two paints, and neither can repaint the other.
-        """
-
-        if not hasattr(self, "targeted_validation_page"):
-            return
-        session = session_view(
-            snapshot=self.shadow_snapshot,
-            target_status=self._target_status,
-            minute_status=self._minute_status,
-            preflight=self.target_preflight_result,
-            controls=self._targeted_controls(),
-        )
-        self.targeted_validation_page.render_session(session)
 
     @staticmethod
     def _field_label(text: str) -> QLabel:
@@ -1740,11 +1827,13 @@ class MainWindow(QMainWindow):
         # restores all seven families in one call and paints the evidence exactly
         # once, and publishes nothing because re-reading local files is not new
         # research.  The window therefore neither names the seven directories nor
-        # repaints the evidence tables here.  The *session* half is still the
-        # window's, so it gets its own first paint below -- that is a session
-        # render, not an evidence render, and the two no longer share a call.
+        # repaints the evidence tables here.  The *session* half belongs to its own
+        # capability now, so its first paint is one call to that capability -- a
+        # session render, not an evidence render, and the two no longer share a
+        # call.  Startup paints it exactly once, leaves the preflight ``None`` and
+        # runs no empty-symbol evaluation: an unset target has nothing to check.
         self.targeted_evidence_orchestrator.restore_saved()
-        self._publish_targeted_session_view()
+        self.targeted_session_orchestrator.render_current()
 
     def _connect_backtest_page(self) -> None:
         """Wiring only: the page reports intent, the capability owns the work."""
@@ -3044,151 +3133,6 @@ class MainWindow(QMainWindow):
         self._publish_execution_controls()
 
 
-    def _current_target_symbol(self) -> str:
-        return self.targeted_validation_page.target_symbol()
-
-    def _apply_target_symbol(self) -> None:
-        universe = self.universe_orchestrator.snapshot
-        symbol = self._current_target_symbol()
-        if not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", symbol):
-            QMessageBox.warning(
-                self,
-                "代码无效",
-                "请输入一个有效的美股或 ETF 代码。",
-            )
-            return
-        if self.shadow_engine is not None and self.shadow_snapshot is not None:
-            if self.shadow_snapshot.active:
-                QMessageBox.information(
-                    self,
-                    "影子会话运行中",
-                    "请先停止当前影子会话，再切换指定标的。",
-                )
-                self.targeted_validation_page.set_target_symbol(
-                    self.shadow_snapshot.target_symbol
-                )
-                return
-        self.targeted_validation_page.set_target_symbol(symbol)
-        eligible = None
-        if universe is not None:
-            eligible = any(
-                row.symbol == symbol and row.eligible_for_research
-                for row in universe.records
-            )
-        if eligible is False:
-            self._target_status = (
-                f"{symbol} · 已设置，但尚未通过当前非中概研究资格门"
-            )
-        else:
-            self._target_status = f"{symbol} · 订阅、回放、评估和影子做 T 共用"
-        if not self.market_orchestrator.is_live:
-            self.market_orchestrator.set_subscription_symbols((symbol,))
-        self._refresh_minute_data_status(symbol)
-        self._refresh_target_preflight()
-        self._log(
-            f"当前指定做 T 标的已切换为 {symbol}；"
-            "没有默认代码或单一股票专用逻辑。"
-        )
-
-    def _sync_targeted_symbol_to_stream(self) -> None:
-        symbol = self._current_target_symbol()
-        if not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", symbol):
-            QMessageBox.warning(
-                self,
-                "代码无效",
-                "请输入一个有效的美股或 ETF 代码。",
-            )
-            return
-        if self.market_orchestrator.is_live:
-            QMessageBox.information(
-                self,
-                "请先停止当前行情流",
-                "停止当前行情流后，再切换本次针对性日内 T 标的。",
-            )
-            return
-        self.targeted_validation_page.set_target_symbol(symbol)
-        self.market_orchestrator.set_subscription_symbols(
-            (symbol,), note=f"针对性日内 T：{symbol}"
-        )
-        self._log(
-            f"本次针对性日内 T 标的设为 {symbol}；"
-            "启动行情后仍需通过实时性与中概排除门。"
-        )
-        self._refresh_minute_data_status(symbol)
-        self._refresh_target_preflight()
-        self.market_orchestrator.start()
-
-    def _refresh_minute_data_status(
-        self, symbol: str | None = None
-    ) -> None:
-        target = (
-            symbol or self._current_target_symbol()
-        ).strip().upper()
-        if not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", target):
-            self._minute_status = (
-                "分钟证据：输入代码后显示本地已录数据；只回放 fresh bid/ask。"
-            )
-            self._publish_targeted_session_view()
-            return
-        summary = self.minute_quote_store.summary(target)
-        providers = " / ".join(summary.providers) or "无"
-        origins = " / ".join(summary.evidence_origins) or "缺失"
-        data_range = (
-            f"{summary.first_minute} → {summary.last_minute}"
-            if summary.first_minute and summary.last_minute
-            else "尚无"
-        )
-        self._minute_status = (
-            f"分钟证据 · {target}：可用 {summary.usable_rows} / "
-            f"总计 {summary.total_rows} 行 · 来源 {providers} · "
-            f"证据类型 {origins} · 区间 {data_range}"
-        )
-        self._publish_targeted_session_view()
-
-    def _refresh_target_preflight(self, *_args: object) -> None:
-        universe = self.universe_orchestrator.snapshot
-        if not hasattr(self, "targeted_validation_page"):
-            return
-        symbol = self._current_target_symbol()
-        universe_record = next(
-            (
-                row
-                for row in universe.records
-                if row.symbol == symbol
-            ),
-            None,
-        ) if universe is not None else None
-        stream = self.market_orchestrator.snapshot
-        quote = next(
-            (
-                row
-                for row in (stream.quotes if stream is not None else ())
-                if row.symbol == symbol
-            ),
-            None,
-        )
-        account: BrokerAccountSnapshot | None = (
-            self.account_orchestrator.portfolio.account
-            if self.account_orchestrator.portfolio is not None
-            else None
-        )
-        summary = self.minute_quote_store.summary(symbol)
-        multiplier = self._configured_exposure_multipliers().get(
-            symbol, Decimal("1")
-        )
-        result = evaluate_target_preflight(
-            symbol,
-            universe_record=universe_record,
-            quote=quote,
-            account=account,
-            minute_summary=summary,
-            strategy=self._selected_shadow_strategy_record(),
-            exposure_multiplier=multiplier,
-            broker_orders_available=False,
-        )
-        self.target_preflight_result = result
-        self._publish_targeted_session_view()
-
     def _configured_exposure_multipliers(
         self,
     ) -> dict[str, Decimal]:
@@ -3285,7 +3229,7 @@ class MainWindow(QMainWindow):
         self._publish_dashboard_view()
         if self.auto_quant_snapshot is not None:
             self._render_auto_quant_snapshot()
-        self._refresh_target_preflight()
+        self.targeted_session_orchestrator.refresh_preflight()
         self._refresh_auto_quant_preflight()
 
     def _render_account_shell_health(self, view: object) -> None:
@@ -3369,19 +3313,12 @@ class MainWindow(QMainWindow):
             # window's: this asks it to re-read the catalogue rather than
             # recomputing the projection here.
             self.backtest_orchestrator.refresh_strategy_options()
-        if hasattr(self, "targeted_validation_page"):
-            purpose = StrategySelectionPurpose.TARGETED_SHADOW
-            selected = self.strategy_selection.restore_or_default(purpose)
-            self.targeted_validation_page.set_strategy_options(
-                tuple(
-                    TargetedStrategyOption(
-                        version.version_id,
-                        strategy_option_label(version),
-                    )
-                    for version in self.strategy_selection.options(purpose)
-                ),
-                selected.version_id if selected else None,
-            )
+        if hasattr(self, "targeted_session_orchestrator"):
+            # The Targeted combo's options and its selected version are the
+            # capability's to publish: it is the only production caller of the
+            # page's ``set_strategy_options``, so the page cannot be given a
+            # selection the service would refuse.
+            self.targeted_session_orchestrator.refresh_strategy_options()
         if hasattr(self, "execution_page"):
             purpose = StrategySelectionPurpose.AUTO_ROTATION
             # The combo is a view: it is refilled from the service's options and
@@ -3564,15 +3501,6 @@ class MainWindow(QMainWindow):
             version_id,
         )
 
-    def _shadow_strategy_selection_changed(self, *_args: object) -> None:
-        """Adopt the targeted page's choice as the runtime selection."""
-
-        self._record_runtime_strategy_selection(
-            StrategySelectionPurpose.TARGETED_SHADOW,
-            self.targeted_validation_page.selected_strategy_version_id(),
-        )
-        self._refresh_target_preflight()
-
     def _selected_shadow_strategy_record(
         self,
     ) -> StrategyVersion | None:
@@ -3718,9 +3646,15 @@ class MainWindow(QMainWindow):
                 message=str(error),
             )
             return
-        target = self._current_target_symbol()
+        # Fresh minute evidence for the current target means the session panel's
+        # minute line is stale.  The target is read from the session capability's
+        # snapshot -- the one canonical draft -- rather than from the editor, and
+        # the refresh is the capability's own command: minute evidence is not an
+        # evidence-routing decision, and this deliberately does not recompute the
+        # preflight.  Only the minute line moved.
+        target = self.targeted_session_orchestrator.snapshot.target_draft
         if target in symbols_to_record:
-            self._refresh_minute_data_status(target)
+            self.targeted_session_orchestrator.refresh_minute_status(target)
 
 
 
@@ -3812,7 +3746,11 @@ class MainWindow(QMainWindow):
                 "缺少已核验标的池，无法执行“不做中概股”硬过滤。",
             )
             return
-        target_symbol = self._current_target_symbol()
+        # The target is read once, from the session capability's snapshot -- the
+        # one canonical draft -- and never again from the editor.  A second read
+        # of the widget could pick up a symbol the operator typed after the gates
+        # above were checked.
+        target_symbol = self.targeted_session_orchestrator.snapshot.target_draft
         if not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", target_symbol):
             QMessageBox.warning(
                 self,
@@ -3884,7 +3822,11 @@ class MainWindow(QMainWindow):
             self.shadow_engine = None
             QMessageBox.warning(self, "内部影子仿真未启动", str(error))
             return
-        self._publish_targeted_session_view()
+        # The Shadow snapshot just changed, so the session panel is stale.  The
+        # window owns the snapshot; the capability is asked to repaint and is
+        # never handed it, which is what keeps Shadow truth out of the session
+        # snapshot.
+        self.targeted_session_orchestrator.render_current()
         self._record_runtime_event(
             severity="info",
             component="shadow_paper",
@@ -3909,7 +3851,7 @@ class MainWindow(QMainWindow):
         self.shadow_snapshot = engine.stop()
         if self.shadow_workflow.active:
             self.shadow_workflow.stop()
-        self._publish_targeted_session_view()
+        self.targeted_session_orchestrator.render_current()
         self._record_runtime_event(
             severity="info",
             component="shadow_paper",

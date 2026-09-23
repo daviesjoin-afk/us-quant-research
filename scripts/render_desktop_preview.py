@@ -293,7 +293,7 @@ def seed_targeted_minute_quotes(window) -> None:
                 ),
                 evidence_origin="synthetic_preview",
             )
-    window._refresh_minute_data_status("AAPL")
+    window.targeted_session_orchestrator.refresh_minute_status("AAPL")
 
 
 def _capture_targeted_suite(window, suffix: str) -> list[Path]:

@@ -698,9 +698,14 @@ def test_the_snapshot_bridge_still_reaches_every_declared_consumer() -> None:
         "_record_minute_snapshot",
         "_publish_dashboard_view",
         "_populate_auto_quant_candidates",
-        "_refresh_target_preflight",
+        # The targeted session's preflight is the capability's own command now
+        # (v2O-C5B); the bridge asks for the refresh rather than doing it.
+        "targeted_session_orchestrator.refresh_preflight",
         "paper_workflow.on_stream",
         "shadow_engine.on_stream",
+        # The Shadow engine produced a new snapshot, so the session panel is
+        # stale.  The window owns the snapshot and asks the capability to repaint.
+        "targeted_session_orchestrator.render_current",
     ):
         assert consumer in source, consumer
 

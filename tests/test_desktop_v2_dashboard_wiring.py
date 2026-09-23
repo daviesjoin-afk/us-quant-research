@@ -199,7 +199,9 @@ def test_stream_receive_updates_dashboard_through_the_window(window, monkeypatch
 
     monkeypatch.setattr(window, "_record_minute_snapshot", lambda snapshot: None)
     monkeypatch.setattr(window, "_populate_auto_quant_candidates", lambda: None)
-    monkeypatch.setattr(window, "_refresh_target_preflight", lambda: None)
+    monkeypatch.setattr(
+        window.targeted_session_orchestrator, "refresh_preflight", lambda: None
+    )
     window.market_orchestrator._on_snapshot(_snapshot(quotes=(_quote(),)))
     assert window.dashboard_page._intraday_market_card.value_label.text() == "可用"
 

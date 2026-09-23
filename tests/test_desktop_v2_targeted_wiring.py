@@ -144,6 +144,58 @@ class _Engine:
         return SimpleNamespace(active=False)
 
 
+def _shadow_snapshot(*, active: bool):
+    """A real Shadow snapshot, because the presenter reads every field.
+
+    A ``SimpleNamespace(active=True)`` would satisfy a rule that only reads
+    ``active``, and then pass here while the actual panel rendered nothing -- the
+    presenter is the one projection this round must not change.
+    """
+
+    from us_quant.shadow.models import ShadowSnapshot
+
+    return ShadowSnapshot(
+        session_id="session-1",
+        strategy_version_id="targeted-v1",
+        parameter_hash="hash-v1",
+        target_symbol="AAPL",
+        active=active,
+        initial_cash=Decimal("10000"),
+        capital_source="IBKR Paper DU***67 NetLiquidation",
+        cash=Decimal("10000"),
+        equity=Decimal("10000"),
+        realized_pnl=Decimal("0"),
+        daily_realized_pnl=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        positions=(),
+        fills=(),
+        trades_today=0,
+        trading_day="2026-09-22",
+        status="运行中" if active else "已停止",
+        observed_at="2026-09-22T14:00:00+00:00",
+    )
+
+
+def render_session_view(window: MainWindow):
+    """The session view the capability just painted, captured from the page.
+
+    The capability is the only session painter now and it fetches the Shadow
+    snapshot itself, so a test that wants to read the *projection* -- rather than
+    the widgets -- records the render it drives.  That keeps the assertion on the
+    projection rule instead of on "some call happened".
+    """
+
+    painted: list[object] = []
+    original = window.targeted_validation_page.render_session
+    window.targeted_validation_page.render_session = painted.append
+    try:
+        window.targeted_session_orchestrator.render_current()
+    finally:
+        window.targeted_validation_page.render_session = original
+    assert painted, "the session capability must paint"
+    return painted[-1]
+
+
 def _bundle(run_id: str, symbol: str) -> TargetedRobustnessBundle:
     """One complete suite, shaped as the service returns it.
 
@@ -330,43 +382,54 @@ def test_research_route_is_the_native_aggregate(window: MainWindow) -> None:
 def test_every_targeted_intent_reaches_its_owner(
     window: MainWindow, monkeypatch
 ) -> None:
-    """The page's intents split by owner, and each reaches the right one.
+    """The page's intents split three ways, and each reaches the right owner.
 
-    The session/Shadow intents are still the window's handlers.  The four
-    evidence intents are *not*: they reach the capability that owns the evidence,
-    which is the property v2O-C5A establishes.  Driving them through the real
-    buttons is what makes this a wiring test rather than a signal test.
+    Session intents go to ``targeted_session_orchestrator`` (v2O-C5B), evidence
+    intents to ``targeted_evidence_orchestrator`` (v2O-C5A), and the two Shadow
+    intents stay on the window -- starting and stopping the internal simulation is
+    the Shadow runtime, which is v2O-D.  Driving them through the real buttons is
+    what makes this a wiring test rather than a signal test.
     """
 
     page = window.targeted_validation_page
-    orchestrator = window.targeted_evidence_orchestrator
+    session = window.targeted_session_orchestrator
+    evidence = window.targeted_evidence_orchestrator
     seen: list[str] = []
     session_wiring = (
-        ("strategy_selected", "_shadow_strategy_selection_changed"),
-        ("target_apply_requested", "_target_symbol_requested"),
-        ("target_subscribe_requested", "_target_subscribe_requested"),
+        ("target_draft_changed", "adopt_target_draft"),
+        ("strategy_selected", "request_strategy_selection"),
+        ("target_apply_requested", "request_target_apply"),
+        ("target_subscribe_requested", "request_target_subscribe"),
+    )
+    window_wiring = (
         ("shadow_start_requested", "_start_shadow"),
         ("shadow_stop_requested", "_stop_shadow"),
     )
-    for _signal, handler in session_wiring:
-        monkeypatch.setattr(
-            window,
-            handler,
-            lambda *_args, handler=handler: seen.append(handler),
-        )
     evidence_wiring = (
         ("replay_requested", "request_replay"),
         ("robustness_requested", "request_robustness"),
         ("robustness_run_selected", "select_robustness_run"),
         ("review_run_selected", "select_review_run"),
     )
-    for _signal, method in evidence_wiring:
+    for _signal, method in session_wiring:
         monkeypatch.setattr(
-            orchestrator,
+            session,
             method,
             lambda *_args, method=method: seen.append(method),
         )
-    for signal, _handler in session_wiring + evidence_wiring:
+    for _signal, handler in window_wiring:
+        monkeypatch.setattr(
+            window,
+            handler,
+            lambda *_args, handler=handler: seen.append(handler),
+        )
+    for _signal, method in evidence_wiring:
+        monkeypatch.setattr(
+            evidence,
+            method,
+            lambda *_args, method=method: seen.append(method),
+        )
+    for signal, _ in session_wiring + window_wiring + evidence_wiring:
         getattr(page, signal).disconnect()
     window._connect_targeted_validation_page()
 
@@ -378,7 +441,7 @@ def test_every_targeted_intent_reaches_its_owner(
         "v1",
     )
     page.session_panel.controls.strategy_combo.setCurrentIndex(1)
-    page.set_target_symbol("AAPL")
+    page.session_panel.controls.target_symbol_input.setText("AAPL")
     page.session_panel.controls.target_symbol_apply_button.click()
     page.session_panel.controls.target_symbol_subscribe_button.click()
     page.session_panel.controls.render(
@@ -400,8 +463,19 @@ def test_every_targeted_intent_reaches_its_owner(
     page.review_run_selected.emit("review-1")
 
     assert seen == [
-        handler for _signal, handler in session_wiring
-    ] + [method for _signal, method in evidence_wiring]
+        # The clicked order: the combo, then typing, then the two target buttons,
+        # then the Shadow buttons, then the evidence ones.
+        "request_strategy_selection",
+        "adopt_target_draft",
+        "request_target_apply",
+        "request_target_subscribe",
+        "_start_shadow",
+        "_stop_shadow",
+        "request_replay",
+        "request_robustness",
+        "select_robustness_run",
+        "select_review_run",
+    ]
 
 
 def test_targeted_theme_switch_notifies_the_page(
@@ -420,8 +494,15 @@ def test_targeted_theme_switch_notifies_the_page(
 def test_targeted_controls_preserve_legacy_shadow_availability(
     window: MainWindow,
 ) -> None:
-    window.shadow_snapshot = SimpleNamespace(active=True)
-    controls = window._targeted_controls()
+    """The enabled-state rule is the same one; its owner moved with the session.
+
+    A running internal simulation owns the target, the strategy and the
+    subscription, so those close and only 停止内部仿真 stays live.  Replay and
+    robustness stay available.  The rule is unchanged -- only who projects it.
+    """
+
+    window.shadow_snapshot = _shadow_snapshot(active=True)
+    controls = render_session_view(window).controls
     assert controls.strategy_enabled is False
     assert controls.target_enabled is False
     assert controls.subscribe_enabled is False
@@ -473,6 +554,251 @@ def test_a_robustness_completion_asks_for_focus_and_navigates_semantically(
         "_targeted_active_evidence_tab",
     ):
         assert not hasattr(window, name), name
+
+
+# -- cross-workflow wiring ----------------------------------------------
+#
+# Three external changes reach the session capability, and one does not.  Each of
+# these drives the real bridge -- the window's own slot or the capability's own
+# signal -- so a rewiring that dropped a consumer fails here rather than in
+# production.
+
+
+def test_a_market_snapshot_refreshes_the_targeted_preflight(
+    window: MainWindow, monkeypatch
+) -> None:
+    """Market snapshot -> session preflight refresh, through the real bridge."""
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        window.targeted_session_orchestrator,
+        "refresh_preflight",
+        lambda: calls.append("preflight"),
+    )
+    monkeypatch.setattr(window, "_record_minute_snapshot", lambda _s: None)
+    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(window, "_populate_auto_quant_candidates", lambda: None)
+
+    window._on_market_snapshot_changed(
+        SimpleNamespace(
+            realtime_ready=True,
+            message="ok",
+            quotes=(),
+            source_id="test",
+            source_label="TestFeed",
+        )
+    )
+
+    assert calls == ["preflight"], calls
+
+
+def test_a_market_snapshot_repaints_the_session_when_shadow_runs(
+    window: MainWindow, monkeypatch
+) -> None:
+    """A Shadow snapshot change repaints the session -- and only the session.
+
+    The window owns the snapshot and asks the capability to repaint; the evidence
+    tables must not be touched, which is the C5A property this round preserves.
+    """
+
+    paints: list[str] = []
+    monkeypatch.setattr(
+        window.targeted_session_orchestrator,
+        "render_current",
+        lambda: paints.append("session"),
+    )
+    evidence: list[object] = []
+    monkeypatch.setattr(
+        window.targeted_validation_page,
+        "render_evidence",
+        lambda view: evidence.append(view),
+    )
+    monkeypatch.setattr(window, "_record_minute_snapshot", lambda _s: None)
+    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(window, "_populate_auto_quant_candidates", lambda: None)
+
+    class _Engine:
+        active = True
+
+        def on_stream(self, _snapshot):
+            return _shadow_snapshot(active=True)
+
+        def stop(self):
+            self.active = False
+            return _shadow_snapshot(active=False)
+
+    window.shadow_engine = _Engine()
+    window.shadow_workflow = _Workflow()
+    window.shadow_workflow.active = True
+
+    window._on_market_snapshot_changed(
+        SimpleNamespace(
+            realtime_ready=True,
+            message="ok",
+            quotes=(),
+            source_id="test",
+            source_label="TestFeed",
+        )
+    )
+
+    # Exactly two session paints, both intended: the preflight refresh paints, and
+    # then the Shadow snapshot bridge paints the new positions.  Asserting the
+    # *count* rather than "at least one" is what makes the Shadow repaint
+    # load-bearing -- with the bridge removed the preflight refresh alone would
+    # still produce one paint and a loose assertion would pass.
+    assert paints == ["session", "session"], paints
+    assert evidence == [], "a market tick must not rebuild the evidence tables"
+
+
+def test_a_market_snapshot_without_shadow_refreshes_without_the_shadow_repaint(
+    window: MainWindow, monkeypatch
+) -> None:
+    """The Shadow repaint is the *bridge's*, not the preflight's.
+
+    The mirror of the test above: with no running engine there is exactly one
+    paint, so the second one really is the Shadow bridge reacting to a new
+    snapshot rather than a second preflight refresh.
+    """
+
+    paints: list[str] = []
+    monkeypatch.setattr(
+        window.targeted_session_orchestrator,
+        "render_current",
+        lambda: paints.append("session"),
+    )
+    monkeypatch.setattr(window, "_record_minute_snapshot", lambda _s: None)
+    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(window, "_populate_auto_quant_candidates", lambda: None)
+
+    window.shadow_engine = None
+
+    window._on_market_snapshot_changed(
+        SimpleNamespace(
+            realtime_ready=True,
+            message="ok",
+            quotes=(),
+            source_id="test",
+            source_label="TestFeed",
+        )
+    )
+
+    assert paints == ["session"], paints
+
+
+def test_an_account_portfolio_change_refreshes_the_targeted_preflight(
+    window: MainWindow, monkeypatch
+) -> None:
+    """Account portfolio change -> session preflight refresh."""
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        window.targeted_session_orchestrator,
+        "refresh_preflight",
+        lambda: calls.append("preflight"),
+    )
+    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
+
+    window._on_account_portfolio_changed(SimpleNamespace(account=None))
+
+    assert calls == ["preflight"], calls
+
+
+def test_an_evidence_replay_completion_refreshes_the_minute_status(
+    window: MainWindow, monkeypatch
+) -> None:
+    """Evidence replay completion -> session minute refresh, and nothing else.
+
+    The capability's published signal is connected to the session capability's own
+    command: minute status is not an evidence fact, so it is not the evidence
+    capability's to write.
+    """
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        window.targeted_session_orchestrator,
+        "refresh_minute_status",
+        lambda symbol=None: calls.append(symbol),
+    )
+
+    window.targeted_evidence_orchestrator.minute_status_refresh_requested.emit(
+        "AAPL"
+    )
+
+    assert calls == ["AAPL"], calls
+
+
+def test_a_targeted_strategy_choice_reaches_the_selection_service(
+    window: MainWindow,
+) -> None:
+    """The page -> capability -> StrategySelectionService path, end to end.
+
+    The canonical selection stays in the service; the capability relays the id it
+    was handed and caches nothing.
+    """
+
+    from us_quant.trading.application.strategy_selection import (
+        StrategySelectionPurpose,
+    )
+
+    seen: list[tuple] = []
+    original = window.strategy_selection.select
+
+    def select(purpose, version_id):
+        seen.append((purpose, version_id))
+        return original(purpose, version_id)
+
+    window.strategy_selection.select = select  # type: ignore[method-assign]
+    try:
+        window.targeted_session_orchestrator.request_strategy_selection(
+            "does-not-exist"
+        )
+    finally:
+        window.strategy_selection.select = original  # type: ignore[method-assign]
+
+    assert seen == [
+        (StrategySelectionPurpose.TARGETED_SHADOW, "does-not-exist")
+    ], seen
+
+
+def test_the_targeted_draft_feeds_the_evidence_target_provider(
+    window: MainWindow,
+) -> None:
+    """Typing a symbol without applying it still lets Replay read it.
+
+    The evidence capability reads the session snapshot's draft through its
+    provider, so the two halves share exactly one fact and neither imports the
+    other.
+    """
+
+    window.targeted_validation_page.session_panel.controls.target_symbol_input.setText(
+        "aapl"
+    )
+    assert (
+        window.targeted_evidence_orchestrator._target_symbol_provider() == "AAPL"
+    )
+
+
+def test_a_normal_session_refresh_leaves_the_evidence_tables_alone(
+    window: MainWindow, monkeypatch
+) -> None:
+    """The C5A property, re-asserted against the new owner.
+
+    A session refresh is a session refresh: it must not repaint seven research
+    tables, which is why the two halves have separate entry points.
+    """
+
+    evidence: list[object] = []
+    monkeypatch.setattr(
+        window.targeted_validation_page,
+        "render_evidence",
+        lambda view: evidence.append(view),
+    )
+
+    window.targeted_session_orchestrator.render_current()
+
+    assert evidence == []
 
 
 # -- shadow characterization --------------------------------------------
@@ -534,7 +860,7 @@ def test_shadow_start_rejects_non_research_eligible_symbol(
             ),
         ))
     )
-    window.targeted_validation_page.set_target_symbol("AAPL")
+    window.targeted_session_orchestrator.adopt_target_draft("AAPL")
     window._start_shadow()
     assert dialogs[0][1][1] == "标的门未通过"
 
@@ -549,7 +875,7 @@ def test_shadow_start_rejects_missing_fresh_target_quote(
         _ready_stream(SimpleNamespace(symbol="AAPL", realtime_ready=False)),
     )
     window.universe_orchestrator.restore_snapshot(_eligible_universe())
-    window.targeted_validation_page.set_target_symbol("AAPL")
+    window.targeted_session_orchestrator.adopt_target_draft("AAPL")
     window._start_shadow()
     assert dialogs[0][1][1] == "目标行情未就绪"
 
@@ -562,7 +888,9 @@ def test_shadow_start_allowed_path_builds_and_starts_engine(
     monkeypatch.setattr(window.account_orchestrator, "fresh_paper_net_liquidation", lambda: Decimal("10000"))
     monkeypatch.setattr(desktop, "build_targeted_shadow_config", lambda *args, **kwargs: object())
     monkeypatch.setattr(desktop, "ShadowPaperEngine", _Engine)
-    monkeypatch.setattr(window, "_publish_targeted_session_view", lambda: None)
+    monkeypatch.setattr(
+        window.targeted_session_orchestrator, "render_current", lambda: None
+    )
     monkeypatch.setattr(window, "_record_runtime_event", lambda **kwargs: None)
     monkeypatch.setattr(window, "_log", lambda *args, **kwargs: None)
     _fake_live_market(window, _ready_stream())
@@ -571,7 +899,7 @@ def test_shadow_start_allowed_path_builds_and_starts_engine(
         account=SimpleNamespace(account_alias="Paper")
     )
     window.shadow_workflow = _Workflow()
-    window.targeted_validation_page.set_target_symbol("AAPL")
+    window.targeted_session_orchestrator.adopt_target_draft("AAPL")
     _Engine.created.clear()
 
     window._start_shadow()
@@ -589,7 +917,9 @@ def test_shadow_stop_calls_engine_and_workflow(window: MainWindow, monkeypatch) 
     workflow.active = True
     window.shadow_engine = engine
     window.shadow_workflow = workflow
-    monkeypatch.setattr(window, "_publish_targeted_session_view", lambda: None)
+    monkeypatch.setattr(
+        window.targeted_session_orchestrator, "render_current", lambda: None
+    )
     monkeypatch.setattr(window, "_record_runtime_event", lambda **kwargs: None)
 
     window._stop_shadow()

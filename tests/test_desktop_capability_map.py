@@ -178,20 +178,24 @@ def test_the_session_row_points_at_the_capability() -> None:
         assert retired not in row, retired
 
 
-def test_the_shadow_row_still_says_the_runtime_is_the_windows() -> None:
-    """Targeted Session *renders* a Shadow snapshot; it does not own the runtime.
+def test_the_shadow_row_names_its_capability_owner() -> None:
+    """v2O-D landed, so the row must name ``ShadowOrchestrator``, not the window.
 
-    Pinning this stops a later round from reading "Targeted Session is complete"
-    as "the Shadow engine moved too" -- the engine, its store and its start/stop
-    are v2O-D's, and the session capability only reaches them through a provider.
+    This guard was written the other way round while Shadow was "a later slice":
+    it asserted ``MainWindow.shadow_engine`` so a round could not claim the
+    runtime had moved when it had not.  It has moved, so the assertion inverts --
+    the row must name the capability and must no longer name a window attribute.
+    Inverting rather than deleting keeps the same protection in both directions.
     """
 
     text = _MAP.read_text(encoding="utf-8")
     row = next(
         line for line in text.splitlines() if line.startswith("| **Shadow**")
     )
-    assert "MainWindow.shadow_engine" in row
-    assert "v2O-D" in row
+    assert "ShadowOrchestrator.snapshot" in row
+    assert "v2O-D complete" in row
+    assert "MainWindow.shadow_engine" not in row
+    assert "v2O-D next" not in row
 
 
 def test_the_shared_research_capital_fact_has_an_entry() -> None:

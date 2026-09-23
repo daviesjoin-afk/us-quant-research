@@ -13,8 +13,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from us_quant import desktop
 from us_quant.desktop import MainWindow
+from us_quant.desktop_v2.orchestration.shadow import orchestrator as shadow_orchestrator_module
 from us_quant.desktop_targeted_evidence_models import (
     TargetedRobustnessBundle,
 )
@@ -386,14 +386,16 @@ def test_every_targeted_intent_reaches_its_owner(
 
     Session intents go to ``targeted_session_orchestrator`` (v2O-C5B), evidence
     intents to ``targeted_evidence_orchestrator`` (v2O-C5A), and the two Shadow
-    intents stay on the window -- starting and stopping the internal simulation is
-    the Shadow runtime, which is v2O-D.  Driving them through the real buttons is
-    what makes this a wiring test rather than a signal test.
+    intents to ``shadow_orchestrator`` (v2O-D) -- starting and stopping the
+    internal simulation is the Shadow runtime, and it has its own capability.
+    Driving them through the real buttons is what makes this a wiring test rather
+    than a signal test.
     """
 
     page = window.targeted_validation_page
     session = window.targeted_session_orchestrator
     evidence = window.targeted_evidence_orchestrator
+    shadow = window.shadow_orchestrator
     seen: list[str] = []
     session_wiring = (
         ("target_draft_changed", "adopt_target_draft"),
@@ -401,9 +403,9 @@ def test_every_targeted_intent_reaches_its_owner(
         ("target_apply_requested", "request_target_apply"),
         ("target_subscribe_requested", "request_target_subscribe"),
     )
-    window_wiring = (
-        ("shadow_start_requested", "_start_shadow"),
-        ("shadow_stop_requested", "_stop_shadow"),
+    shadow_wiring = (
+        ("shadow_start_requested", "start"),
+        ("shadow_stop_requested", "stop"),
     )
     evidence_wiring = (
         ("replay_requested", "request_replay"),
@@ -417,11 +419,11 @@ def test_every_targeted_intent_reaches_its_owner(
             method,
             lambda *_args, method=method: seen.append(method),
         )
-    for _signal, handler in window_wiring:
+    for _signal, method in shadow_wiring:
         monkeypatch.setattr(
-            window,
-            handler,
-            lambda *_args, handler=handler: seen.append(handler),
+            shadow,
+            method,
+            lambda *_args, method=method: seen.append(method),
         )
     for _signal, method in evidence_wiring:
         monkeypatch.setattr(
@@ -429,7 +431,7 @@ def test_every_targeted_intent_reaches_its_owner(
             method,
             lambda *_args, method=method: seen.append(method),
         )
-    for signal, _ in session_wiring + window_wiring + evidence_wiring:
+    for signal, _ in session_wiring + shadow_wiring + evidence_wiring:
         getattr(page, signal).disconnect()
     window._connect_targeted_validation_page()
 
@@ -469,8 +471,8 @@ def test_every_targeted_intent_reaches_its_owner(
         "adopt_target_draft",
         "request_target_apply",
         "request_target_subscribe",
-        "_start_shadow",
-        "_stop_shadow",
+        "start",
+        "stop",
         "request_replay",
         "request_robustness",
         "select_robustness_run",
@@ -501,7 +503,7 @@ def test_targeted_controls_preserve_legacy_shadow_availability(
     robustness stay available.  The rule is unchanged -- only who projects it.
     """
 
-    window.shadow_snapshot = _shadow_snapshot(active=True)
+    window.shadow_orchestrator._snapshot = _shadow_snapshot(active=True)
     controls = render_session_view(window).controls
     assert controls.strategy_enabled is False
     assert controls.target_enabled is False
@@ -597,8 +599,10 @@ def test_a_market_snapshot_repaints_the_session_when_shadow_runs(
 ) -> None:
     """A Shadow snapshot change repaints the session -- and only the session.
 
-    The window owns the snapshot and asks the capability to repaint; the evidence
-    tables must not be touched, which is the C5A property this round preserves.
+    The Shadow capability owns the snapshot and asks the session capability to
+    repaint; the evidence tables must not be touched, which is the C5A property
+    this round preserves.  The engine is injected into the orchestrator, because
+    the window no longer holds one.
     """
 
     paints: list[str] = []
@@ -627,9 +631,7 @@ def test_a_market_snapshot_repaints_the_session_when_shadow_runs(
             self.active = False
             return _shadow_snapshot(active=False)
 
-    window.shadow_engine = _Engine()
-    window.shadow_workflow = _Workflow()
-    window.shadow_workflow.active = True
+    window.shadow_orchestrator._engine = _Engine()
 
     window._on_market_snapshot_changed(
         SimpleNamespace(
@@ -670,7 +672,7 @@ def test_a_market_snapshot_without_shadow_refreshes_without_the_shadow_repaint(
     monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
     monkeypatch.setattr(window, "_populate_auto_quant_candidates", lambda: None)
 
-    window.shadow_engine = None
+    window.shadow_orchestrator._engine = None
 
     window._on_market_snapshot_changed(
         SimpleNamespace(
@@ -802,6 +804,11 @@ def test_a_normal_session_refresh_leaves_the_evidence_tables_alone(
 
 
 # -- shadow characterization --------------------------------------------
+#
+# The intents now reach ``shadow_orchestrator`` instead of a window handler, so
+# these drive the capability and assert the same operator-visible outcome.  The
+# gates themselves read the window's composed facts through the injected
+# providers, so a test still sets up the world the way it always did.
 
 
 def test_shadow_start_rejects_active_trading_runtime(
@@ -810,7 +817,7 @@ def test_shadow_start_rejects_active_trading_runtime(
     window.trading_runtime = SimpleNamespace(
         session=SimpleNamespace(active=True)
     )
-    window._start_shadow()
+    window.shadow_orchestrator.start()
     assert dialogs[0][0] == "warning"
     assert dialogs[0][1][1] == "IBKR Paper 自动量化运行中"
 
@@ -820,7 +827,7 @@ def test_shadow_start_rejects_missing_paper_capital(
 ) -> None:
     monkeypatch.setattr(window, "_selected_shadow_strategy_record", _valid_strategy)
     monkeypatch.setattr(window.account_orchestrator, "fresh_paper_net_liquidation", lambda: None)
-    window._start_shadow()
+    window.shadow_orchestrator.start()
     assert dialogs[0][1][1] == "缺少 IBKR Paper 资金真值"
 
 
@@ -839,7 +846,7 @@ def test_shadow_start_rejects_stale_market(
         "snapshot",
         property(lambda self: SimpleNamespace(realtime_ready=False, quotes=())),
     )
-    window._start_shadow()
+    window.shadow_orchestrator.start()
     assert dialogs[0][1][1] == "行情门未通过"
 
 
@@ -861,7 +868,7 @@ def test_shadow_start_rejects_non_research_eligible_symbol(
         ))
     )
     window.targeted_session_orchestrator.adopt_target_draft("AAPL")
-    window._start_shadow()
+    window.shadow_orchestrator.start()
     assert dialogs[0][1][1] == "标的门未通过"
 
 
@@ -876,18 +883,29 @@ def test_shadow_start_rejects_missing_fresh_target_quote(
     )
     window.universe_orchestrator.restore_snapshot(_eligible_universe())
     window.targeted_session_orchestrator.adopt_target_draft("AAPL")
-    window._start_shadow()
+    window.shadow_orchestrator.start()
     assert dialogs[0][1][1] == "目标行情未就绪"
 
 
 def test_shadow_start_allowed_path_builds_and_starts_engine(
     window: MainWindow, monkeypatch, dialogs
 ) -> None:
+    """The engine is built and started through the capability, and the lease held.
+
+    The constructor symbols are patched where the orchestrator imports them, not
+    in ``us_quant.desktop``: the window no longer names either one, which is the
+    ownership this round moved.
+    """
+
     strategy = _valid_strategy()
     monkeypatch.setattr(window, "_selected_shadow_strategy_record", lambda: strategy)
     monkeypatch.setattr(window.account_orchestrator, "fresh_paper_net_liquidation", lambda: Decimal("10000"))
-    monkeypatch.setattr(desktop, "build_targeted_shadow_config", lambda *args, **kwargs: object())
-    monkeypatch.setattr(desktop, "ShadowPaperEngine", _Engine)
+    monkeypatch.setattr(
+        shadow_orchestrator_module,
+        "build_targeted_shadow_config",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(shadow_orchestrator_module, "ShadowPaperEngine", _Engine)
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "render_current", lambda: None
     )
@@ -898,16 +916,17 @@ def test_shadow_start_allowed_path_builds_and_starts_engine(
     window.broker_account._portfolio = SimpleNamespace(
         account=SimpleNamespace(account_alias="Paper")
     )
-    window.shadow_workflow = _Workflow()
+    workflow = _Workflow()
+    window.shadow_orchestrator._lease = workflow  # type: ignore[assignment]
     window.targeted_session_orchestrator.adopt_target_draft("AAPL")
     _Engine.created.clear()
 
-    window._start_shadow()
+    window.shadow_orchestrator.start()
 
     assert len(_Engine.created) == 1
     assert _Engine.created[0].active is True
-    assert window.shadow_snapshot.active is True
-    assert window.shadow_workflow.active is True
+    assert window.shadow_orchestrator.snapshot.active is True
+    assert workflow.active is True
 
 
 def test_shadow_stop_calls_engine_and_workflow(window: MainWindow, monkeypatch) -> None:
@@ -915,14 +934,14 @@ def test_shadow_stop_calls_engine_and_workflow(window: MainWindow, monkeypatch) 
     engine = SimpleNamespace(active=True, stop=lambda: stopped)
     workflow = _Workflow()
     workflow.active = True
-    window.shadow_engine = engine
-    window.shadow_workflow = workflow
+    window.shadow_orchestrator._engine = engine  # type: ignore[assignment]
+    window.shadow_orchestrator._lease = workflow  # type: ignore[assignment]
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "render_current", lambda: None
     )
     monkeypatch.setattr(window, "_record_runtime_event", lambda **kwargs: None)
 
-    window._stop_shadow()
+    window.shadow_orchestrator.stop()
 
-    assert window.shadow_snapshot is stopped
+    assert window.shadow_orchestrator.snapshot is stopped
     assert workflow.active is False

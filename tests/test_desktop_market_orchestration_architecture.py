@@ -702,10 +702,11 @@ def test_the_snapshot_bridge_still_reaches_every_declared_consumer() -> None:
         # (v2O-C5B); the bridge asks for the refresh rather than doing it.
         "targeted_session_orchestrator.refresh_preflight",
         "paper_workflow.on_stream",
-        "shadow_engine.on_stream",
-        # The Shadow engine produced a new snapshot, so the session panel is
-        # stale.  The window owns the snapshot and asks the capability to repaint.
-        "targeted_session_orchestrator.render_current",
+        # v2O-D: the internal simulation consumes the same fact, but the engine
+        # is no longer the window's.  The bridge hands the snapshot to the
+        # capability, which feeds its own engine and repaints its own session
+        # panel -- a no-op when nothing runs.
+        "shadow_orchestrator.on_market_snapshot",
     ):
         assert consumer in source, consumer
 
@@ -779,7 +780,7 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
         for path in (_SRC / "desktop_v2" / "orchestration").iterdir()
         if path.is_dir() and path.name != "__pycache__"
     }
-    assert children == {"market", "account", "research"}, children
+    assert children == {"market", "account", "research", "shadow"}, children
 
     # The route aggregate must stay an aggregate: a capability-level
     # orchestrator at its root is the God object in a new costume.

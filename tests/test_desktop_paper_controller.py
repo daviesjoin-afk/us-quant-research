@@ -34,9 +34,25 @@ def test_manual_resume_cannot_resubmit_pending_orders() -> None:
 
 
 def test_shadow_uses_the_shared_lease_and_releases_it_on_stop() -> None:
-    assert "self.shadow_workflow.start()" in _source("_start_shadow")
-    assert "self.shadow_workflow.stop()" in _source("_stop_shadow")
-    assert "self.shadow_workflow.stop()" in _source("closeEvent")
+    """The lease is still shared with Paper; its holder moved in v2O-D.
+
+    ``ShadowOrchestrator`` acquires and releases the same ``ExecutionLeaseManager``
+    handle ``WorkflowController`` gives to the Paper workflow, so "Shadow and
+    Paper cannot both hold execution" stays structural.  The close-time release is
+    the capability's own quieter ``shutdown`` path, which publishes nothing.
+    """
+
+    from us_quant.desktop_v2.orchestration.shadow import ShadowOrchestrator
+
+    start = inspect.getsource(ShadowOrchestrator.start)
+    stop = inspect.getsource(ShadowOrchestrator.stop)
+    shutdown = inspect.getsource(ShadowOrchestrator.shutdown)
+    assert "self._lease.start()" in start
+    assert "self._lease.stop()" in stop
+    assert "self._lease.stop()" in shutdown
+    # And the window hands over the shared handle rather than composing its own.
+    desktop_source = inspect.getsource(MainWindow)
+    assert "lease=self.shadow_workflow" in desktop_source
 
 
 def test_close_blocks_unfinalized_paper_before_any_disconnect() -> None:

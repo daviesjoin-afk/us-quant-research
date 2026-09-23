@@ -299,7 +299,9 @@ def test_a_successful_refresh_renders_the_page_and_appends_once(
     monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
     monkeypatch.setattr(window, "_log", lambda _message: None)
     monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
-    monkeypatch.setattr(window, "_refresh_target_preflight", lambda: None)
+    monkeypatch.setattr(
+        window.targeted_session_orchestrator, "refresh_preflight", lambda: None
+    )
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
     monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
 
@@ -316,7 +318,9 @@ def test_a_successful_refresh_sets_the_account_badge(window, monkeypatch) -> Non
     monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
     monkeypatch.setattr(window, "_log", lambda _message: None)
     monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
-    monkeypatch.setattr(window, "_refresh_target_preflight", lambda: None)
+    monkeypatch.setattr(
+        window.targeted_session_orchestrator, "refresh_preflight", lambda: None
+    )
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
     monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
 
@@ -340,7 +344,9 @@ def test_a_successful_refresh_fans_out_to_the_preflights(
         window, "_refresh_auto_quant_preflight", lambda: calls.append("auto")
     )
     monkeypatch.setattr(
-        window, "_refresh_target_preflight", lambda: calls.append("target")
+        window.targeted_session_orchestrator,
+        "refresh_preflight",
+        lambda: calls.append("target"),
     )
 
     window.account_orchestrator._refresh_succeeded(_portfolio())
@@ -352,7 +358,9 @@ def test_a_wrong_result_type_is_refused(window, monkeypatch) -> None:
     monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
     monkeypatch.setattr(window, "_log", lambda _message: None)
     monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
-    monkeypatch.setattr(window, "_refresh_target_preflight", lambda: None)
+    monkeypatch.setattr(
+        window.targeted_session_orchestrator, "refresh_preflight", lambda: None
+    )
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
     monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
 
@@ -371,7 +379,9 @@ def test_a_successful_refresh_does_not_touch_the_market_badge(
     monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
     monkeypatch.setattr(window, "_log", lambda _message: None)
     monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
-    monkeypatch.setattr(window, "_refresh_target_preflight", lambda: None)
+    monkeypatch.setattr(
+        window.targeted_session_orchestrator, "refresh_preflight", lambda: None
+    )
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
     monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
 

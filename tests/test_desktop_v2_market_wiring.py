@@ -258,18 +258,19 @@ def test_load_watchlist_is_refused_while_a_stream_runs() -> None:
 def test_the_targeted_symbol_path_writes_the_page_field(monkeypatch) -> None:
     """A targeted session subscribes one symbol, through the orchestrator.
 
-    ``_sync_targeted_symbol_to_stream`` finishes by starting the stream, which
-    fails closed without a credential; the message box is recorded so the test
-    observes the write rather than blocking on a dialog.
+    The subscribe command finishes by requesting the stream, which fails closed
+    without a credential; the message box is recorded so the test observes the
+    write rather than blocking on a dialog.  The command is the session
+    capability's (v2O-C5B): the window no longer has a targeted subscribe path,
+    and the symbol arrives as the command's argument.
     """
 
     window = _window()
     try:
         _capture_messages(monkeypatch)
         window.market_page.set_subscription_symbols(("AAPL", "MSFT"))
-        window.targeted_validation_page.set_target_symbol("NVDA")
 
-        window._sync_targeted_symbol_to_stream()
+        window.targeted_session_orchestrator.request_target_subscribe("NVDA")
 
         assert window.market_page.subscription_symbols() == ("NVDA",)
         assert window.market_page.watchlist_card.note_label.text() == (

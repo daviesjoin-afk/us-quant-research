@@ -142,7 +142,7 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | History Orchestration | MIGRATED（v2O-C1，`desktop_v2/orchestration/research/history/`） |
 | Scanner Orchestration | MIGRATED（v2O-C2，`desktop_v2/orchestration/research/scanner/`） |
 | Backtest Orchestration | MIGRATED（v2O-C3，`desktop_v2/orchestration/research/backtest/`） |
-| Research Orchestration | **IN PROGRESS**（v2O-C；Universe / History / Scanner / Backtest 已完成，Cross-Section / Targeted 未迁） |
+| Research Orchestration | **COMPLETE**（v2O-C；Universe / History / Scanner / Backtest / Cross-Section / Targeted Evidence / Targeted Session 全部已迁） |
 
 Shadow 子系统：
 
@@ -1805,12 +1805,67 @@ capability import `StrategySelectionService` / `TaskThread` /
 service、admission 被拒后 busy 保持 True、failure 清空 last-good runs、success
 不选第一条 run、catalogue refresh 不更新 Backtest options。
 
-**v2O-C1 Universe + History + v2O-C2 Scanner + v2O-C3 Backtest ✅**；顶层路线仍为
-**v2O-C Research in progress**，Cross-Section / Targeted 待续。下一刀写
-**v2O-C4 Cross Section**（须先明确 `research capital` ownership），不得标整个
-Research 完成。
+**v2O-C1 Universe + History + v2O-C2 Scanner + v2O-C3 Backtest ✅**；
+**v2O-C4 Cross Section ✅**；**v2O-C5A Targeted Evidence ✅**；
+**v2O-C5B Targeted Session + Preflight ✅** —— 顶层路线现在是
+**v2O-C Research COMPLETE**。下一刀是 **v2O-D Shadow orchestration**。
 
-维护导航见 `docs/DESKTOP_CAPABILITY_MAP.md`。
+维护导航见 `docs/DESKTOP_CAPABILITY_MAP.md`；C5B 的设计依据见
+`DESKTOP_DECOMPOSITION.md` §25，本文的 §8.16 只记该轮改变了哪些 boundary。
+
+### 8.16 targeted session + preflight orchestration 已抽出（v2O-C5B）
+
+```text
+desktop_v2/orchestration/research/targeted/session/
+    __init__.py      命名理由与完整规则集
+    models.py        TargetedSessionSnapshot + 默认文本 + refusal severity + 文案
+    queries.py       纯规则：normalize / symbol 门 / Universe 与 quote 查找 /
+                     两条 status 文本 / controls 投影
+    orchestrator.py  命令、顺序、refresh、render owner
+desktop_targeted_session_service.py   Qt-free：MinuteQuoteStore + preflight evaluator
+```
+
+canonical truth 是 `TargetedSessionOrchestrator.snapshot`（immutable）。它**公开**
+是因为有两个真实消费者：Targeted Evidence 需要 draft 作为 Replay/Robustness 的
+symbol，Shadow start 需要 target。**不**提供四个独立 accessor。
+
+**它不拥有 Shadow。** `shadow_snapshot_provider` 让它在 `render_current()` 里每次
+绘制时读取快照；`shadow_engine` / `shadow_snapshot` / `_start_shadow` /
+`_stop_shadow` / `ShadowPaperStore` / `ShadowWorkflow` 全部仍在 `MainWindow`，属
+v2O-D。因此名字是 `TargetedSessionOrchestrator`，不是
+`ShadowSessionOrchestrator` —— 这里的 session 指 Targeted 工作区的呈现会话。
+
+**依赖全部是 Callable / immutable domain fact**：universe、market snapshot、
+account、strategy selection、exposure multipliers、Shadow snapshot 六个 provider，
+加两条极窄的 Market 命令（`set_subscription_symbols`、`start`）。它不 import 任何
+orchestrator，也不能 poll / stop / switch market 或选择 provider。
+
+**Timing 契约**（继承且被测试钉住）：
+
+```text
+draft signal       → 只记录 draft（每个字符一次赋值，零 fan-out）
+refresh_minute     → 不重算 preflight
+refresh_preflight  → 不跑 evidence
+preflight          → derived fact；只有 evaluator 返回才 commit；
+                     失败继续传播（不吞异常，不 repaint 过期 verdict）
+```
+
+**错误契约（继承，不是新策略）**：`refresh_preflight()` 里**没有** try/except。
+base 的 `_refresh_target_preflight()` 也没有 —— 任何 Universe / Market / Account /
+provider / store / evaluator 异常原本都会显式暴露。在 capability 里加
+`except Exception: return` 会静默吞掉全部失败，让操作员把过期 verdict 继续当成当前
+的读，而它携带的 Paper account freshness / 行情 freshness / whole-share gate 恰恰是
+刷新失败后绝不能看起来仍然有效的那几个。吸收异常属于 composition / error boundary。
+
+**Safety 语义**（逐字保持）：invalid symbol = warning；active Shadow 时拒绝切
+target（page 与 canonical draft 同时回到引擎实际在做的 symbol）；Market live 时拒绝
+subscribe；apply 只预置 subscription 不启动行情；subscribe 的 preflight 早于
+market start。`broker_orders_available` 在 service 里硬编码 `False` 且不是参数。
+
+`render_session` 现在与 `render_evidence` 一样只有一个 production caller
+（各自的 capability）；`MainWindow` 不再画 Targeted 页面的任何一半。MainWindow
+退休了 `_target_status` / `_minute_status` / `target_preflight_result` 三个状态和
+十个 handler，且不留任何 compatibility property。
 
 ## 9. 已删除的旧架构
 
@@ -2691,8 +2746,28 @@ loading 归 `DesktopMarketScanService`；AutoQuant preparation **仍然直接**
 busy 三个属性与 8 个 handler 已迁入
 `desktop_v2/orchestration/research/backtest/`，纯规则（option 顺序、版本选择、
 draft → request）归 Qt-free 的 `queries.py`，窗口只保留 composition 与
-refusal dialog bridge。`v2O-C Research orchestration` 整体仍是 **IN PROGRESS**
-（Cross-Section / Targeted 待续）。
+refusal dialog bridge。**v2O-C4 Cross Section orchestration 已完成**，Cross-Section
+的 report truth / run request / page render 迁入
+`desktop_v2/orchestration/research/cross_section/`，Research Scenario Capital 单
+owner 化。**v2O-C5A Targeted Evidence orchestration 已完成**，Targeted 工作区的
+研究证据runtime（七类 result + 两个 selection + 两个请求 + evidence render）迁入
+`desktop_v2/orchestration/research/targeted/evidence/`。**v2O-C5B Targeted Session + Preflight orchestration 已完成**（§8.16），session 一半
+（target draft / target status / minute status / preflight / session render）迁入
+`desktop_v2/orchestration/research/targeted/session/`。设计依据见
+`DESKTOP_DECOMPOSITION.md` §25。
+
+**`v2O-C Research orchestration` 整体 COMPLETE**：Universe、History、Scanner、
+Backtest、Cross-Section、Targeted Evidence、Targeted Session 各自拥有 canonical
+truth，`MainWindow` 不再持有任何 Research capability state，且没有引入
+`ResearchOrchestrator` / `ResearchManager` / `ResearchContext`。
+
+**Research closure does not own execution authority.** 特别地：
+`TargetPreflightResult.shadow_ready` **不等于**券商订单授权 —— 它只表示内部 Shadow
+仿真的就绪状态，而 preflight 的 `broker_orders_available` 在
+`DesktopTargetedSessionService` 内硬编码为 `False`。未来真金实盘需要独立的 Risk
+Kernel，那是更高信任层，本轮不提前做，也不把 preflight 重命名成
+`RiskDecision` / `ExecutionDecision` / `TradeApproval`。
+
 阶段 2 剩余：
 
 ```text
@@ -2702,8 +2777,7 @@ Desktop Dashboard v2
 后续 orchestration 抽取：
 
 ```text
-v2O-C Research orchestration    （🔄 IN PROGRESS，Universe + History + Scanner
-                                   + Backtest 已完成）
+v2O-C Research orchestration    ✅ COMPLETE（C1–C5B 全部完成）
 v2O-D Shadow orchestration
 v2O-E Paper orchestration
 v2O-F System orchestration

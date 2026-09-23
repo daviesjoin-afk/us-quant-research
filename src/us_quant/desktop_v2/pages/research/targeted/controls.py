@@ -24,6 +24,13 @@ class TargetedControls(QWidget):
     """The strategy, target, Shadow and evidence controls."""
 
     strategy_selected = Signal(str)
+    #: The operator's *current target input*, normalized, one emission per edit.
+    #:
+    #: Not a request: typing a symbol is not applying it, and this signal exists
+    #: only so the session capability can record what the operator has typed --
+    #: which is what Replay and Robustness read even before 应用标的 is clicked.
+    #: A receiver must not run anything on it; one keystroke is one assignment.
+    target_draft_changed = Signal(str)
     target_apply_requested = Signal(str)
     target_subscribe_requested = Signal(str)
     shadow_start_requested = Signal()
@@ -55,6 +62,7 @@ class TargetedControls(QWidget):
         self.target_symbol_input.setMaxLength(10)
         self.target_symbol_input.setMinimumWidth(220)
         self.target_symbol_input.setClearButtonEnabled(True)
+        self.target_symbol_input.textChanged.connect(self._target_text_changed)
         self.target_symbol_input.returnPressed.connect(self._apply_target)
         self.target_symbol_apply_button = QPushButton("应用标的")
         self.target_symbol_apply_button.clicked.connect(self._apply_target)
@@ -115,6 +123,18 @@ class TargetedControls(QWidget):
         if version_id:
             self.strategy_selected.emit(version_id)
 
+    def _target_text_changed(self, text: str) -> None:
+        """Publish the operator's target input, normalized, and nothing else.
+
+        The normalization is the display rule -- strip the edges, upper-case the
+        rest -- applied to every edit so the draft a receiver records matches what
+        the field shows.  Emitting unconditionally (including for the empty string,
+        which clears the draft) keeps the receiver's state equal to the widget's
+        rather than only ever moving forward.
+        """
+
+        self.target_draft_changed.emit(text.strip().upper())
+
     def _apply_target(self) -> None:
         symbol = self.target_symbol()
         if symbol:
@@ -169,7 +189,21 @@ class TargetedControls(QWidget):
         return self.target_symbol_input.text().strip().upper()
 
     def set_target_symbol(self, symbol: str) -> None:
-        self.target_symbol_input.setText(symbol.strip().upper())
+        """Show ``symbol``, without publishing a draft.
+
+        Programmatic, so the edit signal is blocked: the session capability sets
+        the field *because* it already committed the same value, and letting
+        ``textChanged`` fire would call straight back into it as if the operator
+        had typed -- an orchestrator -> page -> orchestrator loop, and one that
+        would rewrite the canonical draft from the widget it just told what to
+        display.
+        """
+
+        blocked = self.target_symbol_input.blockSignals(True)
+        try:
+            self.target_symbol_input.setText(symbol.strip().upper())
+        finally:
+            self.target_symbol_input.blockSignals(blocked)
 
     def set_target_status(self, text: str) -> None:
         self.target_symbol_status.setText(text)

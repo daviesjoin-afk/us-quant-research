@@ -295,7 +295,9 @@ def test_targeted_replay_reads_the_updated_canonical_capital(
 
     window.cross_section_page.capital_changed.emit(4200)
     window.universe_orchestrator.restore_snapshot(_universe())
-    window.targeted_validation_page.set_target_symbol("AAPL")
+    window.targeted_validation_page.session_panel.controls.target_symbol_input.setText(
+        "AAPL"
+    )
     seen: dict[str, object] = {}
 
     class Strategy:
@@ -356,7 +358,9 @@ def test_targeted_robustness_reads_the_updated_canonical_capital(
 
     window.cross_section_page.capital_changed.emit(5100)
     window.universe_orchestrator.restore_snapshot(_universe())
-    window.targeted_validation_page.set_target_symbol("AAPL")
+    window.targeted_validation_page.session_panel.controls.target_symbol_input.setText(
+        "AAPL"
+    )
     seen: dict[str, object] = {}
 
     class Strategy:

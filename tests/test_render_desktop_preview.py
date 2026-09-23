@@ -15,10 +15,14 @@ paired with the positive assertion that keeps it non-vacuous: a test that only
 banned a spelling would also pass against an empty script.
 
 The bans are deliberately a named list rather than "every ``window._*``".
-Two private dependencies are still legitimate here -- ``_populate_auto_quant_
-candidates`` (AutoQuant preparation, v2O-E) and ``_refresh_minute_data_status``
-(Targeted orchestration, v2O-C5) -- and a blanket rule would block the next two
-migrations instead of protecting the boundaries this one repaired.
+One private dependency is still legitimate here -- ``_populate_auto_quant_
+candidates`` (AutoQuant preparation, v2O-E) -- and a blanket rule would block the
+next migration instead of protecting the boundaries these rounds repaired.
+
+Targeted is no longer one of these: v2O-C5B moved the session half's refresh
+behind the capability, so the script now names
+``targeted_session_orchestrator.refresh_minute_status`` -- a public command on the
+object that owns the minute status -- rather than a window handler.
 """
 
 from __future__ import annotations

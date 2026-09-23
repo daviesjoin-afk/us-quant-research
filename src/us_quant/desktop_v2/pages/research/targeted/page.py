@@ -36,6 +36,7 @@ class TargetedValidationPage(QWidget):
     """Renders the targeted workspace and emits operator intent."""
 
     strategy_selected = Signal(str)
+    target_draft_changed = Signal(str)
     target_apply_requested = Signal(str)
     target_subscribe_requested = Signal(str)
     shadow_start_requested = Signal()
@@ -114,6 +115,7 @@ class TargetedValidationPage(QWidget):
     def _connect_controls(self) -> None:
         controls = self.session_panel.controls
         controls.strategy_selected.connect(self.strategy_selected.emit)
+        controls.target_draft_changed.connect(self.target_draft_changed.emit)
         controls.target_apply_requested.connect(self.target_apply_requested.emit)
         controls.target_subscribe_requested.connect(self.target_subscribe_requested.emit)
         controls.shadow_start_requested.connect(self.shadow_start_requested.emit)

@@ -2499,30 +2499,27 @@ C1–C3 的三次迁移各自退休了一批 `MainWindow` widget 属性与 priva
 code。`desktop.py` 本轮 **0 行改动**：目标正是让 tooling 适配已经存在的正确边界。
 
 留作 bridge（对应 capability 尚未轮到，不提前拆）：`_populate_auto_quant_candidates`
-（Execution/Paper → v2O-E）、`_refresh_minute_data_status`（Targeted session →
-v2O-C5B）。
+（Execution/Paper → v2O-E）。`_refresh_minute_data_status` 已在 v2O-C5B 退休，见 §25。
 
 ownership、roadmap 与 capability map 均未改变；preview 的 fixture 数据、Scanner 候选
 选择算法、Targeted 研究算法与 Execution/Paper 状态机全部冻结。下一刀当时仍是
 **v2O-C4 Cross Section**（已完成，见 §21）。
 
-## 23. 路线状态（v2O-C5A 之后）
+## 23. 路线状态（v2O-C 收口后）
 
 ```text
 v2O-A Market        ✅
 v2O-B Account       ✅
 
-v2O-C Research      IN PROGRESS
-  C1 Universe       ✅
-  C1 History        ✅
-  C2 Scanner        ✅
-  C3 Backtest       ✅
-  Preview repair    ✅
-  C4 Cross Section  ✅   （含 Research Scenario Capital 单 owner 化）
+v2O-C Research      COMPLETE
+  C1 Universe + History   ✅
+  C2 Scanner              ✅
+  C3 Backtest             ✅
+  C4 Cross Section        ✅   （含 Research Scenario Capital 单 owner 化）
   C5A Targeted Evidence   ✅
-  C5B Targeted Session + Preflight   ← 下一刀
-  Research closure
+  C5B Targeted Session + Preflight   ✅
 
+NEXT:
 v2O-D Shadow
 v2O-E Paper
 v2O-F System
@@ -2538,14 +2535,30 @@ owner，拼接期间不存在两套资金真值。
 C5 本身又拆成两刀，因为 Targeted 实际混着三类互不相关的东西：
 
 ```text
-A. Evidence research      → C5A（本轮）  TargetedEvidenceOrchestrator
-B. Target session/preflight → C5B
-C. Shadow runtime         → v2O-D
+A. Evidence research      → C5A  TargetedEvidenceOrchestrator
+B. Target session/preflight → C5B  TargetedSessionOrchestrator
+C. Shadow runtime         → v2O-D（仍未迁）
 ```
 
-全部塞进一个 `TargetedOrchestrator` 会直接制造一个新的 MainWindow，所以本轮明确
+全部塞进一个 `TargetedOrchestrator` 会直接制造一个新的 MainWindow，所以两轮都明确
 禁止创建 `targeted/orchestrator.py`、`TargetedOrchestrator`、`TargetedContext`、
-`TargetedState`、`TargetedServices`（见 §24）。
+`TargetedState`、`TargetedServices`（见 §24、§25）。
+
+**Research 收口条件**（§25.8）：下表的每一行都有自己的 owner，且 `MainWindow` 不再
+持有任何 Research capability state。Shadow state 不算 Research state。
+
+```text
+Universe truth        → UniverseOrchestrator
+History truth         → HistoryOrchestrator / DesktopHistoryService
+Scanner truth         → ScannerOrchestrator
+Backtest truth        → BacktestOrchestrator
+Cross Section truth   → CrossSectionOrchestrator
+Research Capital      → ResearchScenarioCapitalState
+Targeted Evidence     → TargetedEvidenceOrchestrator
+Targeted Session      → TargetedSessionOrchestrator
+```
+
+没有 `ResearchOrchestrator`、`ResearchManager`、`ResearchContext`。
 
 ## 24. v2O-C5A：Targeted Evidence 提取
 
@@ -2690,7 +2703,7 @@ capability 不 import `DesktopShellV2` / `ResearchPage` / `ResearchWorkspace`。
 
 ```python
 self.targeted_evidence_orchestrator.restore_saved()   # 一次读全部七类
-self._publish_targeted_session_view()                 # session 自己的首绘
+self.targeted_session_orchestrator.render_current()   # session 自己的首绘
 ```
 
 evidence 恰好绘制一次（constructor 不绘制）；startup **不**自动选 latest
@@ -2707,6 +2720,348 @@ PBO/DSR、Newey-West、walk-forward partitions）全部未改。
 
 Shadow（engine / start-stop / stream ingestion）完全冻结，本轮不 import、
 不迁移，属 v2O-D。Target symbol、minute-status、preflight、strategy-selection
-的 ownership 属 C5B，本轮不动。
+的 ownership 属 C5B（见 §25）。
+
+## 25. v2O-C5B：Targeted Session + Preflight 提取
+
+### 25.1 为什么这一刀不能顺手把 Shadow 一起迁
+
+C5B 的页面确实显示 Shadow 的 cards / positions / fills，但**显示**不是**拥有**。
+三类问题在这一刀之后必须保持分离：
+
+```text
+TargetedEvidenceOrchestrator  研究证据：这套策略有什么证据？
+TargetedSessionOrchestrator   会话/准入：当前 target 能不能启动内部仿真？
+MainWindow（未来 ShadowOrchestrator）  Shadow runtime：仿真实际在跑什么？
+```
+
+所以 `TargetedSessionOrchestrator` 的构造参数里有
+`shadow_snapshot_provider`，但没有 `shadow_engine`；它在 `render_current()` 里
+**每次绘制时读取**快照，从不保存。`_start_shadow` / `_stop_shadow` /
+`shadow_engine` / `shadow_snapshot` / `shadow_store` / `ShadowWorkflow` 全部留在
+`MainWindow`，属 v2O-D。architecture test 反向锁定：
+`TargetedSessionSnapshot` 的字段集恰好是
+`{target_draft, target_status, minute_status, preflight}`，且 capability 的源码里
+不出现 `shadow_engine` / `set_shadow_snapshot`。
+
+名字也据此选定：**不是** `ShadowSessionOrchestrator`，因为它不拥有 Shadow
+session；这里的 session 指 Targeted 工作区的**呈现会话**。
+
+### 25.2 canonical truth 与为什么 snapshot 公开
+
+```python
+@dataclass(frozen=True, slots=True)
+class TargetedSessionSnapshot:
+    target_draft: str = ""
+    target_status: str = "未指定"
+    minute_status: str = DEFAULT_MINUTE_STATUS
+    preflight: TargetPreflightResult | None = None
+```
+
+canonical Desktop truth 是 `TargetedSessionOrchestrator._snapshot`，公开为
+`snapshot` property。本刀有两个**真实**外部消费者：
+
+```text
+Targeted Evidence  → 需要当前 target draft（作为 Replay/Robustness 的 symbol）
+Shadow start       → 需要当前 target
+```
+
+因此允许一个 immutable snapshot。**禁止**四个独立 accessor
+（`target_draft()` / `target_status()` / `minute_status()` / `preflight()`）：
+四次读取就是四次机会读在不同时刻并互相矛盾。architecture test 断言这四个名字
+都不作为方法存在，且 `snapshot` 是 property。
+
+`broker_orders_available` 在 service 里硬编码为 `False` 且不是参数：
+Research Targeted 没有券商下单通路。`TargetPreflightResult.shadow_ready` 只表示
+**内部影子仿真就绪**，不等于任何券商订单授权（见 `TRADING_ARCHITECTURE_V2.md`）。
+
+### 25.3 target_draft 的语义
+
+不叫 `applied_target` / `active_target` / `trading_target`。当前 UI 行为是：
+
+```text
+用户输入 AAPL（还没点“应用标的”）
+→ Replay / Robustness 已经会读到 AAPL
+```
+
+这是 **target draft / 当前归一化输入**，不是已通过 preflight 的 target。C5A 的
+Evidence target provider 因此从 `page.target_symbol` 改为：
+
+```python
+lambda: self.targeted_session_orchestrator.snapshot.target_draft
+```
+
+后半句同样重要：只输入代码、没点 Apply，Replay / Robustness 仍然能读到它 ——
+这是既有行为，本轮保持。
+
+### 25.4 draft signal 的边界
+
+`TargetedControls` / `TargetedValidationPage` 新增 presentation intent：
+
+```python
+target_draft_changed = Signal(str)     # QLineEdit.textChanged → strip + upper
+```
+
+它**只能**接 `adopt_target_draft`，做一次赋值。禁止触发 preflight / 读 minute
+store / 改 Market subscription / 启动 Market / 写 runtime event / 跑 Evidence /
+重绘整页 —— 打一个字母不能触发业务 fan-out。wiring guard 断言这个 signal 的
+receiver 列表恰好是 `["session.adopt_target_draft"]`。
+
+`set_target_symbol(...)` 必须是 silent：`blockSignals(True)` + `try/finally`，
+否则形成 orchestrator → page → orchestrator 回环，并且会让 widget 反向覆盖它刚
+被告知要显示的 canonical draft。
+
+### 25.5 Apply 与 Subscribe 的顺序（冻结）
+
+`request_target_apply(symbol)`：
+
+```text
+1. normalize（strip + upper）
+2. regex 校验，anchor 两端：r"[A-Z][A-Z0-9.-]{0,9}"
+   不合法 → REFUSAL_WARNING，不改任何状态
+3. 读当前 ShadowSnapshot
+4. Shadow active 且要换标的：
+     REFUSAL_INFORMATION + 「请先停止当前影子会话」
+     page 恢复为 shadow.target_symbol
+     canonical draft 同步恢复为同一 symbol
+     return（不写 subscription，不跑 preflight，不 log）
+5. commit draft
+6. page 静默反映 normalized symbol
+7. 由当前 Universe 计算 target status
+8. Market 未 live 时预置 subscription=(symbol,)；**不启动** Market
+9. refresh minute status
+10. refresh preflight
+11. log「当前指定做 T 标的已切换为 ...」
+```
+
+`request_target_subscribe(symbol)`：
+
+```text
+1. normalize + regex，不合法 → REFUSAL_WARNING
+2. Market 已 live → REFUSAL_INFORMATION，return
+3. canonical draft = symbol；page 静默反映
+4. Market subscription = (symbol,)，note="针对性日内 T：{symbol}"
+5. log 既有文案
+6. refresh minute status
+7. refresh preflight          ← 必须在 start 之前
+8. request Market start
+```
+
+四条 safety 语义逐字保持：
+
+```text
+active Shadow → 拒绝切换标的（page 与 canonical draft 都回到引擎真正在做的）
+Market live   → 拒绝改 subscription
+apply         → 只预置 subscription，不启动行情
+subscribe     → preflight 先于 market start
+```
+
+Subscribe 不重算 target status：订阅一个 symbol 从来没有改变 Universe 对它的
+判断，只有「应用标的」会。step 7 之后第一份 market snapshot 会再次 refresh
+preflight，所以面板会自己追上。
+
+### 25.6 三类外部变化如何进入 Session
+
+```text
+Market snapshot    → refresh_preflight
+Account portfolio  → refresh_preflight
+Evidence replay 完成（minute_status_refresh_requested）
+                   → refresh_minute_status
+Shadow snapshot 变化 → render_current（只重绘）
+Market subscription / start → 两条极窄的注入命令
+```
+
+`refresh_minute_status()` **不**自动重算 preflight，`refresh_preflight()` 也**不**
+跑 Evidence。每个变化只刷新它真正影响的东西；架构守卫禁止
+`refresh_all` / `refresh_session` 这类聚合方法。
+
+Universe `snapshot_changed` 当前**并不**直接 refresh Targeted preflight，本轮不因为
+「看起来应该」而新增 —— extraction ≠ product behavior redesign，记作未来产品决策。
+
+### 25.7 Preflight 与 render 的边界
+
+`refresh_preflight()` 每次读取**当前**的：target draft、Universe snapshot、
+Market snapshot、Broker Account truth、MinuteQuote summary、选中的
+StrategyVersion、exposure multiplier，然后交给
+`DesktopTargetedSessionService.evaluate_preflight()`。quote lookup **没有 fallback**
+（不换 symbol、不用 Scanner 价、不用 broker mark）：没有 quote 就让 gate 失败。
+
+资金链路保持 Decimal → Decimal：
+
+```text
+account.net_liquidation    → Decimal，不 float()
+exposure_multiplier        → Decimal，不 float()
+```
+
+Paper account gate 用 `BrokerAccountApplication.portfolio.account`（券商真值），
+**不**使用 `ResearchScenarioCapital`。两者语义严格分离：
+
+```text
+Targeted Evidence Replay/Robustness → ResearchScenarioCapital（研究情景资金）
+Targeted Preflight whole-share 容量 → fresh Paper account truth（券商真值）
+```
+
+Preflight 是 **derived fact**：只有 evaluator 返回了才 commit。失败时**异常继续传播**
+（fail loudly），`snapshot.preflight` 保持不动且**不 repaint** —— 面板继续显示上一次
+verdict，同时 caller / log / 任何 runtime-event 边界都能看到这次刷新失败了。
+
+这一条是**继承**而非新选择：base 的 `_refresh_target_preflight()` 没有 try/except，
+任何 Universe / Market / Account / provider / store / evaluator 异常都会显式暴露。
+在 capability 里写 `except Exception: return` 不是 extraction，而是错误语义变化，而且
+是更危险的那种：操作员会把**过期的 verdict 继续当成当前的**读，而它携带的 gate
+（Paper account freshness、行情 freshness、whole-share 容量）恰恰是刷新失败后绝不能
+看起来仍然有效的那几个。吸收异常属于 composition / error boundary 的职责，不是
+capability 的。
+
+`render_current()` 每次绘制时通过 provider 读 Shadow snapshot，然后
+`session_view(...)` + `page.render_session(view)`。它**只**画 session 一半；
+evidence 七张表有自己的 owner 和入口，所以一次 market tick 不会重建它们。
+`render_session` 的 production caller 现在恰好只有一个（capability），
+`render_evidence` 的也恰好只有一个（evidence capability）。
+
+### 25.8 新增文件与预算
+
+```text
+desktop_v2/orchestration/research/targeted/session/
+    __init__.py      包文档：命名理由与完整规则集
+    models.py        immutable snapshot + 默认文本 + refusal severity + 操作员文案
+    queries.py       纯规则：normalize / regex 门 / Universe 与 quote 查找 /
+                     两条 status 文本 / controls 投影
+    orchestrator.py  命令、顺序、refresh、render owner
+desktop_targeted_session_service.py   Qt-free：MinuteQuoteStore + preflight evaluator
+```
+
+预算：`orchestrator.py` ≤ 320、`models.py` ≤ 140、`queries.py` ≤ 200、
+`__init__.py` ≤ 60、service ≤ 180。
+
+`queries.py` 里只放 Qt-free 纯规则，不放 store 读、Market 命令、preflight 执行、
+page 调用或 Shadow runtime。symbol regex 完全冻结为
+`r"[A-Z][A-Z0-9.-]{0,9}"`，不替换成另一个 validator。
+
+`models.py` 只放 snapshot 与文本；**不允许**出现 `shadow_snapshot` /
+`shadow_active` / `positions` / `fills` —— 那些不是 Targeted Session truth。
+
+### 25.9 MainWindow 退休清单
+
+删除的状态（禁止 compatibility property / alias）：
+
+```text
+_target_status
+_minute_status
+target_preflight_result
+```
+
+删除的方法：
+
+```text
+_current_target_symbol
+_target_symbol_requested
+_target_subscribe_requested
+_apply_target_symbol
+_sync_targeted_symbol_to_stream
+_refresh_minute_data_status
+_refresh_target_preflight
+_targeted_controls
+_publish_targeted_session_view
+_shadow_strategy_selection_changed
+```
+
+保留：
+
+```text
+_start_shadow / _stop_shadow / _selected_shadow_strategy_record   （v2O-D）
+_on_market_snapshot_changed / _on_account_portfolio_changed
+_configured_exposure_multipliers / _record_runtime_strategy_selection
+_report_targeted_evidence_refusal / _record_targeted_evidence_runtime_event
+_focus_targeted_evidence
+所有 Paper / execution bridge
+```
+
+新增的四个 **composition helper**（只回答「这个窗口现在能看到的某个事实当前值」，
+不做任何决定）：
+
+```text
+_targeted_account_snapshot       → account_orchestrator.portfolio.account
+_targeted_displayed_strategy     → strategy_selection.restore_or_default(...)
+_targeted_strategy_options       → strategy_selection.options(...) + label 投影
+_targeted_strategy_selected      → strategy_selection.select(...)
+```
+
+以及一个 refusal bridge：
+
+```python
+def _report_targeted_session_refusal(self, level, title, message) -> None:
+    if level == REFUSAL_INFORMATION:
+        QMessageBox.information(self, title, message)
+    else:
+        QMessageBox.warning(self, title, message)
+```
+
+severity 必须保留：invalid symbol = warning，active Shadow target switch =
+information，subscribe while Market live = information。
+
+`_populate_strategy_selection_combos()` 不再自己画 Targeted combo，改为调用
+`targeted_session_orchestrator.refresh_strategy_options()`；capability 成为
+`TargetedValidationPage.set_strategy_options` 的唯一 production caller。
+Targeted 不 import StrategyPage：label 投影留在 window 的
+`_targeted_strategy_options` helper 里。
+
+strategy selection 的 canonical owner 仍是 `StrategySelectionService`：signal 已经
+携带 `version_id`，capability 直接用 signal argument，禁止回头读
+`page.selected_strategy_version_id()`；也**不**缓存 StrategyVersion。
+
+### 25.10 页面 wiring 的最终形状
+
+```text
+Page
+ ├─ target_draft_changed       → Session.adopt_target_draft
+ ├─ strategy_selected          → Session.request_strategy_selection
+ ├─ target_apply_requested     → Session.request_target_apply
+ ├─ target_subscribe_requested → Session.request_target_subscribe
+ ├─ replay_requested           → Evidence.request_replay
+ ├─ robustness_requested       → Evidence.request_robustness
+ ├─ robustness_run_selected    → Evidence.select_robustness_run
+ ├─ review_run_selected        → Evidence.select_review_run
+ ├─ shadow_start_requested     → MainWindow._start_shadow
+ └─ shadow_stop_requested      → MainWindow._stop_shadow
+```
+
+Shadow 两个 intent 必须仍然去 MainWindow：把它们接到 Session 就是把引擎交给一个
+不该拥有它的对象。Session 与 Evidence 互不 import，唯一共享事实是
+`Session.snapshot.target_draft`，通过 provider 传递。
+
+### 25.11 启动
+
+```python
+self.targeted_evidence_orchestrator.restore_saved()   # 一次读全部七类
+self.targeted_session_orchestrator.render_current()   # session 恰好首绘一次
+```
+
+startup 时：`preflight is None`、draft 为空、target status 为「未指定」、minute
+status 为默认文案；**不**自动跑一次空 symbol 的 preflight。
+
+### 25.12 冻结范围与 mutation 要求
+
+本轮**不**修改：Shadow 引擎 / store / 算法 / fill math / 手续费与滑点、Paper
+workflow、ExecutionApplication、RiskApplication、TradingRuntime、Targeted 研究
+算法（Replay / Robustness / Walk-forward / PBO / DSR / 数据质量 / 执行压力 /
+Review）、`evaluate_target_preflight` 算法（symbol format gate、Universe identity、
+STK/ETF、`eligible_for_research`、StrategyStatus 规则、fresh realtime quote、
+Paper account truth、300 秒账龄、whole-share sizing、commission、slippage、
+exposure multiplier、minute evidence、broker route disabled、decision strings）。
+
+mutation 必须 RED 的关键项（不建框架，手工验证）：恢复 `_target_status` /
+`_minute_status` / `target_preflight_result`；MainWindow 重新调用
+`page.render_session`；MainWindow 重新把 `page.target_symbol` 当 canonical truth；
+Evidence 重新读 `page.target_symbol`；Session import `MarketOrchestrator` /
+`AccountOrchestrator` / `UniverseOrchestrator` / `ShadowPaperEngine`；snapshot
+增加 `shadow_snapshot`；typing 每个字符触发 preflight；invalid target 被 Apply；
+active Shadow 时允许切 target；Market live 时 Subscribe 仍改 subscription；
+`broker_orders_available` 改 True；strategy selection 忽略 signal version_id 改读
+combo；minute refresh 自动重算 preflight；Market snapshot 不再 refresh preflight；
+Account change 不再 refresh preflight；Shadow snapshot change 不再 render session；
+MainWindow 继续 `set_strategy_options`；programmatic `set_target_symbol` 产生 signal
+loop；Shadow start/stop 被迁入 Session；Evidence render 被 Session refresh 触发。
+
 
 

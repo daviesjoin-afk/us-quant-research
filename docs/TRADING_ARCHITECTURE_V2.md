@@ -1884,7 +1884,7 @@ closeEvent                         关闭时停止
 _export_terminal_state             shadow_store.recent_fills(500)
 ```
 
-全部收口到 `desktop_v2/orchestration/shadow/`（30 / 220 / 276 / 334 行）：
+全部收口到 `desktop_v2/orchestration/shadow/`（30 / 220 / 276 / 382 行）：
 
 ```text
 models.py        冻结 request、拒绝 shape、runtime event shape、ShadowLease 协议
@@ -1893,9 +1893,25 @@ orchestrator.py  只做 sequencing：读一次事实 → 过门 → 建引擎 �
 ```
 
 **单一 truth 不变。** `ShadowPaperEngine` 仍是 session id / active / cash / PnL /
-position / fills / marks 的唯一 owner；orchestrator 只持有引擎**引用**与引擎最后产出的
+position / fills / marks 的**唯一** owner；orchestrator 只持有引擎**引用**与引擎最后产出的
 snapshot，`is_active` 问引擎（不缓存布尔），`recent_fills` 委托 store。它不算 PnL、
 不模拟 fill、不写 store —— Shadow 算法 / fill math / 手续费 / 滑点一行未动。
+
+**`_holds_lease` 不是第二份交易真相。** orchestrator 还持有这一个 capability-local
+布尔，它回答的是另一个问题：**"本 capability 是否取得了共享执行租约"**。共享
+`ExecutionLeaseManager` 是 Shadow 与 Paper 共用的，所以 `lease.active` 在**任何一方**
+持有时都为真，表达不了 ownership；需要 release 判断时只能由本地记录回答。它**不**镜像
+`engine.active`、**不**镜像任何交易状态，因此不违反上面的 single truth。
+
+这一点是安全要求而非风格：早期版本用 `self._lease.active` 作为释放条件，造成两处真实
+缺陷——重复 `start()` 在失败路径释放了**正在运行**会话的租约，`stop()` / `shutdown()`
+则可能释放**Paper** 后来取得的租约。两处都会让"Shadow XOR Paper"静默失效。现在
+`self._lease.stop()` 全文件只出现一次（`_release_lease()` 内），由 `_holds_lease` 把关。
+**不要把它改回 `lease.active`。**
+
+**重复启动是 no-op（安全不变量）。** `start()` 最前面有 own-active gate：已 active 时
+不读任何 provider、不构造第二个 engine、不碰 lease、不改 snapshot。这是本 capability
+自己的生命周期完整性，不是 Paper 逻辑，也不需要改 Shadow core。
 
 **import 边界。** 该 package 不 import Market / Account / Research 的 orchestrator，
 也不 import `desktop_v2/workflows.py`。后者是个真实陷阱：`ShadowWorkflowController`
@@ -1912,6 +1928,11 @@ snapshot，`is_active` 问引擎（不缓存布尔），`recent_fills` 委托 st
 shutdown() 只停引擎 + 释放 lease；不重绘、不记录事件、不改 snapshot
            ⇒ 关闭不会把操作员从未停止的会话写成"已停止"
 ```
+
+**一处刻意不保留的行为。** 退休 `_start_shadow` 的重复启动后果（第二个 engine 被 lease
+拒绝后，失败路径释放**第一个** run 的租约）**没有**逐字迁移：那是安全漏洞，不是产品
+语义。原样迁移再加上一个保护它的测试，会把漏洞固化进新的 canonical owner，并让
+v2O-E Paper 更难、更危险。已替换为上面的 no-op 契约。
 
 **窗口剩下的 Shadow 代码**只有：构造与接线、五个 composition helper、两处
 cross-capability interlock 读取，以及两个非 runtime truth 的属性——
@@ -2933,6 +2954,10 @@ v2O-D 刻意没有做的事，留给更后面：
 - 没有改 Shadow 引擎 / trade_logic / store / models / config，没有改 fill math、
   手续费、滑点、warmup、momentum、force-flat 或跨交易日行为；十道门的顺序与文案
   逐字保留，`_money` 语义（含 `不可用`）逐字保留；
+- **没有保留**退休 `_start_shadow` 的重复启动后果。这不是 "ownership extraction
+  不做设计改动" 的例外，而是它唯一**必须**改的一处：旧行为会让一个仍在运行的会话
+  失去共享租约，"Shadow XOR Paper" 静默失效。重复启动现在的契约是 no-op
+  （见 §8.17），并且由 architecture guard 锁死；
 - 没有提前建 `CapitalAllocator` / Risk Kernel / Champion-Challenger / AI / Live
   broker / Live order：未来目标不进这一轮；
 - 没有清理本轮之外的 legacy。

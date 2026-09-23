@@ -3098,6 +3098,27 @@ marks 的唯一 owner。`ShadowOrchestrator` 只持有**引擎引用**和**引�
 snapshot**，`snapshot` property 读它，`is_active` 问引擎。它不算 PnL、不模拟 fill、
 不写 store。`_store` 只通过 `recent_fills()` 委托给终端导出。
 
+**`_holds_lease` 不违反这条规则。** orchestrator 另有一个 capability-local 布尔
+`_holds_lease`，回答的是另一个问题：**"本 capability 是否取得了共享执行租约"**。
+共享 `ExecutionLeaseManager` 是 Shadow 与 Paper 共用的，`lease.active` 在任何一方持有
+时都为真，无法表达 ownership —— 需要判断"该不该释放"时只能由本地记录回答。它**不**
+镜像 `engine.active`、**不**镜像任何交易或 session 状态，所以不是第二份交易真相。
+
+这条边界是安全要求而非风格，而且是踩过两次坑才定下来的：
+
+```text
+重复 start()         → 失败路径释放了"正在运行"会话的租约
+                       （第二个 engine 被 lease 拒绝后，旧代码释放了第一个的租约）
+stop() / shutdown()  → Shadow 已停、Paper 之后取得 lease 时，释放了 Paper 的租约
+```
+
+两处都会让 "Shadow XOR Paper" 静默失效。现在 `self._lease.stop()` 全文件**只有一处**
+（`_release_lease()` 内），由 `_holds_lease` 把关。**禁止改回 `self._lease.active`。**
+
+**重复启动是 no-op（安全不变量）。** `start()` 最前面有 own-active gate：已 active 时
+不读任何 provider、不构造第二个 engine、不碰 lease、不改 snapshot、不丢 `_engine`。
+这是本 capability 自己的生命周期完整性，不是 Paper 逻辑，也不需要改 Shadow core。
+
 ### 26.3 依赖注入
 
 12 个显式依赖，全部是 callable 而非对象句柄：
@@ -3124,8 +3145,10 @@ import `desktop_v2/workflows.py`（那个模块里坐着 `PaperWorkflowControlle
 
 `_start_shadow` 里资金**金额**和资金**来源**是在不同时刻读的：金额在资金门读，
 来源（account alias）只在真正构建 engine 时才读。因此一个被拒绝的启动**从不**
-触碰 portfolio。提取时把两者合并成一个 eager read 会改变这个行为——测试
-`test_shadow_start_rejects_*` 系列会立刻发现。所以分成
+触碰 portfolio。提取时把两者合并成一个 eager read 会改变这个行为——我第一版就是
+这么写的，`tests/test_desktop_v2_targeted_wiring.py` 里三条 `test_shadow_start_rejects_*`
+当场变红。现在由 `test_a_refused_start_never_reads_the_account_alias` 正向锁定（断言
+拒绝路径下 alias provider 的调用列表为空）。所以分成
 `_shadow_capital_fact()`（门）与 `_shadow_account_alias()`（构建）两个 provider。
 
 ### 26.5 三层 shutdown 语义
@@ -3133,8 +3156,14 @@ import `desktop_v2/workflows.py`（那个模块里坐着 `PaperWorkflowControlle
 ```text
 stop()      操作员停止：停引擎 + 释放 lease + 重绘 + 记 SHADOW_STOP 事件
 shutdown()  关闭时：只停引擎 + 释放 lease。不重绘、不记录、不改 snapshot
+start()     已 active 时 no-op（不读 provider、不建 engine、不碰 lease）
 on_market_snapshot()  无运行时时是 no-op
 ```
+
+三条路径的释放**都**经由 `_release_lease()`，且只在 Shadow 自己持有租约时生效
+（见 §26.2）。这不是统一风格的整理：`stop()` 会保留 `_engine` 以便发布引擎最后一个
+snapshot，因此"Shadow 已停 + Paper 之后取得 lease + 再次 stop()"是可达状态，内联
+`lease.active` 判断在这里会误释放 Paper 的租约。
 
 `shutdown()` 比 `stop()` 安静是刻意的：关闭时没有窗口可画，且 runtime teardown
 自己会报告；如果它写一条"已停止"事件，就会把操作员从未停止的会话记录成停止。
@@ -3167,9 +3196,25 @@ Shadow 引擎 / trade_logic / store / models / 算法 / fill math / 手续费与
 `_money` 的语义（含 `不可用` 与无 `+` 号）在 `queries.format_money` 里逐字保留；
 十道门的**顺序**与每道门的**文案**逐字保留；Paper workflow 生命周期一行未动。
 
+**唯一一处刻意不"逐字保留"的行为：** 退休 `_start_shadow` 的重复启动后果没有迁移。
+旧行为下第二次启动会构造第二个 engine、被 lease 拒绝，然后在失败路径释放**第一个**
+run 的租约，使一个仍在运行的会话失去共享租约。这是安全漏洞而非产品语义，原样迁移
+（再补一个保护它的测试）会把漏洞固化进新的 canonical owner。现在的契约是
+`active → no-op`，见 §26.2。
+
 mutation 必须 RED 的关键项（手工验证）：把 `shadow_engine` / `shadow_snapshot`
 加回 MainWindow；恢复 `_start_shadow` / `_stop_shadow`；让 Shadow package import
 MarketOrchestrator / AccountOrchestrator / ResearchOrchestrator / PaperWorkflowController；
 让 `orchestrator.py` 摸 widget（`QtWidgets`）；把 `shutdown()` 换成会记录事件的
 `stop()`；把金额与来源合并成一次 eager read；让 `on_market_snapshot` 在无运行时
 仍然重绘。
+
+两条**最重要**的安全 invariant（本轮由 review 发现，必须有 guard）：
+
+```text
+duplicate start      → 只能有一个 engine、一个 lease；不改 snapshot、不丢 _engine
+                       删掉 start() 的 own-active gate 必须 RED
+Shadow never releases a lease it did not acquire
+                       把 _release_lease 改回 if self._lease.active 必须 RED
+                       （同时覆盖 stop() / shutdown() 在 Paper 持租约时的误释放）
+```

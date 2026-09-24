@@ -120,9 +120,19 @@ able to look like a passing review.
 "@
     }
 
+    # ``Get-Command`` first, and not only the exit-code check below it.  Calling
+    # a command that is not on PATH raises ``CommandNotFoundException`` -- it does
+    # **not** return a non-zero exit code -- so under ``$ErrorActionPreference =
+    # "Stop"`` the line after it never runs and the user gets a raw PowerShell
+    # error record instead of the sentence naming what to install.  Measured by
+    # hand with ``git`` removed from PATH before this was fixed; it is also why
+    # ``ocr`` above is detected with ``Get-Command``.
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        Stop-WithMessage "git is not available on PATH; OpenCodeReview needs it for diff generation and code search."
+    }
     $gitRaw = & git --version 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $gitRaw) {
-        Stop-WithMessage "git is not available on PATH; OpenCodeReview needs it for diff generation."
+        Stop-WithMessage "git is on PATH but 'git --version' did not succeed; OpenCodeReview needs a working git."
     }
     $gitVersionText = ($gitRaw -replace '^git version\s+', '') -replace '\.windows\.\d+$', ''
     try {
@@ -193,7 +203,21 @@ able to look like a passing review.
         # case-insensitive, so a local ``$preview`` *is* the ``[switch]$Preview``
         # parameter.  Assigning the parsed object to it fails with a confusing
         # "cannot convert ... to SwitchParameter" from a line that looks innocent.
-        $previewSpec = Get-Content -LiteralPath $previewFile -Raw | ConvertFrom-Json
+        #
+        # The parse is fallible in a way the exit code does not cover: OCR can
+        # exit 0 having written a warning line before the JSON, or nothing at all.
+        # Unhandled, that surfaces as a ConvertFrom-Json traceback and the file
+        # holding the raw output is never named.
+        $previewRaw = Get-Content -LiteralPath $previewFile -Raw -ErrorAction SilentlyContinue
+        if (-not $previewRaw) {
+            Stop-WithMessage "ocr delegate preview produced no output; nothing was written to $previewFile."
+        }
+        try {
+            $previewSpec = $previewRaw | ConvertFrom-Json
+        }
+        catch {
+            Stop-WithMessage "ocr delegate preview did not produce valid JSON. The raw output is kept at $previewFile."
+        }
         $paths = @($previewSpec.reviewable_files | ForEach-Object { $_.path })
 
         Write-Host "   files : $($paths.Count) reviewable of $($previewSpec.total_files) changed"

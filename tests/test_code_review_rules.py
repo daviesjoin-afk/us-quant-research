@@ -97,11 +97,55 @@ _CREDENTIAL_KEY = re.compile(
 
 
 def _rule_spec() -> dict[str, Any]:
-    return json.loads(_RULE_FILE.read_text(encoding="utf-8"))
+    """The parsed document, or a clean named failure.
+
+    ``pytest.fail`` rather than a bare ``json.loads``: a helper that raises
+    ``JSONDecodeError`` reports as a traceback, and the reader has to reconstruct
+    which file was being read and why it matters.  Every test that needs the spec
+    now fails with the same sentence.
+    """
+
+    try:
+        spec = json.loads(_RULE_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        pytest.fail(f"{_PROJECT_RULE_PATH} is missing")
+    except json.JSONDecodeError as error:
+        pytest.fail(f"{_PROJECT_RULE_PATH} is not valid JSON: {error}")
+    if not isinstance(spec, dict):
+        pytest.fail(f"{_PROJECT_RULE_PATH} must contain a JSON object, found {type(spec).__name__}")
+    return spec
+
+
+def _rule_indices() -> list[int]:
+    """Indices to parametrize ``test_every_rule_entry_is_usable`` over.
+
+    Defensive on purpose, because this runs at **collection** time: an exception
+    here does not fail one test, it aborts the whole file.  Measured by hand --
+    with ``rule.json`` replaced by invalid JSON the naive version reported
+    ``1 error during collection`` and **0** tests executed, so the guards for CI,
+    ``.gitignore`` and the docs never ran either, and the file that exists to
+    explain a broken rule file explained nothing.
+
+    Falling back to a single index keeps the dedicated tests in charge of saying
+    what is wrong: ``test_the_project_rule_file_is_valid_json`` and the
+    per-entry test both now fail with the parse error itself.
+    """
+
+    try:
+        spec = json.loads(_RULE_FILE.read_text(encoding="utf-8"))
+        rules = spec["rules"]
+    except Exception:
+        return [0]
+    if not isinstance(rules, list) or not rules:
+        return [0]
+    return list(range(len(rules)))
 
 
 def _rules() -> list[dict[str, Any]]:
-    return _rule_spec()["rules"]
+    rules = _rule_spec().get("rules")
+    if not isinstance(rules, list):
+        pytest.fail(f"{_PROJECT_RULE_PATH} must declare a 'rules' array")
+    return rules
 
 
 def _pattern_to_index() -> dict[str, int]:
@@ -170,7 +214,7 @@ def test_the_rule_list_is_not_empty() -> None:
     assert rules, "the project rule layer declares no rules at all"
 
 
-@pytest.mark.parametrize("index", range(len(json.loads(_RULE_FILE.read_text(encoding="utf-8"))["rules"])))
+@pytest.mark.parametrize("index", _rule_indices())
 def test_every_rule_entry_is_usable(index: int) -> None:
     """``path`` and ``rule`` are both required, and both must carry content."""
 
@@ -270,7 +314,7 @@ def test_trading_core_is_declared_before_the_catch_all() -> None:
     assert order["src/us_quant/trading/**"] < order[_GLOBAL_PYTHON_PATTERN]
 
 
-def test_the_narrow_trading_rules_are_declared_after_the_broader_one() -> None:
+def test_the_narrow_trading_rules_are_declared_before_the_umbrella() -> None:
     """``trading/**`` must not shadow ``risk.py`` / ``execution.py`` / ``paper/**``.
 
     ``trading/**`` is the broadest trading rule and therefore has to come last
@@ -381,15 +425,43 @@ def test_review_output_is_ignored_by_git() -> None:
 def test_the_wrapper_propagates_the_wrapped_exit_code() -> None:
     """A wrapper that swallowed the exit code would fake a clean review."""
 
+    assert _REVIEW_PS1.is_file(), "scripts/review.ps1 is missing"
     text = _REVIEW_PS1.read_text(encoding="utf-8")
-    assert _REVIEW_PS1.is_file()
     assert re.search(r"exit\s+\$reviewCode", text), (
         "review.ps1 does not exit with the wrapped command's code"
     )
     # It has to *read* the native exit code before it can propagate it.
     assert text.count("$LASTEXITCODE") >= 2, text.count("$LASTEXITCODE")
-    # And it must not hold a credential of its own.
-    assert _SECRET_LITERAL.search(text) is None
+
+
+def test_the_wrapper_holds_no_credential() -> None:
+    """It must not smuggle a provider key into the repository."""
+
+    assert _REVIEW_PS1.is_file(), "scripts/review.ps1 is missing"
+    assert _SECRET_LITERAL.search(_REVIEW_PS1.read_text(encoding="utf-8")) is None
+
+
+def test_every_external_tool_is_located_before_it_is_invoked() -> None:
+    """``& missing-command`` throws; it does not return a non-zero exit code.
+
+    Measured on this script by hand, with ``git`` removed from PATH: ``$raw = &
+    git --version`` raises ``CommandNotFoundException`` and, under
+    ``$ErrorActionPreference = "Stop"``, terminates the script.  A guard written
+    as ``if ($LASTEXITCODE -ne 0)`` *after* that line is therefore unreachable,
+    and the user gets a PowerShell error record instead of the sentence naming
+    what to install -- which is the failure mode the ``scripts/**`` rule in
+    ``rule.json`` calls out.
+
+    So both external tools are located with ``Get-Command`` first.  Asserted as
+    the presence of that lookup for each, not as a line count.
+    """
+
+    text = _REVIEW_PS1.read_text(encoding="utf-8")
+    for tool in ("ocr", "git"):
+        assert f"Get-Command {tool}" in text, (
+            f"review.ps1 does not locate {tool!r} with Get-Command before using "
+            f"it, so a missing {tool} fails with a stack trace instead of a message"
+        )
 
 
 def test_the_wrapper_defaults_to_the_delegated_review() -> None:

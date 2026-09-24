@@ -3855,15 +3855,18 @@ class MainWindow(QMainWindow):
                 # connection nobody can reach any more.  Hand the client back instead.
                 #
                 # Reachable when a launch fault leaves a promotion claim standing
-                # (v2O-E1's invariant path).  The claim lives in memory only, so a
-                # restart is the honest remedy for now; E3's in-app recovery is what
-                # will replace that sentence.
+                # (v2O-E1's invariant path).  ``disconnect()`` above has already run, so
+                # the wording says the connection stopped rather than that it will not
+                # be stopped -- the ownership is what is left.  The claim lives in
+                # memory only, so a restart is the honest remedy for now; E3's in-app
+                # recovery is what will replace that sentence.
                 event.ignore()
                 QMessageBox.information(
                     self,
                     "Paper 订单通道未释放",
-                    "Paper 订单通道的所有权无法确认，客户端不会在未弄清它归谁时"
-                    f"断开或退出。请重启客户端后重新启动 Paper 会话。\n\n{error}",
+                    "Paper 订单连接已停止，但所有权占用无法确认；"
+                    "客户端不会释放该所有权或正常退出。"
+                    f"请重启客户端后重新启动 Paper 会话。\n\n{error}",
                 )
                 return
         # The internal simulation is stopped through its own capability, which

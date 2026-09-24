@@ -161,7 +161,10 @@ from us_quant.trading.runtime.health import (
     evaluate_paper_execution_health,
 )
 from us_quant.trading.runtime.paper_models import PaperSessionResult
-from us_quant.trading.application.paper import PaperTradingService
+from us_quant.trading.application.paper import (
+    PaperTradingLifecycleError,
+    PaperTradingService,
+)
 from us_quant.trading.runtime.workflow_state import (
     PaperWorkflowPhase,
     WorkflowStateError,
@@ -3843,7 +3846,26 @@ class MainWindow(QMainWindow):
             return
         if self.paper_trading.has_order_service():
             self.paper_trading.disconnect()
-            self.paper_trading.clear_active()
+            try:
+                self.paper_trading.clear_active()
+            except PaperTradingLifecycleError as error:
+                # The service refuses to release a slot it cannot account for, and that
+                # refusal is it doing its job -- so it must not escape a Qt slot and
+                # skip the rest of this teardown, which is how a window closes over a
+                # connection nobody can reach any more.  Hand the client back instead.
+                #
+                # Reachable when a launch fault leaves a promotion claim standing
+                # (v2O-E1's invariant path).  The claim lives in memory only, so a
+                # restart is the honest remedy for now; E3's in-app recovery is what
+                # will replace that sentence.
+                event.ignore()
+                QMessageBox.information(
+                    self,
+                    "Paper 订单通道未释放",
+                    "Paper 订单通道的所有权无法确认，客户端不会在未弄清它归谁时"
+                    f"断开或退出。请重启客户端后重新启动 Paper 会话。\n\n{error}",
+                )
+                return
         # The internal simulation is stopped through its own capability, which
         # is quieter than the operator's stop: no repaint, no event, no log, so a
         # close cannot write a "stopped" event over a session nobody stopped.

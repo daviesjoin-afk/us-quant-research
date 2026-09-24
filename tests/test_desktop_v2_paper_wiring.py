@@ -25,6 +25,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import dataclasses
 from decimal import Decimal
 
 import pytest
@@ -34,15 +35,18 @@ from us_quant.desktop import MainWindow
 from us_quant.desktop_v2.orchestration.paper.models import (
     DUPLICATE_MESSAGE,
     DUPLICATE_TITLE,
+    PAPER_PROMOTION_INVARIANT_CODE,
     PAPER_STRATEGY_INTEGRITY_CODE,
     PAPER_STRATEGY_INTEGRITY_TITLE,
 )
 from us_quant.paper_order_models import PaperBrokerState
 from us_quant.trading.application.paper import PaperTradingService
+from us_quant.trading.application.paper.models import PaperTradingLifecycleError
 from us_quant.trading.runtime.models import AutoQuantCandidate
 from us_quant.trading.runtime.workflow_state import (
     ExecutionLease,
     PaperWorkflowPhase,
+    WorkflowStateError,
 )
 from us_quant.trading.domain.strategy import StrategyStatus
 
@@ -324,8 +328,6 @@ def test_an_inconsistent_catalogue_version_does_not_escape_the_qt_slot(
     the UI would look armed and idle while a real catalogue fault went unreported.
     """
 
-    import dataclasses
-
     real = window._test_strategy
     window.paper_orchestrator._strategy_provider = lambda: dataclasses.replace(
         real, identity=dataclasses.replace(real.identity, parameter_hash="0" * 64)
@@ -486,3 +488,184 @@ class _HoldingSubmitter:
             }
         )
         return True
+
+
+# -- the publication invariant ------------------------------------------
+#
+# The regression this round closes.  ``publish_armed`` used to be followed by a
+# promotion that could still be refused, and a refusal there left **``RUNNING`` with
+# no active owner**: measured on this very wiring (phase RUNNING, ``has_order_service``
+# False, lease PAPER held, a published coordinator whose order port was the armed
+# broker channel, ``_poll_auto_quant_orders`` still reaching the workflow, and manual
+# reconciliation never entered because it starts at ``has_order_service``).
+#
+# Ownership is now taken *before* publication, so that state cannot be built.  These
+# tests assert the invariant by injection rather than by reading the source: every
+# place a launch can be refused is driven on the real thing.
+
+_RUNNING_PHASES = (
+    PaperWorkflowPhase.RUNNING,
+    PaperWorkflowPhase.PAUSED,
+    PaperWorkflowPhase.STOPPING,
+)
+
+
+def _assert_never_ownerless_while_running(window: MainWindow) -> None:
+    """``RUNNING`` must imply an active owner -- the whole round in one assertion.
+
+    ``_on_market_snapshot_changed`` and ``_poll_auto_quant_orders`` both drive the
+    workflow on the phase alone, so an ownerless ``RUNNING`` session is one the window
+    keeps feeding orders through while nothing can adopt it.
+    """
+
+    if window.paper_trading.phase() in _RUNNING_PHASES:
+        assert window.paper_trading.has_order_service() is True
+
+
+def _assert_rolled_back(window: MainWindow) -> None:
+    """A refused launch leaves the window exactly as it found it."""
+
+    assert window.paper_trading.phase() is PaperWorkflowPhase.READY
+    assert window.paper_workflow.lease is ExecutionLease.NONE
+    assert window.paper_trading.has_order_service() is False
+    assert window.paper_trading.has_candidate("1") is False
+    assert window.execution_page.arm_confirmed() is False
+    assert window._test_submitter.connect_count == 1
+    _assert_never_ownerless_while_running(window)
+
+
+def _inject_bad_account(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A broker gate refusal, before anything is built."""
+    monkeypatch.setattr(
+        _FakeCandidateService,
+        "broker_state",
+        lambda self: dataclasses.replace(self._state, net_liquidation=Decimal("0")),
+    )
+
+
+def _inject_build_failure(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The composition seam fails after the candidate exists."""
+    window.paper_orchestrator._build_session = _raising("runtime build failed")
+
+
+def _inject_arm_failure(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The armed channel refuses, after a successful build."""
+    monkeypatch.setattr(
+        _FakeCandidateService, "arm", _raising("channel not connected")
+    )
+
+
+def _inject_reserve_failure(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The order-service owner refuses to take the promotion slot."""
+    window.paper_trading.reserve_candidate_promotion = _raising(
+        "a Paper order service is already active",
+        error=PaperTradingLifecycleError,
+    )
+
+
+def _inject_publish_failure(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Publication itself fails -- the exact boundary the rollback turns on."""
+    window.paper_workflow.publish_armed = _raising(
+        "Stale or invalid Paper launch publication.",
+        error=WorkflowStateError,
+    )
+
+
+def _raising(message: str, *, error: type[Exception] = RuntimeError):
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise error(message)
+
+    return boom
+
+
+_ROLLBACK_INJECTIONS = [
+    pytest.param(_inject_bad_account, id="broker-gate"),
+    pytest.param(_inject_build_failure, id="runtime-build"),
+    pytest.param(_inject_arm_failure, id="arm"),
+    pytest.param(_inject_reserve_failure, id="reserve"),
+    pytest.param(_inject_publish_failure, id="publish"),
+]
+
+
+@pytest.mark.parametrize("inject", _ROLLBACK_INJECTIONS)
+def test_every_pre_publication_failure_rolls_back_and_leaves_no_owner(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch, inject
+) -> None:
+    """Each refusal must unwind the attempt completely, and never publish.
+
+    The bounded claim is that a launch refused at *any* point before publication ends
+    with nothing owned, nothing leased, no candidate and no armed channel -- so no
+    ownerless session can exist for the window to keep driving afterwards.
+    """
+
+    inject(window, monkeypatch)
+
+    _launch(window)  # must not raise out of the Qt slot
+
+    _assert_rolled_back(window)
+    assert window._test_events == [] or all(
+        event.code != PAPER_PROMOTION_INVARIANT_CODE for event in window._test_events
+    )
+    assert window.trading_runtime is None
+
+
+def test_a_commit_failure_after_publication_cannot_orphan_the_session(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one injection that is *not* a rollback, and the state it must not leave.
+
+    Ending the claim can only be refused through a bug -- this launch took the
+    reservation and nothing else may replace it -- but it is precisely the injection
+    that produced the ownerless running session in the retired order, so it is driven
+    directly.  The session is live and **owned**; the window can still find it, which
+    is what every recovery path starts from.
+    """
+
+    window.paper_trading.commit_candidate_promotion = _raising(
+        "stale or foreign Paper promotion reservation",
+        error=PaperTradingLifecycleError,
+    )
+
+    _launch(window)  # must not raise out of the Qt slot
+
+    assert window.paper_workflow.phase is PaperWorkflowPhase.RUNNING
+    assert window.paper_workflow.lease is ExecutionLease.PAPER
+    # The property the retired order could not hold: RUNNING with an owner.
+    assert window.paper_trading.has_order_service() is True
+    assert window.paper_trading.is_connected() is True
+    _assert_never_ownerless_while_running(window)
+    # Reported, with its own code, rather than silently absorbed.
+    assert window._test_events[-1].code == PAPER_PROMOTION_INVARIANT_CODE
+    assert window._test_events[-1].severity == "error"
+    # And the recovery entry point's own first predicate now passes, which is what
+    # makes the session adoptable instead of stranded.
+    assert window.paper_trading.has_order_service() is True
+
+
+def test_a_publication_failure_releases_the_promotion_for_the_next_launch(
+    window: MainWindow,
+) -> None:
+    """The rollback's job, checked by *outcome* rather than by inspection.
+
+    A reservation that was not given back would leave the service permanently
+    unreservable -- fail-closed, but a dead end for the operator.  The probe is a
+    second launch on the same service: it can only reach ``RUNNING`` if the first
+    launch left nothing claimed.
+    """
+
+    real = window.paper_workflow.publish_armed
+    window.paper_workflow.publish_armed = _raising(
+        "Stale or invalid Paper launch publication.",
+        error=WorkflowStateError,
+    )
+
+    _launch(window)
+    _assert_rolled_back(window)
+
+    window.paper_workflow.publish_armed = real
+    _launch(window)
+
+    assert window.paper_workflow.phase is PaperWorkflowPhase.RUNNING
+    assert window.paper_trading.has_order_service() is True
+    assert window.paper_workflow.lease is ExecutionLease.PAPER
+    _assert_never_ownerless_while_running(window)

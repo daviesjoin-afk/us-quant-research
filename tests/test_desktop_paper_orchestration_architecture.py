@@ -55,6 +55,7 @@ _PAPER_DIR = _SRC / "desktop_v2" / "orchestration" / "paper"
 _ORCHESTRATOR_PATH = _PAPER_DIR / "orchestrator.py"
 _QUERIES_PATH = _PAPER_DIR / "queries.py"
 _MODELS_PATH = _PAPER_DIR / "models.py"
+_SERVICE_PATH = _SRC / "trading" / "application" / "paper" / "service.py"
 
 #: The launch state and helpers the extraction deleted rather than shimmed.
 RETIRED_WINDOW_LAUNCH_STATE = (
@@ -345,6 +346,20 @@ def _function_source(path: pathlib.Path, name: str) -> str:
                 ):
                     return ast.get_source_segment(source, member) or ""
     raise AssertionError(f"PaperOrchestrator.{name} not found")
+
+
+def _raises(path: pathlib.Path, name: str) -> bool:
+    """Whether one function contains a ``raise`` *statement*.
+
+    Structural rather than textual, because these methods' docstrings routinely
+    explain the very thing they must not do -- "it does not raise" would match a
+    substring search on the explanation.
+    """
+
+    for node in ast.walk(_tree(path)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return any(isinstance(inner, ast.Raise) for inner in ast.walk(node))
+    raise AssertionError(f"{name} not found in {path.name}")
 
 
 def _stored_self_attrs(path: pathlib.Path) -> set[str]:
@@ -853,28 +868,35 @@ def test_no_new_desktop_manager_or_context_was_introduced() -> None:
             )
 
 
-# -- the arm/publish/promote order is a hard constraint ------------------
+# -- the arm/reserve/publish/commit order is a hard constraint -----------
+#
+# The promotion is *taken* before publication rather than checked before it.  The
+# difference is what these guards now pin: with a pure check the slot was still empty
+# while a session that expects an owner came into being, so a promotion refused after
+# ``publish_armed`` stranded a running workflow whose order port -- already the
+# coordinator's -- belonged to nobody, and every recovery path (all of which start at
+# ``has_order_service``) returned early.
 
 
 def test_the_irreversible_order_is_locked() -> None:
-    """``ensure_candidate_can_promote`` < ``publish_armed`` < ``promote_candidate``.
+    """``reserve_candidate_promotion`` < ``publish_armed`` < ``commit_candidate_promotion``.
 
-    A broker connect proves reachability, not permission: promotions that happened
-    before publication would leave the session owned by the window while the workflow
-    still believes it is only connecting.  The ensure step must come first so the
-    published session can never be left without an owner for an already-knowable
-    reason.
+    A broker connect proves reachability, not permission: a promotion that happened
+    with nothing published would leave the session owned while the workflow still
+    believed it was only connecting.  Conversely the reservation *must* precede
+    publication, because publication is the step that creates something needing an
+    owner -- that ordering is the safety property, not a preference.
     """
 
     source = _function_source(_ORCHESTRATOR_PATH, "_arm_and_publish")
-    check = source.index("self._paper_trading.ensure_candidate_can_promote(")
+    reserve = source.index("self._paper_trading.reserve_candidate_promotion(")
     publish = source.index("self._workflow.publish_armed(")
-    promote = source.index("self._paper_trading.promote_candidate(")
-    assert check < publish < promote
+    commit = source.index("self._paper_trading.commit_candidate_promotion(")
+    assert reserve < publish < commit
 
 
-def test_the_arm_happens_before_the_ensure_check() -> None:
-    """``arm`` precedes the promotability check, and both precede publication.
+def test_the_arm_happens_before_the_reservation() -> None:
+    """``arm`` precedes the reservation, and both precede publication.
 
     The build seam only composes and starts the runtime, so ``arm`` is this module's
     own call and the full ordering is assertable here rather than approximated by
@@ -883,9 +905,9 @@ def test_the_arm_happens_before_the_ensure_check() -> None:
 
     source = _function_source(_ORCHESTRATOR_PATH, "_arm_and_publish")
     armed = source.index("service.arm(")
-    check = source.index("self._paper_trading.ensure_candidate_can_promote(")
+    reserve = source.index("self._paper_trading.reserve_candidate_promotion(")
     publish = source.index("self._workflow.publish_armed(")
-    assert armed < check < publish
+    assert armed < reserve < publish
 
 
 def test_the_broker_gate_precedes_the_build() -> None:
@@ -932,18 +954,18 @@ def _called_and_attributed(path: pathlib.Path, name: str) -> set[str]:
 def test_the_publish_failure_path_cannot_touch_the_active_service() -> None:
     """Publication splits the failure handling, and only the pre-publication side rolls back.
 
-    ``publish_armed`` raises *before* the workflow reaches ``RUNNING``, so promotion
-    must sit **outside** the rollback ``try``: it is the only step that can fail once
-    the session is published, and the rollback handler must not be reachable from it.
+    ``publish_armed`` raises *before* the workflow reaches ``RUNNING``, so ending the
+    claim must sit **outside** the rollback ``try``: it is the only step left once the
+    session is published, and the rollback handler must not be reachable from it.
     Asserted against the methods' actual *calls* rather than their source text, because
     the post-publication handler's docstring names the calls it must not make.
     """
 
     source = _function_source(_ORCHESTRATOR_PATH, "_arm_and_publish")
     rollback_handler = source.index("except Exception")
-    promote = source.index("self._paper_trading.promote_candidate(")
-    # Promotion comes *after* the rollback handler, i.e. in its own block.
-    assert rollback_handler < promote
+    commit = source.index("self._paper_trading.commit_candidate_promotion(")
+    # The commit comes *after* the rollback handler, i.e. in its own block.
+    assert rollback_handler < commit
     assert "self._discard_candidate(" in source
 
     # The rollback path never clears or disconnects the active service.
@@ -960,20 +982,88 @@ def test_the_publish_failure_path_cannot_touch_the_active_service() -> None:
     assert "disconnect" not in after, after
 
 
+def test_the_rollback_gives_the_reservation_back_before_disposing() -> None:
+    """Cancel first, dispose second -- and the cancel must be unable to raise.
+
+    Reserving *installs* the service, so until the rollback cancels, the candidate is
+    the active one: ``discard_candidate`` would find nothing to dispose and the slot
+    would stay occupied after a rejected launch.  Ordering is therefore load-bearing,
+    and the cancel is the one call in the sequence that must not raise -- an exception
+    thrown there would skip the rejection and strand ``CONNECTING`` holding PAPER.
+    """
+
+    source = _function_source(_ORCHESTRATOR_PATH, "_arm_and_publish")
+    cancel = source.index("cancel_candidate_promotion(reservation)")
+    discard = source.index("self._discard_candidate(")
+    assert cancel < discard
+    # It is guarded by the reservation actually having been taken...
+    assert "if reservation is not None:" in source
+
+    # ...and the service's own cancel reports rather than raises, for that reason.
+    # Checked on the method's own syntax tree, not its text: its docstring *explains*
+    # the no-raise rule, so a substring search would fire on the explanation.
+    assert not _raises(_SERVICE_PATH, "cancel_candidate_promotion")
+
+
+def test_nothing_between_publication_and_the_commit_can_yield_control() -> None:
+    """The published-but-unclaimed instant must not contain an observer.
+
+    Ownership is taken before publication, so no ownerless session can exist.  There
+    is still an instant in which the phase reads ``RUNNING`` while the launch's claim
+    is outstanding, and that instant is safe only because it grants control to nobody:
+    the workflow controller is not a ``QObject`` and its phase transitions emit
+    nothing, and this module emits nothing in between.  Pinned shut rather than argued
+    closed, because "no signal is emitted" is exactly the kind of assumption a later
+    edit can invalidate silently.
+    """
+
+    source = _function_source(_ORCHESTRATOR_PATH, "_arm_and_publish")
+    publish = source.index("self._workflow.publish_armed(")
+    commit = source.index("self._paper_trading.commit_candidate_promotion(")
+    assert ".emit(" not in source[publish:commit], source[publish:commit]
+
+    # And the controller cannot re-enter a slot of its own: no Qt at all on that path,
+    # including the reconciliation mixin it inherits.
+    for path in (
+        _SRC / "trading" / "runtime" / "workflow.py",
+        _SRC / "trading" / "runtime" / "recovery.py",
+    ):
+        text = path.read_text(encoding="utf-8")
+        for forbidden in ("QObject", "Signal(", ".emit("):
+            assert forbidden not in text, (path.name, forbidden)
+
+
+def test_the_commit_refusal_is_caught_by_name() -> None:
+    """A missing commit cannot escape a Qt slot, so it is caught as its own type.
+
+    Catching ``Exception`` here would be a different claim: the point is that this is
+    the order-service owner refusing, not an arbitrary failure being absorbed.
+    """
+
+    source = _function_source(_ORCHESTRATOR_PATH, "_arm_and_publish")
+    assert "except PaperTradingLifecycleError as error:" in source
+    # And the type is imported at runtime from the port's own models module, not from
+    # the service implementation, so catching it needs no service import.
+    assert (
+        "from us_quant.trading.application.paper.models import"
+        " PaperTradingLifecycleError"
+    ) in _ORCHESTRATOR_PATH.read_text(encoding="utf-8")
+
+
 def test_the_arm_call_belongs_to_the_orchestrator() -> None:
     """``arm`` is an explicit orchestrator step, not a hidden step in the build seam.
 
     The round is "launch / arm orchestration", so the ordering constraint has to be
     visible in this module for a guard to lock it.  When arming lived inside the
-    injected seam, only ``build < ensure < publish`` could be asserted.
+    injected seam, only ``build < check < publish`` could be asserted.
     """
 
     source = _function_source(_ORCHESTRATOR_PATH, "_arm_and_publish")
     armed = source.index("service.arm(")
     built = source.index("self._build_session(")
-    check = source.index("self._paper_trading.ensure_candidate_can_promote(")
+    reserve = source.index("self._paper_trading.reserve_candidate_promotion(")
     publish = source.index("self._workflow.publish_armed(")
-    assert built < armed < check < publish
+    assert built < armed < reserve < publish
     # The seam returns the sizing rather than arming itself.
     assert "max_order_notional=built.max_order_notional" in source
 

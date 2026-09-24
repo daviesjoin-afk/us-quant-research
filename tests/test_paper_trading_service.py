@@ -1,9 +1,10 @@
 """Unit coverage for the Paper trading service: ownership, reads, lifecycle.
 
 Nothing here touches IBKR: the order service is a local fake built by a fake
-factory, so the ownership contract -- candidate registration, promotion,
-stale-candidate disposal, and the fail-closed clearing rules -- is pinned
-without a broker, a Qt event loop, or a real order service.
+factory, so the ownership contract -- candidate registration, the two-phase
+promotion (reserve, then commit or cancel), stale-candidate disposal, and the
+fail-closed clearing rules -- is pinned without a broker, a Qt event loop, or a
+real order service.
 
 The service moved into the ``trading.application.paper`` package in Trading
 Framework Closure v2C, so the structural assertions below read the *service
@@ -21,6 +22,7 @@ import pytest
 
 from us_quant.trading.application.paper import service as module
 from us_quant.trading.application.paper import (
+    PaperPromotionReservation,
     PaperReconciliationStatus,
     PaperTradingLifecycleError,
     PaperTradingService,
@@ -171,7 +173,7 @@ def _owned(
     candidate_id: str = "attempt-1",
     holder: _Holder | None = None,
 ) -> PaperTradingService:
-    """A service whose active slot already holds ``service`` via a real promote."""
+    """A service whose active slot already holds ``service`` via a real promotion."""
 
     factory = factory if factory is not None else _FakeFactory(service)
     boundary = _service(factory=factory, holder=holder)
@@ -181,7 +183,9 @@ def _owned(
         repository=object(),
         extended_hours_enabled=False,
     )
-    boundary.promote_candidate(candidate_id)
+    boundary.commit_candidate_promotion(
+        boundary.reserve_candidate_promotion(candidate_id)
+    )
     return boundary
 
 
@@ -543,24 +547,39 @@ def test_discard_refuses_an_unknown_id() -> None:
         boundary.discard_candidate("nope")
 
 
-# -- promote -------------------------------------------------------------
+# -- promotion: reserve / commit / cancel ---------------------------------
 
 
-def test_promote_moves_the_candidate_into_the_active_slot() -> None:
-    service = _FakeService()
+def _reserved(
+    service: _FakeService, candidate_id: str = "attempt-1"
+) -> tuple[PaperTradingService, PaperPromotionReservation]:
+    """A service with one connected candidate whose promotion is reserved."""
+
     boundary = _service(factory=_FakeFactory(service))
     boundary.connect_candidate(
-        "attempt-1", config=object(), repository=object(), extended_hours_enabled=False
+        candidate_id, config=object(), repository=object(), extended_hours_enabled=False
     )
+    return boundary, boundary.reserve_candidate_promotion(candidate_id)
 
-    boundary.promote_candidate("attempt-1")
+
+def test_reserving_installs_the_candidate_and_takes_the_slot() -> None:
+    """A reservation is the promotion itself, not a promise to promote later.
+
+    This is the property the launch depends on: the owner has to exist *before* the
+    publication that creates a session expecting one, or there is a window in which a
+    published session has an order port nobody owns.
+    """
+
+    service = _FakeService()
+    boundary, _reservation = _reserved(service)
 
     assert boundary.has_order_service() is True
     assert boundary.has_candidate("attempt-1") is False
     assert boundary.is_connected() is True
+    assert service.connect_calls == 1
 
 
-def test_promote_refuses_to_replace_a_live_active_service() -> None:
+def test_reserving_refuses_to_replace_a_live_active_service() -> None:
     old, new = _FakeService(), _FakeService()
     boundary = _owned(old, factory=_FakeFactory(old, new))
     boundary.connect_candidate(
@@ -568,9 +587,9 @@ def test_promote_refuses_to_replace_a_live_active_service() -> None:
     )
 
     with pytest.raises(PaperTradingLifecycleError, match="already active"):
-        boundary.promote_candidate("attempt-2")
+        boundary.reserve_candidate_promotion("attempt-2")
 
-    # The old owner is untouched, and the rejected candidate is still disposable.
+    # The old owner is untouched, and the refused candidate is still disposable.
     assert old.disconnect_calls == 0
     assert boundary.broker_state() is old.broker_state_value
     boundary.discard_candidate("attempt-2")
@@ -578,38 +597,141 @@ def test_promote_refuses_to_replace_a_live_active_service() -> None:
     assert boundary.has_order_service() is True
 
 
-def test_ensure_can_promote_is_a_pure_check() -> None:
-    service = _FakeService()
-    boundary = _service(factory=_FakeFactory(service))
+def test_a_second_reservation_cannot_overlap_the_first() -> None:
+    """Exclusivity is what makes the ending deterministic rather than a race."""
+
+    first, second = _FakeService(), _FakeService()
+    boundary = _service(factory=_FakeFactory(first, second))
     boundary.connect_candidate(
         "attempt-1", config=object(), repository=object(), extended_hours_enabled=False
     )
-
-    boundary.ensure_candidate_can_promote("attempt-1")
-
-    # Nothing moved: the check must not promote, discard, or connect.
-    assert boundary.has_candidate("attempt-1") is True
-    assert boundary.has_order_service() is False
-    assert service.disconnect_calls == 0
-    assert service.connect_calls == 1
-
-
-def test_ensure_can_promote_reports_an_occupied_slot_before_it_is_too_late() -> None:
-    old, new = _FakeService(), _FakeService()
-    boundary = _owned(old, factory=_FakeFactory(old, new))
+    boundary.reserve_candidate_promotion("attempt-1")
     boundary.connect_candidate(
         "attempt-2", config=object(), repository=object(), extended_hours_enabled=False
     )
 
-    with pytest.raises(PaperTradingLifecycleError, match="already active"):
-        boundary.ensure_candidate_can_promote("attempt-2")
+    with pytest.raises(
+        PaperTradingLifecycleError, match="already holds the promotion reservation"
+    ):
+        boundary.reserve_candidate_promotion("attempt-2")
+
+    # The refused candidate is untouched, and still disposable the ordinary way.
+    assert boundary.has_candidate("attempt-2") is True
+    assert boundary.broker_state() is first.broker_state_value
 
 
-def test_ensure_can_promote_refuses_an_unknown_candidate() -> None:
+def test_reserving_refuses_an_unknown_candidate() -> None:
     boundary = _service()
 
     with pytest.raises(PaperTradingLifecycleError, match="unknown Paper candidate"):
-        boundary.ensure_candidate_can_promote("nope")
+        boundary.reserve_candidate_promotion("nope")
+
+
+def test_commit_ends_the_claim_without_moving_anything() -> None:
+    """The commit says which ending this was; the ownership move already happened."""
+
+    service = _FakeService()
+    boundary, reservation = _reserved(service)
+
+    boundary.commit_candidate_promotion(reservation)
+
+    assert boundary.has_order_service() is True
+    assert boundary.has_candidate("attempt-1") is False
+    assert service.disconnect_calls == 0
+
+
+def test_a_committed_launch_frees_the_slot_for_the_next_one() -> None:
+    """An unended claim costs the *next* launch, not this one.
+
+    That asymmetry is deliberate and is what makes it safe to take ownership before
+    publication: the worst a broken commit can do is refuse a later reservation, which
+    is fail-closed, whereas the retired promote-after-publish could leave a live
+    session owned by nobody.
+    """
+
+    first, second = _FakeService(), _FakeService()
+    boundary = _service(factory=_FakeFactory(first, second))
+    boundary.connect_candidate(
+        "attempt-1", config=object(), repository=object(), extended_hours_enabled=False
+    )
+    boundary.commit_candidate_promotion(
+        boundary.reserve_candidate_promotion("attempt-1")
+    )
+
+    # The session ends the way finalization leaves it...
+    boundary.disconnect()
+    boundary.clear_active()
+
+    # ...and the next launch can take the slot again.
+    boundary.connect_candidate(
+        "attempt-2", config=object(), repository=object(), extended_hours_enabled=False
+    )
+    assert boundary.reserve_candidate_promotion("attempt-2") is not None
+
+
+def test_commit_refuses_a_reservation_that_was_already_ended() -> None:
+    service = _FakeService()
+    boundary, reservation = _reserved(service)
+    boundary.commit_candidate_promotion(reservation)
+
+    with pytest.raises(PaperTradingLifecycleError, match="stale or foreign"):
+        boundary.commit_candidate_promotion(reservation)
+
+
+def test_commit_refuses_an_equal_but_foreign_reservation() -> None:
+    """Identity *is* the meaning of a reservation, so an equal one is not the same one.
+
+    Naming the same candidate is not enough to end a claim: otherwise any caller that
+    could construct the value could cut another launch's promotion short.
+    """
+
+    service = _FakeService()
+    boundary, _reservation = _reserved(service)
+
+    with pytest.raises(PaperTradingLifecycleError, match="stale or foreign"):
+        boundary.commit_candidate_promotion(PaperPromotionReservation("attempt-1"))
+
+    # The real claim is untouched by the attempt.
+    assert boundary.has_order_service() is True
+
+
+def test_cancel_returns_the_service_to_the_candidate_slot() -> None:
+    """The rollback is exactly the reverse of the installation."""
+
+    service = _FakeService()
+    boundary, reservation = _reserved(service)
+
+    assert boundary.cancel_candidate_promotion(reservation) is True
+
+    assert boundary.has_order_service() is False
+    assert boundary.has_candidate("attempt-1") is True
+    assert service.disconnect_calls == 0
+    # And the ordinary candidate path works on it again, which is what the launch's
+    # own rollback goes on to use.
+    boundary.discard_candidate("attempt-1")
+    assert service.disconnect_calls == 1
+
+
+def test_cancel_reports_that_a_foreign_reservation_released_nothing() -> None:
+    """It must not raise -- it runs where raising would skip the rejection -- so the
+    only honest way to tell a stale caller is to say it released nothing."""
+
+    service = _FakeService()
+    boundary, _reservation = _reserved(service)
+
+    assert (
+        boundary.cancel_candidate_promotion(PaperPromotionReservation("attempt-1"))
+        is False
+    )
+    assert boundary.has_order_service() is True
+
+
+def test_a_cancelled_reservation_leaves_the_slot_reservable_again() -> None:
+    service = _FakeService()
+    boundary, reservation = _reserved(service)
+    boundary.cancel_candidate_promotion(reservation)
+
+    assert boundary.reserve_candidate_promotion("attempt-1") is not None
 
 
 # -- active lifecycle ----------------------------------------------------

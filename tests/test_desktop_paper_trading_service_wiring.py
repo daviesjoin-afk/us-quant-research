@@ -7,12 +7,12 @@ to tear Paper down before the session is finalized.  No broker is started; the
 window is constructed offscreen and its collaborators are replaced.
 
 v2O-E1 moved the *launch* sequence -- connect, stale-callback decision, arm,
-publish, promote -- out of ``MainWindow`` and into ``PaperOrchestrator``.  The
-structural assertions below therefore read the capability rather than the window.
-Their safety meaning is unchanged and deliberately not weakened: the same call
-must exist, in the same order, on the new owner.  Only the object being inspected
-moved, which is exactly what the extraction claims and what these guards exist to
-verify.
+reserve, publish, commit -- out of ``MainWindow`` and into ``PaperOrchestrator``.
+The structural assertions below therefore read the capability rather than the
+window.  Their safety meaning is unchanged and deliberately not weakened: the same
+call must exist, in the same order, on the new owner.  Only the object being
+inspected moved, which is exactly what the extraction claims and what these guards
+exist to verify.
 """
 
 from __future__ import annotations
@@ -108,7 +108,9 @@ def _install_fake_service(window: MainWindow, *, connected: bool = False):
         repository=object(),
         extended_hours_enabled=False,
     )
-    window.paper_trading.promote_candidate("wiring-test")
+    window.paper_trading.commit_candidate_promotion(
+        window.paper_trading.reserve_candidate_promotion("wiring-test")
+    )
     if connected:
         window.paper_trading.connect_active()
     return fake
@@ -263,23 +265,27 @@ def test_starting_a_launch_connects_a_candidate_not_the_active_slot() -> None:
 
     assert "self._paper_trading.connect_candidate(" in source
     assert "IBKRPaperOrderService(" not in source
-    assert "self._paper_trading.promote_candidate(" not in source
+    assert "self._paper_trading.reserve_candidate_promotion(" not in source
+    assert "self._paper_trading.commit_candidate_promotion(" not in source
 
 
-def test_promotion_happens_only_after_the_launch_is_published() -> None:
-    """Order of the irreversible steps: check, publish, then promote.
+def test_the_promotion_is_taken_before_publication_and_ended_after_it() -> None:
+    """Order of the irreversible steps: take the slot, publish, then end the claim.
 
-    A promotion that happened first would leave the session owned by the window
-    while the workflow still believes it is only connecting.  Pinned on
+    The retired order checked promotability, published, and only *then* promoted --
+    so the slot was still empty while a session that expects an owner came into
+    being, and a refusal in that last step stranded a running session with an armed
+    broker channel and no owner.  Taking the promotion first is what makes
+    ``RUNNING`` imply an owner.  Pinned on
     ``PaperOrchestrator._arm_and_publish`` since v2O-E1.
     """
 
     source = _orchestrator_source("_arm_and_publish")
-    check = source.index("self._paper_trading.ensure_candidate_can_promote(")
+    reserve = source.index("self._paper_trading.reserve_candidate_promotion(")
     publish = source.index("self._workflow.publish_armed(")
-    promote = source.index("self._paper_trading.promote_candidate(")
+    commit = source.index("self._paper_trading.commit_candidate_promotion(")
 
-    assert check < publish < promote
+    assert reserve < publish < commit
 
 
 def test_a_late_callback_disposes_only_its_own_candidate() -> None:
@@ -330,7 +336,8 @@ def test_the_order_channel_check_never_owns_the_channel_it_probes() -> None:
 
     assert "self.paper_trading.probe_order_channel(" in source
     assert "connect_candidate" not in source
-    assert "promote_candidate" not in source
+    assert "reserve_candidate_promotion" not in source
+    assert "commit_candidate_promotion" not in source
 
 
 def test_manual_reconciliation_reconnects_the_owned_service_only() -> None:
@@ -351,7 +358,7 @@ def test_high_risk_calls_stay_in_the_desktop_on_purpose() -> None:
     """
 
     assert "self._workflow.begin_connecting(" in _orchestrator_source("start")
-    assert "self._paper_trading.promote_candidate(" in _orchestrator_source(
+    assert "self._paper_trading.commit_candidate_promotion(" in _orchestrator_source(
         "_arm_and_publish"
     )
     assert "self._workflow.publish_armed(" in _orchestrator_source(

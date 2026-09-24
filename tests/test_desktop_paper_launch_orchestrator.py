@@ -18,8 +18,10 @@ they are the safety properties the round exists to preserve:
   leaves the newer attempt's plan, lease and active service untouched;
 * the second preflight and the frozen-identity revalidation both still refuse;
 * every broker gate still refuses, with ``Decimal`` throughout;
-* the arm/publish/promote order is fixed, with ``ensure_candidate_can_promote``
-  before publication and promotion last;
+* the arm/reserve/publish/commit order is fixed, with the promotion taken *before*
+  publication and its claim ended after it;
+* no failure path can leave ``RUNNING`` with an ownerless session, which is now a
+  property of the order rather than of a handler;
 * each failure path is checked against *state* -- phase, lease, candidate ownership,
   active ownership and the operator-visible outcome -- not merely a dialog.
 
@@ -54,6 +56,7 @@ from us_quant.desktop_v2.orchestration.paper.orchestrator import (
     PaperOrchestrator,
 )
 from us_quant.paper_order_models import PaperBrokerPosition, PaperBrokerState
+from us_quant.trading.application.paper.models import PaperTradingLifecycleError
 from us_quant.trading.domain.strategy import parameter_hash_for
 from us_quant.trading.runtime.workflow_state import (
     PaperWorkflowPhase,
@@ -219,19 +222,35 @@ class _Candidate:
         self.arm_calls.append(kwargs)
 
 
+class _Reservation:
+    """The fake owner's promotion claim.  Identity, not value, is the meaning."""
+
+    def __init__(self, candidate_id: str) -> None:
+        self.candidate_id = candidate_id
+
+
 class _Trading:
-    """The candidate lifecycle of the order-service owner, with two slots."""
+    """The candidate lifecycle of the order-service owner, with two slots.
+
+    Faithful in the property this round made load-bearing: **reserving installs** the
+    service as the active one and locks the slot, so a launch that has reserved is
+    already the owner before it publishes.  A fake that only *recorded* the intent
+    would let the ordering tests pass over an ownerless publication window.
+    """
 
     def __init__(self, candidates: dict[str, _Candidate] | None = None) -> None:
         self._candidates: dict[str, _Candidate] = dict(candidates or {})
         self._active: _Candidate | None = None
+        self._promotion: _Reservation | None = None
         self.connected: list[str] = []
         self.discarded: list[str] = []
+        self.reserved: list[str] = []
         self.promoted: list[str] = []
+        self.cancelled: list[str] = []
         self.connect_error: Exception | None = None
         self.discard_error: Exception | None = None
-        self.promote_error: Exception | None = None
-        self.would_refuse_promotion = False
+        self.reserve_error: Exception | None = None
+        self.commit_error: Exception | None = None
 
     def connect_candidate(self, candidate_id: str, **kwargs: object) -> object:
         if self.connect_error is not None:
@@ -251,19 +270,50 @@ class _Trading:
     def candidate_service(self, candidate_id: str) -> _Candidate:
         return self._candidates[candidate_id]
 
-    def ensure_candidate_can_promote(self, candidate_id: str) -> None:
-        if self.would_refuse_promotion:
-            raise RuntimeError("a Paper order service is already active")
-        if candidate_id not in self._candidates:
-            raise RuntimeError(f"unknown Paper candidate {candidate_id!r}")
-
-    def promote_candidate(self, candidate_id: str) -> None:
-        if self.promote_error is not None:
-            raise self.promote_error
+    def reserve_candidate_promotion(self, candidate_id: str) -> _Reservation:
+        if self.reserve_error is not None:
+            raise self.reserve_error
+        if self._promotion is not None:
+            raise PaperTradingLifecycleError(
+                f"Paper candidate {self._promotion.candidate_id!r} already holds"
+                " the promotion reservation"
+            )
         if self._active is not None:
-            raise RuntimeError("a Paper order service is already active")
-        self._active = self._candidates.pop(candidate_id)
-        self.promoted.append(candidate_id)
+            raise PaperTradingLifecycleError(
+                "a Paper order service is already active"
+            )
+        service = self._candidates.get(candidate_id)
+        if service is None:
+            raise PaperTradingLifecycleError(
+                f"unknown Paper candidate {candidate_id!r}"
+            )
+        reservation = _Reservation(candidate_id)
+        self._active = service
+        del self._candidates[candidate_id]
+        self._promotion = reservation
+        self.reserved.append(candidate_id)
+        return reservation
+
+    def commit_candidate_promotion(self, reservation: _Reservation) -> None:
+        if self.commit_error is not None:
+            raise self.commit_error
+        if self._promotion is not reservation:
+            raise PaperTradingLifecycleError(
+                "stale or foreign Paper promotion reservation"
+            )
+        self._promotion = None
+        self.promoted.append(reservation.candidate_id)
+
+    def cancel_candidate_promotion(self, reservation: _Reservation) -> bool:
+        if self._promotion is not reservation:
+            return False
+        service = self._active
+        self._active = None
+        if service is not None:
+            self._candidates[reservation.candidate_id] = service
+        self._promotion = None
+        self.cancelled.append(reservation.candidate_id)
+        return True
 
     def discard_candidate(self, candidate_id: str) -> None:
         self.discarded.append(candidate_id)
@@ -784,6 +834,7 @@ def test_a_changed_input_during_the_connect_refuses_the_old_launch(mutate) -> No
     harness.submitter.finish(result)
 
     assert harness.trading.discarded == ["1"]
+    assert harness.trading.reserved == []
     assert harness.trading.promoted == []
     assert harness.workflow.phase is PaperWorkflowPhase.READY
     assert harness.workflow.lease.active is False
@@ -806,6 +857,7 @@ def test_a_preflight_that_fails_after_the_connect_refuses_the_launch() -> None:
     harness.submitter.finish(result)
 
     assert harness.trading.discarded == ["1"]
+    assert harness.trading.reserved == []
     assert harness.trading.promoted == []
     assert harness.workflow.phase is PaperWorkflowPhase.READY
     assert harness.workflow.lease.active is False
@@ -900,6 +952,7 @@ def test_a_broker_gate_refuses_without_publishing(candidate, expected) -> None:
     harness = _build(trading=trading)
     _launch(harness)
 
+    assert harness.trading.reserved == []
     assert harness.trading.promoted == []
     assert harness.trading.active is None
     assert harness.workflow.published == []
@@ -920,6 +973,7 @@ def test_the_capital_resolution_failure_refuses_the_launch() -> None:
 
     _launch(harness)
 
+    assert harness.trading.reserved == []
     assert harness.trading.promoted == []
     assert harness.workflow.phase is PaperWorkflowPhase.READY
     assert harness.workflow.lease.active is False
@@ -929,7 +983,7 @@ def test_the_capital_resolution_failure_refuses_the_launch() -> None:
 # -- publish ordering ----------------------------------------------------
 
 
-def test_arm_ensure_publish_promote_order_is_fixed() -> None:
+def test_arm_reserve_publish_commit_order_is_fixed() -> None:
     """The irreversible sequence, asserted positively as an ordered trace.
 
     This is the whole constraint in one assertion, and v2O-E1's follow-up round is
@@ -937,10 +991,11 @@ def test_arm_ensure_publish_promote_order_is_fixed() -> None:
     covers all four steps instead of stopping at the build seam.  Before that, arming
     happened inside the injected seam and the real ordering could only be approximated.
 
-    ``ensure`` before ``publish`` is the safety property: a publication that could
-    still fail for an already-knowable reason would leave a session with no owner.
-    ``promote`` last is the other one: a successful broker connect is not permission
-    for the session to own execution.
+    ``reserve`` before ``publish`` is the safety property, and it is a stronger one
+    than the ``ensure`` it replaced: reserving *takes* the slot, so the published
+    session is already owned when it comes into being instead of being promised an
+    owner that a later refusal could withhold.  ``commit`` last is what ends the
+    launch's claim; it moves nothing.
     """
 
     order: list[str] = []
@@ -954,19 +1009,19 @@ def test_arm_ensure_publish_promote_order_is_fixed() -> None:
     trading = _Trading()
     trading._candidate_for = lambda candidate_id: candidate  # type: ignore[method-assign]
 
-    original_ensure = trading.ensure_candidate_can_promote
-    original_promote = trading.promote_candidate
+    original_reserve = trading.reserve_candidate_promotion
+    original_commit = trading.commit_candidate_promotion
 
-    def ensure(candidate_id):
-        order.append("ensure_candidate_can_promote")
-        return original_ensure(candidate_id)
+    def reserve(candidate_id):
+        order.append("reserve_candidate_promotion")
+        return original_reserve(candidate_id)
 
-    def promote(candidate_id):
-        order.append("promote_candidate")
-        return original_promote(candidate_id)
+    def commit(reservation):
+        order.append("commit_candidate_promotion")
+        return original_commit(reservation)
 
-    trading.ensure_candidate_can_promote = ensure  # type: ignore[method-assign]
-    trading.promote_candidate = promote  # type: ignore[method-assign]
+    trading.reserve_candidate_promotion = reserve  # type: ignore[method-assign]
+    trading.commit_candidate_promotion = commit  # type: ignore[method-assign]
 
     workflow = _Workflow()
     original_publish = workflow.publish_armed
@@ -982,9 +1037,9 @@ def test_arm_ensure_publish_promote_order_is_fixed() -> None:
 
     assert order == [
         "arm",
-        "ensure_candidate_can_promote",
+        "reserve_candidate_promotion",
         "publish_armed",
-        "promote_candidate",
+        "commit_candidate_promotion",
     ]
 
 
@@ -1004,7 +1059,7 @@ def test_the_wiring_reads_the_candidate_broker_state_before_arming() -> None:
     assert reading.net_liquidation == Decimal("25000")
     assert reading.cash == Decimal("25000")
     assert reading.account_alias == "DU1234567"
-    # The borrowed candidate is the one that was armed and later promoted.
+    # The borrowed candidate is the one that was armed and then promoted.
     assert service is candidate
     assert candidate.arm_calls
     assert harness.trading.active is candidate
@@ -1024,10 +1079,16 @@ def test_the_build_seam_receives_the_frozen_request_not_current_ui() -> None:
 
 
 def test_a_promotion_refused_before_publication_leaves_no_session() -> None:
-    """An occupied active slot is discoverable *before* publication, so it is."""
+    """An occupied slot is discoverable *before* publication, so it is.
+
+    With the promotion taken before publication, a refusal here is a refusal to
+    *start*: nothing was reserved, nothing published and nothing rolled back.
+    """
 
     trading = _Trading()
-    trading.would_refuse_promotion = True
+    trading.reserve_error = PaperTradingLifecycleError(
+        "a Paper order service is already active"
+    )
     harness = _build(trading=trading)
     _launch(harness)
 
@@ -1035,22 +1096,36 @@ def test_a_promotion_refused_before_publication_leaves_no_session() -> None:
     assert harness.workflow.phase is PaperWorkflowPhase.READY
     assert harness.workflow.lease.active is False
     assert harness.trading.active is None
+    assert harness.trading.reserved == []
+    assert harness.trading.cancelled == []
     assert harness.trading.promoted == []
     assert harness.events.publications == []
 
 
-def test_a_publish_failure_discards_the_candidate_and_rejects_the_plan() -> None:
+def test_a_publish_failure_gives_the_reservation_back_and_rolls_back() -> None:
+    """The reservation's other ending, and the reason taking it early is safe.
+
+    ``publish_armed`` raises *before* the workflow reaches ``RUNNING``, so this is
+    still an ordinary rollback -- and the rollback has to *cancel* first, because the
+    candidate is the active service until it does and the disposal below would find
+    nothing to dispose.
+    """
+
     workflow = _Workflow()
     workflow.publish_error = WorkflowStateError("Stale or invalid publication.")
     harness = _build(workflow=workflow)
 
     _launch(harness)
 
+    assert harness.trading.reserved == ["1"]
+    assert harness.trading.cancelled == ["1"]
     assert harness.trading.promoted == []
     assert harness.trading.discarded == ["1"]
+    # Nothing is left owned, leased or published.
+    assert harness.trading.active is None
     assert harness.workflow.phase is PaperWorkflowPhase.READY
     assert harness.workflow.lease.active is False
-    assert harness.trading.active is None
+    assert harness.workflow.published == []
     assert harness.events.publications == []
     assert harness.events.refusals[-1][0] == messages.LAUNCH_FAILED_TITLE
 
@@ -1060,6 +1135,7 @@ def test_a_runtime_build_failure_discards_the_candidate() -> None:
     _launch(harness)
 
     assert harness.trading.discarded == ["1"]
+    assert harness.trading.reserved == []
     assert harness.trading.promoted == []
     assert harness.workflow.phase is PaperWorkflowPhase.READY
     assert harness.workflow.lease.active is False
@@ -1075,6 +1151,8 @@ def test_an_arm_failure_discards_the_candidate() -> None:
     _launch(harness)
 
     assert harness.trading.discarded == ["1"]
+    # Arming precedes the reservation, so this failure never took the slot.
+    assert harness.trading.reserved == []
     assert harness.workflow.published == []
     assert harness.workflow.phase is PaperWorkflowPhase.READY
     assert harness.workflow.lease.active is False
@@ -1254,6 +1332,7 @@ def test_editing_the_live_parameters_during_the_connect_is_refused() -> None:
     harness.submitter.finish(result)
 
     assert harness.builder.calls == []
+    assert harness.trading.reserved == []
     assert harness.trading.promoted == []
     assert harness.trading.discarded == ["1"]
     assert harness.workflow.phase is PaperWorkflowPhase.READY
@@ -1261,35 +1340,43 @@ def test_editing_the_live_parameters_during_the_connect_is_refused() -> None:
     assert harness.events.refusals[-1][1] == IDENTITY_CHANGED_MESSAGE
 
 
-# -- Blocker 2: publication splits rollback from invariant failure -------
+# -- publication splits rollback from the claim's ending -----------------
+#
+# The retired pair here modelled a *promotion refused after publication*, which
+# stranded ``RUNNING`` with an ownerless session.  That state can no longer be built:
+# the promotion is taken before publication.  What remains after publication is one
+# step -- ending the launch's claim -- and these tests pin what a failure in *that*
+# step may and may not do.
 
 
-def _publication_then_promotion_failure():
-    """A harness where ``publish_armed`` succeeds and promotion then raises.
+def _publication_then_commit_failure():
+    """A harness where ``publish_armed`` succeeds and ending the claim then raises.
 
-    Promotion failing *after* publication is the broken-invariant window: the
-    workflow has already reached ``RUNNING`` with a published coordinator, so there
-    is nothing left to roll back.
+    Only reachable through a bug: the reservation was taken by this very sequence and
+    nothing else may replace it, so ``commit`` has no refusal left that this path can
+    hit.
     """
 
     workflow = _Workflow()
     trading = _Trading()
-    trading.promote_error = RuntimeError("promotion slot taken")
+    trading.commit_error = PaperTradingLifecycleError("promotion claim not found")
     harness = _build(workflow=workflow, trading=trading)
     _launch(harness)
     return harness
 
 
-def test_a_promotion_failure_after_publication_is_not_rolled_back() -> None:
-    """The session, the lease and the candidate must all survive.
+def test_a_commit_failure_after_publication_still_leaves_the_session_owned() -> None:
+    """The property the reservation buys: ``RUNNING`` implies an owner.
 
-    This is the regression for the round's second blocker.  Rolling back here is
-    actively harmful: ``reject_connecting`` is a no-op outside ``CONNECTING``,
-    discarding the candidate leaves a *published* session with no owner, and releasing
-    PAPER would un-enforce the Shadow/Paper mutex while the session is live.
+    This replaces the retired ownerless-session regression.  In the old order the
+    promotion happened *after* publication and could be refused there, leaving a
+    running workflow whose order port -- already the coordinator's -- belonged to
+    nobody, so every recovery path (all of which start at ``has_order_service``)
+    returned early.  Ownership is now taken before publication, so a failure at this
+    point cannot produce that state at all.
     """
 
-    harness = _publication_then_promotion_failure()
+    harness = _publication_then_commit_failure()
 
     # The workflow was published and stays running.
     assert harness.workflow.published == [harness.workflow.active_plan]
@@ -1297,22 +1384,26 @@ def test_a_promotion_failure_after_publication_is_not_rolled_back() -> None:
     # The lease is still held -- not released.
     assert harness.workflow.lease.active is True
     assert harness.workflow.lease.released == 0
-    # The candidate is still owned and was NOT discarded or disconnected.
-    assert harness.trading.candidate_ids == {"1"}
+    # And the session is *owned*: the active slot holds it, nothing was discarded, and
+    # the claim was not given back as though publication had failed.
+    assert harness.trading.active is not None
+    assert harness.trading.reserved == ["1"]
+    assert harness.trading.cancelled == []
+    assert harness.trading.promoted == []
     assert harness.trading.discarded == []
-    # And no refusal was raised as though this were an ordinary launch failure.
+    # No refusal was raised as though this were an ordinary launch failure.
     assert all(
         title != "Paper 会话未启动" for title, _ in harness.events.refusals
     )
-    # The session was never published to the desktop either -- the window did not
-    # adopt a runtime it cannot own.
+    # The session is deliberately *not* handed to the desktop: the fault is reported
+    # rather than papered over by adopting a runtime whose launch bookkeeping failed.
     assert harness.events.publications == []
 
 
-def test_a_promotion_failure_after_publication_is_reported_as_an_invariant() -> None:
+def test_a_commit_failure_after_publication_is_reported_as_an_invariant() -> None:
     """It must be loud, with its own code, not disguised as a launch failure."""
 
-    harness = _publication_then_promotion_failure()
+    harness = _publication_then_commit_failure()
 
     codes = [
         event.code
@@ -1326,10 +1417,13 @@ def test_a_promotion_failure_after_publication_is_reported_as_an_invariant() -> 
         if event.code == PAPER_PROMOTION_INVARIANT_CODE
     )
     assert invariant.severity == "error"
-    assert "promotion slot taken" in invariant.message
-    # The operator is told, and told what state the session is in.
+    assert "promotion claim not found" in invariant.message
+    # The operator is told, and told what actually happened: the order channel *is*
+    # taken over, and what is stuck is this launch's own claim -- which is a *later*
+    # launch's problem, not a live ownerless session.
     assert harness.events.refusals[-1][0] == messages.PAPER_PROMOTION_INVARIANT_TITLE
-    assert "已发布未接管" in harness.events.refusals[-1][1]
+    assert "订单通道已接管" in harness.events.refusals[-1][1]
+    assert "启动占用未能释放" in harness.events.refusals[-1][1]
 
 
 def test_a_publish_failure_before_publication_still_rolls_back() -> None:

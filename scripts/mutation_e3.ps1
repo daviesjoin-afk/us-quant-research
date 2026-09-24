@@ -28,6 +28,7 @@ $py = ".\.venv\Scripts\python.exe"
 
 $orchestrator = "src\us_quant\desktop_v2\orchestration\paper\orchestrator.py"
 $queriesPath = "src\us_quant\desktop_v2\orchestration\paper\queries.py"
+$service = "src\us_quant\trading\application\paper\service.py"
 $activeRelease = "src\us_quant\trading\application\paper\active_release.py"
 $desktopPath = "src\us_quant\desktop.py"
 
@@ -233,12 +234,12 @@ $mutations = @(
         select = @("-k", "ownership_cannot_be_released or broker_still_reports_positions or journal_still_has or orderly_stop_was_refused")
     },
     @{
-        name = "M23 READY is returned without the slot having been given up"
+        name = "M23 a held ownership is declared READY without proving anything"
         file = $orchestrator
-        find = "        if not self\._paper_trading\.has_order_service\(\):\r?\n(?:            #[^\r\n]*\r?\n)*            return PaperShutdownResult\(PaperShutdownDisposition\.READY\)\r?\n"
-        repl = "        return PaperShutdownResult(PaperShutdownDisposition.READY)`n"
+        find = "        reason = self\._release_paper_ownership_if_proven\(result\)\r?\n        if reason is not None:\r?\n            return self\._ownership_blocked\(reason\)\r?\n        self\.session_finalized\.emit\(\)\r?\n        return PaperShutdownResult\(PaperShutdownDisposition\.READY\)"
+        repl = "        return PaperShutdownResult(PaperShutdownDisposition.READY)"
         tests = @($behavior, $architecture)
-        select = @("-k", "shutdown_blocks or ownership_block_is_never_downgraded")
+        select = @("-k", "releases_a_finalized_session or shutdown_blocks or ownership_block_is_never_downgraded")
     },
     @{
         name = "M24 prepare_shutdown stops a running session twice"
@@ -336,6 +337,44 @@ $mutations = @(
         repl = "            self.stop()`n            return PaperShutdownResult(`n                PaperShutdownDisposition.WAITING_FOR_FINALIZATION,`n                SHUTDOWN_STOP_REQUESTED_MESSAGE,`n            )"
         tests = @($behavior)
         select = @("-k", "halt_an_orderly_stop_produced or fast_finalizing_stop or orderly_stop_was_refused")
+    },
+
+    # -- the concurrency claims, and the third owner ------------------------
+    #
+    # The second review round.  M35/M36 are the check-then-act pair the reservations exist
+    # to close; M37/M38 are the ownership the READY gate used to miss.
+
+    @{
+        name = "M35 the release reads the connection before it claims the slot"
+        file = $activeRelease
+        find = "            reservation = PaperActiveReleaseReservation\(\)\r?\n            self\._active_release_reservation = reservation\r?\n        try:\r?\n            connected = bool\(service\.connection_snapshot\(\)\.connected\)\r?\n        except Exception:\r?\n            # A read that failed proved nothing[^\r\n]*\r?\n(?:            #[^\r\n]*\r?\n)*            self\.cancel_active_release\(reservation\)\r?\n            raise\r?\n        if connected:\r?\n            self\.cancel_active_release\(reservation\)\r?\n            raise PaperTradingLifecycleError\(\r?\n                ""refusing to release an active Paper order service that still""\r?\n                "" reports a live connection""\r?\n            \)\r?\n        return reservation"
+        repl = "            reservation = PaperActiveReleaseReservation()`n        try:`n            connected = bool(service.connection_snapshot().connected)`n        except Exception:`n            raise`n        if connected:`n            raise PaperTradingLifecycleError(`n                ""refusing to release an active Paper order service that still""`n                "" reports a live connection""`n            )`n        self._active_release_reservation = reservation`n        return reservation"
+        tests = @($serviceTests)
+        select = @("-k", "refused_while_a_release_holds_the_slot or cannot_overwrite_a_reservation")
+    },
+    @{
+        name = "M36 a re-open no longer claims the slot it is re-opening"
+        file = $service
+        find = "            self\._active_connect_inflight = True\r?\n        try:"
+        repl = "        try:"
+        tests = @($serviceTests)
+        select = @("-k", "refused_while_a_connect_is_in_flight")
+    },
+    @{
+        name = "M37 READY without asking about the candidate slot"
+        file = $orchestrator
+        find = "        if self\._paper_trading\.has_candidate_ownership\(\):\r?\n            return self\._ownership_blocked\(SHUTDOWN_CANDIDATE_OWNERSHIP_REASON\)\r?\n"
+        repl = "        pass`n"
+        tests = @($behavior)
+        select = @("-k", "candidate_is_still_owned or discard_failure_state")
+    },
+    @{
+        name = "M38 READY without asking about the execution lease"
+        file = $orchestrator
+        find = "        if not holds_a_slot and not holds_the_lease:"
+        repl = "        if not holds_a_slot:"
+        tests = @($behavior)
+        select = @("-k", "unexplained_lease")
     }
 )
 

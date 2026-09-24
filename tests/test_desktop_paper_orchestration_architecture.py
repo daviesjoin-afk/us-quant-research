@@ -1667,13 +1667,18 @@ def test_the_malformed_callback_is_raised_not_swallowed() -> None:
 
 
 def test_the_lease_is_never_touched_directly() -> None:
-    """The capability drives the workflow; it never acquires or releases PAPER.
+    """The capability may *ask* whether the lease is free, and nothing else.
 
-    The calls are matched *with their parentheses* since v2O-E3: the release helper is
-    named ``_release_paper_ownership_if_proven`` because that is what it does, and a
-    bare substring would fire on the name instead of on a lease call.  The claim is
-    unchanged and, if anything, sharper -- ``release_paper(`` is a call and
-    ``_release_paper_ownership`` is not.
+    Two claims, and the second is the sharper one.  It never acquires or releases PAPER:
+    those are the workflow's transitions, and a second writer of the lease is a second
+    owner of the Shadow/Paper mutex.  And it never *names* a held lease -- neither
+    ``ExecutionLease.PAPER`` nor ``.SHADOW`` appears -- so the only thing it can do with
+    the enum is compare against ``NONE``, which is a read of canonical truth rather than a
+    claim about who owns it.
+
+    The calls are matched with their parentheses: the release helper is named
+    ``_release_paper_ownership_if_proven`` because that is what it does, and a bare
+    substring would fire on the name instead of on a lease call.
     """
 
     source = "\n".join(
@@ -1683,9 +1688,13 @@ def test_the_lease_is_never_touched_directly() -> None:
         "acquire_paper(",
         "release_paper(",
         "_leases.",
-        "ExecutionLease",
+        "ExecutionLeaseManager",
+        "ExecutionLease.PAPER",
+        "ExecutionLease.SHADOW",
     ):
         assert forbidden not in source, forbidden
+    # And the one use it does make is the read the shutdown gate needs.
+    assert "ExecutionLease.NONE" in source
 
 
 # -- Guard H: the window left recovery and finalization ------------------
@@ -2017,13 +2026,20 @@ def test_the_ownership_block_is_never_downgraded_to_ready() -> None:
     code = _code_only(
         _ORCHESTRATOR_PATH, "_ownership_verdict", class_name="PaperOrchestrator"
     )
-    compact = re.sub(r"\s+", "", code)
-    # READY is only reachable when nothing is held...
+    # Whitespace collapsed to single spaces rather than removed, so the assertions below stay
+    # readable: the point is the branch, not the formatting.
+    flat = re.sub(r"\s+", " ", code)
+    # ``READY`` requires the *absence* of all three owners: a candidate, the active slot and
+    # the lease.  The old shape short-circuited on "no active service", which is not the
+    # same claim -- the service owns a candidate slot too.
+    assert "self._paper_trading.has_candidate_ownership()" in flat
+    assert "holds_a_slot = self._paper_trading.has_order_service()" in flat
+    assert "holds_the_lease = self._workflow.lease is not ExecutionLease.NONE" in flat
     assert (
-        "ifnotself._paper_trading.has_order_service():"
-        "returnPaperShutdownResult(PaperShutdownDisposition.READY)"
-    ) in compact
-    # ...and every other outcome for a held slot is a refusal, never a silent release.
+        "if not holds_a_slot and (not holds_the_lease):"
+        " return PaperShutdownResult(PaperShutdownDisposition.READY)"
+    ) in flat
+    # Every other outcome for a held ownership is a refusal, never a silent release.
     assert "self._ownership_blocked(" in code
     assert "clear_active" not in code, "the decision must not force a release"
     for forbidden in ("except Exception", "release_paper("):

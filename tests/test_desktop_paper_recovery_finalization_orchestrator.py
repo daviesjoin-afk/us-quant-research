@@ -43,6 +43,7 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     RECONCILIATION_NO_SERVICE_MESSAGE,
     RESUME_EVIDENCE_MISSING_MESSAGE,
     RESUME_NOT_READY_MESSAGE,
+    SHUTDOWN_CANDIDATE_OWNERSHIP_REASON,
     SHUTDOWN_FINALIZATION_PENDING_MESSAGE,
     SHUTDOWN_LAUNCH_IN_FLIGHT_REASON,
     SHUTDOWN_MANUAL_RECOVERY_MESSAGE,
@@ -56,6 +57,7 @@ from us_quant.desktop_v2.orchestration.paper.orchestrator import (
     FINALIZATION_REFRESH_BACKOFF_SECONDS,
     PaperOrchestrator,
 )
+from us_quant.trading.application.paper import PaperTradingService
 from us_quant.trading.application.paper.models import PaperTradingLifecycleError
 from us_quant.trading.runtime.workflow import PaperWorkflowController
 from us_quant.trading.runtime.workflow_state import (
@@ -192,6 +194,10 @@ class _Workflow:
         self.calls: list[object] = []
         self.stop_requests = 0
         self.lease_released = False
+        # The execution lease is a canonical read the shutdown gate makes, so the fake
+        # models it: a session that holds a slot holds PAPER in production, and a client
+        # that never launched holds nothing.
+        self._lease = ExecutionLease.NONE
         # Shared with the trading fake by ``_build``, so a test can assert the *interleaving*
         # of the two -- which is the only way "the evidence is captured before the
         # disconnect" is observable: each fake's own call list is internally in order
@@ -211,6 +217,10 @@ class _Workflow:
     @property
     def reconciliation_evidence(self) -> _Evidence | None:
         return self._evidence
+
+    @property
+    def lease(self) -> ExecutionLease:
+        return self._lease
 
     # -- the ordinary stop ---------------------------------------------
 
@@ -395,6 +405,7 @@ class _Trading:
         release_refusal: str | None = None,
         commit_fails: bool = False,
         cancel_refused: bool = False,
+        candidates: bool = False,
     ) -> None:
         self.owned = owned
         self.connected = connected
@@ -403,6 +414,7 @@ class _Trading:
         self.release_refusal = release_refusal
         self.commit_fails = commit_fails
         self.cancel_refused = cancel_refused
+        self.candidates = candidates
         self.calls: list[str] = []
         self.trace: list[str] = []
         self._release_reservation: object | None = None
@@ -410,6 +422,9 @@ class _Trading:
 
     def has_order_service(self) -> bool:
         return self.owned
+
+    def has_candidate_ownership(self) -> bool:
+        return self.candidates
 
     def is_connected(self) -> bool:
         return self.connected
@@ -1794,6 +1809,172 @@ def test_shutdown_blocks_an_owned_slot_with_no_session_at_all() -> None:
     assert SHUTDOWN_UNPROVABLE_SESSION_REASON in verdict.message
     assert harness.trading.calls == []
     assert harness.workflow.calls == []
+
+
+def test_shutdown_blocks_while_a_candidate_is_still_owned() -> None:
+    """The service owns two slots, and ``READY`` needs both of them empty.
+
+    A candidate is a real broker connection.  ``has_order_service()`` says nothing about it,
+    so a close that asked only about the active slot would report ``READY`` while an
+    unpromoted connection was still tracked -- and the whole point of the disposition is
+    that ``READY`` means "no unexplained ownership left".
+    """
+
+    harness = _build(
+        workflow=_Workflow(phase=PaperWorkflowPhase.READY, result=None),
+        trading=_Trading(owned=False, candidates=True),
+    )
+
+    verdict = harness.orchestrator.prepare_shutdown()
+
+    assert verdict.disposition is PaperShutdownDisposition.OWNERSHIP_BLOCKED
+    assert SHUTDOWN_CANDIDATE_OWNERSHIP_REASON in verdict.message
+    # Nothing was released, deleted or asked about: E3 does not clean a candidate up.
+    assert harness.trading.calls == []
+    assert harness.workflow.calls == []
+    assert harness.events.finalized == 0
+
+
+def test_shutdown_blocks_on_an_unexplained_lease() -> None:
+    """The lease is the last hard condition, and it alone is enough to refuse a close.
+
+    Nothing in the service is held, so the old short-circuit would have answered ``READY``
+    and let the process exit holding PAPER -- which would un-enforce the Shadow/Paper mutex
+    on the way out.
+    """
+
+    workflow = _Workflow(phase=PaperWorkflowPhase.READY, result=None)
+    workflow._lease = ExecutionLease.PAPER
+    harness = _build(workflow=workflow, trading=_Trading(owned=False))
+
+    verdict = harness.orchestrator.prepare_shutdown()
+
+    assert verdict.disposition is PaperShutdownDisposition.OWNERSHIP_BLOCKED
+    assert harness.workflow.calls == []
+
+
+def test_shutdown_releases_a_lease_with_nothing_else_held() -> None:
+    """A lease with a finalized result behind it is released by the workflow's own gate.
+
+    This is the one path where the sequencing helper has no slot to lock, so it asks the
+    gate directly -- and the gate is still the only thing that may hand PAPER back.
+    """
+
+    workflow = _Workflow(
+        phase=PaperWorkflowPhase.FINALIZED, result=_Result(finalized=True)
+    )
+    workflow._lease = ExecutionLease.PAPER
+    harness = _build(workflow=workflow, trading=_Trading(owned=False))
+
+    verdict = harness.orchestrator.prepare_shutdown()
+
+    assert verdict.disposition is PaperShutdownDisposition.READY
+    assert harness.workflow.calls == ["finalize_if_safe"]
+    assert harness.workflow.lease_released is True
+    assert harness.events.finalized == 1
+    assert harness.trading.calls == []
+
+
+class _UndeletableCandidate:
+    """A connected order candidate whose disconnect fails -- E1's discard-failure path."""
+
+    def __init__(self) -> None:
+        self.connected = True
+        self.disconnect_calls = 0
+
+    def connect(self) -> object:
+        self.connected = True
+        return self
+
+    def connection_snapshot(self) -> object:
+        return type("_Connection", (), {"connected": self.connected})()
+
+    def broker_state(self) -> object:
+        return object()
+
+    def reconciliation_rows_with_latency(
+        self, *, session_id: str | None = None, limit: int = 1000
+    ) -> tuple:
+        return ()
+
+    def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        raise RuntimeError("the candidate socket would not close")
+
+
+def test_shutdown_blocks_the_discard_failure_state_reached_for_real() -> None:
+    """E1's discard failure, reproduced through the real service and the real workflow.
+
+    ``discard_candidate`` raising leaves the candidate **tracked** while
+    ``reject_connecting`` rejects the plan and releases PAPER -- so the phase is ``READY``,
+    ``has_order_service()`` is false, the lease is ``NONE``, and a broker connection this
+    capability still owns may be alive.  Every canonical read except the candidate query
+    says "nothing here", which is precisely why the candidate query has to be part of the
+    gate.
+
+    E3 does not clean this up: the candidate is left exactly where it was, and the close is
+    refused rather than allowed to pretend the cleanup happened.
+    """
+
+    candidate = _UndeletableCandidate()
+    workflow = PaperWorkflowController()
+    workflow.begin_preparing()
+    workflow.mark_ready()
+    plan = build_auto_launch_plan(
+        attempt_id=1,
+        strategy_version_id="version-1",
+        parameter_hash="hash-1",
+        candidate_symbols=("AAPL",),
+        requested_capital_limit=Decimal("1000"),
+    )
+    workflow.begin_connecting(plan)
+    service = PaperTradingService(
+        workflow_getter=lambda: workflow,
+        order_service_factory=lambda config, *, repository, extended_hours_enabled: (
+            candidate
+        ),
+    )
+    service.connect_candidate(
+        "attempt-1", config=object(), repository=object(), extended_hours_enabled=False
+    )
+    with pytest.raises(RuntimeError, match="would not close"):
+        service.discard_candidate("attempt-1")
+    assert workflow.reject_connecting(plan) is True
+
+    # The state, asserted before the verdict is asked for: every other read says "clean".
+    assert workflow.phase is PaperWorkflowPhase.READY
+    assert workflow.lease is ExecutionLease.NONE
+    assert service.has_order_service() is False
+    assert service.has_candidate_ownership() is True
+
+    orchestrator = PaperOrchestrator(
+        workflow_getter=lambda: workflow,
+        paper_trading_getter=lambda: service,
+        build_session=lambda *args, **kwargs: None,
+        submit_task=_Submitter(),
+        health_evaluator="health",
+        preflight_provider=lambda: None,
+        strategy_provider=lambda: None,
+        candidates_provider=lambda: (),
+        capital_limit_provider=lambda: 0,
+        order_channel_provider=lambda: None,
+        shadow_is_active=lambda: False,
+        market_snapshot_provider=lambda: None,
+        reconciliation_rows_provider=lambda session_id: (),
+        clear_arm_confirmation=lambda: None,
+        render_launch_state=lambda: None,
+        render_launch_context=lambda summary: None,
+        clock=_Clock(),
+    )
+
+    verdict = orchestrator.prepare_shutdown()
+
+    assert verdict.disposition is PaperShutdownDisposition.OWNERSHIP_BLOCKED
+    assert SHUTDOWN_CANDIDATE_OWNERSHIP_REASON in verdict.message
+    # Left exactly where it was, and nothing pretended otherwise.
+    assert service.has_candidate_ownership() is True
+    assert candidate.disconnect_calls == 1
+    assert workflow.phase is PaperWorkflowPhase.READY
 
 
 def test_shutdown_blocks_when_the_broker_still_reports_positions() -> None:

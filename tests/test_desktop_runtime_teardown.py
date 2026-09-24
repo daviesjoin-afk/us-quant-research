@@ -22,6 +22,7 @@ from PySide6.QtWidgets import QApplication
 
 from us_quant.desktop import MainWindow
 from us_quant.runtime_supervisor import STATE_STOPPED, RuntimeSupervisor
+from us_quant.trading.runtime.workflow_state import ExecutionLease
 
 
 _APP = QApplication.instance() or QApplication([])
@@ -492,6 +493,10 @@ class _HaltedPaperWorkflow:
         self._finalized = finalized
         self._halted = False
         self.stop_requests = 0
+        # The execution lease is a canonical read the shutdown gate makes.  Nothing in this
+        # fake ever takes it, so ``NONE`` is the honest answer -- and a missing attribute
+        # would fail open only if the gate defaulted it, which it does not.
+        self.lease = ExecutionLease.NONE
 
     @property
     def result(self):

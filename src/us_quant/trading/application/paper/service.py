@@ -76,6 +76,13 @@ class PaperTradingService(PaperActiveRelease):
         # statement that the slot's *ending* belongs to one caller until it says which
         # of the two endings it was.  See ``reserve_active_release``.
         self._active_release_reservation: PaperActiveReleaseReservation | None = None
+        # Whether a re-open of the active service is in flight.  A third claim, and the
+        # one that makes the release reservation mean anything: a connect and a release
+        # both start by reading the connection and then act on it, so without exclusion
+        # a release can lock a slot that a connect is about to make live again -- leaving
+        # a live broker socket, no owner and no lease.  Like the two above it is installed
+        # *inside* the critical section, before any call into the broker boundary.
+        self._active_connect_inflight = False
         self._last_error: str | None = None
 
     # -- reads ---------------------------------------------------------
@@ -96,6 +103,20 @@ class PaperTradingService(PaperActiveRelease):
 
         with self._lock:
             return self._order_service is not None
+
+    def has_candidate_ownership(self) -> bool:
+        """Whether any connected-but-unpromoted candidate is still tracked.
+
+        The service owns **two** slots, not one: the active order service and the
+        candidates that were connected but never promoted.  A candidate is a real broker
+        connection, so "no active service" is not "nothing owned" -- and E1's discard path
+        leaves exactly this state behind when a candidate cannot be disposed: the candidate
+        stays tracked while the workflow's plan is rejected and the PAPER lease is released.
+        A caller deciding whether a session is finished has to ask about both.
+        """
+
+        with self._lock:
+            return bool(self._candidates)
 
     def is_connected(self) -> bool:
         """Whether the *active* service reports a live connection (not a candidate)."""
@@ -382,16 +403,39 @@ class PaperTradingService(PaperActiveRelease):
     # -- active lifecycle ----------------------------------------------
 
     def connect_active(self) -> object:
-        """Re-open the active service; never creates one."""
+        """Re-open the active service; never creates one.
+
+        The call is **claimed under the lock before the broker call is made**, and the claim
+        is what makes it mutually exclusive with a release.  Both operations start by
+        reading the connection and then acting on what they read, so a check-then-act pair
+        of them is a real race in both directions: a release that observed "disconnected"
+        can lock the slot while a connect is in flight and about to make it live again --
+        leaving a live broker socket with no owner and no execution lease -- and a connect
+        that observed "no release" can re-open a slot a release is about to drop.
+
+        A claim installed in the same critical section closes both: neither operation can
+        begin while the other holds its claim.  The broker call itself stays outside the
+        lock, as it must.
+        """
 
         with self._lock:
             self._refuse_if_release_in_flight(action="re-open the slot it has reserved")
-        service = self._active_service()
-        if service is None:
-            raise PaperTradingLifecycleError(
-                "no active Paper order service to connect"
-            )
-        return service.connect()
+            if self._active_connect_inflight:
+                raise PaperTradingLifecycleError(
+                    "an active Paper re-open is already in flight;"
+                    " refusing to overlap it"
+                )
+            service = self._order_service
+            if service is None:
+                raise PaperTradingLifecycleError(
+                    "no active Paper order service to connect"
+                )
+            self._active_connect_inflight = True
+        try:
+            return service.connect()
+        finally:
+            with self._lock:
+                self._active_connect_inflight = False
 
     def disconnect(self) -> None:
         """Run the existing ``disconnect`` semantics once; never clears ownership."""

@@ -4008,6 +4008,51 @@ commit_active_release()    total：reservation 生效期间，promotion / clear 
 （同 `commit_candidate_promotion` 的论证），且刻意保留 reservation，绝不在无法交代 owner 时
 把 slot 交回复用。
 
+**claim 必须先装，而且 connect 与 release 必须互斥（第二次 review 抓出的 blocker）。**
+第一版把 reservation 装在第二个临界区、并且只在第二次加锁时重读 service，于是仍然是
+check-then-act，而且是**双向**的竞赛：
+
+```text
+A/B 同时 reserve：两边都看到"没有 release"，A 装好 reservation，B 覆盖它
+                  → A 的 token 变 stale，而 A 的 commit 跑在
+                    finalize_if_safe() **之后**（PAPER 已经释放）→ 必然失败
+                  → 也就是说"commit 结构性不可达"当时是假的
+
+connect 与 release：release 看到 disconnected → 去读连接；
+                  connect 在此期间把 socket 重新接上 → release 装 claim、finalize、
+                  commit → 结果是 broker connection alive + active slot gone + lease gone
+```
+
+修法是让两个 operation 真正互斥，而不是"再多检查一次"：
+
+```text
+connect_active()：lock → 拒绝 release reservation / 拒绝第二个 connect /
+                        取 service / 标记 _active_connect_inflight → unlock
+                  try: service.connect()  finally: lock → 清除 claim
+
+reserve_active_release()：lock → 拒绝现有 release / 拒绝 promotion /
+                                拒绝 connect in flight / 取 service /
+                                **立刻装上 reservation** → unlock
+                          try: 读 connection_snapshot()（锁外）
+                          except: cancel 自己的 reservation，抛
+                          仍 connected: cancel 自己的 reservation，抛
+                          return reservation
+```
+
+两条 claim 都在**同一个临界区**里装好，且都在调用 broker 之前，所以：
+
+```text
+claim 生效期间，promotion / clear / reconnect / 第二次 reserve 全部被拒
+∴ commit_active_release 的 total 才真的是结构性的
+∴ reserve 的拒绝 / cancel 的回滚都不需要网络调用，也不在锁内
+```
+
+即"claim 先于证据，网络调用在锁外"。
+
+**为什么不能在 orchestrator 里 workaround**：唯一能消除竞态的做法是让 slot 侧可锁，
+而 slot 的 owner 是 `PaperTradingService`。在 orchestrator 里读 `_promotion_reservation`
+或自建标志都只是把同一份状态复制到没有所有权的层。
+
 **这是本轮唯一一处 canonical owner 改动，按规范单独披露**：
 
 ```text
@@ -4113,9 +4158,31 @@ stop → 相位仍是 RUNNING      → OWNERSHIP_BLOCKED（停止了但会话还
 stop → STOPPING              → WAITING_FOR_FINALIZATION
 ```
 
-`_ownership_verdict()` 是唯一的 READY 出口：`has_order_service()` 为假才 READY；持有 slot
-则走 §29.5 的两阶段释放，拒绝一律 `OWNERSHIP_BLOCKED`（reason 附在固定文案之后，所以
-"客户端不会释放该所有权或正常退出"这句永远是同一句，只有诊断在变）。
+`_ownership_verdict()` 是唯一的 READY 出口，而且它检查**三份** ownership，不是一份：
+
+```text
+candidate ownership（_candidates 非空）        → OWNERSHIP_BLOCKED
+                                                （service 有两个 slot；释放 active 的那个
+                                                  并不释放 candidate）
+active service 存在 或 PAPER lease 仍 held     → 走 §29.5 的两阶段释放序列
+                                                result 缺失 → OWNERSHIP_BLOCKED
+三者皆无                                        → READY
+```
+
+旧形状用 `has_order_service()` 短路，而"没有 active service"与"什么都没持有"根本不是一个
+命题：E1 的 `discard_candidate()` 失败时（broker disconnect 抛错）candidate 会**留在
+`_candidates` 里**，同时 `reject_connecting()` 把相位推回 `READY` 并释放 PAPER。于是
+phase=`READY`、active service=`None`、PAPER=`NONE`，而一条可能仍然活着的 broker 连接仍被
+这个 capability 拥有——每一次 canonical 读取（除了 candidate 查询）都在说"这里是干净的"。
+所以 candidate 查询必须进 gate，而且 **`workflow.lease == NONE` 是 READY 的最终硬条件**：
+它是唯一活得比其他所有释放都久的 ownership，只有 workflow 自己那道闸门能交还它，于是
+`READY` 才真正意味着"Paper capability 没有任何尚未解释的 ownership"。
+
+E3 **不**自动修复这个 candidate（不删除、不假装清理成功）：返回 `OWNERSHIP_BLOCKED` 即可。
+窄查询是 `PaperTradingService.has_candidate_ownership()`——orchestrator 不读 `_candidates`。
+
+`_ownership_verdict()` 的 READY 出口另外只在一个地方：`_release_paper_ownership_if_proven`
+返回 `None` 之后 `session_finalized` 才发。
 
 `closeEvent` 只剩 presentation 与 generic teardown：
 
@@ -4171,7 +4238,7 @@ _paper_needs_manual_recovery            _release_close_drain_if_recovery_require
 
 ### 29.9 行为测试与 mutation
 
-新增 `tests/test_desktop_paper_recovery_finalization_orchestrator.py`（90 项），覆盖：
+新增 `tests/test_desktop_paper_recovery_finalization_orchestrator.py`（95 项），覆盖：
 `HALTED → reconcile → RECONCILING` / 重连只收证据（不 resume、不重下订单）/
 成功 → `RECONCILING_READY` / 取不到证据或 task 失败 → sticky HALTED /
 未 admit 回退 attempt / 无 fresh evidence 拒绝且无 task 无 fake result /
@@ -4184,38 +4251,64 @@ disconnect 失败不释放 / broker position 非空不释放 / unreconciled row 
 `finalize_if_safe() == False` 不 clear_active / 全部通过 → disconnect → reserve →
 finalize_if_safe → commit / release helper 自己也不信任调用方 /
 **slot 拒绝 reserve 时 workflow 根本没被调用（lease 因此不可能被释放）** /
-commit 拒绝报成 invariant / 每个 E3 result 只发布一次且每个 event 恰好请求一次 /
-`manual_recovery_required` 覆盖与排除 /
-`prepare_shutdown` 的九种 verdict（含 `CONNECTING` 两种取值、stop 的四种结局）。
+commit 拒绝报成 invariant / cancel 被拒时停在 fail-closed /
+**candidate 仍被拥有时不得 READY（含用真实 service + 真实 controller 复现 E1 的
+discard 失败路径）** / **只持有 lease 也要拦** / lease + finalized result 可释放 /
+每个 E3 result 只发布一次且每个 event 恰好请求一次 / `manual_recovery_required` 覆盖与排除 /
+`prepare_shutdown` 的十一种 verdict（含 `CONNECTING` 两种取值、stop 的四种结局、
+三种 ownership 组合）。
 
-`tests/test_paper_trading_service.py` 另加 19 项，覆盖新协议本身：reserve 的三类拒绝
-（promotion claim / 无 active service / 仍 connected）、不可重叠、锁住 clear / reconnect /
-promote、commit 的 total 与两类误用拒绝、cancel 归还锁且什么都不丢、外来 reservation
-不释放任何东西。
+`tests/test_paper_trading_service.py` 另加 **26 项**：新协议自身（reserve 的三类拒绝、
+不可重叠、锁住 clear / reconnect / promote、commit 的 total 与两类误用拒绝、cancel 归还锁、
+外来 reservation 不释放任何东西）、**三组 deterministic race**（用 Event 把第一个 operation
+停在 broker 调用内部，再从另一个线程发第二个：release 在读连接时 connect 必须被拒 /
+connect 在飞行中时 reserve 必须被拒 / 重叠的第二个 reserve 必须立刻被拒），以及
+candidate ownership 的真值表与 E1 discard 失败后的状态。
 
-真实 wiring（`tests/test_desktop_v2_paper_wiring.py`）：operator 点 **No** 时 capability
-根本不被调用、点 **Yes** 时 `confirm_manual_resume` 恰好一次、没有 fresh 证据时窗口只负责问
-而 capability 负责拒。真实 close-drain recovery 加在
-`tests/test_desktop_runtime_teardown.py`（含"信号本身才是解除 drain 的东西"与幂等）。
+`scripts/mutation_e3.ps1` 应用 **38** 项篡改；**38/38 RED**。前 29 项覆盖 E3 主体，M30–M34
+是第一次 review 的 blocker，**M35–M38 是第二次 review 的 blocker**：
 
-`scripts/mutation_e3.ps1` 应用 **34** 项篡改；**34/34 RED**。前 29 项覆盖 E3 主体（删
-in-flight 门、删 backoff、backoff 不依赖 engine、放开 STOPPING-only、finalized result 重新
-排程、broker busy 当 finalization failure、capture/disconnect 换序、disconnect/confirm 换序、
-release helper 信任调用方、broker positions 不拦、unreconciled rows 不拦、忽略
-`finalize_if_safe`、finalization failure 不 HALT、reconciliation 自动 resume、resume 不查
-fresh evidence、失败 reconciliation 不回退 attempt、未 admit 不回退、confirmation 在 task 内
-重读证据、`HALTED` 当自动路径、STOPPING 强制 disconnect、`OWNERSHIP_BLOCKED` 当 `READY`、
-未释放就报 `READY`、stop 两次、halt 公告不触发、窗口重新调 `finalize_if_safe`、窗口重新持有
-proof flag、reconcile 又走窗口、recovery result 绕开唯一出口）。
-
-后 5 项（M30–M34）是 review blocker 的 mutation：**promotion claim 占着 slot 也允许
-reserve**（事务边界失效）、**reserved release 不再锁住其他转移**（commit 的 total 失效）、
-**reserved release 无法归还**（slot 被永久锁死）、**`CONNECTING` 用"没有 result"分类**、
-**stop 后的 verdict 硬编码成 waiting**。
+```text
+M35 release 先读连接再装 claim（check-then-act 回归）
+M36 re-open 不再 claim 它正在重开的 slot（connect/release 互斥失效）
+M37 READY 不问 candidate slot
+M38 READY 不问 execution lease
+```
 
 脚本还有一道**语法闸门**：篡改后先 `ast.parse`，语法不合法判 `HARNESS-ERROR` 而不是
 "抓住"——一个丢掉了缩进的 `repl` 会让 pytest 报 collection error，那次运行对被测属性什么
 都没说。
+
+### 29.10 删掉的数值型结构门禁
+
+`tests/test_paper_trading_service.py` 原有三个**数值**门禁，本轮删除（用户约束：不设行数
+上限，也不许改名保留）：
+
+```text
+span < 60                            单方法行数
+len(lines) < 500                     service.py 非空非注释行数
+implementation > 2.5 * boundary      "被包装的实现要大得多"的字节比
+```
+
+换成真正锁边界的结构守卫：
+
+```text
+test_module_never_holds_the_lock_across_a_network_call
+    锁内不得出现 broker 边界调用（**按调用名判定**，不再按文本 substring）
+test_the_ownership_write_surface_is_the_declared_one
+    slot / reservation / connect claim 的写者集合是精确声明的（逐文件）
+test_the_import_set_is_closed
+    只允许向下的 import allowlist（没有 adapter / desktop / Qt）
+test_the_module_touches_no_gui_and_submits_no_order
+    无 Qt、无 placeOrder/cancelOrder/reqGlobalCancel/submit_approved、无 service bag
+test_promotion_and_release_reservations 的排他性
+   由上面三份协议测试与 M30/M31/M35/M36 覆盖
+```
+
+"锁内禁止网络调用"这条原来是把整块 AST dump 出来搜 `"connect"` / `"disconnect"` 两个
+substring：于是字段名（`_active_connect_inflight`）和一句含 "connection" 的文案都会触发它，
+而两者都不是网络调用，都可以靠**换个名词**"修好"。一个改名就能满足的守卫没有在守任何性质，
+所以改成按**调用名**判定。
 
 本轮 canonical-owner 改动只有一处（§29.5 披露的 active-release reservation），
 `trading/runtime/*`（`workflow.py` / `recovery.py` / `reconciliation.py` / `coordinator.py` /

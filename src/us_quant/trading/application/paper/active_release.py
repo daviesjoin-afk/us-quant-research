@@ -53,6 +53,7 @@ class PaperActiveRelease:
     _order_service: PaperOrderServicePort | None
     _promotion_reservation: PaperPromotionReservation | None
     _active_release_reservation: PaperActiveReleaseReservation | None
+    _active_connect_inflight: bool
     _record_error: Callable[[str | None], None]
 
     def _refuse_if_release_in_flight(self, *, action: str) -> None:
@@ -77,22 +78,34 @@ class PaperActiveRelease:
     def reserve_active_release(self) -> PaperActiveReleaseReservation:
         """Prove the active slot can be released and lock it for that release.
 
-        The checks are ``clear_active``'s, run *here* rather than after the caller has
-        released an execution lease it cannot take back:
+        **The claim goes on first, and the proof afterwards.**  That order is the whole of
+        the concurrency argument: the reservation is installed in the *same* critical
+        section that checks the slot and captures the service, so from that instant no
+        other release, clear, promotion or re-open can touch the slot -- and only then is
+        the connection read, outside the lock, because that read is a call into the broker
+        boundary.
 
-        * an overlapping release refuses, so one caller's lock is never two callers' claim;
-        * a promotion claim still outstanding refuses outright.  This is the E1 invariant
-          path, and it is the one the transaction boundary exists for: if the slot cannot
-          be accounted for, PAPER must not be released either, so the refusal has to arrive
-          *before* the workflow is asked;
-        * no active service at all refuses, because there is nothing to release;
-        * a service that still reports a live connection refuses -- dropping it would
-          abandon a socket nobody could reach again;
-        * the service identity is re-read under the lock, so a slot that changed while the
-          connection was being checked cannot be locked by mistake.
+        Asking the broker first and installing the claim afterwards would leave a
+        check-then-act window in both directions: an overlapping reserve could overwrite
+        this reservation (making the caller's token stale, so the commit that follows an
+        already-released lease fails), and a re-open could make the slot live again between
+        the proof and the claim -- leaving a live broker socket with no owner and no lease
+        while this method reported the slot releasable.
 
-        The connection read is deliberately outside the lock: this module never holds the
-        lock across a call into the broker boundary.
+        The refusals, all inside that same section:
+
+        * an overlapping release refuses, so one release's lock is never another's claim;
+        * a re-open in flight refuses: a connect this call cannot see the end of must not
+          be locked out of the slot it is about to make live;
+        * a promotion claim still outstanding refuses.  This is the E1 invariant path and
+          the reason the boundary exists: if the slot cannot be accounted for, PAPER must
+          not be released either, so the refusal has to arrive *before* the workflow is
+          asked;
+        * no active service at all refuses, because there is nothing to release.
+
+        The connection read then happens outside the lock, and a service that still reports
+        a live connection -- or a read that raises -- takes the claim back off again and
+        refuses.  So this method is a claim or an exception, never a half-held claim.
         """
 
         with self._lock:
@@ -100,6 +113,11 @@ class PaperActiveRelease:
                 raise PaperTradingLifecycleError(
                     "an active Paper release is already in flight;"
                     " refusing to overlap it"
+                )
+            if self._active_connect_inflight:
+                raise PaperTradingLifecycleError(
+                    "an active Paper re-open is in flight; refusing to reserve the slot"
+                    " it is re-opening"
                 )
             if self._promotion_reservation is not None:
                 raise PaperTradingLifecycleError(
@@ -112,19 +130,21 @@ class PaperActiveRelease:
                 raise PaperTradingLifecycleError(
                     "no active Paper order service to release"
                 )
-        if bool(service.connection_snapshot().connected):
+            reservation = PaperActiveReleaseReservation()
+            self._active_release_reservation = reservation
+        try:
+            connected = bool(service.connection_snapshot().connected)
+        except Exception:
+            # A read that failed proved nothing, so the claim goes back rather than being
+            # held over a slot whose state this method never learned.
+            self.cancel_active_release(reservation)
+            raise
+        if connected:
+            self.cancel_active_release(reservation)
             raise PaperTradingLifecycleError(
                 "refusing to release an active Paper order service that still"
                 " reports a live connection"
             )
-        with self._lock:
-            if self._order_service is not service:
-                raise PaperTradingLifecycleError(
-                    "the active Paper order service changed while its release was being"
-                    " prepared; refusing to reserve a different service"
-                )
-            reservation = PaperActiveReleaseReservation()
-            self._active_release_reservation = reservation
         return reservation
 
     def commit_active_release(

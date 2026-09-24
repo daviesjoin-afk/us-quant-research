@@ -106,6 +106,7 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     RESUME_SUCCEEDED_MESSAGE,
     SHADOW_ACTIVE_MESSAGE,
     SHADOW_ACTIVE_TITLE,
+    SHUTDOWN_CANDIDATE_OWNERSHIP_REASON,
     SHUTDOWN_FINALIZATION_PENDING_MESSAGE,
     SHUTDOWN_LAUNCH_IN_FLIGHT_REASON,
     SHUTDOWN_MANUAL_RECOVERY_MESSAGE,
@@ -124,6 +125,7 @@ from us_quant.desktop_v2.orchestration.paper.models import (
 )
 from us_quant.trading.application.paper.models import PaperTradingLifecycleError
 from us_quant.trading.runtime.workflow_state import (
+    ExecutionLease,
     PaperWorkflowPhase,
     WorkflowStateError,
 )
@@ -1092,17 +1094,32 @@ class PaperOrchestrator(QObject):
         return self._ownership_verdict()
 
     def _ownership_verdict(self) -> PaperShutdownResult:
-        """``READY`` only once every ownership has been provably given up."""
+        """``READY`` only once every Paper ownership has been given up.
 
-        if not self._paper_trading.has_order_service():
-            # The workflow holds no unfinished session and this capability owns no order
-            # service: there is nothing left to release or to wait for.
+        Three owners, not one, and the gate is the *absence of all three* -- a candidate, the
+        active order-service slot, and the execution lease.  The old shape short-circuited on
+        "no active service", which is not the same claim at all: ``PaperTradingService`` owns
+        a candidate slot as well, and E1's discard path leaves one tracked while the plan is
+        rejected and the lease released, so a close could walk away from a live broker
+        connection and still be told ``READY``.
+
+        The lease is the final hard condition on purpose, and it is what makes ``READY`` mean
+        "this capability has no unexplained ownership": it is the one piece of ownership that
+        outlives every other release, and only the workflow's own gate may hand it back.  So
+        when a slot is still held -- or when only the lease is -- the sequencing helper runs,
+        which is also where the broker evidence is proved and the workflow is asked.
+        """
+
+        if self._paper_trading.has_candidate_ownership():
+            return self._ownership_blocked(SHUTDOWN_CANDIDATE_OWNERSHIP_REASON)
+        holds_a_slot = self._paper_trading.has_order_service()
+        holds_the_lease = self._workflow.lease is not ExecutionLease.NONE
+        if not holds_a_slot and not holds_the_lease:
             return PaperShutdownResult(PaperShutdownDisposition.READY)
         result = self._workflow.result
         if result is None:
-            # An owned slot with no result at all: a launch fault left a promotion claim
-            # standing, so the ownership cannot be shown to be releasable.  E1's
-            # invariant, reported rather than unwound.
+            # Ownership is held with no result to prove anything about: a launch fault left
+            # something behind.  E1's invariant, reported rather than unwound.
             return self._ownership_blocked(SHUTDOWN_UNPROVABLE_SESSION_REASON)
         reason = self._release_paper_ownership_if_proven(result)
         if reason is not None:

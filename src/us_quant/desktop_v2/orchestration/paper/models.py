@@ -185,6 +185,10 @@ SHUTDOWN_LAUNCH_IN_FLIGHT_REASON = (
 SHUTDOWN_UNPROVABLE_SESSION_REASON = (
     "an order service is owned but the workflow holds no session to prove anything about"
 )
+SHUTDOWN_CANDIDATE_OWNERSHIP_REASON = (
+    "a connected order candidate is still tracked: the service owns two slots, and"
+    " releasing the active one does not release a candidate"
+)
 SHUTDOWN_STOP_REFUSED_REASON = (
     "the orderly stop could not be requested and the session is still live"
 )
@@ -386,6 +390,7 @@ __all__ = [
     "RESUME_PROGRESS", "RESUME_START_MESSAGE", "RESUME_SUCCEEDED_MESSAGE",
     "SHADOW_ACTIVE_MESSAGE",
     "SHADOW_ACTIVE_TITLE", "SHUTDOWN_FINALIZATION_PENDING_MESSAGE",
+    "SHUTDOWN_CANDIDATE_OWNERSHIP_REASON",
     "SHUTDOWN_LAUNCH_IN_FLIGHT_REASON", "SHUTDOWN_MANUAL_RECOVERY_MESSAGE",
     "SHUTDOWN_OWNERSHIP_BLOCKED_MESSAGE",
     "SHUTDOWN_OWNERSHIP_BLOCKED_WITH_REASON_MESSAGE",

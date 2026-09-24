@@ -2255,6 +2255,28 @@ clear 又会在 workflow 拒绝时丢失 ownership，所以 slot 必须可锁。
 （只有一处定义：`_refuse_if_release_in_flight`）。协议不连接、不断开、不提交、不取消，
 也不碰 execution lease。
 
+**claim 先装，并且 connect 与 release 互斥**（第二次 review 的 blocker）：把 reservation
+装在第二次加锁时、以及 `connect_active` 在锁外裸调 `service.connect()`，都还是
+check-then-act，而且是双向的——两个重叠的 reserve 可以互相覆盖 token（于是先那个的 commit
+跑在已经释放的 lease 之后必然失败），release 与 connect 交错可以留下
+`broker connection alive + active slot gone + PAPER lease gone`。所以
+`connect_active` 在临界区内标记 `_active_connect_inflight`（`finally` 清除），
+`reserve_active_release` 在同一个临界区里就装上 reservation、然后才在锁外读连接
+（读失败或读到 connected 就 cancel 自己的 reservation 再抛）。两条 claim 都在调用 broker
+之前生效，`commit` 的 total 才是结构性的，而网络调用仍然不在锁内。
+
+**`READY` 对应三份 ownership 全空**（同一轮的第二个 blocker）：`_ownership_verdict()` 依次
+检查 candidate（`PaperTradingService.has_candidate_ownership()`）、active slot、以及
+**execution lease**。service 拥有两个 slot，而 E1 的 `discard_candidate()` 失败会留下
+candidate 仍被 track、相位回到 `READY`、PAPER 已释放——"没有 active service"并不等于
+"什么都没持有"。lease 是 READY 的最终硬条件：它是活得最久的 ownership，只有 workflow 自己
+那道闸门能交还它。E3 不自动清理这个 candidate，返回 `OWNERSHIP_BLOCKED`。
+
+**删掉的数值门禁**：`tests/test_paper_trading_service.py` 原有的 `span < 60` /
+`len(lines) < 500` / `implementation > 2.5 * boundary` 已删除（用户约束：不设行数上限，
+也不许改名保留），换成按**调用名**判定的"锁内禁止 broker 调用"、精确的 ownership 写者集合、
+闭合的 import allowlist、以及"无 Qt / 无 order API / 无 service bag"。
+
 **`TaskSubmitter` 返回 `False` != task 失败**：`False` 只是 broker resource group busy、
 什么都没发生，因此不 `fail_finalization_refresh`、不 HALT，下一次合法 result 按 backoff
 重试；只有真正跑过并失败的 task 才把 `STOPPING` 推到 `HALTED`。把"忙"当"失败"会把一次排程
@@ -2266,7 +2288,7 @@ PAPER lease，一个未发布的 launch 可能已经连上 candidate）；`RUNNI
 `HALTED`，也可能 fast-stop 到 `FINALIZED`；只有 `_ownership_verdict()` 会返回 `READY`，
 且只在 `has_order_service()` 为假时。
 
-本轮 **34 项 mutation 全部 RED**（`scripts/mutation_e3.ps1`，可复跑），脚本比 E2 版多一道
+本轮 **38 项 mutation 全部 RED**（`scripts/mutation_e3.ps1`，可复跑），脚本比 E2 版多一道
 **语法闸门**：篡改后先 `ast.parse`，语法不合法判 `HARNESS-ERROR` 而不是"抓住"——一个丢掉
 缩进的 `repl` 会让 pytest 报 collection error，那次运行对被测属性什么都没说。
 

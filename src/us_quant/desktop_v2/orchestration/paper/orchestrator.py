@@ -1,7 +1,7 @@
 """Paper launch orchestration: the one owner of starting a Paper AutoQuant session.
 
 Sequence: READY -> CONNECTING -> (2nd preflight + identity revalidation) -> broker gate
--> build runtime -> arm -> ensure promotable -> publish_armed -> promote -> RUNNING.
+-> build runtime -> arm -> reserve the promotion -> publish_armed -> commit -> RUNNING.
 The active-session half -- polling, stream ingress, pause/resume, an orderly stop, halt
 recovery, manual reconciliation, finalization -- is v2O-E2/E3 and named nowhere here.
 
@@ -13,10 +13,14 @@ Three rules matter more than the rest:
   duplicate and staleness gates read ``workflow.phase``, which is equivalent to the
   retired ``_active_auto_launch_plan is not None`` and stays correct after publication,
   when the plan legitimately outlives the attempt;
-* **the arm/ensure/publish/promote order is a safety constraint.**  The promotability
-  check is pure and precedes publication so a published session can never be left
-  without an owner for an already-knowable reason, and publication *splits the failure
-  handling*: ``publish_armed`` raising is still a rollback, promotion failing is not;
+* **the arm/reserve/publish/commit order is a safety constraint, and the promotion is
+  taken rather than checked.**  The order-service owner installs the candidate as the
+  active service *and* locks the slot in one call, so the workflow cannot reach
+  ``RUNNING`` without an owner: there is no longer an ordering in which a published
+  session could be left ownerless.  Publication still splits the failure handling -- a
+  raise at or before ``publish_armed`` is a rollback (cancel the reservation, dispose
+  the candidate, reject the plan, release PAPER), and after it only the launch's own
+  claim is left to end;
 * **the candidate is borrowed, never stored.**  It lives in one callback's local, never
   an attribute -- a stored handle would be a second owner of the connection.
 
@@ -69,9 +73,11 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     PaperOrderChannel,
     PaperSessionBuilder,
 )
+from us_quant.trading.application.paper.models import PaperTradingLifecycleError
 from us_quant.trading.runtime.workflow_state import WorkflowStateError
 
 if TYPE_CHECKING:
+    from us_quant.trading.application.paper.models import PaperPromotionReservation
     from us_quant.trading.application.paper.service import PaperTradingService
     from us_quant.trading.runtime.models import AutoQuantCandidate
     from us_quant.trading.runtime.preflight import AutoQuantPreflight
@@ -311,21 +317,34 @@ class PaperOrchestrator(QObject):
     def _arm_and_publish(
         self, candidate_id: str, request: PaperLaunchRequest
     ) -> None:
-        """Validate the reading, arm the channel, publish, and promote.
+        """Validate the reading, arm, take the promotion, publish, and end the claim.
 
         One sequence, here rather than buried in the injected build seam: ``arm`` ->
-        ``ensure_candidate_can_promote`` -> ``publish_armed`` -> ``promote_candidate``.
+        ``reserve_candidate_promotion`` -> ``publish_armed`` ->
+        ``commit_candidate_promotion``.
 
-        **Publication splits the failure handling in two.**  The boundary is exactly
-        "did ``publish_armed`` return": it raises *before* the workflow reaches
-        ``RUNNING``, so everything up to and including its raise is still a *rollback*
-        (candidate disposed, matching plan rejected, PAPER released).  Once it returns
-        there is nothing left to roll back -- see :meth:`_fail_after_publication`.
+        **The promotion is taken before publication, not after it.**  The order-service
+        owner installs the candidate as the active service *and* locks the slot in that
+        one call, so the workflow cannot reach ``RUNNING`` without an owner: between
+        here and the commit there is no step that could leave a published session whose
+        order port -- already the coordinator's -- belongs to nobody the recovery paths
+        can find.  The retired shape checked promotability, published, and promoted
+        afterwards, and a refusal in that last step stranded exactly such a session:
+        ``RUNNING``, PAPER held, a published coordinator holding an armed channel, and
+        ``has_order_service()`` false, so every recovery path returned early.
+
+        **Publication still splits the failure handling in two**, but the boundary now
+        concerns the launch's *claim* rather than the ownership.  A raise at or before
+        ``publish_armed`` is a rollback: cancel the reservation (which restores the
+        candidate exactly as it was found), dispose it, reject the matching plan and
+        release PAPER.  Once ``publish_armed`` returns there is nothing left to roll
+        back -- only a claim to end -- and cancelling instead would be the unsafe edit.
         """
 
+        reservation: PaperPromotionReservation | None = None
         try:
             # Borrowed for this call stack only: never assigned to an attribute, never
-            # kept past promotion.  A stored handle would be a second owner.
+            # kept past the promotion.  A stored handle would be a second owner.
             service = self._paper_trading.candidate_service(candidate_id)
             broker_state = service.broker_state()
             refusal = queries.validate_broker_state(broker_state)
@@ -344,8 +363,9 @@ class PaperOrchestrator(QObject):
                 max_order_notional=built.max_order_notional,
                 sellable_quantities={},
             )
-            # Pure check, no mutation, and deliberately *before* publication.
-            self._paper_trading.ensure_candidate_can_promote(candidate_id)
+            # Ownership is taken here, and kept only if publication then succeeds --
+            # which is what the cancel below is for, not an afterthought.
+            reservation = self._paper_trading.reserve_candidate_promotion(candidate_id)
             result = self._workflow.publish_armed(
                 request.plan,
                 engine=built.engine,
@@ -354,6 +374,13 @@ class PaperOrchestrator(QObject):
                 candidate_symbols=frozenset(request.candidate_symbols),
             )
         except Exception as error:  # noqa: BLE001 - nothing is published yet
+            if reservation is not None:
+                # Always first: the slot is this launch's to give back, and the
+                # discard below cannot even see a candidate that is still installed.
+                # ``cancel`` is the one call in this sequence that must not raise --
+                # see its own note -- because an exception here would skip the
+                # rejection and strand ``CONNECTING`` holding PAPER for good.
+                self._paper_trading.cancel_candidate_promotion(reservation)
             self._discard_candidate(
                 candidate_id,
                 request,
@@ -361,10 +388,18 @@ class PaperOrchestrator(QObject):
                 show_message=True,
             )
             return
+        # Both failure paths above returned, so this is always a real reservation.
+        # Asserted rather than defaulted, so a later reordering of this method cannot
+        # quietly skip ending the claim and leave the slot spoken for.
+        assert reservation is not None
         try:
-            self._paper_trading.promote_candidate(candidate_id)
-        except Exception as error:  # noqa: BLE001 - published, so no rollback
-            self._fail_after_publication(request, error)
+            self._paper_trading.commit_candidate_promotion(reservation)
+        except PaperTradingLifecycleError as error:
+            # Caught *by name*, and by the type that lives beside the port rather than
+            # inside the service, because a refusal here is the reservation machinery
+            # disagreeing with itself rather than an operator condition -- and because
+            # an exception leaving a Qt slot is reported nowhere at all.
+            self._fail_after_publication(error)
             return
         self.session_published.emit(
             PaperLaunchPublication(
@@ -386,20 +421,21 @@ class PaperOrchestrator(QObject):
             )
         )
 
-    def _fail_after_publication(
-        self, request: PaperLaunchRequest, error: Exception
-    ) -> None:
-        """Fail closed when the session was published but promotion did not land.
+    def _fail_after_publication(self, error: Exception) -> None:
+        """Report a published launch that could not end its promotion claim.
 
-        A **broken safety invariant, not a launch failure**.  ``publish_armed`` already
-        moved the workflow to ``RUNNING`` with a published coordinator, so nothing here
-        may unwind it: ``reject_connecting`` is a no-op outside ``CONNECTING``,
-        discarding the candidate would strand a running session with no owner, and
-        releasing PAPER would un-enforce the Shadow/Paper mutex while a session is live.
-        So nothing is rolled back -- the candidate, the lease and the published workflow
-        stay as they are, and the condition is reported at error severity under its own
-        code.  An ownerless session needs a human, and that is the honest state.  The
-        long-term fix is a promotion reservation/commit in the order-service owner.
+        A **bug report, not a state report**.  Taking the promotion before publication
+        is what makes the session live *and* owned whatever happens next, and the commit
+        that only ends the claim has no failure left that this sequence can reach.  So
+        nothing here is a launch failure and nothing here may unwind: what a stuck claim
+        costs is the *next* launch, because the slot stays spoken for and every later
+        reservation is refused.  That is fail-closed, and it is still a defect worth the
+        operator's attention, so it is reported at error severity under its own code.
+
+        Nothing is rolled back, deliberately: ``reject_connecting`` is a no-op outside
+        ``CONNECTING``, discarding the candidate would drop the owner of a running
+        session, and releasing PAPER would un-enforce the Shadow/Paper mutex while a
+        session is live.
         """
 
         message = PAPER_PROMOTION_INVARIANT_MESSAGE.format(error=error)

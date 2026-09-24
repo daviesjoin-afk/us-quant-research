@@ -19,6 +19,7 @@ from us_quant.trading.application.paper.contracts import (
     WorkflowGetter,
 )
 from us_quant.trading.application.paper.models import (
+    PaperPromotionReservation,
     PaperReconciliationStatus,
     PaperTradingLifecycleError,
     PaperTradingSnapshot,
@@ -36,6 +37,12 @@ class PaperTradingService:
     is never disconnected implicitly.  Phase and evidence are read through an
     injected workflow *getter*, because ``MainWindow`` replaces that controller
     in the safety tests and this boundary must read whichever one is live.
+
+    Promotion is the one transition here that is *two-phase*, because it is the
+    only one a caller must be able to take back: ``reserve_candidate_promotion``
+    installs the owner **and** locks the slot, and ``commit``/``cancel`` end the
+    launch's claim.  Those two methods carry the argument for why the
+    installation cannot wait until after publication.
     """
 
     def __init__(
@@ -52,6 +59,10 @@ class PaperTradingService:
         # genuinely fail-closed instead of a check-then-insert race.
         self._candidates: dict[str, PaperOrderServicePort | None] = {}
         self._order_service: PaperOrderServicePort | None = None
+        # The launch that currently has a promotion in flight.  Not a second copy
+        # of the owner -- the owner is ``_order_service``; this only records that
+        # the slot is spoken for and by whom.
+        self._promotion_reservation: PaperPromotionReservation | None = None
         self._last_error: str | None = None
 
     # -- reads ---------------------------------------------------------
@@ -177,32 +188,116 @@ class PaperTradingService:
         service = self._candidate_or_raise(key)
         return service
 
-    def ensure_candidate_can_promote(self, candidate_id: str) -> None:
-        """Pure check that promotion would be legal; mutates nothing."""
+    def reserve_candidate_promotion(
+        self, candidate_id: str
+    ) -> PaperPromotionReservation:
+        """Install ``candidate_id`` as the active service and lock the slot to it.
 
-        key = self._candidate_key(candidate_id)
-        self._candidate_or_raise(key)
-        with self._lock:
-            if self._order_service is not None:
-                raise PaperTradingLifecycleError(
-                    "a Paper order service is already active;"
-                    " refusing to replace it"
-                )
+        The successor to the old two-step "check that it *could* be promoted, then
+        promote it after publishing".  That shape left the slot empty across
+        publication, so a promotion refused after it stranded a *running* workflow
+        holding an armed broker channel that no recovery path could adopt -- every
+        one of them starts at :meth:`has_order_service`.
 
-    def promote_candidate(self, candidate_id: str) -> None:
-        """Move a validated candidate into the single active slot."""
+        So the ownership move happens here, before publication, and this call is all
+        of it: :meth:`commit_candidate_promotion` only ends the launch's claim.  The
+        ordering constraint stops being a promise about the future and becomes the
+        state of the slot -- after publication the workflow cannot be ownerless,
+        because there is no longer an ordering in which it could be.
+
+        Exclusive while it lasts.  A second reservation, a
+        :meth:`connect_candidate` for the same id, and a slot that already holds a
+        service are all refused, so the ending is deterministic rather than a race.
+        """
 
         key = self._candidate_key(candidate_id)
         service = self._candidate_or_raise(key)
         with self._lock:
+            # The claim is checked first because it is the more specific refusal: an
+            # occupied slot *is* one of these two, and "a promotion is in flight" says
+            # far more than "a service is already active" when one is.
+            if self._promotion_reservation is not None:
+                raise PaperTradingLifecycleError(
+                    f"Paper candidate {self._promotion_reservation.candidate_id!r}"
+                    " already holds the promotion reservation;"
+                    " refusing to overlap it"
+                )
             if self._order_service is not None:
                 raise PaperTradingLifecycleError(
                     "a Paper order service is already active;"
                     " refusing to replace it"
                 )
+            if self._candidates.get(key) is not service:
+                # A discard or a reconnect replaced it between the read above and
+                # this lock; installing the stale handle would make the candidate
+                # owned-but-unreachable in the same breath.
+                raise PaperTradingLifecycleError(
+                    f"Paper candidate {key!r} changed while it was being reserved;"
+                    " refusing to reserve a different service"
+                )
+            reservation = PaperPromotionReservation(candidate_id=key)
             self._order_service = service
             del self._candidates[key]
+            self._promotion_reservation = reservation
         self._record_error(None)
+        return reservation
+
+    def commit_candidate_promotion(
+        self, reservation: PaperPromotionReservation
+    ) -> None:
+        """End the launch's claim on the slot it already owns.
+
+        Total by construction, which is what reserving bought: ownership was taken
+        before publication, so a successful publication leaves nothing left to decide
+        and nothing left that can fail.  The single refusal is a reservation that is
+        not the outstanding one -- a programming error rather than a race, and
+        refused loudly instead of silently claiming a slot.
+
+        Not bookkeeping, either.  While a reservation stands every other promotion is
+        refused, so a launch that never ended its claim would leave the service
+        permanently unreservable: fail-closed, but still a defect.  That is why a
+        guard pins the call into the launch sequence.
+        """
+
+        with self._lock:
+            if self._promotion_reservation is not reservation:
+                raise PaperTradingLifecycleError(
+                    "stale or foreign Paper promotion reservation;"
+                    " refusing to commit it"
+                )
+            self._promotion_reservation = None
+        self._record_error(None)
+
+    def cancel_candidate_promotion(
+        self, reservation: PaperPromotionReservation
+    ) -> bool:
+        """Undo a reservation: the named service becomes a candidate again.
+
+        The launch's publication-refused path, and the reason taking ownership early
+        is safe -- the rollback is exactly the reverse of the installation, so
+        afterwards the ordinary candidate path (:meth:`discard_candidate`) works
+        unchanged.  Returns whether this call released anything, so a caller holding a
+        stale reservation is told it released nothing.
+
+        Deliberately does not raise.  It runs *inside* the rollback, where raising
+        would skip the rejection and strand ``CONNECTING`` holding PAPER for good, so
+        a refusal here has to be a return value rather than an exception.
+        """
+
+        with self._lock:
+            if self._promotion_reservation is not reservation:
+                return False
+            service = self._order_service
+            if service is None:
+                # Unreachable: a reservation is only ever taken together with the
+                # installation, and nothing else may empty the slot.  Reported as
+                # "released nothing" rather than raising, for the reason above.
+                return False
+            self._order_service = None
+            self._candidates[reservation.candidate_id] = service
+            self._promotion_reservation = None
+        self._record_error(None)
+        return True
 
     def discard_candidate(self, candidate_id: str) -> None:
         """Disconnect and forget one stale candidate, and nothing else."""

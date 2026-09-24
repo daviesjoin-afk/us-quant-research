@@ -50,14 +50,16 @@ IDENTITY_CHANGED_MESSAGE = "连接期间策略、候选或资金上限已变化�
 ARMING_FAILED_MESSAGE = "Paper 会话校验或武装失败，未提交自动订单：{error}"
 BAD_CALLBACK_MESSAGE = "unexpected auto order connection result"
 
-#: The one *invariant* message: ``publish_armed`` succeeded but the promotion that must
-#: follow it did not, so the session runs with no owner.  A broken safety invariant
-#: rather than a launch failure, reported at error severity under its own code.
-PAPER_PROMOTION_INVARIANT_TITLE = "Paper 会话已发布但未能接管"
+#: The one *invariant* message: the launch could not end its promotion claim after
+#: ``publish_armed`` succeeded.  The session is live **and owned** -- taking the
+#: promotion installs the owner before publication, so this is no longer an ownerless
+#: session -- but a claim that is never released refuses every later reservation, so a
+#: broken invariant is reported at error severity under its own code.
+PAPER_PROMOTION_INVARIANT_TITLE = "Paper 会话发布后未能结束启动占用"
 PAPER_PROMOTION_INVARIANT_CODE = "PAPER_PROMOTION_INVARIANT"
 PAPER_PROMOTION_INVARIANT_MESSAGE = (
-    "Paper 会话已发布但候选接管失败；会话处于已发布未接管状态，"
-    "需人工处理；已保留租约与候选原状，不做回滚：{error}"
+    "Paper 会话已发布且订单通道已接管，但启动占用未能释放；"
+    "在重启客户端前，新的 Paper 启动会被拒绝：{error}"
 )
 
 #: The catalogue-fault message.  Raised when a governed version's declared hash does not

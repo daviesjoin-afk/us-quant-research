@@ -54,6 +54,8 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     PAPER_PROMOTION_INVARIANT_CODE,
     PAPER_PROMOTION_INVARIANT_MESSAGE,
     PAPER_PROMOTION_INVARIANT_TITLE,
+    PAPER_STRATEGY_INTEGRITY_CODE,
+    PAPER_STRATEGY_INTEGRITY_TITLE,
     PREFLIGHT_CHANGED_MESSAGE,
     PREFLIGHT_PREFIX,
     PREFLIGHT_TITLE,
@@ -61,6 +63,7 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     SHADOW_ACTIVE_TITLE,
     STALE_PLAN_MESSAGE,
     PaperLaunchEvent,
+    PaperLaunchIntegrityError,
     PaperLaunchPublication,
     PaperLaunchRequest,
     PaperOrderChannel,
@@ -189,13 +192,37 @@ class PaperOrchestrator(QObject):
             self.refused.emit(PREFLIGHT_TITLE, PREFLIGHT_PREFIX)
             return
         self._next_attempt += 1
-        request = queries.freeze_launch(
-            attempt_id=self._next_attempt,
-            strategy=strategy,
-            candidates=self._candidates_provider(),
-            requested_capital_limit=self._capital_limit_provider(),
-            order_channel=self._order_channel_provider(),
-        )
+        try:
+            request = queries.freeze_launch(
+                attempt_id=self._next_attempt,
+                strategy=strategy,
+                candidates=self._candidates_provider(),
+                requested_capital_limit=self._capital_limit_provider(),
+                order_channel=self._order_channel_provider(),
+            )
+        except PaperLaunchIntegrityError as error:
+            # A catalogue fault, caught *by name* rather than by ``Exception``.  The
+            # transaction is already safe -- nothing is bound, no lease is taken and no
+            # candidate exists -- but leaving it to escape would strand the UI: the
+            # operator's confirmation is already set, so they would see "armed" with no
+            # session, no refusal, no log line and no event, and the traceback would
+            # surface from a Qt slot rather than from a path that can report it.
+            #
+            # Nothing about this is a retry or a degraded launch, so the arm flag is
+            # cleared and the fault is reported as an error event plus an operator
+            # refusal.  The launch does not proceed under either hash.
+            self._clear_arm_confirmation()
+            self.log_requested.emit(str(error))
+            self.runtime_event_requested.emit(
+                PaperLaunchEvent(
+                    severity="error",
+                    component=PAPER_LAUNCH_COMPONENT,
+                    code=PAPER_STRATEGY_INTEGRITY_CODE,
+                    message=str(error),
+                )
+            )
+            self.refused.emit(PAPER_STRATEGY_INTEGRITY_TITLE, str(error))
+            return
         try:
             # Bound and acquired *before* the connect: Shadow and Paper share one
             # lease, so this ordering is the structural mutex, not a UI gate.

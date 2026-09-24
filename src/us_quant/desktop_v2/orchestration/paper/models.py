@@ -60,6 +60,12 @@ PAPER_PROMOTION_INVARIANT_MESSAGE = (
     "需人工处理；已保留租约与候选原状，不做回滚：{error}"
 )
 
+#: The catalogue-fault message.  Raised when a governed version's declared hash does not
+#: describe its own parameters; the launch never proceeds, so the operator must be told
+#: why rather than left with a confirmed-but-never-started attempt.
+PAPER_STRATEGY_INTEGRITY_TITLE = "Paper 策略版本校验失败"
+PAPER_STRATEGY_INTEGRITY_CODE = "PAPER_STRATEGY_INTEGRITY_FAILED"
+
 #: Progress, status and event wording, verbatim from the retired chain.
 CONNECTING_SUMMARY = "正在连接独立 IBKR Paper 订单会话并核验唯一 DU 账户…"
 CONNECT_START_MESSAGE = "IBKR Paper 自动量化连接中…"
@@ -211,7 +217,8 @@ __all__ = [
     "DUPLICATE_TITLE", "IDENTITY_CHANGED_MESSAGE", "LAUNCH_FAILED_TITLE",
     "NET_LIQUIDATION_MESSAGE", "PAPER_ARMED_CODE", "PAPER_LAUNCH_COMPONENT",
     "PAPER_PROMOTION_INVARIANT_CODE", "PAPER_PROMOTION_INVARIANT_MESSAGE",
-    "PAPER_PROMOTION_INVARIANT_TITLE", "POSITIONS_MESSAGE",
+    "PAPER_PROMOTION_INVARIANT_TITLE", "PAPER_STRATEGY_INTEGRITY_CODE",
+    "PAPER_STRATEGY_INTEGRITY_TITLE", "POSITIONS_MESSAGE",
     "PREFLIGHT_CHANGED_MESSAGE", "PREFLIGHT_PREFIX", "PREFLIGHT_TITLE",
     "PaperAccountReading", "PaperCandidateOrder", "PaperLaunchEvent",
     "PaperLaunchIntegrityError", "PaperLaunchPublication", "PaperLaunchRefusal",

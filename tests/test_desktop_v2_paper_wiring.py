@@ -34,6 +34,8 @@ from us_quant.desktop import MainWindow
 from us_quant.desktop_v2.orchestration.paper.models import (
     DUPLICATE_MESSAGE,
     DUPLICATE_TITLE,
+    PAPER_STRATEGY_INTEGRITY_CODE,
+    PAPER_STRATEGY_INTEGRITY_TITLE,
 )
 from us_quant.paper_order_models import PaperBrokerState
 from us_quant.trading.application.paper import PaperTradingService
@@ -230,6 +232,12 @@ def window(monkeypatch, tmp_path):
     window.paper_orchestrator.refused.connect(
         lambda title, message: window._test_refusals.append((title, message))
     )
+    # And its runtime events, so a fault's own code can be asserted rather than merely
+    # "something was logged".
+    window._test_events = []
+    window.paper_orchestrator.runtime_event_requested.connect(
+        window._test_events.append
+    )
 
     # The facts the launch reads, so the gates pass without a live feed or account.
     window.auto_quant_candidates = (_candidate(),)
@@ -303,6 +311,39 @@ def test_the_window_build_seam_does_not_arm_the_channel(window: MainWindow) -> N
     seam = inspect.getsource(MainWindow._build_paper_session)
     assert ".arm(" not in seam
     assert "max_order_notional=" in seam  # it returns the sizing instead
+
+
+def test_an_inconsistent_catalogue_version_does_not_escape_the_qt_slot(
+    window: MainWindow,
+) -> None:
+    """A catalogue fault must be *reported*, not thrown out of a signal handler.
+
+    This is the real-path regression for the escaping-exception defect.  The operator's
+    confirmation is set before ``start()`` runs, so an exception leaving the slot would
+    leave ``arm_confirmed`` true with no session, no refusal, no log line and no event --
+    the UI would look armed and idle while a real catalogue fault went unreported.
+    """
+
+    import dataclasses
+
+    real = window._test_strategy
+    window.paper_orchestrator._strategy_provider = lambda: dataclasses.replace(
+        real, identity=dataclasses.replace(real.identity, parameter_hash="0" * 64)
+    )
+
+    window._test_refusals.clear()
+    _launch(window)  # must not raise
+
+    # Nothing started, and the operator is not left looking armed.
+    assert window.paper_workflow.phase is PaperWorkflowPhase.READY
+    assert window.paper_workflow.lease is ExecutionLease.NONE
+    assert window.paper_trading.has_order_service() is False
+    assert window.execution_page.arm_confirmed() is False
+    assert window._test_submitter.connect_count == 0
+    # And they were told, with an error event under its own code.
+    assert window._test_refusals[-1][0] == PAPER_STRATEGY_INTEGRITY_TITLE
+    assert window._test_events[-1].code == PAPER_STRATEGY_INTEGRITY_CODE
+    assert window._test_events[-1].severity == "error"
 
 
 def test_the_session_reaches_the_window_through_the_publication(

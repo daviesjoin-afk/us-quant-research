@@ -45,7 +45,6 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     PREFLIGHT_CHANGED_MESSAGE,
     STALE_PLAN_MESSAGE,
     PaperAccountReading,
-    PaperLaunchIntegrityError,
     PaperLaunchPublication,
     PaperLaunchRequest,
     PaperOrderChannel,
@@ -1188,24 +1187,39 @@ def test_the_frozen_parameters_are_detached_from_the_source_object() -> None:
 
 
 def test_a_version_whose_hash_contradicts_its_parameters_is_refused() -> None:
-    """Fail closed: never launch an inconsistent version under either hash.
+    """Fail closed, and *report* -- never leave a confirmed-but-unstarted attempt.
 
-    A version declaring a hash that does not describe its own parameters cannot be
-    launched honestly.  Running it under the declared hash would execute parameters
-    that hash does not cover -- the split-identity failure -- so the launch is
-    refused before any plan is bound, the lease is taken or a candidate exists.
+    The launch is already safe at this point (nothing bound, no lease, no candidate),
+    but the operator's confirmation is already set by the time this runs.  So the flag
+    must be cleared and the fault published: an escaping exception would surface from a
+    Qt slot and leave the UI claiming "armed" with no session, no refusal, no log and no
+    event -- a plausible-looking idle state masking a catalogue fault.
     """
 
     tampered = _Strategy(parameter_hash="0" * 64)
     harness = _build(strategy=tampered)
 
-    with pytest.raises(PaperLaunchIntegrityError):
-        harness.orchestrator.start()
+    # It returns normally rather than raising: swallowing the error would hide a real
+    # fault, but *escaping* would strand the UI.
+    harness.orchestrator.start()
 
+    # Nothing was started or reserved.
     assert harness.workflow.phase is PaperWorkflowPhase.READY
     assert harness.workflow.lease.acquired == 0
     assert harness.trading.connected == []
     assert harness.submitter.calls == []
+    assert harness.builder.calls == []
+    # The operator is not left looking armed.
+    assert harness.arm_clears == [1]
+    # And they are told why, with an error event under its own code.
+    assert harness.events.logs, "the fault must be logged"
+    codes = [
+        event.code for event in harness.events.runtime_events
+    ]
+    assert codes == [messages.PAPER_STRATEGY_INTEGRITY_CODE]
+    assert harness.events.runtime_events[0].severity == "error"
+    assert harness.events.refusals[-1][0] == messages.PAPER_STRATEGY_INTEGRITY_TITLE
+    assert "parameter_hash" in harness.events.refusals[-1][1]
 
 
 def test_editing_the_live_parameters_during_the_connect_is_refused() -> None:

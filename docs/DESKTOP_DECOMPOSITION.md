@@ -3450,6 +3450,16 @@ publish 后 commit 失败去 reject_connecting         → RED（2 failed）
 publish 后 commit 失败去 clear_active              → RED（3 failed）
 ```
 
+**reservation 收口之后（第五轮，27.11(6)）：**
+
+```text
+clear_active 不再理会 reservation                → RED（5 failed + 1 error）
+commit 不再确认槽位仍被持有                       → RED（1 failed）
+orchestrator 忽略 cancel 的返回值                 → RED（5 failed）
+cancel 未证明已归还时仍完成回滚                    → RED（4 failed）
+closeEvent 任由被拒的 clear 抛出                  → RED（1 failed + 2 errors）
+```
+
 完整性错误的报告路径同样有 mutation 覆盖：
 
 ```text
@@ -3552,3 +3562,68 @@ candidate 移入 active。本分支把「移入 active」放在 `reserve`，因�
 恰恰是这个状态本身。收益是缺陷从「不安全」降级为「fail closed 的活性问题」：commit 若因 bug
 没有执行，会话仍然是**有 owner 且可恢复**的，代价只是下一次启动被拒。代价是 `reserve` 在
 语义上不只是「预定」，文档与 docstring 都按这个语义写。
+
+**（6）第五轮 review：reservation 并没有真正锁住槽位，且回滚忽略了 cancel 的结果。**
+
+**(6a) `clear_active()` 完全不检查 `_promotion_reservation`。** 只要 service 已显示
+disconnected，它就能把 `_order_service` 清成 `None`，而占用仍在；`commit` 当时也只看
+reservation 是否匹配、不检查 active 是否还在。于是这条**合法 public API 序列**成立：
+
+```text
+reserve → active = service, reservation = R
+service disconnect
+clear_active()      → active = None
+publish_armed()     → workflow RUNNING
+commit(R)           → 匹配，成功
+最终：RUNNING + active order service == None
+```
+
+也就是 27.11(1) 刚修掉的 ownerless `RUNNING` 又可以通过另一个 public lifecycle API 造出来。
+在真实 desktop 路径上实测（reserve 之后、publish 之前插入一次 `clear_active()`）：`phase
+RUNNING`、`has_order_service False`、`lease PAPER`、coordinator 已发布，而唯一的事件是一条
+`PAPER_SESSION_ARMED`（severity warning）——即这次启动还在宣称自己成功。
+
+修法两半：`clear_active()` 在占用存在时**直接拒绝**（这是「reservation 锁住槽位」从
+docstring 变成性质的另一半），`commit_candidate_promotion()` 再独立确认 `_order_service` 仍
+持有该 service；两者都保持占用不释放——owner 无法交代时，把槽位交回复用是唯一绝不能做的事。
+
+**(6b) 回滚调用 `cancel_candidate_promotion()` 却完全忽略它的 `bool`。** 该 API 明确用返回值
+报告「是否真的把 active 还回了候选槽位」，而 orchestrator 无条件继续 discard + reject +
+release PAPER。真实 desktop 路径实测（publication 抛错 + cancel 返回 `False`）：`phase READY`、
+`lease NONE`（PAPER **已释放**）、owner 仍被持有、armed 通道仍活着，而操作员只看到一条普通的
+「Paper 会话未启动」。PAPER 与 Shadow 共享一个租约，所以这是共享租约最不该允许的状态。
+
+修法：cancel 返回 `False` 时走新的 `_fail_to_release_promotion()` —— **不回滚**、保持
+`CONNECTING` 与 PAPER 租约，用独立 code `PAPER_LAUNCH_ROLLBACK_FAILED` 在 error 级别报出。
+与 `_fail_after_publication` 对称：那边是"已发布且已接管、无可回滚"，这边是"尚未发布、于是
+留在飞行中"。两者都不拆自己交代不清的东西。卡住的启动是操作员看得见、可处置的；一个悄悄空出
+来的租约什么也保护不了。
+
+**(6c) 随之而来的 `closeEvent` 收口。** `clear_active()` 的新拒绝暴露了一处**本轮自己引入
+的**异常路径：`closeEvent` 里那次 `clear_active()` 是无保护的，而
+`runtime_supervisor.begin_shutdown()` 在它之前、`shadow_orchestrator.shutdown()` /
+心跳 / 行情 / worker join 在它之后。实测该状态下 `window.close()`：异常从该 Qt override 抛出，
+窗口最终不可见，而 owner 仍被持有——即后半段收尾全被跳过。这与第三轮的 integrity 逃逸是同一类
+缺陷，因此按同一方式收口：**按名字**捕获 `PaperTradingLifecycleError`、弹窗、
+`event.ignore()` 把客户端交还给操作员。占用只在内存里，所以重启是当前诚实的处置；E3 的应用内
+恢复才是将来替代那句话的东西。
+
+本轮 mutation（均为 RED，实测）：
+
+```text
+clear_active 不再理会 reservation                → RED（5 failed + 1 error）
+commit 不再确认槽位仍被持有                       → RED（1 failed）
+orchestrator 忽略 cancel 的返回值                 → RED（5 failed）
+cancel 未证明已归还时仍完成回滚                    → RED（4 failed）
+closeEvent 任由被拒的 clear 抛出                  → RED（1 failed + 2 errors）
+```
+
+新增 regression：service 层 `test_clearing_is_refused_while_a_promotion_is_reserved` /
+`test_clearing_is_refused_before_it_even_reads_the_connection` /
+`test_commit_refuses_when_the_reserved_slot_was_lost`；能力层
+`test_a_rollback_that_cannot_give_the_slot_back_stays_in_flight`；真实路径
+`test_a_rollback_that_cannot_give_the_slot_back_keeps_the_lease` /
+`test_a_refused_clear_cannot_be_reached_between_the_reserve_and_the_commit` /
+`test_a_stuck_launch_is_not_closed_over_silently`；guard
+`test_the_rollback_stops_when_the_promotion_cannot_be_released` /
+`test_the_reservation_gates_the_clear_of_the_active_slot`。

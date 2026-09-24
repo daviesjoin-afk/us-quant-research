@@ -110,7 +110,7 @@ self.paper_trading = PaperTradingService(
 | --- | --- |
 | `connect_active()` | 只**重连**已有 active；无 owner 是编程错误（人工对账针对的是已存在的会话，不是新建一个） |
 | `disconnect()` | 现有 disconnect 语义原样执行一次；**不清空所有权**——断开成功只证明 socket 没了，不证明会话可以释放。失败记录到 `last_error` 并**原样重抛** |
-| `clear_active(*, expected_service=None)` | 释放所有权。**双向 fail-closed**：仍报告 connected 的 active 被拒绝（丢引用=抛弃一个没人能再够到的 socket）；`expected_service` 让晚到的调用方证明自己清的是**它真正想清的那个**，而不是期间替换上来的新 service |
+| `clear_active(*, expected_service=None)` | 释放所有权。**三向 fail-closed**：① 仍有未结束的 promotion 占用时**直接拒绝**——这是「reservation 锁住槽位」这句话的落实，否则 finalization / recovery 调用方可以在 reserve 与 commit 之间把 owner 清掉，启动就会发布一个 owner 已被丢弃的会话（见 `DESKTOP_DECOMPOSITION.md` §27.11(6)）；② 仍报告 connected 的 active 被拒绝（丢引用=抛弃一个没人能再够到的 socket）；③ `expected_service` 让晚到的调用方证明自己清的是**它真正想清的那个**，而不是期间替换上来的新 service |
 
 ### 3.4 一次性探针
 

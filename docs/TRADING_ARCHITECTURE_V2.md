@@ -2025,7 +2025,19 @@ workflow 转入 `RUNNING` **之前**，所以到它抛为止都还是 rollback�
 拒，当前会话仍然有 owner、可恢复。
 
 `cancel_candidate_promotion()` **刻意不抛异常**：它跑在 rollback 里，抛出会跳过 rejection
-并把 `CONNECTING` 永久卡在持有 PAPER 的状态。是否真的释放了用返回值报告。
+并把 `CONNECTING` 永久卡在持有 PAPER 的状态。所以它**用返回值报告**是否真的释放了，而
+orchestrator 必须**把它当控制信号**而不是日志：返回 `False` 时 ownership 无法证明已归还，
+此时继续回滚会丢掉一个可能仍持有槽位的 service、reject plan 并释放 PAPER（与 Shadow 共享的
+租约），于是改走 `_fail_to_release_promotion()` —— 不回滚、保持 `CONNECTING` 与租约，用独立
+code `PAPER_LAUNCH_ROLLBACK_FAILED` 报出。已发布 LIVE 会话与卡住的启动是两个不同的处境，
+所以 code 也分开。
+
+占用同样**约束 `clear_active()`**：仍有一次 promotion 在飞时它直接拒绝。否则 reservation
+只是"打算"锁住槽位——finalization / recovery 调用方可以在 reserve 与 commit 之间把 owner
+清掉，启动便发布一个 owner 已被丢弃的会话。这是 `RUNNING ⇒ has_order_service()` 成为结构性
+推论的另一半，而 `commit` 还会独立确认槽位仍持有该 service。相应地 `closeEvent` 里那次
+`clear_active()` 按名字捕获这个拒绝（否则异常会从该 Qt override 逃出去，并跳过
+shadow / 心跳 / 行情 / worker 的收尾），弹窗并 `event.ignore()` 交还给操作员。
 
 **冻结的 request 必须真正冻结参数。** `StrategyVersion` 虽是 frozen dataclass，但
 `__post_init__` 把 `parameters` 规范成普通 `dict`（仍可变），而 `parameter_hash` 只是

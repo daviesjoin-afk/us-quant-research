@@ -3393,6 +3393,19 @@ publish → promote" 的它，实际看不到 arm 那一步，architecture test 
 `PaperOrchestrator._arm_and_publish()` 明确执行。现在完整顺序可以被 AST guard 与 mutation
 test 直接锁死，MainWindow 也真正退出了 Paper launch 的 mutation。
 
+**（4）`freeze_launch()` 的完整性错误从 Qt slot 逃逸。** 加上 (1) 的
+`PaperLaunchIntegrityError` 之后，`freeze_launch()` 在 `start()` 里仍是**无保护调用**。
+交易上是 fail closed（不 bind plan、不取 lease、不建 candidate、不下单），但 UI 不是：
+操作员确认步骤已经把 `arm_confirmed` 置为 True，异常却直接从一个 Qt slot 抛出，于是既没有
+refused signal、也没有 log、也没有 runtime event，用户看到的是"已武装但什么都没发生"的
+假空闲状态，而 traceback 打在 stderr 上。
+
+修法：**按名字**捕获 `PaperLaunchIntegrityError`（不是 broad `except Exception`），清掉
+`arm_confirmed`、写一条 `severity="error"`、`code="PAPER_STRATEGY_INTEGRITY_FAILED"` 的
+runtime event、并向操作员发一条 `refused`。既不掩盖真实目录缺陷，也不把它变成一次静默的
+无效启动。对应 regression 从"期望异常逃出去"改成断言 phase 仍为 `READY`、未取得 lease、
+无 candidate、无 task、`arm_confirmed` 已清、有 error event、有 operator refusal。
+
 ### 27.10 mutation 必须 RED
 
 ```text
@@ -3408,10 +3421,22 @@ publish 后 promotion 失败去 clear_active           → RED（3 failed）
 promote 被跳过                                     → RED（10 failed）
 ```
 
-十条均已手工验证为 RED（单元 + wiring + 架构 guard 三层合计）。前两项 blocker 的
-regression 分别是 `test_editing_the_live_parameters_during_the_connect_is_refused` /
-`test_freeze_launch_detaches_parameters_from_the_live_version` /
-`test_a_version_whose_hash_contradicts_its_parameters_is_refused` 与
+完整性错误的报告路径同样有 mutation 覆盖：
+
+```text
+不按名字捕获（改成永不匹配的 except）      → RED（2 failed）
+捕获但不清 arm_confirmed                   → RED（2 failed）
+捕获但不写 runtime event                   → RED（2 failed）
+捕获但不发 refused                         → RED（2 failed）
+报告后仍继续往下 launch                    → RED（1 failed）
+```
+
+十五条均已手工验证为 RED（单元 + wiring + 架构 guard 三层合计）。三项修复的 regression
+分别是：参数脱钩与 hash 校验 `test_freeze_launch_detaches_parameters_from_the_live_version`
+/ `test_editing_the_live_parameters_during_the_connect_is_refused` /
+`test_a_version_whose_hash_contradicts_its_parameters_is_refused`；publication 拆分
 `test_a_promotion_failure_after_publication_is_not_rolled_back` /
-`test_a_promotion_failure_after_publication_is_reported_as_an_invariant` /
-`test_the_orchestrator_arms_the_channel_itself`。
+`test_a_promotion_failure_after_publication_is_reported_as_an_invariant`；arm 归属
+`test_the_orchestrator_arms_the_channel_itself` /
+`test_the_window_build_seam_does_not_arm_the_channel`；完整性报告
+`test_an_inconsistent_catalogue_version_does_not_escape_the_qt_slot`。

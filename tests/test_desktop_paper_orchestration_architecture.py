@@ -24,11 +24,14 @@ Seven guards matter most, and each fails for the right reason:
   site, stores into a local, and never reaches an attribute;
 * **Guard F -- the exact public surface.**  ``start()`` plus the four published
   signals, asserted in both directions so a convenience method fails here;
-* **Guard G -- the public surface and navigability.**  ``start()`` plus the four
-  published signals, asserted in both directions so a convenience method fails here,
-  and one non-blocking check that no single module has stopped being navigable.  There
-  is deliberately **no line budget**: the architecture is asserted by the guard that
-  names a property, not by a number pinned at a file's current size.
+* **Guard G -- the exact public surface.**  ``start()`` plus the four published signals,
+  asserted in both directions so a convenience method fails here.
+
+There is deliberately **no line-count gate of any kind**, not even a renamed "navigability
+threshold": a file's length is a symptom, and a cap pinned at whatever a file happens to be
+fails on a good change while passing on a bad one.  Architecture is asserted by guards that
+name a property -- single responsibility, unambiguous ownership, a stable dependency
+direction, no second truth, no service bag, and a locked safety order -- not by a number.
 
 The import set is closed by an **allowlist** as well as a denylist.  A denylist only
 forbids the couplings someone thought to name; the allowlist means a new dependency
@@ -205,22 +208,6 @@ PUBLIC_SIGNALS = (
     "session_published",
     "runtime_event_requested",
 )
-
-#: A *navigation* sanity threshold, deliberately not an architecture budget.
-#
-#: This guard used to assert per-file line caps (450/200/250).  Those numbers were
-#: never the point: a file's length is a symptom, and a cap at the size a file
-#: happens to be is a gate that fails on a good change and passes on a bad one.  What
-#: actually matters is whether a file has one responsibility, whether ownership is
-#: unambiguous, whether the dependency direction is stable, and whether the key safety
-#: ordering is locked by a test -- all of which the other guards in this file assert
-#: directly.
-#
-#: What is kept is only the signal that a single module has stopped being navigable:
-#: a threshold set well above any honest sequencing module, so it fires when
-#: responsibilities have really accumulated rather than when a docstring grew.  Treat a
-#: failure here as "go and look at this file", not as "split it to fit a number".
-NAVIGABILITY_CEILING = 800
 
 #: Every ``self.paper_orchestrator.<name>`` the window may reach for.
 WINDOW_ALLOWED_ORCHESTRATOR_MEMBERS = set(PUBLIC_SURFACE) | set(PUBLIC_SIGNALS)
@@ -864,25 +851,6 @@ def test_no_new_desktop_manager_or_context_was_introduced() -> None:
             assert banned not in path.read_text(encoding="utf-8"), (
                 f"{banned} in {path.name}"
             )
-
-
-@pytest.mark.parametrize("path", _python_files(_PAPER_DIR), ids=lambda p: p.name)
-def test_no_paper_file_stops_being_navigable(path: pathlib.Path) -> None:
-    """A *navigation* check, not a line budget.
-
-    There is deliberately no per-file cap here.  A file's length is a symptom, and a
-    cap pinned at whatever a file happens to be fails on a good change while passing on
-    a bad one.  What this asserts is only the point at which one module has plausibly
-    accumulated several responsibilities and should be read by a human: the threshold is
-    far above any honest sequencing module, so a failure means "go and look", not
-    "split it to fit the number".
-    """
-
-    lines = len(path.read_text(encoding="utf-8").splitlines())
-    assert lines <= NAVIGABILITY_CEILING, (
-        f"{path.name} is {lines} lines: check whether it still has one "
-        "responsibility before splitting it"
-    )
 
 
 # -- the arm/publish/promote order is a hard constraint ------------------

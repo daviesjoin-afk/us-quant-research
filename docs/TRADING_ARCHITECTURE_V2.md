@@ -1969,10 +1969,10 @@ orchestrator.py  只做 sequencing
 __init__.py      只导出 PaperOrchestrator
 ```
 
-**本轮的架构要求不是行数。** 早先版本写了逐文件行数上限并做成阻断性 guard，该做法已撤销：
-文件长度是症状而非约束，把上限钉在文件当时恰好多长，只会在良性改动上失败、在恶性改动上通过。
+**本轮的架构要求不是行数。** 早先版本写了逐文件行数上限并做成阻断性 guard，后来退成一条
+"导航阈值"，**两者都已彻底删除**——换名字不改变性质，它仍是一个会让 CI 失败的强制行数上限。
 现在断言的是职责单一、ownership 明确、依赖方向稳定、无重复 truth / context bag / god
-object、关键安全顺序有测试锁住；测试里只剩一条远高于诚实模块的**导航**阈值。
+object、关键安全顺序有测试锁住；本 capability 的 guard 里不存在任何 LOC 断言。
 
 **没有第二份 truth。** 这是本轮最重要的一条。`PaperWorkflowController` 仍拥有 phase、
 active plan、execution lease；`PaperTradingService` 仍拥有 candidate 与 active 连接；

@@ -468,16 +468,16 @@ def _build(
     capital_limit: Decimal = Decimal("20000"),
     shadow_active: bool = False,
     market_snapshot: object | None = None,
-    finalization_inflight: bool = False,
+    reconciliation_rows: tuple[object, ...] = (),
     clock: object | None = None,
 ):
     """Assemble an orchestrator over fakes, returning it with its collaborators.
 
     ``preflights`` is a queue so a test can make the second pass disagree with the
-    first -- which is the whole point of the re-run.  The three E2 providers are given
-    inert defaults here: these tests are about the launch, and the active-session
-    behaviours have their own file, where the clock and both providers are driven
-    deliberately.
+    first -- which is the whole point of the re-run.  The cross-boundary providers are
+    given inert defaults here: these tests are about the launch, and the active-session,
+    recovery and finalization behaviours have their own files, where the clock and each
+    provider are driven deliberately.
     """
 
     workflow = workflow or _Workflow()
@@ -512,7 +512,7 @@ def _build(
         ),
         shadow_is_active=lambda: shadow_active,
         market_snapshot_provider=lambda: market_snapshot,
-        finalization_inflight_provider=lambda: finalization_inflight,
+        reconciliation_rows_provider=lambda session_id: reconciliation_rows,
         clear_arm_confirmation=lambda: arm_clears.append(1),
         render_launch_state=lambda: renders.append(None),
         render_launch_context=lambda summary: renders.append(summary),

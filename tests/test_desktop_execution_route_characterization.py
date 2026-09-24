@@ -21,13 +21,35 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+import pytest
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from us_quant.desktop import MainWindow
-from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
+from us_quant.trading.runtime.workflow_state import (
+    PaperWorkflowPhase,
+    WorkflowStateError,
+)
 
 
 _APP = QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def _silence_dialogs(monkeypatch):
+    """A refused close is a modal dialog, and a modal dialog blocks a headless run.
+
+    Several cases below put the workflow in ``HALTED`` / ``RECONCILING_READY`` and then
+    close the window.  Since v2O-E3 ``closeEvent`` asks the capability what to do about the
+    session and *shows the verdict*, so a session only the operator can leave is refused
+    with ``QMessageBox.information`` -- correctly, and for ever if nothing answers it.
+
+    Silencing the dialog is the test-side accommodation.  Which verdict those phases
+    produce is asserted where it belongs, in
+    ``test_desktop_paper_recovery_finalization_orchestrator``.
+    """
+
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
 
 
 def _window() -> MainWindow:
@@ -37,7 +59,14 @@ def _window() -> MainWindow:
 
 
 class _Phase:
-    """The controller surface the render path reads, and nothing else."""
+    """The controller surface the render path reads, and nothing else.
+
+    It answers ``request_stop`` as well, because since v2O-E3 ``closeEvent`` asks the
+    capability to stop a live session.  This fake has no coordinator behind it -- that is
+    what makes it a render fixture rather than a session -- so it refuses the way the real
+    controller does when nothing is published, instead of inventing a result for the
+    orchestrator to publish.
+    """
 
     def __init__(
         self, phase: PaperWorkflowPhase, *, awaiting: bool = False
@@ -45,6 +74,9 @@ class _Phase:
         self.phase = phase
         self.result = None
         self.reconciliation_evidence = object() if awaiting else None
+
+    def request_stop(self, stream_snapshot: object | None = None) -> object:
+        raise WorkflowStateError("No active Paper runtime is available.")
 
 
 class _State:

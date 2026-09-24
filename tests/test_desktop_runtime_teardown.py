@@ -22,6 +22,7 @@ from PySide6.QtWidgets import QApplication
 
 from us_quant.desktop import MainWindow
 from us_quant.runtime_supervisor import STATE_STOPPED, RuntimeSupervisor
+from us_quant.trading.runtime.workflow_state import ExecutionLease
 
 
 _APP = QApplication.instance() or QApplication([])
@@ -492,6 +493,10 @@ class _HaltedPaperWorkflow:
         self._finalized = finalized
         self._halted = False
         self.stop_requests = 0
+        # The execution lease is a canonical read the shutdown gate makes.  Nothing in this
+        # fake ever takes it, so ``NONE`` is the honest answer -- and a missing attribute
+        # would fail open only if the gate defaulted it, which it does not.
+        self.lease = ExecutionLease.NONE
 
     @property
     def result(self):
@@ -715,9 +720,9 @@ def test_finalization_failure_during_close_reopens_manual_recovery(
     try:
         # Hold the zero-state proof in flight so the close path stops at
         # STOPPING with the gate still down -- the real state while the proof
-        # runs.  Without this the missing service fails the proof immediately
-        # and the release below happens inside the same close call.
-        window._paper_finalization_inflight = True
+        # runs.  The flag is the capability's since v2O-E3; the test sets it where
+        # it now lives.
+        window.paper_orchestrator._finalization_inflight = True
 
         assert _close_verdict(window) is False
         # RUNNING has an automatic route, so the gate stays down for it.
@@ -725,7 +730,7 @@ def test_finalization_failure_during_close_reopens_manual_recovery(
         assert running.phase is PaperWorkflowPhase.STOPPING
 
         # The proof then fails: STOPPING -> HALTED, the automatic route.
-        window._paper_finalization_failed("zero-state proof failed")
+        window.paper_orchestrator._finalization_failed("zero-state proof failed")
 
         assert window.paper_workflow.phase is PaperWorkflowPhase.HALTED
         assert window._closing is False
@@ -802,17 +807,19 @@ def test_close_after_finalization_still_completes_the_teardown(
         window.deleteLater()
 
 
-def test_a_halt_discovered_during_the_stop_reopens_manual_recovery(
+def test_a_halt_reported_by_a_running_proof_reopens_manual_recovery(
     monkeypatch,
 ) -> None:
-    """Requirement 3 (second route): the *render* path is the other way in.
+    """Requirement 3 (second route): a result that lands ``HALTED`` mid-drain.
 
-    The result handler is where a poll that discovers unsafe health lands the session
-    in ``HALTED`` while a close is already draining.  Since v2O-E2 that handler is
-    ``_on_paper_result_changed``; the route it exercises -- a result arriving, the
-    control state being republished, the refused-close drain being released -- is
-    unchanged, and that is exactly what this test pins.  It is a different call site
-    from ``_paper_finalization_failed``, so it needs its own regression.
+    The automatic failure route is ``_finalization_failed``; this is the other one, and
+    it is a different call site: the proof was *in flight* and came back reporting a
+    halted session instead of failing.  Until v2O-E3 the analogue was the render path,
+    because the window's result handler was where a result that had moved the phase was
+    noticed; the decision is the capability's now, so the result goes in where a result
+    actually arrives -- the proof's completion callback -- and the drain must still be
+    released.  A HALTED session with the admission gate still down cannot be reconciled,
+    so this is the difference between a recoverable client and a stuck one.
     """
 
     from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
@@ -822,16 +829,19 @@ def test_a_halt_discovered_during_the_stop_reopens_manual_recovery(
     running = _HaltedPaperWorkflow(PaperWorkflowPhase.RUNNING)
     real = _install_paper_workflow(monkeypatch, window, running)
     try:
-        window._paper_finalization_inflight = True
+        window.paper_orchestrator._finalization_inflight = True
         assert _close_verdict(window) is False
         assert window._closing is True
 
-        # A watchdog poll reports unsafe health mid-drain: STOPPING -> HALTED.
-        window._on_paper_result_changed(running.halt())
+        # The in-flight proof reports unsafe health: STOPPING -> HALTED, and the
+        # result reaches the capability's own completion path.
+        window.paper_orchestrator._finalization_completed(running.halt())
 
         assert window.paper_workflow.phase is PaperWorkflowPhase.HALTED
         assert window._closing is False
         assert window.runtime_supervisor.shutting_down is False
+        # And the flag was cleared even though the result halted the session.
+        assert window.paper_orchestrator._finalization_inflight is False
 
         admitted = window._start_task(
             lambda report: None,
@@ -843,4 +853,33 @@ def test_a_halt_discovered_during_the_stop_reopens_manual_recovery(
         assert admitted is True
     finally:
         _restore_paper_workflow(window, real)
+        window.deleteLater()
+
+
+def test_the_recovery_publication_is_what_releases_the_close_drain() -> None:
+    """Requirement 2 (the mechanism): the *signal* undoes the refused close.
+
+    The rounds above reach the release through a route that happens to end in this
+    publication; this one invokes the publication directly, so the claim under test is
+    the wiring itself rather than any single route's arithmetic.  It is the whole of what
+    v2O-E3 has to keep: the window no longer decides *whether* Paper needs a human -- the
+    capability says so, and the window only undoes its own teardown.
+    """
+
+    window = _window()
+    try:
+        window.runtime_supervisor.begin_shutdown()
+        assert window._closing is True
+        assert window.runtime_supervisor.shutting_down is True
+
+        window.paper_orchestrator.manual_recovery_required.emit()
+
+        assert window._closing is False
+        assert window.runtime_supervisor.shutting_down is False
+
+        # And it is idempotent, because the capability re-announces the condition rather
+        # than diffing phases -- a listener that assumed a transition would double-count.
+        window.paper_orchestrator.manual_recovery_required.emit()
+        assert window._closing is False
+    finally:
         window.deleteLater()

@@ -49,10 +49,22 @@ def test_normal_paper_ingress_delegates_once_to_workflow_controller() -> None:
 
 
 def test_manual_resume_cannot_resubmit_pending_orders() -> None:
-    source = _source("_resume_auto_quant_from_reconciliation")
-    assert "paper_workflow.confirm_manual_resume" in source
+    """Reconciliation confirmation resumes; it never re-submits or rebuilds an intent.
+
+    v2O-E3 moved the confirmation's *sequencing* into the capability, so the claim reads
+    there now.  The property is the one that was asserted of the window all along:
+    pending broker rows are review evidence, and the only engine call this path can make
+    is the workflow's own ``confirm_manual_resume``.
+    """
+
+    source = _orchestrator_source("confirm_reconciliation_resume")
+    assert "self._workflow.confirm_manual_resume(evidence_id)" in source
     assert "resubmit_pending_intent" not in source
     assert ".submit(" not in source
+    # And nothing in the path reconnects, arms or disconnects: the session's order port
+    # is the one it was armed with.
+    for forbidden in ("connect_active", "disconnect", "arm(", "reserve_candidate"):
+        assert forbidden not in source, forbidden
 
 
 def test_shadow_uses_the_shared_lease_and_releases_it_on_stop() -> None:
@@ -93,14 +105,31 @@ def test_shadow_uses_the_shared_lease_and_releases_it_on_stop() -> None:
 
 
 def test_close_blocks_unfinalized_paper_before_any_disconnect() -> None:
-    source = _source("closeEvent")
-    # The gate now reads the controller through the Paper trading facade; the
-    # guarantee is unchanged -- an unfinalized session is refused before any
-    # disconnect runs.
-    assert "self.paper_trading.is_finalized()" in source
-    assert source.index("self.paper_trading.is_finalized()") < source.index(
-        "self.paper_trading.disconnect()"
-    )
+    """An unfinalized session refuses the close before anything is torn down.
+
+    Since v2O-E3 the *decision* is ``PaperOrchestrator.prepare_shutdown``'s and the
+    release sequencing -- the only Paper disconnect there is -- lives beside it, behind
+    the workflow's own ``finalize_if_safe`` gate.  The guarantee is unchanged: the close
+    asks first, and a non-READY verdict stops it before shadow shutdown, before the
+    supervisor and before any Paper disconnect.
+    """
+
+    close = _source("closeEvent")
+    ask = close.index("self.paper_orchestrator.prepare_shutdown()")
+    assert ask < close.index("self.shadow_orchestrator.shutdown()")
+    assert ask < close.index("self.runtime_supervisor.shutdown()")
+    assert "self.paper_trading.disconnect()" not in close
+    assert "self.paper_trading.clear_active()" not in close
+
+    # And the release it delegates to is gated on the workflow's own verdict, with the
+    # slot reserved *before* the gate so a slot that cannot be accounted for refuses
+    # while the lease is still held.
+    release = _orchestrator_source("_release_paper_ownership_if_proven")
+    reserve = release.index("self._paper_trading.reserve_active_release()")
+    disconnect = release.index("self._paper_trading.disconnect()")
+    finalize = release.index("if not self._workflow.finalize_if_safe():", reserve)
+    clear = release.index("self._paper_trading.commit_active_release(reservation)")
+    assert disconnect < reserve < finalize < clear
 
 
 def test_unarmed_launch_rejection_is_controller_scoped() -> None:
@@ -125,28 +154,64 @@ def test_unarmed_launch_rejection_is_controller_scoped() -> None:
 
 
 def test_async_preparation_and_reconciliation_fail_closed() -> None:
+    """Both asynchronous steps roll their own attempt back when the task is refused.
+
+    v2O-E3 moved the reconciliation into the capability, so the assertions read there.
+    The two properties are the ones the window's handler had: an attempt that was never
+    admitted is failed explicitly rather than left in a phase whose only exit is a proof
+    nobody took, and a task that started and then failed fails only *its* attempt.
+    """
+
     assert "on_failure=self._auto_candidate_preparation_failed" in _source(
         "_prepare_auto_quant_candidates"
     )
     assert "paper_workflow.cancel_preparing()" in _source(
         "_auto_candidate_preparation_failed"
     )
-    reconnect = _source("_reconnect_auto_order_service")
-    assert "complete_manual_reconciliation(attempt_id)" in reconnect
-    assert "self._auto_order_reconciliation_failed(" in reconnect
-    assert "if not started:" in reconnect
-    assert "fail_manual_reconciliation(attempt_id)" in reconnect
-    assert "paper_workflow.fail_manual_reconciliation(attempt_id)" in _source(
-        "_auto_order_reconciliation_failed"
+    reconcile = _orchestrator_source("reconcile")
+    assert "complete_manual_reconciliation(attempt_id)" in reconcile
+    assert "self._reconciliation_failed(" in reconcile
+    assert "if not started:" in reconcile
+    assert "fail_manual_reconciliation(attempt_id)" in reconcile
+    assert "self._workflow.fail_manual_reconciliation(attempt_id)" in (
+        _orchestrator_source("_reconciliation_failed")
     )
+    # Reconnecting is evidence collection: the task must not reach anything that trades.
+    assert "connect_active()" in reconcile
+    for forbidden in ("resubmit", "placeOrder", "arm(", "request_stop"):
+        assert forbidden not in reconcile, forbidden
 
 
 def test_manual_resume_requires_current_evidence_and_runs_off_ui_thread() -> None:
-    source = _source("_resume_auto_quant_from_reconciliation")
-    assert "PaperWorkflowPhase.RECONCILING_READY" in source
-    assert "reconciliation_evidence" in source
+    """The proof is read *after* the confirmation, and the engine work is a task.
+
+    Reading it before the dialog is the failure this pins: a proof captured when the
+    question was asked can be consumed or superseded while the operator reads it.  The
+    capability therefore re-reads the phase and the evidence itself, freezes that id into
+    the attempt's closure, and only then submits -- and it raises no fabricated result
+    when the proof is missing.
+    """
+
+    source = _orchestrator_source("confirm_reconciliation_resume")
+    assert "queries.reconciliation_resume_ready(" in source
+    assert "self._workflow.reconciliation_evidence" in source
     assert "confirm_manual_resume(evidence_id)" in source
-    assert "self._start_task(" in source
+    assert "self._submit_task(" in source
+    # The read order is the claim: the refusal comes first.
+    assert source.index("reconciliation_resume_ready") < source.index(
+        "self._submit_task("
+    )
+    # And the confirmation itself is presentation, on the window, with no orchestration.
+    confirm = _source("_confirm_paper_reconciliation_resume")
+    assert "QMessageBox.question(" in confirm
+    assert "self.paper_orchestrator.confirm_reconciliation_resume()" in confirm
+    for forbidden in (
+        "reconciliation_evidence",
+        "confirm_manual_resume",
+        "evidence_id",
+        "paper_workflow",
+    ):
+        assert forbidden not in confirm, forbidden
 
 
 def test_snapshot_renderer_does_not_enable_manual_resume_from_engine_flags() -> None:
@@ -164,29 +229,43 @@ def test_snapshot_renderer_does_not_enable_manual_resume_from_engine_flags() -> 
 
 
 def test_finalization_proves_zero_state_before_disconnect_and_lease_release() -> None:
-    source = _source("_start_paper_finalization_refresh")
+    """The proof's order, asserted on its new owner.
+
+    Evidence before disconnect (the proof reads the connection the session still holds)
+    and disconnect before confirmation (the proof is only consumed once the callback
+    thread has joined), on the broker resource group, with the busy dialog suppressed
+    and the task marked shutdown-essential -- it is part of the close path itself.
+    """
+
+    source = _orchestrator_source("_start_finalization")
     assert source.index("capture_finalization_evidence()") < source.index(
-        "self.paper_trading.disconnect()"
+        "self._paper_trading.disconnect()"
     )
-    assert source.index("self.paper_trading.disconnect()") < source.index(
+    assert source.index("self._paper_trading.disconnect()") < source.index(
         "confirm_finalization_after_disconnect"
     )
-    assert "resource_group=\"broker\"" in source
+    assert 'resource_group="broker"' in source
+    assert "suppress_busy_message=True" in source
+    assert "shutdown_essential=True" in source
+    # And the proof releases nothing: only the workflow's own gate may do that.
+    for forbidden in ("clear_active(", "release_paper(", "finalize_if_safe()"):
+        assert forbidden not in source, forbidden
 
 
 def test_finalization_suppresses_desktop_poll_and_stream_ingress() -> None:
-    """Both entry points consult the finalization seam *before* they do anything.
+    """Both entry points consult the proof *before* they do anything.
 
-    The deferral moved with the operations in v2O-E2, so the ordering is asserted on
-    the capability: a poll or an ingress that ran first and consulted the seam second
-    would interleave two readers of the same broker connection.
+    The deferral is now a flag this capability owns rather than a provider read across
+    the boundary, so the ordering is asserted where the flag lives: a poll or an ingress
+    that ran first and consulted it second would interleave two readers of the same
+    broker connection.
     """
 
     poll_source = _orchestrator_source("poll")
     stream_source = _orchestrator_source("on_market_snapshot")
-    assert poll_source.index("_finalization_inflight_provider()") < poll_source.index(
+    assert poll_source.index("self._finalization_inflight") < poll_source.index(
         "self._workflow.poll()"
     )
-    assert stream_source.index(
-        "_finalization_inflight_provider()"
-    ) < stream_source.index("self._workflow.on_stream(snapshot)")
+    assert stream_source.index("self._finalization_inflight") < stream_source.index(
+        "self._workflow.on_stream(snapshot)"
+    )

@@ -144,7 +144,7 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Backtest Orchestration | MIGRATED（v2O-C3，`desktop_v2/orchestration/research/backtest/`） |
 | Research Orchestration | **COMPLETE**（v2O-C；Universe / History / Scanner / Backtest / Cross-Section / Targeted Evidence / Targeted Session 全部已迁） |
 | Shadow Orchestration | MIGRATED（v2O-D，`desktop_v2/orchestration/shadow/`） |
-| Paper Orchestration | MIGRATED（v2O-E1 启动链 + v2O-E2 active runtime，`desktop_v2/orchestration/paper/`）；recovery / finalization / render ownership 仍在 `MainWindow`，属 v2O-E3/E4 |
+| Paper Orchestration | MIGRATED（v2O-E1 启动链 + v2O-E2 active runtime + v2O-E3 recovery/finalization/shutdown，`desktop_v2/orchestration/paper/`）；render ownership 与 `closeEvent` 的整体收口仍在 `MainWindow`，属 v2O-E4 |
 
 Shadow 子系统：
 
@@ -1811,12 +1811,13 @@ service、admission 被拒后 busy 保持 True、failure 清空 last-good runs�
 **v2O-C1 Universe + History + v2O-C2 Scanner + v2O-C3 Backtest ✅**；
 **v2O-C4 Cross Section ✅**；**v2O-C5A Targeted Evidence ✅**；
 **v2O-C5B Targeted Session + Preflight ✅**；**v2O-D Shadow orchestration ✅**；
-**v2O-E1 Paper launch orchestration ✅**；**v2O-E2 active Paper runtime orchestration ✅
-（v2O-E partial）** ——
-顶层路线现在是 **v2O-C Research COMPLETE**。Paper 能力分四刀：启动链（§8.18）与 active
-runtime（§8.19）已完成，`MainWindow` 不再决定 active session 何时 poll / 何时吃行情 /
-何时 pause/resume/stop，也不再持有 runtime handle；下一刀是
-**v2O-E3 HALT / manual reconciliation / finalization / shutdown**。
+**v2O-E1 Paper launch orchestration ✅**；**v2O-E2 active Paper runtime orchestration ✅**；
+**v2O-E3 recovery / finalization orchestration ✅（v2O-E partial）** ——
+顶层路线现在是 **v2O-C Research COMPLETE**。Paper 能力分四刀：启动链（§8.18）、active
+runtime（§8.19）与 recovery/finalization/shutdown（§8.20）已完成，`MainWindow` 不再决定
+active session 何时 poll / 何时吃行情 / 何时 pause/resume/stop，不再持有 runtime handle，
+也不再决定 HALT 之后如何对账、zero-state 证明何时开始、ownership 何时可以释放；下一刀是
+**v2O-E4 render ownership + MainWindow closure guards**。
 
 维护导航见 `docs/DESKTOP_CAPABILITY_MAP.md`；C5B 的设计依据见
 `DESKTOP_DECOMPOSITION.md` §25，本文的 §8.16 只记该轮改变了哪些 boundary。
@@ -2101,7 +2102,7 @@ manual reconciliation、finalization refresh、`_finish_auto_quant_session_if_sa
 后续阶段：
 
 ```text
-v2O-E3  HALT / manual reconciliation / finalization / shutdown
+v2O-E3  HALT / manual reconciliation / finalization / shutdown   ✅ 已完成（§8.20）
 v2O-E4  Paper render ownership + MainWindow closure guards
 ```
 
@@ -2175,6 +2176,141 @@ interlock 恒返回 False。
 本轮**未触碰**任何 frozen core：`trading/runtime/*`、`trading/application/*`、broker
 adapter、execution lease、Shadow core 均零 diff——包括 E1 刚完成的 promotion reservation
 （`reserve/commit/cancel_candidate_promotion` 与 reserved-id ownership）。
+
+### 8.20 Paper recovery / finalization orchestration 已抽出（v2O-E3）
+
+E2 之后，`MainWindow` 仍然决定 HALT 之后怎么对账、zero-state 证明什么时候开始、以及一个
+finalized 的 session 什么时候可以交出 ownership。这一刀把这三件事（连同关闭时对 Paper 的
+判断）收进**同一个** `PaperOrchestrator`——没有 `PaperRecoveryOrchestrator` /
+`PaperFinalizationManager` / `PaperShutdownController`，Paper capability 仍然只有一个
+sequencing owner。
+
+```text
+HALTED → reconcile → RECONCILING → 一次性证据 → RECONCILING_READY
+       → 操作员明确确认 → resume 既有 session → RUNNING
+
+STOPPING → 排程 zero-state 证明（5s backoff，engine 仍 active 时才生效）
+         → capture evidence < disconnect < confirm evidence
+         → workflow.finalize_if_safe() → clear_active() → PAPER lease 释放
+```
+
+**三条硬不变量**，也是本轮最终验收标准：
+
+```text
+1. HALT 之后没有任何自动路径可以绕过人工 reconciliation
+   （reconcile 只收证据；resume 必须在用户确认之后重读证据；stale / consumed /
+     changed 证据一律拒绝，只 log，不造 result、不修相位）
+
+2. 没有完整证明（local zero-state + broker zero-state + reconciliation complete +
+     finalization evidence valid + workflow finalize_if_safe == True）之前，
+     active Paper ownership 与 PAPER lease 都绝不释放
+   （broker disconnected != finalized；finalize_if_safe 是唯一 canonical gate）
+
+3. MainWindow 已退出 recovery / finalization sequencing，
+     且没有提前把 E4 的 presentation / composition 职责塞进 capability
+```
+
+**窗口交出的 sequencing**：`_reconnect_auto_order_service` /
+`_auto_order_service_reconnected` / `_resume_auto_quant_from_reconciliation` /
+`_auto_order_resume_failed` / `_auto_order_reconciliation_failed` /
+`_schedule_paper_finalization_refresh` / `_start_paper_finalization_refresh` /
+`_paper_finalization_completed` / `_paper_finalization_failed` /
+`_finish_auto_quant_session_if_safe` / `_handle_paper_e3_result_bridge` /
+`_publish_window_paper_result`，以及 `_paper_needs_manual_recovery` /
+`_release_close_drain_if_recovery_required`（后者是窗口自己的 Paper 相位推理）。窗口也不再
+持有 `_paper_finalization_inflight` / `_last_paper_finalization_started`，并且**不留
+forwarding property**。
+
+**窗口留下的**：两个 `QMessageBox` 确认（launch 与 resume——capability 不能 import
+`QMessageBox`）、`closeEvent` 的 presentation 与 generic teardown、execution render
+ownership（E4）。
+
+**新增 public API**：`reconcile()`、`confirm_reconciliation_resume()`、
+`prepare_shutdown() -> PaperShutdownResult`（`PaperShutdownDisposition` =
+`READY` / `WAITING_FOR_FINALIZATION` / `MANUAL_RECOVERY_REQUIRED` /
+`OWNERSHIP_BLOCKED`），以及三个**无 payload** 的 signal：`presentation_refresh_requested`
+（没有新 result 但控件状态变了）、`session_finalized`、`manual_recovery_required`。三者都不
+携带 phase copy / bool mirror / state dict。
+
+**result 仍只有一条出口**：`_publish_result` 之外多了一个 `_after_result`——一个 `STOPPING`
+result 会从 stop、stream tick 和 poll 三处到达，三份"该不该开始证明"就是其中一个开始自己
+排程的方式。`desktop.py` 里已不存在 `for event in result.events`。
+
+**release 的证据走窄 provider**：`reconciliation_rows_provider: Callable[[str],
+Sequence[object]]`（composition root 里是 `order_repository.reconciliation_rows` 的
+lambda），而不是把 repository 交进 capability。
+
+**release 在 slot 侧是两阶段的**（本轮唯一一处 canonical-owner 改动，单独披露）：
+`reserve_active_release()` → `finalize_if_safe()` → `commit_active_release()`，拒绝时
+`cancel_active_release()` 把锁还回去。理由是 `finalize_if_safe` 是 check-and-commit 且**不是
+本轮的**：它一旦返回 `True` 就已经 `release_paper()` 并清掉 workflow 的
+coordinator / result / evidence。原来的顺序是 `disconnect → finalize_if_safe() →
+clear_active()`，于是 `clear_active()` 因 E1 的 promotion reservation 拒绝时，状态会变成
+"ownership 还在、PAPER lease 已经 NONE"——E1 的 ownerless invariant 被反向打破。反过来先
+clear 又会在 workflow 拒绝时丢失 ownership，所以 slot 必须可锁。新增
+`src/us_quant/trading/application/paper/active_release.py`（`PaperActiveRelease` mixin，
+按仓库既有 `trading/runtime/recovery.py` 的模式拆出，`service.py` 仍在既有的 thin-boundary
+结构守卫内），`models.py` 新增 `PaperActiveReleaseReservation`，`service.py` 的
+`connect_active` / `clear_active` / `reserve_candidate_promotion` 各加一处 release 守卫
+（只有一处定义：`_refuse_if_release_in_flight`）。协议不连接、不断开、不提交、不取消，
+也不碰 execution lease。
+
+**claim 先装，并且 connect 与 release 互斥**（第二次 review 的 blocker）：把 reservation
+装在第二次加锁时、以及 `connect_active` 在锁外裸调 `service.connect()`，都还是
+check-then-act，而且是双向的——两个重叠的 reserve 可以互相覆盖 token（于是先那个的 commit
+跑在已经释放的 lease 之后必然失败），release 与 connect 交错可以留下
+`broker connection alive + active slot gone + PAPER lease gone`。所以
+`connect_active` 在临界区内标记 `_active_connect_inflight`（`finally` 清除），
+`reserve_active_release` 在同一个临界区里就装上 reservation、然后才在锁外读连接
+（读失败或读到 connected 就 cancel 自己的 reservation 再抛）。两条 claim 都在调用 broker
+之前生效，`commit` 的 total 才是结构性的，而网络调用仍然不在锁内。
+
+**`clear_active` 走同一套 claim**（第三次 review 的 blocker）：它一度保留自己的检查块，因此
+re-open 完全不在它的视野里——`connect_active` 已装 claim 并在 `service.connect()` 中时，
+`clear_active` 仍可能读到旧的 "disconnected" 把 slot 清掉，最终得到
+`broker socket live + active owner = None`。而在它顶部补一次检查**也没用**（还是
+check-then-act）。所以它不再有检查：`clear_active(expected_service=...)` 就是
+`reserve_active_release(expected_service=...)` + `commit_active_release(...)`，
+`expected_service` 在装 reservation 的同一个临界区里校验。clear / release / connect /
+promotion 对 active slot 的互斥因此全部使用同一套 claim，没有第四种 pre-check。
+
+**`READY` 对应三份 ownership 全空，且 lease 那一份必须 `is PAPER`**（第二、三次 review）：
+`_ownership_verdict()` 依次检查 candidate（`PaperTradingService.has_candidate_ownership()`）、
+active slot、以及 **`workflow.lease is ExecutionLease.PAPER`**。service 拥有两个 slot，而 E1
+的 `discard_candidate()` 失败会留下 candidate 仍被 track、相位回到 `READY`、PAPER 已释放——
+"没有 active service"并不等于"什么都没持有"。lease 判据必须是 `is PAPER` 而不能是
+`is not NONE`：`ExecutionLeaseManager` 与 Shadow **共享**，`lease` 返回持有它的一方，所以
+`is not NONE` 会把一个正在正常运行的 Shadow 会话读成 Paper 的未释放 ownership，从而让应用
+无法关闭（而 `closeEvent` 是 Paper READY 之后才轮到 Shadow teardown）。SHADOW 属于
+`ShadowOrchestrator`，由它自己 stop 时交回。E3 不自动清理 candidate，返回
+`OWNERSHIP_BLOCKED`。
+
+**删掉的数值门禁**：`tests/test_paper_trading_service.py` 原有的 `span < 60` /
+`len(lines) < 500` / `implementation > 2.5 * boundary` 已删除（用户约束：不设行数上限，
+也不许改名保留），换成按**调用名**判定的"锁内禁止 broker 调用"、精确的 ownership 写者集合、
+闭合的 import allowlist、以及"无 Qt / 无 order API / 无 service bag"。
+
+**`TaskSubmitter` 返回 `False` != task 失败**：`False` 只是 broker resource group busy、
+什么都没发生，因此不 `fail_finalization_refresh`、不 HALT，下一次合法 result 按 backoff
+重试；只有真正跑过并失败的 task 才把 `STOPPING` 推到 `HALTED`。把"忙"当"失败"会把一次排程
+冲突升级成一次 HALT。
+
+**shutdown 从 canonical phase 分类**：`CONNECTING` 明确拒绝（它合法地没有 result 且持有
+PAPER lease，一个未发布的 launch 可能已经连上 candidate）；`RUNNING`/`PAUSED` 复用
+`self.stop()` 之后**重新读取**相位与结果再分类——同一次 `request_stop` 可能直接落到
+`HALTED`，也可能 fast-stop 到 `FINALIZED`；只有 `_ownership_verdict()` 会返回 `READY`，
+且只在 `has_order_service()` 为假时。
+
+本轮 **41 项 mutation 全部 RED**（`scripts/mutation_e3.ps1`，可复跑），脚本比 E2 版多一道
+**语法闸门**：篡改后先 `ast.parse`，语法不合法判 `HARNESS-ERROR` 而不是"抓住"——一个丢掉
+缩进的 `repl` 会让 pytest 报 collection error，那次运行对被测属性什么都没说。
+
+本轮 canonical-owner 改动只有上文的 active-release reservation 一处；
+`trading/runtime/*`（`workflow.py` / `recovery.py` / `reconciliation.py` / `coordinator.py` /
+`trading.py`）、RiskApplication / ExecutionApplication、broker adapter、execution lease 与
+Shadow core 仍然零 diff。
+
+设计依据见 `DESKTOP_DECOMPOSITION.md` §29。
 
 ## 9. 已删除的旧架构
 
@@ -2952,7 +3088,7 @@ v2O-B Account orchestration     ✅ 已完成（§8.12）
 v2O-C Research orchestration    ✅ COMPLETE（§8.13–§8.16）
 v2O-D Shadow orchestration      ✅ 已完成（§8.17）
 v2O-E Paper orchestration       🔶 部分完成：E1 启动链（§8.18）+ E2 active runtime（§8.19）
-v2O-E3 HALT / reconciliation / finalization / shutdown   ⏭ 后续
+                                    + E3 recovery/finalization/shutdown（§8.20）
 v2O-E4 Paper render ownership + closure guards           ⏭ 后续
 v2O-F System orchestration      ⏭ 后续
 MainWindow composition closure  ⏭ 后续
@@ -3090,7 +3226,7 @@ v2O-C Research orchestration    ✅ COMPLETE（C1–C5B 全部完成）
 v2O-D Shadow orchestration      ✅ 已完成（§8.17）
 v2O-E1 Paper launch             ✅ 已完成（§8.18）
 v2O-E2 active Paper runtime     ✅ 已完成（§8.19）
-v2O-E3 HALT / reconciliation / finalization / shutdown
+v2O-E3 HALT / reconciliation / finalization / shutdown   ✅ 已完成（§8.20）
 v2O-E4 Paper render ownership + closure guards
 v2O-F System orchestration
 MainWindow composition closure

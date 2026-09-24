@@ -3839,3 +3839,528 @@ HARNESS-ERROR 而不是"抓住"——一个匹配不到测试的选择器否则�
 本轮**未触碰**任何 frozen core：`trading/runtime/*`、`trading/application/*`、broker
 adapter、execution lease、Shadow 全部零 diff，包括 E1 刚完成的
 `reserve/commit/cancel_candidate_promotion` 与 reserved-id ownership。
+
+## 29. v2O-E3：Paper recovery / finalization 提取
+
+### 29.1 这一刀移走什么
+
+E1 移走了启动，E2 移走了 active run。剩下三段仍在窗口：**HALT 之后的人工恢复**、
+**STOPPING 之后的 zero-state 证明**、以及**关闭时对 Paper 的判断**。它们散在
+`_reconnect_auto_order_service` / `_resume_auto_quant_from_reconciliation` /
+`_schedule_paper_finalization_refresh` / `_start_paper_finalization_refresh` /
+`_paper_finalization_completed` / `_paper_finalization_failed` /
+`_finish_auto_quant_session_if_safe` 这七个方法，加上一把临时 bridge。整体迁入同一个
+orchestrator——**没有新建** `PaperRecoveryOrchestrator` / `PaperFinalizationManager` /
+`PaperShutdownController`，Paper capability 仍然只有一个 sequencing owner。
+
+```text
+HALTED → reconcile → RECONCILING → 一次性证据 → RECONCILING_READY
+       → 操作员明确确认 → resume 既有 session → RUNNING
+
+STOPPING → 排程 zero-state 证明（5s backoff）
+         → capture evidence（在 disconnect 之前）
+         → disconnect
+         → confirm evidence（在 disconnect 之后）
+         → workflow.finalize_if_safe()
+         → clear_active() → PAPER lease 释放
+```
+
+§28.6 的 `finalization_inflight_provider` 与 §28.7 的
+`_handle_paper_e3_result_bridge` / `_publish_window_paper_result` 在本轮删除。
+
+**本轮不迁**（属 v2O-E4）：`_paper_render_snapshot` 的退休、execution page 的最终
+render ownership、`build_runtime_view` / ExecutionPage presenter、整个 `closeEvent`
+（除 Paper 判断外）、generic RuntimeSupervisor shutdown、MainWindow 整体架构收口。
+
+### 29.2 result 仍然只有一条出口，并多了一个"后果"钩子
+
+```text
+workflow operation → PaperSessionResult → PaperOrchestrator._publish_result(result)
+                        ├─ result_changed.emit(result)          → 窗口唯一的渲染入口
+                        ├─ 每个 event 一次 runtime_event_requested
+                        └─ _after_result(result)
+                              ├─ _maybe_schedule_finalization(result)
+                              ├─ _maybe_finish_finalized_session(result)
+                              └─ _announce_manual_recovery_if_required()
+```
+
+窗口的 `_publish_window_paper_result` 随之删除：三条仍由窗口直调 workflow 的 E3 路径
+（finalization completed / reconnect / manual resume 确认）现在都在 capability 内走
+`_publish_result`。**整个 `desktop.py` 已不存在 `for event in result.events`**，guard 直接
+钉住这一点——这就是"result 只被发布一次"的可执行定义。
+
+`_after_result` 存在的理由不是整洁：一个 `STOPPING` result 会从 stop、stream tick 和 poll
+三个地方到达，三份"该不该开始证明"就是其中一个开始自己排程的方式。
+
+### 29.3 HALT 只能由人离开，而且要走两次
+
+```text
+ExecutionPage.reconcile_requested          → PaperOrchestrator.reconcile
+ExecutionPage.resume_reconciliation_requested
+    → MainWindow._confirm_paper_reconciliation_resume   （QMessageBox，纯 presentation）
+    → 用户 Yes → PaperOrchestrator.confirm_reconciliation_resume
+```
+
+`reconcile()` 的顺序是硬的：先确认存在 active order service（没有就 log 并 return，**相位
+不动**）→ `begin_manual_reconciliation()` → 请求 presentation refresh → submit broker task
+→ task 内"若 active service 已断开则 `connect_active()`" → `complete_manual_reconciliation(attempt_id)`。
+task 未被 admit 时显式 `fail_manual_reconciliation(attempt_id)` 回退——否则会留下一个
+`RECONCILING` 僵尸，唯一出口是确认一份从未取到的证据。
+
+**重连不是 resume。** pending broker rows 只是证据，任何一步都不重建 intent、不重下订单、
+不补单、不绕过人工确认。`reconcile` 成功后停在 `RECONCILING_READY`。
+
+`confirm_reconciliation_resume()` 的关键是**在用户确认之后**才实时读 `workflow.phase` 与
+`workflow.reconciliation_evidence`：在弹窗之前读到的证据可能在用户思考期间被消费或替换，
+拿着过期证据恢复才是真的危险。读到的 `evidence_id` 被冻结进本次 task 的闭包，因此
+**stale / consumed / changed evidence 都不能恢复 session**，拒绝只 log、不造 result、不
+自己修相位。
+
+窗口侧只保留纯 presentation 的确认 handler：不读 evidence、不存 evidence_id、不
+reconnect、不转换相位、不提交 task。
+
+### 29.4 zero-state 证明：顺序、backoff、以及"未排程 != 失败"
+
+排程门（`_maybe_schedule_finalization`）四条例，缺一不可：
+
+```text
+phase is STOPPING                     只有 STOPPING 在向证明收敛
+and not result.state.finalized        已经证明过的不再证明
+and not self._finalization_inflight   同一个 broker 不能有两个读者
+and not (engine_active and clock() - last_finalization_started < 5.0)
+```
+
+最后一条只在 **engine 仍 active** 时生效：退出还在跑，每个 tick 重新读一遍整个 broker 学不
+到新东西；engine 已静默则不该被 backoff 拖住关闭。`clock` 可注入，测试推进它而不 sleep。
+
+task 内部顺序是安全约束：
+
+```text
+capture_finalization_evidence()   ← 读的还是 session 仍持有连接的那个 broker
+  若 evidence_id is None: 直接 return result
+disconnect()
+confirm_finalization_after_disconnect(evidence_id)   ← 回调线程 join 之后才消费证据
+```
+
+证明本身**不释放任何东西**：一次成功的 disconnect 不是 finalized。
+
+`TaskSubmitter` 返回 `False` 与"task 跑了然后失败"是两件事：
+
+```text
+not started        broker resource group busy / 正在关闭 → 什么都没有发生
+                   → _finalization_inflight = False，**不** fail_finalization_refresh
+                   → 下一次合法 result 按 backoff 重试
+task 真失败          → _finalization_inflight = False
+                   → workflow.fail_finalization_refresh() → STOPPING → HALTED
+                   → 保持 PAPER lease、保持 ownership、log、请求 presentation refresh
+                   → manual_recovery_required
+```
+
+把"忙"当"失败"会把一次排程冲突升级成一次 HALT。
+
+### 29.5 释放 ownership：只有 workflow 那道闸门，而且是两阶段的
+
+```text
+1. workflow.result 存在，且 result.state.finalized == True
+2. 读取当前 session_id
+3. 无 active service → 直接问 workflow 的闸门（没有 slot 就没有锁可加）
+4. 有 active service：
+     broker_state() + reconciliation_rows(session_id)
+     broker positions 非空 → return，不释放
+     存在 unreconciled row → return，不释放
+     disconnect()
+     reserve_active_release()      ← 证明 slot 可释放并**锁住它**；拒绝就地 return
+     workflow.finalize_if_safe()   ← 拒绝则 cancel_active_release() 并把锁还回去
+     commit_active_release()       ← 结构性 total
+```
+
+不变量：
+
+```text
+broker disconnected        != finalized
+socket stopped             != PAPER lease 可释放
+finalize_if_safe()         == 释放 PAPER 的唯一 canonical gate
+reserve 必须在 finalize_if_safe 之前 == PAPER lease 不会被提前交给一个仍被占用的 slot
+```
+
+**为什么必须先 reserve（本轮 review 抓出的 blocker）。** 早先的顺序是
+`disconnect → finalize_if_safe() → clear_active()`。但真实 `finalize_if_safe()` 是
+**check-and-commit**：它一旦返回 `True`，就已经 `release_paper(finalized=True)` 并清掉
+workflow 的 coordinator / result / 两份 evidence。此时若 `clear_active()` 因 E1 的
+promotion reservation 等原因拒绝，方法虽然报 `OWNERSHIP_BLOCKED`，实际状态却是
+**active ownership 还在、promotion claim 还在、PAPER lease 已经 NONE** —— 正是 E1 的
+ownerless invariant 被反向打破。
+
+反过来改成先 `clear_active()` 也不行：workflow 若随后拒绝，就丢失 broker ownership。
+
+所以 slot 侧必须像 E1 的 promotion 一样**两阶段**：
+
+```text
+reserve_active_release()   证明可释放 + 锁住（promotion claim 仍在 → 拒绝；
+                           仍 connected → 拒绝；无 active service → 拒绝）
+finalize_if_safe()         workflow 拒绝 → cancel_active_release()，什么都没丢
+commit_active_release()    total：reservation 生效期间，promotion / clear / reconnect
+                           全部被拒，所以走到这里已经无事可失败
+```
+
+`reserve` 的拒绝发生在**任何事情发生之前**，因此 lease 根本没被碰过；`finalize_if_safe`
+的拒绝只花掉一次 `cancel`，slot 回到原样。`commit` 的两个拒绝是**误用与损坏**而非竞态
+（同 `commit_candidate_promotion` 的论证），且刻意保留 reservation，绝不在无法交代 owner 时
+把 slot 交回复用。
+
+**claim 必须先装，而且 connect 与 release 必须互斥（第二次 review 抓出的 blocker）。**
+第一版把 reservation 装在第二个临界区、并且只在第二次加锁时重读 service，于是仍然是
+check-then-act，而且是**双向**的竞赛：
+
+```text
+A/B 同时 reserve：两边都看到"没有 release"，A 装好 reservation，B 覆盖它
+                  → A 的 token 变 stale，而 A 的 commit 跑在
+                    finalize_if_safe() **之后**（PAPER 已经释放）→ 必然失败
+                  → 也就是说"commit 结构性不可达"当时是假的
+
+connect 与 release：release 看到 disconnected → 去读连接；
+                  connect 在此期间把 socket 重新接上 → release 装 claim、finalize、
+                  commit → 结果是 broker connection alive + active slot gone + lease gone
+```
+
+修法是让两个 operation 真正互斥，而不是"再多检查一次"：
+
+```text
+connect_active()：lock → 拒绝 release reservation / 拒绝第二个 connect /
+                        取 service / 标记 _active_connect_inflight → unlock
+                  try: service.connect()  finally: lock → 清除 claim
+
+reserve_active_release()：lock → 拒绝现有 release / 拒绝 promotion /
+                                拒绝 connect in flight / 取 service /
+                                **立刻装上 reservation** → unlock
+                          try: 读 connection_snapshot()（锁外）
+                          except: cancel 自己的 reservation，抛
+                          仍 connected: cancel 自己的 reservation，抛
+                          return reservation
+```
+
+两条 claim 都在**同一个临界区**里装好，且都在调用 broker 之前，所以：
+
+```text
+claim 生效期间，promotion / clear / reconnect / 第二次 reserve 全部被拒
+∴ commit_active_release 的 total 才真的是结构性的
+∴ reserve 的拒绝 / cancel 的回滚都不需要网络调用，也不在锁内
+```
+
+即"claim 先于证据，网络调用在锁外"。
+
+**`clear_active` 也走同一套 claim，而不是自己再加一次检查（第三次 review 抓出的 blocker）。**
+第一版给 `clear_active` 保留了独立的检查块，于是 re-open 完全不在它的视野里：
+
+```text
+service 当前 disconnected
+T1 connect_active() → 标记 _active_connect_inflight → 进入 service.connect()，尚未完成
+T2 clear_active()   → capture 同一个 service → connection_snapshot 仍看到 disconnected
+                    → _order_service = None
+T1 service.connect() 成功 → broker socket live → finally 清 claim
+最终：broker socket live + active owner = None   ← 同一个 ownerless connection 问题
+```
+
+而且在 `clear_active` 顶部加一次 `if self._active_connect_inflight: raise` **也没用** —— 那仍然
+是 check-then-act（clear 读到 connect=false → unlock → connect 开始并装 claim → clear 按旧的
+connection reading 清掉 slot）。所以 `clear_active` 不再有自己的检查，它**就是**那笔交易：
+
+```text
+clear_active(expected_service=...)
+  = reserve_active_release(expected_service=...)   # 同一个临界区内校验 identity
+    → commit_active_release(reservation)
+```
+
+于是 clear / release / connect / promotion 对 active slot 的互斥**全部**使用同一套 claim，
+不存在第四种 pre-check。`expected_service` 在**装 reservation 的同一个临界区**里校验，
+所以"调用方决定期间 slot 被换掉"不可能被误清。
+
+**为什么不能在 orchestrator 里 workaround**：唯一能消除竞态的做法是让 slot 侧可锁，
+而 slot 的 owner 是 `PaperTradingService`。在 orchestrator 里读 `_promotion_reservation`
+或自建标志都只是把同一份状态复制到没有所有权的层。
+
+**这是本轮唯一一处 canonical owner 改动，按规范单独披露**：
+
+```text
+src/us_quant/trading/application/paper/active_release.py   （新增，PaperActiveRelease mixin）
+src/us_quant/trading/application/paper/models.py           （新增 PaperActiveReleaseReservation）
+src/us_quant/trading/application/paper/service.py          （PaperTradingService(PaperActiveRelease)
+                                                            + connect_active / clear_active /
+                                                              reserve_candidate_promotion 各加一处锁守卫）
+src/us_quant/trading/application/paper/__init__.py         （导出新类型）
+```
+
+原因与界限：
+
+- **现有 canonical API 无法表达该 invariant**。`clear_active()` 的三个 fail-closed 条件里，
+  promotion claim 是私有的（`_promotion_reservation`），调用方无法在释放 lease 之前证明
+  slot 可释放；而"先 clear 再 finalize"会在 workflow 拒绝时丢失 ownership。两个顺序都
+  有失败窗口，因此必须有真正的锁，而不是靠预检（check-then-act 仍然是竞态）。
+- **为什么不能在 orchestrator 里 workaround**：唯一能消除竞态的做法是让 slot 侧可锁，
+  而 slot 的 owner 是 `PaperTradingService`。在 orchestrator 里读 `_promotion_reservation`
+  或自建标志都只是把同一份状态复制到没有所有权的层。
+- **为什么不是改 `PaperWorkflowController`**：`finalize_if_safe` 是 canonical 的
+  check-and-commit，E1 已经把"释放 PAPER 只此一道"钉在这里；改它去接受"slot 已释放"的
+  证明会把 ownership 的真相搬进 workflow。
+- **边界没有扩大**：新协议只做"锁住 slot 的结束方式"，不连接、不断开、不提交、不取消，
+  不碰 execution lease；`clear_active` / `connect_active` 的既有语义与拒绝全部保留，
+  只多一条"release 进行中"的守卫，且该守卫只有一处定义（`_refuse_if_release_in_flight`）。
+- **服务模块仍保持 thin**：新增协议按仓库既有模式（`trading/runtime/recovery.py`）拆成
+  mixin，`service.py` 仍在既有的 <500 行结构守卫之内，没有放宽任何守卫。
+
+`PaperTradingService.broker_state()` 在无 owner 时返回 `None`，所以这里读
+`getattr(broker_state, "positions", ())`：无 owner 一律视为"没有持仓"，而不是崩。
+
+journal 证据走**窄 provider**：注入
+`reconciliation_rows_provider: Callable[[str], Sequence[object]]`（composition root 里是
+`lambda session_id: self.order_repository.reconciliation_rows(session_id=session_id)`），
+而不是把整个 repository 交进 capability——package 的 import allowlist 不允许
+`us_quant.trading.adapters`，而"给一个 session_id、还一批 rows"就是证明所需的全部。
+
+`commit_active_release()` 若仍拒绝（结构性不可达），orchestrator 按名接住并**报成
+invariant**（`PAPER_RELEASE_INVARIANT`，error 级 runtime event + log），而不是折进普通的
+"所有权无法证明"拒绝：两者对操作员是完全不同的处境，前者是"claim 没结束"，后者是
+"会话活得比它的执行租约更久"。
+
+### 29.6 三个无 payload 的 publication
+
+有些 transition 没有新的 `PaperSessionResult`：`HALTED → RECONCILING`、task 未被 admit、
+finalization task 失败 → `HALTED`。**禁止制造 fake result**，所以新增三个信号：
+
+```text
+presentation_refresh_requested   Signal()   没有新 result 但控件状态变了 → 重绘
+session_finalized                Signal()   disconnect → finalize_if_safe → clear_active 之后
+manual_recovery_required         Signal()   这个 session 只能靠操作员继续
+```
+
+三个都不携带 phase copy / bool mirror / state dict——那些正是本轮要拆掉的第二份 truth。
+
+`session_finalized` 之后窗口只做 presentation：写 health 文案、`set_arm_confirmed(False)`、
+`_apply_paper_workflow_button_state()`。它**不能**再 disconnect / clear_active /
+finalize_if_safe / release lease：已经释放的 ownership 再"释放"一次只会篡改记录。
+
+`manual_recovery_required` 取代了窗口自己的相位推理。窗口原先用
+`_paper_needs_manual_recovery()` 判断 `HALTED`/`RECONCILING`/`RECONCILING_READY` 与
+close-drain 的关系——那正是 Paper recovery phase reasoning，本轮删除。现在 capability 在
+相位属于那三个之一时**每次都发**（不是只在"进入"时发：窗口不比对前后相位，比对就是镜像
+状态），窗口的 handler 幂等：`_cancel_close_drain()`。
+
+相位集合本身只有一个定义（`queries._MANUAL_RECOVERY_PHASES` /
+`queries.manual_recovery_phase`），halt 公告与 shutdown disposition 共用它——两份"哪些
+session 在等人"就是其中一份开始提供另一份禁止的自动路径的方式。
+
+### 29.7 Paper shutdown 判定
+
+分类**从 canonical phase 出发**，绝不用“`result is None` 就是没东西要处理”来推导安全——
+那个推导正是 review 抓出的第二个 blocker：`CONNECTING` 合法地没有 result 且持有 PAPER
+lease，而一个没发布任何东西的 launch 可能已经留下一个已连接的 candidate，于是"没有 result"
+会被读成"没什么要对账"，close 就能一路走到 generic teardown。
+
+`prepare_shutdown() -> PaperShutdownResult(disposition, message="")`：
+
+```text
+READY                    所有 Paper ownership 已可证明地释放（或本来就未持有）
+WAITING_FOR_FINALIZATION 自动路径仍在跑：刚请求停止，或 zero-state 证明还在进行
+MANUAL_RECOVERY_REQUIRED 只有操作员能离开：HALTED / RECONCILING / RECONCILING_READY
+OWNERSHIP_BLOCKED        有 attempt 或 ownership 无法交代 → fail closed
+```
+
+```text
+RUNNING / PAUSED  → 复用 self.stop()（**不**自己再调 request_stop），再**重新分类**
+STOPPING          → WAITING，**不**提前 disconnect（退出还在跑，证明才是观察者）
+HALTED / RECONCILING / RECONCILING_READY → MANUAL_RECOVERY_REQUIRED，不代办确认
+CONNECTING        → OWNERSHIP_BLOCKED，且**不看** has_order_service()（lease 已持有）
+IDLE / PREPARING / READY / FINALIZED → 交给 _ownership_verdict()
+```
+
+**stop 之后必须重新分类，不能硬编码 WAITING**（review 的第三个问题）。同一次
+`request_stop()` 可以把 session 直接打进 `HALTED`（stale cancel、exit intervention、
+health），也可能 fast-stop 直接 `FINALIZED`：
+
+```text
+stop → HALTED                → MANUAL_RECOVERY_REQUIRED（自动路径已经没有了）
+stop → FINALIZED + 释放成功  → READY
+stop → 相位仍是 RUNNING      → OWNERSHIP_BLOCKED（停止了但会话还在跑），不释放任何东西
+stop → STOPPING              → WAITING_FOR_FINALIZATION
+```
+
+`_ownership_verdict()` 是唯一的 READY 出口，而且它检查**三份** ownership，不是一份：
+
+```text
+candidate ownership（_candidates 非空）        → OWNERSHIP_BLOCKED
+                                                （service 有两个 slot；释放 active 的那个
+                                                  并不释放 candidate）
+active service 存在 或 PAPER lease 仍 held     → 走 §29.5 的两阶段释放序列
+                                                result 缺失 → OWNERSHIP_BLOCKED
+三者皆无                                        → READY
+```
+
+旧形状用 `has_order_service()` 短路，而"没有 active service"与"什么都没持有"根本不是一个
+命题：E1 的 `discard_candidate()` 失败时（broker disconnect 抛错）candidate 会**留在
+`_candidates` 里**，同时 `reject_connecting()` 把相位推回 `READY` 并释放 PAPER。于是
+phase=`READY`、active service=`None`、PAPER=`NONE`，而一条可能仍然活着的 broker 连接仍被
+这个 capability 拥有——每一次 canonical 读取（除了 candidate 查询）都在说"这里是干净的"。
+所以 candidate 查询必须进 gate，而 **`workflow.lease is ExecutionLease.PAPER` 是 READY 的
+最终硬条件**：它是唯一活得比其他所有释放都久的 ownership，只有 workflow 自己那道闸门能交还
+它，于是 `READY` 才真正意味着"Paper capability 没有任何尚未解释的 ownership"。
+
+**lease 这一条必须是 `is PAPER`，不能是 `is not NONE`（第三次 review 抓出的 blocker）。**
+`ExecutionLeaseManager` 是 Shadow 与 Paper **共享**的，`workflow.lease` 会返回持有它的那一方：
+
+```text
+Paper 侧：无 candidate、无 active service、无 session
+Shadow 侧：正在运行，shared lease = SHADOW
+→ 若判据是 lease != NONE：candidate=false, slot=false, lease!=NONE=true
+  → result 缺失 → OWNERSHIP_BLOCKED
+  → Shadow 正常运行时应用无法关闭（而 closeEvent 是 Paper READY 之后才轮到 Shadow teardown）
+```
+
+SHADOW 属于 `ShadowOrchestrator`，在后面的 Shadow shutdown 阶段处理。所以判据是
+`holds_the_lease = self._workflow.lease is ExecutionLease.PAPER`，并且 guard 把 package 里
+出现的 lease 成员**精确钉成 `{PAPER}`** —— 既挡住 `SHADOW`（读别人的 ownership），也挡住
+`NONE`（"共享租约是否为空"正是那个错误的问法）。
+
+E3 **不**自动修复这个 candidate（不删除、不假装清理成功）：返回 `OWNERSHIP_BLOCKED` 即可。
+窄查询是 `PaperTradingService.has_candidate_ownership()`——orchestrator 不读 `_candidates`。
+
+`_ownership_verdict()` 的 READY 出口另外只在一个地方：`_release_paper_ownership_if_proven`
+返回 `None` 之后 `session_finalized` 才发。
+
+`closeEvent` 只剩 presentation 与 generic teardown：
+
+```python
+paper_shutdown = self.paper_orchestrator.prepare_shutdown()
+if paper_shutdown.disposition is not PaperShutdownDisposition.READY:
+    if paper_shutdown.disposition is MANUAL_RECOVERY_REQUIRED:
+        self._cancel_close_drain()      # 否则会拒绝掉唯一能 finalize 的那个 task
+    event.ignore()
+    QMessageBox.information(self, _PAPER_SHUTDOWN_TITLES[...], paper_shutdown.message)
+    return
+```
+
+三个 disposition 的对话框标题留在窗口（`_PAPER_SHUTDOWN_TITLES`）：capability 说的是
+**为什么**（Qt-free 纯文本），窗口决定怎么问。`OWNERSHIP_BLOCKED` 刻意**不**解除 drain：
+所有权无法确认时既不强清也不假装可退出——E1 的 invariant 不因为现在有恢复路径而放松。
+
+**测试侧后果**：非 READY 就会弹模态框，而无头运行遇到模态框会永远阻塞。两个把 fake
+workflow 留在 `HALTED`/`RECONCILING_READY` 之后 `window.close()` 的文件
+（`test_desktop_execution_route_characterization.py`、
+`test_desktop_v2_execution_wiring.py`）因此加了 autouse 的对话框静音 fixture——静音的是
+**对话框**，不是 verdict；verdict 由
+`test_desktop_paper_recovery_finalization_orchestrator` 断言。
+
+### 29.8 删掉的 E3 sequencing
+
+窗口不再声明：
+
+```text
+_reconnect_auto_order_service           _auto_order_service_reconnected
+_resume_auto_quant_from_reconciliation  _auto_order_resume_failed
+_auto_order_reconciliation_failed
+_schedule_paper_finalization_refresh    _start_paper_finalization_refresh
+_paper_finalization_completed           _paper_finalization_failed
+_finish_auto_quant_session_if_safe
+_handle_paper_e3_result_bridge          _publish_window_paper_result
+_paper_needs_manual_recovery            _release_close_drain_if_recovery_required
+```
+
+窗口不再直接调用 workflow 的 `begin_manual_reconciliation` /
+`complete_manual_reconciliation` / `fail_manual_reconciliation` / `confirm_manual_resume` /
+`capture_finalization_evidence` / `confirm_finalization_after_disconnect` /
+`fail_finalization_refresh` / `finalize_if_safe`，也不再自己编排
+`paper_trading.connect_active` / Paper 的 finalization disconnect / `clear_active`。
+
+窗口不再持有 `_paper_finalization_inflight` 与 `_last_paper_finalization_started`——它们现在
+是 orchestrator **自己 task 时序的记账**，不是 session 事实。**不留 forwarding property**。
+
+`closeEvent` 剩下的纯粹是 composition / presentation / generic 职责：admission gate、
+"后台任务仍在运行"对话框、`prepare_shutdown()` 的判定与对话框、`_cancel_close_drain()`、
+`shadow_orchestrator.shutdown()`、`runtime_supervisor.shutdown()`、worker join、
+`event.accept()` / `ignore()`。
+
+### 29.9 行为测试与 mutation
+
+新增 `tests/test_desktop_paper_recovery_finalization_orchestrator.py`（96 项），覆盖：
+`HALTED → reconcile → RECONCILING` / 重连只收证据（不 resume、不重下订单）/
+成功 → `RECONCILING_READY` / 取不到证据或 task 失败 → sticky HALTED /
+未 admit 回退 attempt / 无 fresh evidence 拒绝且无 task 无 fake result /
+consumed 与 superseded 证据不能恢复 / 确认后恰好调一次 `confirm_manual_resume` /
+resume 不 reconnect 不 resubmit / STOPPING result 只排程一次 / in-flight 不重复提交 /
+active engine + `<5s` 不重提、`>=5s` 允许 / dormant engine 不被拖住 /
+只有 STOPPING 排程 / broker busy defer 不 HALT / task 真失败 → HALTED /
+HALT 后不再自动 finalization / capture < disconnect < confirm（跨两个 fake 的交错 trace）/
+disconnect 失败不释放 / broker position 非空不释放 / unreconciled row 非零不释放 /
+`finalize_if_safe() == False` 不 clear_active / 全部通过 → disconnect → reserve →
+finalize_if_safe → commit / release helper 自己也不信任调用方 /
+**slot 拒绝 reserve 时 workflow 根本没被调用（lease 因此不可能被释放）** /
+commit 拒绝报成 invariant / cancel 被拒时停在 fail-closed /
+**candidate 仍被拥有时不得 READY（含用真实 service + 真实 controller 复现 E1 的
+discard 失败路径）** / **只持有 lease 也要拦** / **共享 lease 为 SHADOW 时必须 READY
+（真实 `WorkflowController`：Paper 不放走 Shadow 的 lease，Shadow 自己 stop 才交回）** /
+lease + finalized result 可释放 /
+每个 E3 result 只发布一次且每个 event 恰好请求一次 / `manual_recovery_required` 覆盖与排除 /
+`prepare_shutdown` 的十一种 verdict（含 `CONNECTING` 两种取值、stop 的四种结局、
+三种 ownership 组合）。
+
+`tests/test_paper_trading_service.py` 另加 **31 项**：新协议自身（reserve 的三类拒绝、
+不可重叠、锁住 clear / reconnect / promote、commit 的 total 与两类误用拒绝、cancel 归还锁、
+外来 reservation 不释放任何东西）、**五组 deterministic race**（用 Event 把第一个 operation
+停在 broker 调用内部，再从另一个线程发第二个：release 在读连接时 connect 必须被拒 /
+clear 在读连接时 connect 必须被拒 / connect 在飞行中时 reserve 与 clear 都必须被拒 /
+重叠的第二个 reserve 必须立刻被拒）、`expected_service` 不匹配时在装 claim 之前就拒绝且不留
+残留 claim、clear 完成后 slot 既空且未上锁、连接读抛错不留下 claim，以及 candidate
+ownership 的真值表与 E1 discard 失败后的状态。
+
+`scripts/mutation_e3.ps1` 应用 **41** 项篡改；**41/41 RED**。前 29 项覆盖 E3 主体，M30–M34
+是第一次 review 的 blocker，M35–M38 是第二次，**M39–M41 是第三次**：
+
+```text
+M35 release 先读连接再装 claim（check-then-act 回归）
+M36 re-open 不再 claim 它正在重开的 slot（connect/release 互斥失效）
+M37 READY 不问 candidate slot
+M38 READY 不问 execution lease
+M39 clear_active 绕过 reservation 直接清 slot（clear/re-open 竞态回归）
+M40 shutdown gate 把 Shadow 的 lease 当成 Paper 的（is not NONE）
+M41 shutdown gate 忽略 Paper 自己的 lease（holds_the_lease = False）
+```
+
+脚本还有一道**语法闸门**：篡改后先 `ast.parse`，语法不合法判 `HARNESS-ERROR` 而不是
+"抓住"——一个丢掉了缩进的 `repl` 会让 pytest 报 collection error，那次运行对被测属性什么
+都没说。
+
+### 29.10 删掉的数值型结构门禁
+
+`tests/test_paper_trading_service.py` 原有三个**数值**门禁，本轮删除（用户约束：不设行数
+上限，也不许改名保留）：
+
+```text
+span < 60                            单方法行数
+len(lines) < 500                     service.py 非空非注释行数
+implementation > 2.5 * boundary      "被包装的实现要大得多"的字节比
+```
+
+换成真正锁边界的结构守卫：
+
+```text
+test_module_never_holds_the_lock_across_a_network_call
+    锁内不得出现 broker 边界调用（**按调用名判定**，不再按文本 substring）
+test_the_ownership_write_surface_is_the_declared_one
+    slot / reservation / connect claim 的写者集合是精确声明的（逐文件）
+test_the_import_set_is_closed
+    只允许向下的 import allowlist（没有 adapter / desktop / Qt）
+test_the_module_touches_no_gui_and_submits_no_order
+    无 Qt、无 placeOrder/cancelOrder/reqGlobalCancel/submit_approved、无 service bag
+test_promotion_and_release_reservations 的排他性
+   由上面三份协议测试与 M30/M31/M35/M36 覆盖
+```
+
+"锁内禁止网络调用"这条原来是把整块 AST dump 出来搜 `"connect"` / `"disconnect"` 两个
+substring：于是字段名（`_active_connect_inflight`）和一句含 "connection" 的文案都会触发它，
+而两者都不是网络调用，都可以靠**换个名词**"修好"。一个改名就能满足的守卫没有在守任何性质，
+所以改成按**调用名**判定。
+
+本轮 canonical-owner 改动只有一处（§29.5 披露的 active-release reservation），
+`trading/runtime/*`（`workflow.py` / `recovery.py` / `reconciliation.py` / `coordinator.py` /
+`trading.py`）、RiskExecution / ExecutionApplication、broker adapter、execution lease 与
+Shadow 仍然零 diff。
+

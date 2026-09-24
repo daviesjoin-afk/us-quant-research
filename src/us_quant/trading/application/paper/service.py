@@ -13,12 +13,14 @@ from __future__ import annotations
 import threading
 from typing import Sequence
 
+from us_quant.trading.application.paper.active_release import PaperActiveRelease
 from us_quant.trading.application.paper.contracts import (
     PaperOrderServiceFactory,
     PaperOrderServicePort,
     WorkflowGetter,
 )
 from us_quant.trading.application.paper.models import (
+    PaperActiveReleaseReservation,
     PaperPromotionReservation,
     PaperReconciliationStatus,
     PaperTradingLifecycleError,
@@ -27,7 +29,7 @@ from us_quant.trading.application.paper.models import (
 from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
 
-class PaperTradingService:
+class PaperTradingService(PaperActiveRelease):
     """Owner of the Paper order-service lifecycle, plus the window's reads.
 
     Two ownership slots, never one.  ``_candidates`` holds services that are
@@ -43,6 +45,12 @@ class PaperTradingService:
     installs the owner **and** locks the slot, and ``commit``/``cancel`` end the
     launch's claim.  Those two methods carry the argument for why the
     installation cannot wait until after publication.
+
+    Its mirror -- releasing a finished session -- is two-phase here too, and is
+    mixed in from :mod:`active_release` for the reason ``recovery`` mixes in the
+    runtime's two protocols: the state is one object's, so neither half should have
+    to be read through the other.  See that module for why the slot has to be
+    proved releasable *before* the execution lease is handed back.
     """
 
     def __init__(
@@ -63,6 +71,18 @@ class PaperTradingService:
         # of the owner -- the owner is ``_order_service``; this only records that
         # the slot is spoken for and by whom.
         self._promotion_reservation: PaperPromotionReservation | None = None
+        # The release that currently has the active slot locked for it.  The mirror of
+        # the reservation above and the same kind of fact: not a copy of the owner, a
+        # statement that the slot's *ending* belongs to one caller until it says which
+        # of the two endings it was.  See ``reserve_active_release``.
+        self._active_release_reservation: PaperActiveReleaseReservation | None = None
+        # Whether a re-open of the active service is in flight.  A third claim, and the
+        # one that makes the release reservation mean anything: a connect and a release
+        # both start by reading the connection and then act on it, so without exclusion
+        # a release can lock a slot that a connect is about to make live again -- leaving
+        # a live broker socket, no owner and no lease.  Like the two above it is installed
+        # *inside* the critical section, before any call into the broker boundary.
+        self._active_connect_inflight = False
         self._last_error: str | None = None
 
     # -- reads ---------------------------------------------------------
@@ -83,6 +103,20 @@ class PaperTradingService:
 
         with self._lock:
             return self._order_service is not None
+
+    def has_candidate_ownership(self) -> bool:
+        """Whether any connected-but-unpromoted candidate is still tracked.
+
+        The service owns **two** slots, not one: the active order service and the
+        candidates that were connected but never promoted.  A candidate is a real broker
+        connection, so "no active service" is not "nothing owned" -- and E1's discard path
+        leaves exactly this state behind when a candidate cannot be disposed: the candidate
+        stays tracked while the workflow's plan is rejected and the PAPER lease is released.
+        A caller deciding whether a session is finished has to ask about both.
+        """
+
+        with self._lock:
+            return bool(self._candidates)
 
     def is_connected(self) -> bool:
         """Whether the *active* service reports a live connection (not a candidate)."""
@@ -233,9 +267,10 @@ class PaperTradingService:
         key = self._candidate_key(candidate_id)
         service = self._candidate_or_raise(key)
         with self._lock:
-            # The claim is checked first because it is the more specific refusal: an
-            # occupied slot *is* one of these two, and "a promotion is in flight" says
-            # far more than "a service is already active" when one is.
+            self._refuse_if_release_in_flight(action="promote into that slot")
+            # The claim is checked before the occupied-slot check because it is the more
+            # specific refusal: an occupied slot *is* one of these two, and "a promotion
+            # is in flight" says far more than "a service is already active" when one is.
             if self._promotion_reservation is not None:
                 raise PaperTradingLifecycleError(
                     f"Paper candidate {self._promotion_reservation.candidate_id!r}"
@@ -368,14 +403,39 @@ class PaperTradingService:
     # -- active lifecycle ----------------------------------------------
 
     def connect_active(self) -> object:
-        """Reconnect the active service; never creates one."""
+        """Re-open the active service; never creates one.
 
-        service = self._active_service()
-        if service is None:
-            raise PaperTradingLifecycleError(
-                "no active Paper order service to connect"
-            )
-        return service.connect()
+        The call is **claimed under the lock before the broker call is made**, and the claim
+        is what makes it mutually exclusive with a release.  Both operations start by
+        reading the connection and then acting on what they read, so a check-then-act pair
+        of them is a real race in both directions: a release that observed "disconnected"
+        can lock the slot while a connect is in flight and about to make it live again --
+        leaving a live broker socket with no owner and no execution lease -- and a connect
+        that observed "no release" can re-open a slot a release is about to drop.
+
+        A claim installed in the same critical section closes both: neither operation can
+        begin while the other holds its claim.  The broker call itself stays outside the
+        lock, as it must.
+        """
+
+        with self._lock:
+            self._refuse_if_release_in_flight(action="re-open the slot it has reserved")
+            if self._active_connect_inflight:
+                raise PaperTradingLifecycleError(
+                    "an active Paper re-open is already in flight;"
+                    " refusing to overlap it"
+                )
+            service = self._order_service
+            if service is None:
+                raise PaperTradingLifecycleError(
+                    "no active Paper order service to connect"
+                )
+            self._active_connect_inflight = True
+        try:
+            return service.connect()
+        finally:
+            with self._lock:
+                self._active_connect_inflight = False
 
     def disconnect(self) -> None:
         """Run the existing ``disconnect`` semantics once; never clears ownership."""
@@ -393,49 +453,27 @@ class PaperTradingService:
     def clear_active(self, *, expected_service: object | None = None) -> None:
         """Release ownership -- only ever after the session is truly finalized.
 
-        Fail-closed three ways: a service still reporting a live connection is
-        refused (dropping it would abandon a socket nobody can reach),
-        ``expected_service`` lets a late caller prove which service it means, and a
-        slot with a promotion in flight is refused outright.
+        One *transaction*, not its own set of guards: the slot is reserved and then
+        committed, which is the same claim every other transition of the active slot goes
+        through.  That is deliberate and it is not terseness -- a pre-check here would be a
+        fifth check-then-act, and the one it would miss is the re-open: a connect already in
+        flight can make the slot live again after this call read a stale "disconnected", and
+        the result is a live broker socket whose owner has been dropped, which is exactly
+        the ownerless connection the release protocol exists to prevent.
 
-        That last refusal is what makes a reservation *lock the slot* rather than
-        merely say so.  Without it a finalization or recovery caller could empty the
-        slot between ``reserve_candidate_promotion`` and
-        ``commit_candidate_promotion``, and the launch would publish a session whose
-        owner had already been dropped -- the ownerless ``RUNNING`` state the
-        two-phase promotion exists to make unreachable, re-enterable through a
-        different public method.
+        So the four refusals are the reservation's, by construction: a promotion still in
+        flight, a release or a re-open in flight, no active service, or a service still
+        reporting a live connection.  ``expected_service`` is validated inside the critical
+        section that installs the reservation, so a slot that changed while the caller was
+        deciding cannot be cleared by mistake.
         """
 
-        with self._lock:
-            if self._promotion_reservation is not None:
-                raise PaperTradingLifecycleError(
-                    f"Paper candidate {self._promotion_reservation.candidate_id!r} holds"
-                    " the promotion reservation; refusing to clear the slot it is"
-                    " reserved to"
-                )
-            service = self._order_service
-            if service is None:
-                raise PaperTradingLifecycleError(
-                    "no active Paper order service to clear"
-                )
-            if expected_service is not None and service is not expected_service:
-                raise PaperTradingLifecycleError(
-                    "refusing to clear a different active Paper order service"
-                )
-        if bool(service.connection_snapshot().connected):
-            raise PaperTradingLifecycleError(
-                "refusing to clear an active Paper order service that still"
-                " reports a live connection"
-            )
-        with self._lock:
-            if self._order_service is not service:
-                raise PaperTradingLifecycleError(
-                    "the active Paper order service changed while it was being"
-                    " cleared; refusing to remove a different service"
-                )
-            self._order_service = None
-        self._record_error(None)
+        # Reserved and committed as one transaction: going through the reservation is what
+        # makes this mutually exclusive with a promotion, with a re-open and with another
+        # release, rather than merely checked against them.
+        self.commit_active_release(
+            self.reserve_active_release(expected_service=expected_service)
+        )
 
     # -- one-shot probe -------------------------------------------------
 

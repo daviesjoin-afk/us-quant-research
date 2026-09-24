@@ -160,10 +160,7 @@ from us_quant.trading.runtime.health import (
     evaluate_paper_execution_health,
 )
 from us_quant.trading.runtime.paper_models import PaperSessionResult
-from us_quant.trading.application.paper import (
-    PaperTradingLifecycleError,
-    PaperTradingService,
-)
+from us_quant.trading.application.paper import PaperTradingService
 from us_quant.trading.runtime.workflow_state import (
     PaperWorkflowPhase,
     WorkflowStateError,
@@ -180,6 +177,7 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     PaperLaunchRequest,
     PaperOrderChannel,
     PaperSessionBuildResult,
+    PaperShutdownDisposition,
 )
 from us_quant.desktop_v2.orchestration.market import (
     MarketOrchestrator,
@@ -299,6 +297,16 @@ from us_quant.user_settings import (
 
 
 APP_TITLE = "美股量化研究台"
+
+#: The dialog title for each refused-close disposition.  Presentation, so it lives here
+#: rather than in the capability: the capability says *why* the close is refused (its
+#: ``PaperShutdownResult.message`` is plain Qt-free text) and the window decides how to
+#: put the question to the operator.
+_PAPER_SHUTDOWN_TITLES = {
+    PaperShutdownDisposition.WAITING_FOR_FINALIZATION: "Paper 会话尚未完成",
+    PaperShutdownDisposition.MANUAL_RECOVERY_REQUIRED: "Paper 会话尚未完成",
+    PaperShutdownDisposition.OWNERSHIP_BLOCKED: "Paper 订单通道未释放",
+}
 
 
 def _money(
@@ -450,8 +458,12 @@ class MainWindow(QMainWindow):
         self._minute_recorded_keys: dict[
             tuple[str, str, str], bool
         ] = {}
-        self._paper_finalization_inflight = False
-        self._last_paper_finalization_started: float | None = None
+        # ``_paper_finalization_inflight`` and ``_last_paper_finalization_started``
+        # used to live here, as the temporary v2O-E2 seam: active ingress had to know
+        # whether the zero-state proof was running, and that proof was still the
+        # window's.  v2O-E3 moved the proof into ``paper_orchestrator``, so the flags are
+        # the orchestrator's own task bookkeeping and there is deliberately no
+        # forwarding property left behind.
         self._last_runtime_events_refresh = 0.0
         self._runtime_events_refresh_pending = False
         self._last_runtime_export: tuple[str, str] | None = None
@@ -554,10 +566,12 @@ class MainWindow(QMainWindow):
             # Paper capability must not import Market, and the snapshot has to be the
             # one that exists when the operator clicks rather than one frozen here.
             market_snapshot_provider=lambda: self.market_orchestrator.snapshot,
-            # TEMPORARY -- removed by v2O-E3.  Active ingress must know whether the
-            # zero-state proof is running, and that proof is still this window's.
-            # The flag stays here; the orchestrator only reads it.
-            finalization_inflight_provider=lambda: self._paper_finalization_inflight,
+            # The journal rows the release sequencing proves "no unreconciled order"
+            # against, as one narrow callable: the orchestrator must not import an
+            # adapter, and ``session_id -> rows`` is the whole of what the proof reads.
+            reconciliation_rows_provider=lambda session_id: (
+                self.order_repository.reconciliation_rows(session_id=session_id)
+            ),
             clear_arm_confirmation=lambda: self.execution_page.set_arm_confirmed(
                 False
             ),
@@ -569,14 +583,26 @@ class MainWindow(QMainWindow):
         self.paper_orchestrator.refused.connect(self._report_paper_launch_refusal)
         self.paper_orchestrator.log_requested.connect(self._log)
         # Every Paper result -- the launch that reached RUNNING and every later stream
-        # tick, poll, pause, resume and stop -- arrives here and nowhere else.  One
-        # handler means one render path and one place the E3 bridge can live until E3
-        # deletes it.
+        # tick, poll, pause, resume, stop, reconciliation and finalization -- arrives here
+        # and nowhere else.  One handler means one render path, and the window publishes
+        # no result of its own any more.
         self.paper_orchestrator.result_changed.connect(
             self._on_paper_result_changed
         )
         self.paper_orchestrator.runtime_event_requested.connect(
             self._record_paper_runtime_event
+        )
+        # The three v2O-E3 publications.  Each one replaces a decision the window used to
+        # make for itself: which controls to repaint when no result exists, whether the
+        # session needs a human, and whether a finished session's ownership is gone.
+        self.paper_orchestrator.presentation_refresh_requested.connect(
+            self._apply_paper_workflow_button_state
+        )
+        self.paper_orchestrator.manual_recovery_required.connect(
+            self._on_paper_manual_recovery_required
+        )
+        self.paper_orchestrator.session_finalized.connect(
+            self._on_paper_session_finalized
         )
         # Research Scenario Capital: the initial-equity figure historical
         # research, replay, scan affordability and cross-sectional portfolio
@@ -1221,12 +1247,13 @@ class MainWindow(QMainWindow):
     def _connect_execution_page(self) -> None:
         """Wire the execution page's intents to the handlers that act on them.
 
-        Every entry is a page signal and one owner.  The session controls --
-        pause, resume and stop -- are *active Paper orchestration* and go straight
-        to ``paper_orchestrator``, which is the only thing that decides whether the
-        request may happen and what the workflow makes of it.  The rest still pass
-        through the window, because their orchestration is not Paper's: the launch
-        confirmation is presentation, and the recovery steps are v2O-E3.
+        Every session intent now has one owner: ``pause``, ``resume``, ``stop``,
+        ``reconcile`` and the confirmed ``resume-after-reconciliation`` all go straight to
+        ``paper_orchestrator``, which is the only thing that decides whether the request
+        may happen and what the workflow makes of it.  The rest still pass through the
+        window, because their orchestration is not Paper's: the launch confirmation and
+        the resume confirmation are presentation, and the preparation, channel probe and
+        market stop are the window's own composition.
         """
 
         page = self.execution_page
@@ -1239,9 +1266,9 @@ class MainWindow(QMainWindow):
         page.pause_requested.connect(self.paper_orchestrator.pause)
         page.resume_requested.connect(self.paper_orchestrator.resume)
         page.stop_requested.connect(self.paper_orchestrator.stop)
-        page.reconcile_requested.connect(self._reconnect_auto_order_service)
+        page.reconcile_requested.connect(self.paper_orchestrator.reconcile)
         page.resume_reconciliation_requested.connect(
-            self._resume_auto_quant_from_reconciliation
+            self._confirm_paper_reconciliation_resume
         )
 
     def _connect_market_page(self) -> None:
@@ -2662,285 +2689,92 @@ class MainWindow(QMainWindow):
         )
         return evaluate_paper_execution_health(reconciliations=models, **kwargs)  # type: ignore[arg-type]
 
-    def _publish_window_paper_result(self, result: PaperSessionResult) -> None:
-        """Publish a result the *window* produced, and record its events.
-
-        TEMPORARY -- removed by v2O-E3.  Three paths still call the workflow directly
-        from here because they are E3's to own -- the finalization proof, the manual
-        reconciliation reconnect, and the confirmation that resumes a reconciled
-        session.  A result they produce has never been through
-        ``PaperOrchestrator._publish_result``, so the window does both halves itself:
-        request each event once, then hand the result to the one render path.
-
-        Nothing that the capability already published may be routed through here -- a
-        second publication is how an event gets recorded twice.
-        """
-
-        for event in result.events:
-            self._record_runtime_event(
-                severity=event.severity,
-                component="paper_execution",
-                code=event.code,
-                message=event.message,
-            )
-        self._on_paper_result_changed(result)
-
     def _on_paper_result_changed(self, result: PaperSessionResult) -> None:
         """Render one Paper result; the events were requested upstream.
 
-        The window's one result handler, and deliberately thin.  It does two clearly
-        separated things:
+        The window's one result handler, and deliberately thin: presentation only.  It
+        keeps the snapshot the execution route draws, repaints from it, and republishes
+        the route's control state.
 
-        * **presentation** -- keep the snapshot the execution route draws, repaint from
-          it, and republish the route's control state.  Nothing here decides anything
-          about the session;
-        * **the temporary v2O-E3 bridge** in :meth:`_handle_paper_e3_result_bridge`,
-          kept in its own method so E3 can delete it whole rather than excavating
-          business logic back out of a render path.
-
-        It must never reach the workflow: no ``on_stream``, no ``poll``, no
-        ``set_entries_paused``, no ``request_stop``, and no risk, execution or broker
-        mutation.  Those are the capability's, and a guard pins that.
+        Nothing here decides anything about the session.  Since v2O-E3 the *consequences*
+        of a result -- whether a zero-state proof is due, and whether a finished session's
+        ownership can be released -- are ``PaperOrchestrator._after_result``'s, so this
+        handler no longer contains a second copy of either decision.  It must never reach
+        the workflow: no ``on_stream``, no ``poll``, no ``set_entries_paused``, no
+        ``request_stop``, and no risk, execution or broker mutation.  A guard pins that.
         """
 
         self._paper_render_snapshot = result.engine_snapshot  # type: ignore[assignment]
         self._render_auto_quant_snapshot()
-        # Reconciliation controls *and* the refused-close recovery hook.
-        self._apply_paper_workflow_button_state()
-        self._handle_paper_e3_result_bridge(result)
-
-    def _handle_paper_e3_result_bridge(self, result: PaperSessionResult) -> None:
-        """TEMPORARY -- removed by v2O-E3.
-
-        The two decisions about a result that are still the window's, because the
-        lifecycle they belong to is E3's: whether a ``STOPPING`` session should start
-        the broker zero-state proof, and whether a finalized session can be closed out.
-
-        Kept verbatim, and kept together, so that deleting this method is the whole of
-        E3's work on the render path.
-        """
-
-        phase = self.paper_trading.phase()
-        if (
-            phase is PaperWorkflowPhase.STOPPING
-            and not result.state.finalized
-            and not getattr(self, "_paper_finalization_inflight", False)
-        ):
-            self._schedule_paper_finalization_refresh(result)
-        self._finish_auto_quant_session_if_safe()
-
-    def _schedule_paper_finalization_refresh(
-        self, result: PaperSessionResult
-    ) -> None:
-        """Start the zero-state proof with backoff while exits are pending.
-
-        H-3 fix: while the engine is still flattening positions, each stream
-        tick must not launch a fresh full-broker refresh; and a busy broker
-        resource group must defer the proof instead of halting the session.
-        """
-        if getattr(self, "_paper_finalization_inflight", False):
-            return
-        engine_active = bool(
-            getattr(result.engine_snapshot, "active", True)
-        )
-        last = self._last_paper_finalization_started
-        if (
-            engine_active
-            and last is not None
-            and monotonic() - last < 5.0
-        ):
-            return
-        self._start_paper_finalization_refresh()
-
-    def _start_paper_finalization_refresh(self) -> None:
-        """Prove broker zero-state, disconnect, then release nothing yet."""
-
-        if not self.paper_trading.has_order_service():
-            self.paper_workflow.fail_finalization_refresh()
-            self._apply_paper_workflow_button_state()
-            return
-        self._paper_finalization_inflight = True
-        self._last_paper_finalization_started = monotonic()
-
-        def task(progress: Callable[[str], None]):
-            progress("Verifying complete Paper zero-state before disconnect...")
-            result, evidence_id = self.paper_workflow.capture_finalization_evidence()
-            if evidence_id is None:
-                return result
-            self.paper_trading.disconnect()
-            return self.paper_workflow.confirm_finalization_after_disconnect(
-                evidence_id
-            )
-
-        started = self._start_task(
-            task,
-            on_success=self._paper_finalization_completed,
-            on_failure=self._paper_finalization_failed,
-            start_message="Paper safe finalization check in progress...",
-            resource_group="broker",
-            suppress_busy_message=True,
-            # This task is part of the close path itself, not new work: it is
-            # what proves broker zero-state so the session can be finalized.
-            shutdown_essential=True,
-        )
-        if not started:
-            # A busy broker resource group defers the proof instead of
-            # halting the session; the next tick retries (H-3 fix).
-            self._paper_finalization_inflight = False
-            self._apply_paper_workflow_button_state()
-
-    def _paper_finalization_completed(self, result: object) -> None:
-        """Render finalization while suppressing an immediate duplicate task."""
-
-        try:
-            self._publish_window_paper_result(result)  # type: ignore[arg-type]
-        finally:
-            self._paper_finalization_inflight = False
-
-    def _paper_finalization_failed(self, message: str) -> None:
-        """Keep the PAPER lease and require manual reconciliation on ambiguity."""
-
-        self._paper_finalization_inflight = False
-        self.paper_workflow.fail_finalization_refresh()
-        self._log(message)
-        # ``fail_finalization_refresh`` moves STOPPING -> HALTED, the automatic
-        # failure route; the button-state helper carries the recovery hook.
         self._apply_paper_workflow_button_state()
 
-    def _resume_auto_quant_from_reconciliation(self) -> None:
-        """Resume only after an explicit reconciliation action and confirmation.
+    def _confirm_paper_reconciliation_resume(self) -> None:
+        """Ask the operator, then hand the confirmation to the capability.
 
-        Pending broker rows remain review evidence.  This path deliberately
-        never creates replacement intents or submits orders.
+        Pure presentation, and deliberately the same shape as the launch confirmation: a
+        modal question and the answer, nothing else.  It reads no reconciliation evidence,
+        stores no evidence id, reconnects nothing and moves no phase -- and when the
+        answer is No it calls nothing at all, so the proof stays exactly where it was.
+
+        Whether a proof is still *current* is decided by ``PaperOrchestrator`` when it
+        re-reads the evidence after this returns, which is the only moment at which the
+        answer is still true: the operator may take as long as they like to decide, and
+        the broker may move in the meantime.
         """
-        if self.paper_trading.phase() is not PaperWorkflowPhase.RECONCILING_READY:
-            self._log("A fresh reconciliation proof is required before Paper can resume.")
-            return
-        evidence = self.paper_workflow.reconciliation_evidence
-        if evidence is None:
-            self._log("Reconciliation proof is missing; run manual reconciliation again.")
-            return
+
         reply = QMessageBox.question(
-            self, "Confirm Paper resume",
-            "Manual reconciliation is complete. Resume the existing Paper session without resubmitting pending orders?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            self,
+            "Confirm Paper resume",
+            "Manual reconciliation is complete. Resume the existing Paper session "
+            "without resubmitting pending orders?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
+        self.paper_orchestrator.confirm_reconciliation_resume()
 
-        evidence_id = evidence.evidence_id
+    def _on_paper_manual_recovery_required(self) -> None:
+        """Paper can now only be continued by the operator: hand the client back.
 
-        def task(progress: Callable[[str], None]):
-            progress("Revalidating the complete IBKR Paper snapshot...")
-            return self.paper_workflow.confirm_manual_resume(evidence_id)
-
-        started = self._start_task(
-            task,
-            on_success=lambda result: self._publish_window_paper_result(result),
-            on_failure=self._auto_order_resume_failed,
-            start_message="Paper reconciliation confirmation in progress...",
-            resource_group="broker",
-        )
-        if not started:
-            # The controller was not invoked; keep the proof available.
-            self._apply_paper_workflow_button_state()
-
-    def _reconnect_auto_order_service(self) -> None:
-        if not self.paper_trading.has_order_service():
-            return
-        try:
-            attempt_id = self.paper_workflow.begin_manual_reconciliation()
-        except WorkflowStateError as error:
-            self._log(str(error))
-            return
-        self._publish_execution_controls()
-        self.execution_page.render_execution_health(
-            "执行对账：正在重新连接 IBKR Paper 并读取开放订单、"
-            "当日成交和当前持仓；不会自动恢复交易。"
-        )
-
-        def task(progress: Callable[[str], None]):
-            progress("重新连接 IBKR Paper 并恢复订单快照…")
-            if not self.paper_trading.is_connected():
-                self.paper_trading.connect_active()
-            return self.paper_workflow.complete_manual_reconciliation(attempt_id)
-
-        started = self._start_task(
-            task,
-            on_success=self._auto_order_service_reconnected,
-            on_failure=lambda message: self._auto_order_reconciliation_failed(
-                attempt_id, message
-            ),
-            start_message="IBKR Paper 重新对账中…",
-            resource_group="broker",
-        )
-        if not started:
-            self.paper_workflow.fail_manual_reconciliation(attempt_id)
-            self._apply_paper_workflow_button_state()
-
-    def _auto_order_reconciliation_failed(
-        self, attempt_id: str, _message: str
-    ) -> None:
-        """Keep a failed evidence refresh halted and explicitly retryable."""
-
-        self.paper_workflow.fail_manual_reconciliation(attempt_id)
-        self._apply_paper_workflow_button_state()
-
-    def _auto_order_resume_failed(self, message: str) -> None:
-        """A consumed or changed proof always returns to sticky HALTED."""
-
-        self._log(message)
-        self._apply_paper_workflow_button_state()
-
-    def _auto_order_service_reconnected(self, result: object) -> None:
-        # Reconnect is evidence collection only.  It must never resume or
-        # re-submit; the separate explicit confirmation handles that.
-        self._publish_window_paper_result(result)  # type: ignore[arg-type]
-
-    def _apply_paper_workflow_button_state(self) -> None:
-        """Render every execution control from controller truth.
-
-        This is the one place every route into ``HALTED``/``RECONCILING*``
-        passes through -- the automatic ``STOPPING`` -> ``HALTED``
-        (finalization failure) as well as each explicit operator step -- so
-        the refused-close recovery hook lives here rather than being repeated
-        at each call site.
+        The capability saying "this session needs a human" is exactly the condition a
+        refused close has to be undone for -- otherwise the gate that admits the
+        reconciliation task is still down and the session can never be finalized.  This
+        handler holds no Paper knowledge of its own: no phase, no evidence, no transition.
+        It only undoes generic teardown, and it is idempotent because the capability
+        re-announces the condition rather than diffing phases.
         """
 
-        self._publish_execution_controls()
-        self._release_close_drain_if_recovery_required()
+        self._cancel_close_drain()
 
-    def _finish_auto_quant_session_if_safe(self) -> None:
-        result = self.paper_workflow.result
-        if result is None or not result.state.finalized:
-            return
-        snapshot = result.engine_snapshot
-        if self.paper_trading.has_order_service():
-            broker_state = self.paper_trading.broker_state()
-            reconciliations = (
-                self.order_repository.reconciliation_rows(
-                    session_id=snapshot.session_id
-                )
-            )
-            if broker_state.positions or any(
-                not row.reconciled for row in reconciliations
-            ):
-                return
-            self.paper_trading.disconnect()
-        if not self.paper_workflow.finalize_if_safe():
-            return
-        # Ownership is released only now, after the workflow itself reported the
-        # session finalized -- a successful disconnect alone proves nothing.  What the
-        # window no longer has to do is *forget* anything: it kept no runtime handle and
-        # no health cache, so releasing the order service is the whole of it.  The
-        # presentation snapshot stays, which is what keeps the route showing the session
-        # it just finished instead of blanking out.
-        self.paper_trading.clear_active()
+    def _on_paper_session_finalized(self) -> None:
+        """Render a Paper session that has safely ended.
+
+        Presentation only.  The disconnect, the workflow's own release gate and
+        ``clear_active`` all already happened inside the capability, in that order, so
+        nothing here may repeat any of them -- an ownership that is gone could only be
+        "released" again by corrupting the record of what happened.
+        """
+
         self.execution_page.render_execution_health(
             "执行对账：会话已安全结束，券商持仓和订单均已核对。"
         )
         self.execution_page.set_arm_confirmed(False)
         self._apply_paper_workflow_button_state()
+
+    def _apply_paper_workflow_button_state(self) -> None:
+        """Render every execution control from controller truth.
+
+        One writer, one source: the publisher turns the phase into booleans and the page
+        is handed those rather than a phase, so it cannot act on a lifecycle vocabulary it
+        does not own.
+
+        v2O-E3 took the refused-close hook out of here.  ``manual_recovery_required`` is
+        the capability's own publication for that condition, so this method no longer
+        reasons about Paper phases at all -- it only repaints.
+        """
+
+        self._publish_execution_controls()
 
     def _render_auto_quant_snapshot(self) -> None:
         """Gather the session facts and hand them to the page as one view.
@@ -3702,22 +3536,6 @@ class MainWindow(QMainWindow):
 
         self._closing = True
 
-    def _paper_needs_manual_recovery(self) -> bool:
-        """Whether leaving this Paper phase is *only* possible via the operator.
-
-        ``RUNNING``/``PAUSED`` are excluded on purpose: closing those still
-        has an automatic route (``request_stop`` -> ``STOPPING`` -> the
-        zero-state proof), so the gate stays down while that runs.  The three
-        phases below have no automatic exit -- each is left by an explicit
-        human reconciliation step -- and every one of those steps is a task.
-        """
-
-        return self.paper_trading.phase() in {
-            PaperWorkflowPhase.HALTED,
-            PaperWorkflowPhase.RECONCILING,
-            PaperWorkflowPhase.RECONCILING_READY,
-        }
-
     def _cancel_close_drain(self) -> None:
         """Undo phase one: this close was refused, so the client stays usable.
 
@@ -3742,23 +3560,6 @@ class MainWindow(QMainWindow):
             self._log(f"关闭流程无法撤销，保持关闭状态：{error}")
             return
         self._closing = False
-
-    def _release_close_drain_if_recovery_required(self) -> None:
-        """Undo a refused close once Paper can only be left by the operator.
-
-        Called from every route that can leave the session in
-        ``HALTED``/``RECONCILING``/``RECONCILING_READY`` -- including the
-        automatic one (``RUNNING`` -> ``STOPPING`` -> finalization failure ->
-        ``HALTED``), which is *not* covered by checking the phase at close
-        time.  Without this the operator would be told to reconcile while the
-        gate that admits the reconciliation task is still down.
-        """
-
-        if not self._closing:
-            return
-        if not self._paper_needs_manual_recovery():
-            return
-        self._cancel_close_drain()
 
     def _running_workers(self) -> list[TaskThread]:
         return [worker for worker in self.workers if worker.isRunning()]
@@ -3810,57 +3611,36 @@ class MainWindow(QMainWindow):
                 ),
             )
             return
-        if not self.paper_trading.is_finalized():
-            if self.paper_trading.phase() in {
-                PaperWorkflowPhase.RUNNING,
-                PaperWorkflowPhase.PAUSED,
-            }:
-                # Automatic safe stop: request_stop -> STOPPING -> the
-                # zero-state proof.  The gate stays down while that runs.
-                # This window still decides *when* a shutdown asks for the stop --
-                # that is E4's -- but the stop itself is the active Paper
-                # orchestrator's, so it goes through the one owner.
-                self.paper_orchestrator.stop()
-            # But if no automatic route is left -- HALTED, RECONCILING or
-            # RECONCILING_READY can only be left by the operator, and every
-            # one of those steps is a task -- this close has been refused in
-            # practice.  Hand the client back, or the recovery task itself
-            # would be refused by the gate and the session could never be
-            # finalized.
-            self._release_close_drain_if_recovery_required()
+        # Paper's own shutdown decision belongs to the capability.  Which of the three
+        # situations this close is in -- an automatic route still running, a session only
+        # the operator can leave, or an ownership that cannot be shown to be released --
+        # is answered by ``prepare_shutdown``, which also performs the release when it is
+        # provably safe.  What stays here is the *presentation* of that verdict, the
+        # generic admission gate and the generic runtime teardown below.
+        paper_shutdown = self.paper_orchestrator.prepare_shutdown()
+        if paper_shutdown.disposition is not PaperShutdownDisposition.READY:
+            if (
+                paper_shutdown.disposition
+                is PaperShutdownDisposition.MANUAL_RECOVERY_REQUIRED
+            ):
+                # No automatic route is left, and every step out of it is a task: hand
+                # the client back, or the gate would refuse the very recovery that can
+                # finalize the session.  The capability announces the same condition
+                # through ``manual_recovery_required``; this branch is the case where
+                # the close itself is what discovered it.
+                self._cancel_close_drain()
+            # The other two keep the gate exactly as it is.  ``WAITING_FOR_FINALIZATION``
+            # is an automatic route still running, so admitting work now would race it;
+            # ``OWNERSHIP_BLOCKED`` means an ownership could not be accounted for, and
+            # nothing here forces it, releases the lease for it or swallows the refusal
+            # to make the process exit.
             event.ignore()
             QMessageBox.information(
                 self,
-                "Paper 会话尚未完成",
-                "必须先完成安全停止和券商对账。停机状态需要人工对账与明确确认；"
-                "客户端不会在未 finalized 时断开订单会话或退出。",
+                _PAPER_SHUTDOWN_TITLES[paper_shutdown.disposition],
+                paper_shutdown.message,
             )
             return
-        if self.paper_trading.has_order_service():
-            self.paper_trading.disconnect()
-            try:
-                self.paper_trading.clear_active()
-            except PaperTradingLifecycleError as error:
-                # The service refuses to release a slot it cannot account for, and that
-                # refusal is it doing its job -- so it must not escape a Qt slot and
-                # skip the rest of this teardown, which is how a window closes over a
-                # connection nobody can reach any more.  Hand the client back instead.
-                #
-                # Reachable when a launch fault leaves a promotion claim standing
-                # (v2O-E1's invariant path).  ``disconnect()`` above has already run, so
-                # the wording says the connection stopped rather than that it will not
-                # be stopped -- the ownership is what is left.  The claim lives in
-                # memory only, so a restart is the honest remedy for now; E3's in-app
-                # recovery is what will replace that sentence.
-                event.ignore()
-                QMessageBox.information(
-                    self,
-                    "Paper 订单通道未释放",
-                    "Paper 订单连接已停止，但所有权占用无法确认；"
-                    "客户端不会释放该所有权或正常退出。"
-                    f"请重启客户端后重新启动 Paper 会话。\n\n{error}",
-                )
-                return
         # The internal simulation is stopped through its own capability, which
         # is quieter than the operator's stop: no repaint, no event, no log, so a
         # close cannot write a "stopped" event over a session nobody stopped.

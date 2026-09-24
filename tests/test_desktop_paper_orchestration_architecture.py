@@ -101,6 +101,62 @@ RETIRED_WINDOW_ACTIVE_METHODS = (
     "_stop_auto_quant",
 )
 
+#: The recovery and finalization sequencing v2O-E3 moved.  Every one of these decided
+#: *when* a halt was reconciled, whether a proof was current, whether a zero-state proof
+#: should start, or whether ownership could be given up -- and each of those is a
+#: decision about a Paper session, which only one owner may make.
+RETIRED_WINDOW_E3_METHODS = (
+    "_reconnect_auto_order_service",
+    "_auto_order_service_reconnected",
+    "_resume_auto_quant_from_reconciliation",
+    "_auto_order_resume_failed",
+    "_auto_order_reconciliation_failed",
+    "_schedule_paper_finalization_refresh",
+    "_start_paper_finalization_refresh",
+    "_paper_finalization_completed",
+    "_paper_finalization_failed",
+    "_finish_auto_quant_session_if_safe",
+    "_handle_paper_e3_result_bridge",
+    "_publish_window_paper_result",
+)
+
+#: The window state v2O-E3 deleted.  ``_paper_finalization_inflight`` was the temporary
+#: E2 seam -- the proof was the window's and active ingress had to read the flag across
+#: the boundary -- and ``_last_paper_finalization_started`` was its backoff stamp.  Both
+#: are the orchestrator's own task bookkeeping now, so neither may reappear here, as an
+#: attribute or as a forwarding property.
+RETIRED_WINDOW_E3_STATE = (
+    "_paper_finalization_inflight",
+    "_last_paper_finalization_started",
+)
+
+#: The workflow calls the window may no longer make on the recovery or finalization
+#: paths' behalf.  Each is a *decision* about a session rather than a presentation step,
+#: and v2O-E3 moved all of them: the halt protocol, the proof of broker zero-state, and
+#: the single gate that may release PAPER.
+RETIRED_WINDOW_E3_CALLS = (
+    "paper_workflow.begin_manual_reconciliation",
+    "paper_workflow.complete_manual_reconciliation",
+    "paper_workflow.fail_manual_reconciliation",
+    "paper_workflow.confirm_manual_resume",
+    "paper_workflow.capture_finalization_evidence",
+    "paper_workflow.confirm_finalization_after_disconnect",
+    "paper_workflow.fail_finalization_refresh",
+    "paper_workflow.finalize_if_safe",
+    "paper_trading.connect_active",
+    "paper_trading.disconnect",
+    "paper_trading.clear_active",
+)
+
+#: The capability's own sequencing calls the window may no longer drive.  Checked as
+#: `self.paper_orchestrator.<name>(` so a re-added handler that merely asks the
+#: capability to do the work is still caught: the decision would have moved back, not
+#: the code.  ``confirm_reconciliation_resume`` is deliberately absent -- the operator's
+#: confirmation is presentation, so the window is the one that has to call it.
+RETIRED_WINDOW_E3_ORCHESTRATOR_CALLS = (
+    "self.paper_orchestrator.reconcile(",
+)
+
 #: The workflow calls the window may no longer make on the active session's behalf.
 RETIRED_WINDOW_ACTIVE_CALLS = (
     "paper_workflow.on_stream",
@@ -119,13 +175,16 @@ RETAINED_WINDOW_LAUNCH_METHODS = (
     "_record_paper_runtime_event",
 )
 
-#: What legitimately stays on the window after v2O-E2: the one result render path, the
-#: window-side publication the three E3-owned paths still need, and the E3 bridge the
-#: result handler keeps in its own method so E3 can delete it whole.
+#: What legitimately stays on the window after v2O-E3: the one result render path, the
+#: two operator confirmations (they are dialogs, and the capability may not import one),
+#: the three presentation handlers for the capability's payload-free publications, and
+#: the Shadow gate that asks the capability instead of holding a runtime handle.
 RETAINED_WINDOW_E2_METHODS = (
     "_on_paper_result_changed",
-    "_publish_window_paper_result",
-    "_handle_paper_e3_result_bridge",
+    "_confirm_and_start_auto_quant",
+    "_confirm_paper_reconciliation_resume",
+    "_on_paper_manual_recovery_required",
+    "_on_paper_session_finalized",
     "_render_auto_quant_snapshot",
     "_paper_runtime_is_active",
 )
@@ -139,6 +198,9 @@ ALLOWED_IMPORTS = (
     "copy",
     "dataclasses",
     "decimal",
+    # ``Enum`` for the shutdown disposition.  A value type, not a behaviour: it exists
+    # so "what should this close do?" has one answerable spelling.
+    "enum",
     # ``monotonic``, the default clock for the poll-suppression window.  Stdlib, and
     # the only reading this layer takes of the outside world that is not a result.
     "time",
@@ -247,7 +309,8 @@ FORBIDDEN_QT_NAMES = (
 
 #: The orchestrator's public surface, asserted exactly in both directions.  Methods
 #: and properties are both *intents or delegated questions*: the five operations a
-#: session's run is driven by, and the three questions other capabilities ask about it.
+#: session's run is driven by, the three recovery/finalization operations v2O-E3 added,
+#: and the three questions other capabilities ask about it.
 PUBLIC_SURFACE = (
     "start",
     "on_market_snapshot",
@@ -255,6 +318,9 @@ PUBLIC_SURFACE = (
     "pause",
     "resume",
     "stop",
+    "reconcile",
+    "confirm_reconciliation_resume",
+    "prepare_shutdown",
     "result",
     "runtime_active",
     "has_runtime_obligations",
@@ -264,11 +330,20 @@ PUBLIC_SURFACE = (
 #: ``PaperSessionResult`` -- one emission per operation, launch included --
 #: ``runtime_event_requested`` and ``log_requested`` are the same request-not-own
 #: pattern every sibling capability uses, and ``refused`` is the launch's dialog.
+#:
+#: v2O-E3 added three payload-free ones.  ``presentation_refresh_requested`` covers the
+#: transitions that produce no result at all; ``session_finalized`` and
+#: ``manual_recovery_required`` are facts the window used to derive from the Paper phase
+#: itself.  None of them carries a phase, a boolean or a state dict, because each of
+#: those would be the second truth this round removed.
 PUBLIC_SIGNALS = (
     "refused",
     "log_requested",
     "result_changed",
     "runtime_event_requested",
+    "presentation_refresh_requested",
+    "session_finalized",
+    "manual_recovery_required",
 )
 
 #: Every ``self.paper_orchestrator.<name>`` the window may reach for.
@@ -281,13 +356,32 @@ START_INTENT_WIRING = (
     ("start_requested", "self._confirm_and_start_auto_quant"),
 )
 
-#: The three session intents, which reach the capability with no window handler in
+#: The session intents, which reach the capability with no window handler in
 #: between: there is nothing for presentation to add, and a hop through the window is
-#: how a second owner starts.
+#: how a second owner starts.  ``reconcile`` joined them in v2O-E3 for the same reason:
+#: whether a halt may be reconciled, and what the broker reading means, is not a
+#: presentation question.
 SESSION_INTENT_WIRING = (
     ("pause_requested", "self.paper_orchestrator.pause"),
     ("resume_requested", "self.paper_orchestrator.resume"),
     ("stop_requested", "self.paper_orchestrator.stop"),
+    ("reconcile_requested", "self.paper_orchestrator.reconcile"),
+)
+
+#: The one recovery intent that *does* pass through the window: the operator's
+#: confirmation.  It is a ``QMessageBox`` and the capability may not import one, so the
+#: hop is the point -- the window asks, the capability decides.
+RESUME_CONFIRMATION_WIRING = (
+    "resume_reconciliation_requested",
+    "self._confirm_paper_reconciliation_resume",
+)
+
+#: The three payload-free publications v2O-E3 added, and the presentation handler each
+#: reaches.  Each handler repaints from canonical truth; none of them decides anything.
+E3_SIGNAL_WIRING = (
+    ("presentation_refresh_requested", "self._apply_paper_workflow_button_state"),
+    ("manual_recovery_required", "self._on_paper_manual_recovery_required"),
+    ("session_finalized", "self._on_paper_session_finalized"),
 )
 
 #: The watchdog heartbeat enters the capability directly, for the same reason.
@@ -443,6 +537,35 @@ def _dense(path: pathlib.Path) -> str:
     """
 
     return re.sub(r"\s+", "", path.read_text(encoding="utf-8"))
+
+
+def _code_only(path: pathlib.Path, name: str, *, class_name: str) -> str:
+    """One method's statements, with its docstring removed.
+
+    Needed where an assertion is about *what a branch does* rather than about the words
+    around it: ``prepare_shutdown``'s docstring names every disposition while explaining
+    the order it considers them in, which is not the order the branches are written in.
+    """
+
+    source = path.read_text(encoding="utf-8")
+    for node in ast.walk(_tree(path)):
+        if not isinstance(node, ast.ClassDef) or node.name != class_name:
+            continue
+        for member in node.body:
+            if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if member.name != name:
+                continue
+            body = list(member.body)
+            first = body[0] if body else None
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                body = body[1:]
+            return "\n".join(ast.unparse(stmt) for stmt in body)
+    raise AssertionError(f"{class_name}.{name} not found")
 
 
 def _raises(path: pathlib.Path, name: str) -> bool:
@@ -673,12 +796,16 @@ def test_the_market_fanout_only_hands_the_paper_fact_over() -> None:
         assert forbidden not in fanout, forbidden
 
 
-def test_the_result_handler_is_presentation_and_bridge_only() -> None:
+def test_the_result_handler_is_presentation_only() -> None:
     """The one result handler renders, and reaches nothing it could drive.
 
     Asserted on the method's actual *calls* rather than its text, because its docstring
     deliberately names the calls it must not make -- a substring search would fire on
     the explanation instead of on a call.
+
+    v2O-E3 removed the bridge this guard used to require, so the assertion is now the
+    stronger one in both directions: the handler still has to do its rendering work, and
+    it must no longer call *any* method that decides something about the session.
     """
 
     used = _called_and_attributed(
@@ -691,13 +818,14 @@ def test_the_result_handler_is_presentation_and_bridge_only() -> None:
         "request_stop",
         "connect_candidate",
         "disconnect",
+        "clear_active",
+        "finalize_if_safe",
         "placeOrder",
     ):
         assert forbidden not in used, (forbidden, sorted(used))
     # And it does the work it exists for, so it cannot pass by doing nothing.
     assert "_render_auto_quant_snapshot" in used, sorted(used)
     assert "_apply_paper_workflow_button_state" in used, sorted(used)
-    assert "_handle_paper_e3_result_bridge" in used, sorted(used)
 
 
 def test_the_one_result_path_is_the_only_emitter() -> None:
@@ -715,7 +843,12 @@ def test_the_one_result_path_is_the_only_emitter() -> None:
         "pause",
         "resume",
         "stop",
+        "reconcile",
+        "confirm_reconciliation_resume",
+        "prepare_shutdown",
         "_arm_and_publish",
+        "_reconciliation_finished",
+        "_finalization_completed",
     ):
         source = _function_source(_ORCHESTRATOR_PATH, method)
         assert "result_changed.emit(" not in source, method
@@ -724,28 +857,76 @@ def test_the_one_result_path_is_the_only_emitter() -> None:
     assert "self.result_changed.emit(result)" in publish
     assert "for event in result.events:" in publish
     assert "PaperRuntimeEventRequest(" in publish
+    # And the consequences of a result are decided in exactly one place.
+    assert "self._after_result(result)" in publish
 
 
 @pytest.mark.parametrize(
     "method",
-    ("on_market_snapshot", "poll", "pause", "resume", "stop", "_arm_and_publish"),
+    (
+        "on_market_snapshot",
+        "poll",
+        "pause",
+        "resume",
+        "stop",
+        "_arm_and_publish",
+        "_reconciliation_finished",
+        "_finalization_completed",
+    ),
 )
 def test_every_operation_publishes_through_the_one_path(method: str) -> None:
     source = _function_source(_ORCHESTRATOR_PATH, method)
     assert "self._publish_result(" in source, method
 
 
-def test_the_finalization_seam_is_a_provider_and_not_a_copy() -> None:
-    """TEMPORARY seam, pinned as a seam: the flag itself never lands here.
+@pytest.mark.parametrize(
+    "caller,attribute",
+    (
+        ("reconcile", "on_success"),
+        ("confirm_reconciliation_resume", "on_success"),
+        ("_start_finalization", "on_success"),
+    ),
+)
+def test_every_task_success_handler_routes_to_the_one_path(
+    caller: str, attribute: str
+) -> None:
+    """A task that produces a result publishes it through the one path.
 
-    E3 deletes the provider.  Until then the guard keeps the *shape* honest -- a copied
-    flag would be a second owner of a lifecycle fact, and would survive E3's change to
-    the window as a stale mirror.
+    The two paths that cannot call it *inline* are the asynchronous ones: their result
+    arrives on a worker, so the routing is what has to be asserted.  ``reconcile`` and
+    ``_start_finalization`` name a wrapper, ``confirm_reconciliation_resume`` names the
+    path itself -- and each wrapper is checked to end there, so a handler that quietly
+    emitted ``result_changed`` itself would fail here.
+    """
+
+    source = _function_source(_ORCHESTRATOR_PATH, caller)
+    line = next(
+        row for row in source.splitlines() if f"{attribute}=" in row and "self._" in row
+    )
+    target = line.split(f"{attribute}=")[1].strip().rstrip(",")
+    if target == "self._publish_result":
+        return
+    handler = target.removeprefix("self.")
+    assert "_publish_result" in _function_source(_ORCHESTRATOR_PATH, handler), target
+
+
+def test_the_finalization_seam_is_gone_and_the_flags_are_the_capabilitys() -> None:
+    """v2O-E3 deleted the E2 provider: the proof, and its flag, are both here now.
+
+    The E2 guard's failure mode was a *copied* flag -- a second owner of a lifecycle
+    fact.  The inverse failure mode is just as bad and is what this pins: the window
+    keeping the flag and reading it back across the boundary, which would keep the
+    owner of a Paper lifecycle decision outside the capability.
     """
 
     stored = _stored_self_attrs(_ORCHESTRATOR_PATH)
-    assert "_finalization_inflight_provider" in stored
-    assert "_paper_finalization_inflight" not in stored
+    assert "_finalization_inflight_provider" not in stored
+    assert "_finalization_inflight" in stored
+    assert "_last_finalization_started" in stored
+    # And the window keeps neither flag, nor a provider standing in for one.
+    assert "finalization_inflight_provider" not in _DESKTOP_PATH.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_the_market_fact_arrives_as_a_provider() -> None:
@@ -961,6 +1142,14 @@ def test_the_orchestrator_stores_no_second_truth() -> None:
         "_order_intent",
         "_snapshot",
         "_auto_quant_snapshot",
+        # v2O-E3's four.  The two evidence records are the ones a "helpful" migration is
+        # most likely to copy -- saving a proof on the way past looks harmless and is
+        # exactly how a consumed proof becomes resumable twice -- and the session id and
+        # evidence id are its companions.
+        "_reconciliation_evidence",
+        "_finalization_evidence",
+        "_evidence_id",
+        "_session_id",
     }
     assert not (stored & banned), sorted(stored & banned)
 
@@ -968,15 +1157,18 @@ def test_the_orchestrator_stores_no_second_truth() -> None:
 def test_the_orchestrator_stores_only_its_injected_collaborators() -> None:
     """What it *does* store is the injected providers plus its own bookkeeping.
 
-    Two entries are not providers and are named deliberately: the attempt sequence,
-    which gives each attempt a distinct identity, and the last-ingress stamp, which
-    only decides whether the next poll would repeat work this object just did.  Both
-    are about this object's own calls; neither is a fact about the session.
+    Four entries are not providers and are named deliberately: the attempt sequence,
+    which gives each attempt a distinct identity; the last-ingress stamp, which only
+    decides whether the next poll would repeat work this object just did; and v2O-E3's
+    two zero-state-proof flags, which decide whether *this object* should start another
+    proof.  All four are about this object's own calls; none is a fact about the session.
     """
 
     stored = _stored_self_attrs(_ORCHESTRATOR_PATH)
     assert "_next_attempt" in stored
     assert "_last_stream_ingress_monotonic" in stored
+    assert "_finalization_inflight" in stored
+    assert "_last_finalization_started" in stored
     assert stored <= {
         "_workflow_getter",
         "_paper_trading_getter",
@@ -990,13 +1182,15 @@ def test_the_orchestrator_stores_only_its_injected_collaborators() -> None:
         "_order_channel_provider",
         "_shadow_is_active",
         "_market_snapshot_provider",
-        "_finalization_inflight_provider",
+        "_reconciliation_rows_provider",
         "_clear_arm_confirmation",
         "_render_launch_state",
         "_render_launch_context",
         "_clock",
         "_next_attempt",
         "_last_stream_ingress_monotonic",
+        "_finalization_inflight",
+        "_last_finalization_started",
     }, sorted(stored)
 
 
@@ -1358,8 +1552,21 @@ def test_every_other_way_into_the_slot_honours_the_reservation() -> None:
         return text[: text.index("\n    def ", 1)]
 
     clears = method("clear_active")
-    assert clears.index("_promotion_reservation") < clears.index(
-        "self._order_service = None"
+    # ``clear_active`` no longer carries the checks itself: it *is* the reservation,
+    # reserved and committed, so the promotion claim is refused by the one place that
+    # installs a claim on the slot rather than by a check of its own that a re-open could
+    # slip past.
+    assert "self.reserve_active_release(expected_service=expected_service)" in clears
+    assert "self.commit_active_release(" in clears
+
+    # And the check still precedes the mutation, at its new home.
+    release_source = (_SERVICE_PATH.parent / "active_release.py").read_text(
+        encoding="utf-8"
+    )
+    reserve = release_source[release_source.index("def reserve_active_release(") :]
+    reserve = reserve[: reserve.index("\n    def ", 1)]
+    assert reserve.index("_promotion_reservation") < reserve.index(
+        "self._active_release_reservation = reservation"
     )
 
     connects = method("connect_candidate")
@@ -1473,15 +1680,390 @@ def test_the_malformed_callback_is_raised_not_swallowed() -> None:
 
 
 def test_the_lease_is_never_touched_directly() -> None:
-    """The capability drives the workflow; it never acquires or releases PAPER."""
+    """The capability may ask whether *Paper's* lease is held, and nothing else.
+
+    Two claims, and the second is the sharper one.  It never acquires or releases PAPER:
+    those are the workflow's transitions, and a second writer of the lease is a second
+    owner of the Shadow/Paper mutex.
+
+    And the only lease member it may name is ``PAPER`` -- deliberately *not* ``NONE`` and
+    not ``SHADOW``.  The manager is *shared* with Shadow, so ``workflow.lease`` answers
+    with whichever of the two holds it; asking "is the shared lease free?" (``is not
+    NONE``) would read Shadow's ownership as Paper's and make a healthy Shadow session
+    block every Paper close.  ``PAPER`` is the one answer that belongs to Paper's gate.
+
+    The calls are matched with their parentheses: the release helper is named
+    ``_release_paper_ownership_if_proven`` because that is what it does, and a bare
+    substring would fire on the name instead of on a lease call.
+    """
 
     source = "\n".join(
         path.read_text(encoding="utf-8") for path in _python_files(_PAPER_DIR)
     )
     for forbidden in (
-        "acquire_paper",
-        "release_paper",
-        "_leases",
-        "ExecutionLease",
+        "acquire_paper(",
+        "release_paper(",
+        "_leases.",
+        "ExecutionLeaseManager",
     ):
         assert forbidden not in source, forbidden
+    named = set(re.findall(r"ExecutionLease\.(\w+)", source))
+    assert named == {"PAPER"}, sorted(named)
+
+
+# -- Guard H: the window left recovery and finalization ------------------
+#
+# v2O-E3's half of the same property Guards A and A2 pin for the launch and the active
+# session.  The window used to decide when a halt was reconciled, whether a proof was
+# current, whether the zero-state proof should start, and whether a finished session's
+# ownership could be given up; it also published results of its own, because three of
+# those paths reached the workflow directly.  All of it is the capability's now, so each
+# retired name is asserted absent *and* each surviving seam is asserted present -- a
+# guard that only checked the deletions would pass on a window that had dropped the
+# wiring entirely, and a window that dropped it would leave Paper unclosable.
+
+
+@pytest.mark.parametrize("name", RETIRED_WINDOW_E3_METHODS)
+def test_the_retired_recovery_methods_are_gone(name: str) -> None:
+    """No E3 sequencing method survives, and no alias under the same name."""
+
+    assert name not in _declared_names(_DESKTOP_PATH), name
+
+
+@pytest.mark.parametrize("attribute", RETIRED_WINDOW_E3_STATE)
+def test_the_window_keeps_no_finalization_state(attribute: str) -> None:
+    """The proof's flags belong to the capability; neither may be mirrored here.
+
+    Checked as assignments *and* as declared names, so neither an attribute nor a
+    property under a retired name can restore the old ownership -- and the exact-set
+    assertion in ``test_the_orchestrator_stores_only_its_injected_collaborators`` stops
+    the same thing appearing on the other side.
+    """
+
+    assert attribute not in _assigned_self_attrs(_DESKTOP_PATH), attribute
+    assert attribute not in _declared_names(_DESKTOP_PATH), attribute
+
+
+@pytest.mark.parametrize("call", RETIRED_WINDOW_E3_CALLS)
+def test_the_window_never_drives_recovery_or_finalization(call: str) -> None:
+    """No window path may reach the workflow or the service for a recovery decision."""
+
+    assert call not in _DESKTOP_PATH.read_text(encoding="utf-8"), call
+
+
+@pytest.mark.parametrize("call", RETIRED_WINDOW_E3_ORCHESTRATOR_CALLS)
+def test_the_window_never_calls_the_capabilitys_own_sequencing(call: str) -> None:
+    """The reconciliation is not routed through a window handler any more.
+
+    A re-added ``_reconcile`` that merely called ``paper_orchestrator.reconcile()``
+    would pass every "the decision is the capability's" check while restoring exactly
+    the hop this round removed, so the *call* is forbidden rather than only the name.
+    """
+
+    assert call not in _DESKTOP_PATH.read_text(encoding="utf-8"), call
+
+
+def test_the_window_publishes_no_paper_result_of_its_own() -> None:
+    """One result path, and it is the capability's.
+
+    The window used to request each event and hand the result to the render path itself
+    on the three E3-only routes, which meant two places that knew how a Paper result is
+    published.  The events loop is what made that second publication possible, so its
+    absence is the claim -- checked on the window's own source, where the loop used to
+    be, rather than on a docstring that explains the removal.
+    """
+
+    desktop = _DESKTOP_PATH.read_text(encoding="utf-8")
+    assert "for event in result.events" not in desktop
+    handler = _method_source(_DESKTOP_PATH, "_on_paper_result_changed")
+    assert "_record_runtime_event" not in handler
+    # The capability still has exactly one, and the window's one writer is the
+    # capability's event publication.
+    assert "for event in result.events:" in _function_source(
+        _ORCHESTRATOR_PATH, "_publish_result"
+    )
+    assert "_record_paper_runtime_event" in desktop
+
+
+@pytest.mark.parametrize("signal,target", E3_SIGNAL_WIRING)
+def test_the_payload_free_publications_reach_their_handlers(
+    signal: str, target: str
+) -> None:
+    """Each E3 publication is wired, so the round cannot pass by publishing into nothing."""
+
+    assert f"{signal}.connect({target})" in _dense(_DESKTOP_PATH), signal
+
+
+def test_the_e3_signals_carry_no_state() -> None:
+    """The three E3 signals are payload-free, pinned at the declaration.
+
+    A signal that carried the phase, a boolean or a state dict would be the second truth
+    this round exists to remove -- and a handler that simply ignored the argument would
+    hide it.  ``Signal()`` with no argument list is the shape; the exact-set assertion
+    over the whole signal surface is in
+    ``test_the_orchestrator_exposes_the_declared_signals``.
+    """
+
+    source = _method_source(
+        _ORCHESTRATOR_PATH, "_publish_result", class_name="PaperOrchestrator"
+    )
+    assert "result_changed.emit(result)" in source
+    declared = _ORCHESTRATOR_PATH.read_text(encoding="utf-8")
+    for signal in (
+        "presentation_refresh_requested",
+        "session_finalized",
+        "manual_recovery_required",
+    ):
+        assert f"{signal} = Signal()" in declared, signal
+
+
+def test_the_resume_confirmation_reaches_the_capability_through_the_window() -> None:
+    """The one recovery intent that legitimately hops through the window.
+
+    It is a ``QMessageBox``, and the capability may not import one -- so the hop is the
+    point rather than a leftover.  The window asks; the capability decides whether the
+    proof it re-reads afterwards is still current.
+    """
+
+    assert (
+        f"{RESUME_CONFIRMATION_WIRING[0]}.connect({RESUME_CONFIRMATION_WIRING[1]})"
+        in _dense(_DESKTOP_PATH)
+    )
+
+
+def test_the_finalization_gate_is_locked() -> None:
+    """The four clauses, in order, and none of them optional.
+
+    A missing phase clause starts a proof for a trading session; a missing finalized
+    clause re-proves what is already proven; a missing in-flight clause interleaves two
+    readers of one broker connection; a missing backoff re-reads the whole broker once
+    per tick while the exits are still working.  The backoff is *conditional on the
+    engine still running*, which is the half a tidy-up would drop.
+    """
+
+    source = _function_source(_ORCHESTRATOR_PATH, "_maybe_schedule_finalization")
+    phase = source.index("PaperWorkflowPhase.STOPPING")
+    finalized = source.index("result.state.finalized")
+    inflight = source.index("self._finalization_inflight")
+    engine = source.index('getattr(result.engine_snapshot, "active", True)')
+    backoff = source.index("FINALIZATION_REFRESH_BACKOFF_SECONDS")
+    start = source.index("self._start_finalization()")
+    assert phase < finalized < inflight < engine < backoff < start
+    assert "engine_active" in source
+    assert "and last_started is not None" in source
+
+
+def test_the_release_is_two_phase_and_the_gate_is_the_workflows() -> None:
+    """Reserve the slot, *then* ask the workflow, then commit -- in that order.
+
+    The invariant the whole round turns on: a successful disconnect is not a finalization.
+    Asserted as an ordering *and* as a guard, because the ordering alone would still be
+    satisfied by a version that ignored the answer.
+
+    And the order is not a preference.  ``finalize_if_safe`` is a check-and-commit call on
+    a canonical owner that releases PAPER, its result, its coordinator and both evidence
+    records when it answers ``True`` -- so the slot's releasability has to be proved and
+    locked *before* it is asked.  Asking first leaves a refusal from the service arriving
+    after the lease is already gone, which is E1's ownerless-session state from the other
+    end.
+    """
+
+    source = _function_source(_ORCHESTRATOR_PATH, "_release_paper_ownership_if_proven")
+    reserve = source.index("reservation = self._paper_trading.reserve_active_release()")
+    gate = source.index("if not self._workflow.finalize_if_safe():", reserve)
+    commit = source.index(
+        "self._paper_trading.commit_active_release(reservation)", reserve
+    )
+    cancel = source.index(
+        "self._paper_trading.cancel_active_release(reservation)", reserve
+    )
+    assert reserve < gate < cancel < commit
+    # The one shortcut is the branch where nothing is held, and it is gated on exactly
+    # that: with no slot there is no lock to take, so the workflow's own gate is asked
+    # directly.  A direct gate *outside* that branch would be the bug this round fixes.
+    shortcut = source.index("if not self._workflow.finalize_if_safe():")
+    assert source.index("if not self._paper_trading.has_order_service():") < shortcut
+    assert shortcut < reserve
+    # And an unaccountable slot is reported rather than swallowed: the platform's own
+    # "lifecycle refused" type is caught by name and turned into a reason -- for the
+    # reservation, before the workflow is asked, and for the commit, as an invariant.
+    assert "except PaperTradingLifecycleError as error:" in source
+    assert "return str(error)" in source
+    assert "self._report_release_invariant(error)" in source
+    # Nothing here forces anything: no bare except, no lease access, no retry.
+    for forbidden in ("except Exception", "_leases", "release_paper("):
+        assert forbidden not in source, forbidden
+
+
+def test_the_reservation_refusal_comes_before_the_workflow_is_asked() -> None:
+    """The transaction boundary, pinned as source order rather than only as behaviour.
+
+    Behaviour covers it too (the release tests assert the workflow was never reached), and
+    this is the structural half: a future edit that moved the reservation after the gate --
+    the "obvious" tidy-up, since the gate is what decides whether anything happens -- would
+    have to change this ordering, and that is exactly when a reviewer should be reading it.
+    """
+
+    source = _function_source(_ORCHESTRATOR_PATH, "_release_paper_ownership_if_proven")
+    reserved = source.index("reservation = self._paper_trading.reserve_active_release()")
+    refused = source.index("return str(error)", reserved)
+    gate = source.index("if not self._workflow.finalize_if_safe():", reserved)
+    assert reserved < refused < gate
+
+
+def test_the_proof_captures_before_it_disconnects_and_confirms_after() -> None:
+    """The task's order, as one assertion on one method.
+
+    Capture asks the broker through the connection the session still holds; confirmation
+    consumes the proof only once the callback thread has joined.  Reversing either half
+    produces a proof of nothing -- and both reversals are exactly what a reordering
+    "cleanup" would do, which is why the order is pinned here rather than left to the
+    task's prose.
+    """
+
+    source = _function_source(_ORCHESTRATOR_PATH, "_start_finalization")
+    capture = source.index("capture_finalization_evidence()")
+    disconnect = source.index("self._paper_trading.disconnect()")
+    confirm = source.index("confirm_finalization_after_disconnect")
+    assert capture < disconnect < confirm
+    # A missing proof returns *before* the disconnect, so nothing is closed on a proof
+    # that was never taken.
+    assert source.index("if evidence_id is None:") < disconnect
+
+
+def test_a_refused_proof_start_is_not_a_failure() -> None:
+    """A busy resource group defers; only a task that ran and failed halts.
+
+    The two are different events and the tasking protocol says so.  Failing the refresh
+    on ``started is False`` would halt a session over a scheduling collision, so the
+    refusal path must clear its own flag and touch the workflow not at all.
+    """
+
+    start = _function_source(_ORCHESTRATOR_PATH, "_start_finalization")
+    refusal = start.index("if not started:")
+    tail = start[refusal:]
+    assert "self._finalization_inflight = False" in tail
+    assert "fail_finalization_refresh" not in tail
+    assert "presentation_refresh_requested.emit()" in tail
+
+    failed = _function_source(_ORCHESTRATOR_PATH, "_finalization_failed")
+    assert "self._workflow.fail_finalization_refresh()" in failed
+    assert "self.presentation_refresh_requested.emit()" in failed
+
+
+def test_the_completed_proof_clears_its_flag_after_publishing() -> None:
+    """The ordering that stops a proof from starting a second one inside itself.
+
+    Clearing the flag before publishing would re-enter ``_maybe_schedule_finalization``
+    from the very result being published -- and for a session that has just gone dormant
+    the backoff no longer applies, so the re-entry would loop.
+    """
+
+    source = _function_source(_ORCHESTRATOR_PATH, "_finalization_completed")
+    assert source.index("self._publish_result(") < source.index("finally:")
+    assert "self._finalization_inflight = False" in source[source.index("finally:") :]
+
+
+def test_shutdown_reads_the_phase_and_never_moves_it_by_hand() -> None:
+    """``prepare_shutdown`` classifies from the canonical phase, and delegates everything.
+
+    Three properties.  The **phase is read first** and every branch is a phase branch, so
+    nothing is inferred from "the workflow holds no result yet" -- ``CONNECTING`` legitimately
+    has no result and a held PAPER lease.  It must reuse ``self.stop()`` rather than call
+    ``request_stop`` itself, because a second stop request would be a second sequencing of
+    the same intent.  And the post-stop verdict has to be *re-derived*: the same
+    ``request_stop`` can halt the session or finalize it outright, so a hard-coded
+    "waiting" would describe a session that has no automatic route left.
+    """
+
+    source = _function_source(_ORCHESTRATOR_PATH, "prepare_shutdown")
+    assert "self.stop()" in source
+    assert "request_stop" not in source
+    assert "capture_finalization_evidence" not in source
+    # The phase is the first thing read, and it is read from the workflow.
+    assert source.index("self._workflow.phase") < source.index("self.stop()")
+    # Only RUNNING/PAUSED are stopped; STOPPING and the manual-recovery three are not.
+    stopped = source.index("PaperWorkflowPhase.RUNNING, PaperWorkflowPhase.PAUSED")
+    assert stopped < source.index("PaperWorkflowPhase.STOPPING")
+    # And a stop is never assumed to have worked: its outcome is re-classified.
+    assert "self._shutdown_verdict_after_the_stop()" in source
+    # ``CONNECTING`` is refused explicitly rather than falling through to ownership.
+    assert "PaperWorkflowPhase.CONNECTING" in source
+    assert "SHUTDOWN_LAUNCH_IN_FLIGHT_REASON" in source
+
+    after_stop = _function_source(
+        _ORCHESTRATOR_PATH, "_shutdown_verdict_after_the_stop"
+    )
+    for ending in (
+        "queries.manual_recovery_phase(phase)",
+        "PaperWorkflowPhase.STOPPING",
+        "SHUTDOWN_STOP_REFUSED_REASON",
+    ):
+        assert ending in after_stop, ending
+
+
+def test_the_manual_recovery_rule_has_one_definition() -> None:
+    """The three operator-only phases are declared once, in ``queries``.
+
+    Two copies -- one for the halt announcement, one for the shutdown disposition -- is
+    how one of them starts offering an automatic route the other forbids.  The capability
+    never *names* a manual-recovery phase at all: it asks, so the set is not even
+    representable here.  ``STOPPING`` and the ``RUNNING``/``PAUSED`` pair are the
+    capability's own facts and are named where its automatic routes are.
+    """
+
+    queries_source = _QUERIES_PATH.read_text(encoding="utf-8")
+    orchestrator = _ORCHESTRATOR_PATH.read_text(encoding="utf-8")
+    assert "PaperWorkflowPhase.HALTED" in queries_source
+    assert "queries.manual_recovery_phase(" in orchestrator
+    # No manual-recovery phase is spelled out where the rule is applied.
+    for forbidden in (
+        "PaperWorkflowPhase.HALTED",
+        "PaperWorkflowPhase.RECONCILING)",
+        "{PaperWorkflowPhase.RECONCILING",
+    ):
+        assert forbidden not in orchestrator, forbidden
+
+
+def test_the_ownership_block_is_never_downgraded_to_ready() -> None:
+    """E1's invariant is not relaxed now that there is a recovery path.
+
+    The tempting edit is "we have in-app recovery now, so an unaccountable claim can be
+    cancelled and the process allowed to exit".  It cannot: the ownership would be
+    dropped without proof, which is the exact failure the promotion reservation exists
+    to make unreachable.  So the refusal has to survive as its own disposition, on the
+    path where the slot is still held.  Asserted on the method's *code* rather than its
+    text, because the order the prose discusses the three situations in is not the order
+    the branches are written in.
+    """
+
+    code = _code_only(
+        _ORCHESTRATOR_PATH, "_ownership_verdict", class_name="PaperOrchestrator"
+    )
+    # Whitespace collapsed to single spaces rather than removed, so the assertions below stay
+    # readable: the point is the branch, not the formatting.
+    flat = re.sub(r"\s+", " ", code)
+    # ``READY`` requires the *absence* of all three owners: a candidate, the active slot and
+    # the lease.  The old shape short-circuited on "no active service", which is not the
+    # same claim -- the service owns a candidate slot too.
+    assert "self._paper_trading.has_candidate_ownership()" in flat
+    assert "holds_a_slot = self._paper_trading.has_order_service()" in flat
+    assert "holds_the_lease = self._workflow.lease is ExecutionLease.PAPER" in flat
+    assert (
+        "if not holds_a_slot and (not holds_the_lease):"
+        " return PaperShutdownResult(PaperShutdownDisposition.READY)"
+    ) in flat
+    # Every other outcome for a held ownership is a refusal, never a silent release.
+    assert "self._ownership_blocked(" in code
+    assert "clear_active" not in code, "the decision must not force a release"
+    for forbidden in ("except Exception", "release_paper("):
+        assert forbidden not in code, forbidden
+
+    # And the one phase that has no result *and* a held lease is refused outright, so a
+    # close cannot walk past a launch that is still in flight.
+    shutdown_code = _code_only(
+        _ORCHESTRATOR_PATH, "prepare_shutdown", class_name="PaperOrchestrator"
+    )
+    assert shutdown_code.index("PaperWorkflowPhase.CONNECTING") < shutdown_code.index(
+        "self._ownership_verdict()"
+    )

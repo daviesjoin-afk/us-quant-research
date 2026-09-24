@@ -27,6 +27,34 @@ class PaperTradingLifecycleError(RuntimeError):
     """
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class PaperActiveReleaseReservation:
+    """One session's outstanding claim on *releasing* the active order-service slot.
+
+    Handed out by ``reserve_active_release`` and required back -- as the *same* instance --
+    by either ``commit_active_release`` or ``cancel_active_release``.
+
+    It exists because releasing a finished Paper session is the mirror image of promoting
+    one, and for the same reason: two transitions have to be ordered and only one of them
+    can be taken back.  The execution lease is released by
+    ``PaperWorkflowController.finalize_if_safe``, which is a check-and-commit call on a
+    canonical owner that is deliberately not this service's to change -- so by the time it
+    answers ``True`` the lease is gone.  If the slot could still refuse to be dropped after
+    that, the session would be left with PAPER released and an ownership still held, which
+    is exactly the state the promotion reservation exists to make unreachable from the
+    other side.
+
+    So the slot's releasability is **proved and locked first**, and the workflow is asked
+    second.  A refusal here costs nothing -- nothing has happened yet -- while a refusal
+    there costs only :meth:`PaperTradingService.cancel_active_release`, which gives the
+    lock back without dropping anything.  That is what makes the release safe in one
+    direction only, which is the direction that matters.
+
+    ``eq=False`` for the same reason as the promotion reservation: identity *is* the
+    meaning, so equality must not be a second, quietly weaker notion of it.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class PaperTradingSnapshot:
     """One immutable reading of the Paper *application lifecycle*.
@@ -73,6 +101,7 @@ class PaperPromotionReservation:
 
 
 __all__ = [
+    "PaperActiveReleaseReservation",
     "PaperPromotionReservation",
     "PaperReconciliationStatus",
     "PaperTradingLifecycleError",

@@ -3302,14 +3302,22 @@ session 已获信任**。
 callback"，此时连 presentation 都不动：不清更新的 attempt 的 arm_confirmed、不重绘它
 的控件、不为它弹窗。log 行不 gate——操作员仍应看到"过期结果已忽略"。
 
-### 27.6 新增文件与预算
+### 27.6 新增文件与职责
 
 ```text
-__init__.py      20    只导出 PaperOrchestrator
-models.py        180   冻结 shape + 两个协作方 Protocol + 逐字 operator 文案
-queries.py       197   启动门 / 冻结 plan / identity 比对 / 券商门
-orchestrator.py  450   只做 sequencing
+__init__.py      只导出 PaperOrchestrator
+models.py        冻结 shape + 两个协作方 Protocol + 逐字 operator 文案
+queries.py       启动门 / 冻结 plan / identity 比对 / 券商门（纯规则，Qt-free，无 I/O）
+orchestrator.py  只做 sequencing
 ```
+
+**本轮的架构要求不是行数。** 早先版本在这里写了逐文件行数上限（180 / 197 / 450），
+并在测试里做成阻断性的 Guard G。那个做法已被撤销：文件长度是**症状**而非约束，把上限钉在
+某个文件当时恰好多长，只会在一次良性改动上失败、在一次恶性改动上通过。现在真正被断言的是
+**职责单一、ownership 明确、依赖方向稳定、无重复 truth / context bag / god object、
+关键安全顺序有测试锁住**——每一条都由一个直接命名该性质的 guard 断言。测试里保留的唯一
+长度检查是一条**导航**阈值（800 行），远高于任何诚实的 sequencing 模块，触发时的含义是
+"去看一眼这个文件"，而不是"拆到数字达标"。
 
 ### 27.7 MainWindow 退休清单
 
@@ -3336,15 +3344,73 @@ orchestrator.py  450   只做 sequencing
 ### 27.8 冻结范围
 
 `trading/runtime/*`、`trading/application/*`、broker adapter、IBKR callback/gateway、
-Paper journal/schema、Shadow core **一行未改**，本轮没有发现可证明的安全 bug。
+Paper journal/schema、Shadow core **一行未改**。
 
-### 27.9 mutation 必须 RED
+### 27.9 review 后补的三项修复
+
+首轮评审发现三个问题，都在本分支修掉，并各配一条 regression。
+
+**（1）冻结的 request 并没有真正冻结 strategy parameters。** `freeze_launch()` 原本把整个
+`strategy` 原对象塞进 request。`StrategyVersion` 虽然是 `@dataclass(frozen=True)`，但它的
+`__post_init__` 明确执行 `object.__setattr__(self, "parameters", dict(self.parameters))`
+——`parameters` 仍是**可变 dict**；而 `parameter_hash` 只是 `identity.parameter_hash` 的
+投影，**从不重算**。于是异步连接期间一次原地修改（`strategy.parameters["x"] = ...`）不会
+改变 hash，第二次 `current_inputs_match()` 仍返回 true，随后 `_build_paper_session()` 却
+用上了已改变的参数：**plan 记 hash A，实际运行参数 B**，immutable launch identity 被静默
+破坏。
+
+修法是新增 `PaperStrategyLaunchFact`：只带 identity / version_id / hash 与一份
+**deepcopy** 后的 parameters，不再保存 live `StrategyVersion`。deepcopy 而非结构冻结，是因为
+`validate_strategy_parameters` 要求整数列表是真正的 `list`，改成 tuple 会拒掉合法目录项。
+同时用 domain 自己的 `parameter_hash_for()` 校验快照参数确实等于 governed hash；不一致时
+抛 `PaperLaunchIntegrityError` 并**拒绝启动**（不是以旧 hash 跑新参数）。callback 上的
+identity 门把该错误转成 mismatch 而非异常——在 Qt slot 里抛会逃逸出槽、把 attempt 卡在
+`CONNECTING` 持有租约，而 mismatch 走正常 rejection 释放 PAPER。两条路径都 fail closed。
+
+**（2）`publish_armed()` 成功但 `promote_candidate()` 失败时的回滚是错的。** 原本
+build/arm/ensure/publish/**promote** 全在同一个 `try`，任何异常都进
+`_discard_candidate()`。但 `publish_armed()` 一返回，workflow 已经是 `RUNNING` 且
+coordinator 已发布：`reject_connecting()` 此时是 no-op，丢弃 candidate 会让一个**正在运行**
+的会话没有 owner，释放 PAPER 则会让 Shadow/Paper 互斥失效。结果可能留下
+`RUNNING` + 持有租约 + 已发布 coordinator + candidate 已丢弃 + 无人接管 的 split-brain。
+
+修法是把 **publication 前的 rollback** 与 **publication 后的不变量失败**分开，边界正好是
+"`publish_armed` 是否返回"：它抛异常发生在 `RUNNING` 转换**之前**，所以到它抛为止都仍是
+rollback（丢弃 candidate、reject plan、释放 PAPER）；它返回之后 promotion 再抛，走
+`_fail_after_publication()`——**不做任何回滚**，candidate / PAPER 租约 / 已发布 workflow
+原状保留，并以独立 code `PAPER_PROMOTION_INVARIANT` 在 error 级别报出来。这是"已发布未接管"
+的真实状态，需要人工处理；静默清理只会把真实缺陷伪装成一次看起来合理的启动失败。长期方案
+是在 order-service owner 上做 promotion 的 reserve/commit 两阶段提交，使这个窗口不存在。
+
+**（3）`service.arm()` 原本还留在 MainWindow。** `_build_paper_session()` 不只做
+composition，它还执行了 `runtime.start()` **和** `service.arm(...)`，所以 orchestrator 只
+看到 `_build_session → ensure → publish → promote`；名义上拥有 "build → arm → ensure →
+publish → promote" 的它，实际看不到 arm 那一步，architecture test 也只能断言
+`_build_session < ensure < publish`，真正的 `arm < ensure < publish < promote` 锁不住。
+既然本轮的标题就是 **Launch / Arm orchestration**，这里已收口：build seam 只做 composition
+加 `runtime.start()`，返回 `session_id / runtime / max_order_notional`；`arm` 由
+`PaperOrchestrator._arm_and_publish()` 明确执行。现在完整顺序可以被 AST guard 与 mutation
+test 直接锁死，MainWindow 也真正退出了 Paper launch 的 mutation。
+
+### 27.10 mutation 必须 RED
 
 ```text
-删掉 duplicate gate                              → RED
-把 stale plan 检查改成 if False                  → RED
-把 ensure_candidate_can_promote 移到 promote 之后 → RED
-删掉二次 preflight                               → RED
+删掉 duplicate gate                                → RED（4 failed）
+把 stale plan 检查改成 if False                    → RED（2 failed）
+删掉二次 preflight                                 → RED（2 failed）
+把 arm 移到 ensure 之后                            → RED（3 failed）
+freeze 不做 deepcopy（参数不脱钩）                 → RED（2 failed）
+不校验 governed hash                               → RED（2 failed）
+publish 后 promotion 失败仍去 discard candidate    → RED（1 failed）
+publish 后 promotion 失败去 reject_connecting      → RED（1 failed）
+publish 后 promotion 失败去 clear_active           → RED（3 failed）
+promote 被跳过                                     → RED（10 failed）
 ```
 
-四条均已手工验证为 RED（单元 + wiring + 架构 guard 三层合计）。
+十条均已手工验证为 RED（单元 + wiring + 架构 guard 三层合计）。前两项 blocker 的
+regression 分别是 `test_editing_the_live_parameters_during_the_connect_is_refused` /
+`test_freeze_launch_detaches_parameters_from_the_live_version` /
+`test_a_version_whose_hash_contradicts_its_parameters_is_refused` 与
+`test_a_promotion_failure_after_publication_is_not_rolled_back` /
+`test_a_promotion_failure_after_publication_is_reported_as_an_invariant` /
+`test_the_orchestrator_arms_the_channel_itself`。

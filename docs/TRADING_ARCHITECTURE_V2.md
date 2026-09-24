@@ -1960,14 +1960,19 @@ _current_auto_launch_matches         UI 输入是否仍与冻结 plan 一致
 _reset_auto_launch_controls          只重置属于该 attempt 的控件
 ```
 
-全部收口到 `desktop_v2/orchestration/paper/`（20 / 180 / 197 / 450 行）：
+全部收口到 `desktop_v2/orchestration/paper/`：
 
 ```text
 models.py        冻结 request / 券商读数 / build 结果 / publication / event；两个协作方 Protocol；逐字 operator 文案
-queries.py       启动门、冻结 plan、identity 比对、券商门，纯规则、Qt-free、无 I/O
+queries.py       启动门、冻结 plan（含参数脱钩与 hash 校验）、identity 比对、券商门，纯规则、Qt-free、无 I/O
 orchestrator.py  只做 sequencing
 __init__.py      只导出 PaperOrchestrator
 ```
+
+**本轮的架构要求不是行数。** 早先版本写了逐文件行数上限并做成阻断性 guard，该做法已撤销：
+文件长度是症状而非约束，把上限钉在文件当时恰好多长，只会在良性改动上失败、在恶性改动上通过。
+现在断言的是职责单一、ownership 明确、依赖方向稳定、无重复 truth / context bag / god
+object、关键安全顺序有测试锁住；测试里只剩一条远高于诚实模块的**导航**阈值。
 
 **没有第二份 truth。** 这是本轮最重要的一条。`PaperWorkflowController` 仍拥有 phase、
 active plan、execution lease；`PaperTradingService` 仍拥有 candidate 与 active 连接；
@@ -1987,7 +1992,8 @@ orchestrator **不保存**其中任何一样——特别是**不保存** `self._
 ```text
 candidate_service(candidate_id)   借用引用，只存在于本 callback 调用栈
 → validate_broker_state           净值 > 0 / 空仓 / cash 存在（Decimal 全链路）
-→ build_session                   组合根建 runtime 与 execution application，并 arm
+→ build_session                   组合根只建 runtime 与 execution application，并 runtime.start()
+→ service.arm(...)                **orchestrator 自己执行**，不再藏进 build seam
 → ensure_candidate_can_promote    纯检查，无副作用
 → publish_armed
 → promote_candidate
@@ -1996,6 +2002,32 @@ candidate_service(candidate_id)   借用引用，只存在于本 callback 调用
 `ensure_candidate_can_promote` **必须早于** `publish_armed`：这样"已发布的 session 因一个
 当时即可知的原因而没有 owner"不可能发生。promote **必须最后**：candidate 只有在 workflow
 publication 成功之后才成为 execution 的 active owner。
+
+`arm` 必须由 orchestrator 明确执行。首轮实现把它放在 `_build_paper_session()` 里，于是
+orchestrator 只看到 `_build_session → ensure → publish → promote`，架构 guard 也只能断言
+`_build_session < ensure < publish`——真正的 `arm < ensure < publish < promote` 锁不住。
+既然本轮标题就是 **Launch / Arm orchestration**，这里已收口：build seam 返回
+`session_id / runtime / max_order_notional`，arm 在 orchestrator 里执行。
+
+**publish 前回滚 vs publish 后不变量失败，必须分开。** `publish_armed()` 抛异常发生在
+workflow 转入 `RUNNING` **之前**，所以到它抛为止都还是 rollback（丢弃 candidate、reject
+plan、释放 PAPER）。它返回之后 promotion 再失败，就已经**没有东西可以回滚**：
+`reject_connecting()` 在 `CONNECTING` 之外是 no-op，丢弃 candidate 会让一个正在运行的会话
+没有 owner，释放 PAPER 会让 Shadow/Paper 互斥失效。此时走
+`_fail_after_publication()`：candidate / 租约 / 已发布 workflow **原状保留**，以独立 code
+`PAPER_PROMOTION_INVARIANT` 在 error 级别报出。这是 safety invariant 破坏而非启动失败，
+静默清理只会把真实缺陷伪装成合理的启动失败。长期方案是在 order-service owner 上做 promotion
+的 reserve/commit 两阶段提交。
+
+**冻结的 request 必须真正冻结参数。** `StrategyVersion` 虽是 frozen dataclass，但
+`__post_init__` 把 `parameters` 规范成普通 `dict`（仍可变），而 `parameter_hash` 只是
+`identity.parameter_hash` 的投影、**从不重算**。直接保存 live `StrategyVersion` 会让
+连接期间的原地修改在 hash 不变的情况下生效：plan 记 hash A，实际运行参数 B。因此 request
+保存的是 `PaperStrategyLaunchFact`——identity / version_id / hash 加一份 **deepcopy** 的
+parameters，并用 domain 的 `parameter_hash_for()` 校验快照确实等于 governed hash；不一致
+即抛 `PaperLaunchIntegrityError` 拒绝启动（不是以旧 hash 跑新参数）。callback 上的
+identity 门把该错误转成 mismatch：在 Qt slot 里抛会逃逸出槽并把 attempt 卡在 `CONNECTING`
+持有租约，而 mismatch 走正常 rejection 释放 PAPER。两条路径都 fail closed。
 
 **borrow 不是 store。** `candidate_service()` 全 package 只有一个调用点
 （`_arm_and_publish`），结果只进局部变量 `service`，永不赋给属性、永不越过 promotion、

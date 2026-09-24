@@ -49,9 +49,13 @@ _order_service: service | None             ← 已被验证并武装的那一个
   策略与资金复核，因此过期的异步回调必须能**只处置自己的候选**，而绝不触碰 active。
   `dict` 值先写 `None` 是**占位（reservation）**：表示该 id 的 connect 正在飞行中，
   这才让 id 冲突真正 fail-closed，而不是 check-then-insert 的竞态。
-- **active 槽位**：`promote_candidate()` 是唯一入口，且**拒绝覆盖**已存在的 active；
-  新候选到达也**绝不隐式断开**旧会话——「旧会话是否结束」是终局化路径的判断，不是
-  新启动的副作用。
+- **active 槽位**：只有一个入口，而且是**两阶段的**：`reserve_candidate_promotion()` 一边
+  把候选装进 active、一边把槽位锁给这次启动，`commit_candidate_promotion()` /
+  `cancel_candidate_promotion()` 结束这次启动的占用。两阶段不是整洁癖——启动必须能在
+  publication 失败时把自己的晋升收回来，同时又必须在 publication **之前**就已经是 owner，
+  否则「已发布但无 owner」的会话会出现（见 `DESKTOP_DECOMPOSITION.md` §27.11）。任一阶段都
+  **拒绝覆盖**已存在的 active；新候选到达也**绝不隐式断开**旧会话——「旧会话是否结束」是
+  终局化路径的判断，不是新启动的副作用。
 
 candidate id 是调用方给的不透明字符串；本模块**从不 import** launch-plan 或 workflow
 类型，边界不需要知道一次策略启动长什么样。
@@ -92,10 +96,11 @@ self.paper_trading = PaperTradingService(
 
 | 方法 | 语义 |
 | --- | --- |
-| `connect_candidate(id, config=, journal=, extended_hours_enabled=)` | 建并连一个候选；**只有成功才登记**。失败时 best-effort 断开；若连断开都失败，则**保留登记**（丢掉引用=丢掉对一个可能还活着的连接的控制） |
+| `connect_candidate(id, config=, journal=, extended_hours_enabled=)` | 建并连一个候选；**只有成功才登记**。失败时 best-effort 断开；若连断开都失败，则**保留登记**（丢掉引用=丢掉对一个可能还活着的连接的控制）。**该 id 正被一次飞行中的 promotion 占用时直接拒绝**（拒绝发生在 factory 之前）——占用期间该 id 已不在候选表里，只查重复是查不到的 |
 | `candidate_service(id)` | **借出**已登记的候选，供 promotion 前的 arm/submit/publish 接线使用；调用方不得存为成员变量 |
-| `ensure_candidate_can_promote(id)` | **纯检查，零变更**：在不可逆的 `publish_armed` 之前调用，使随后的 promotion 不会因「本可提前知道」的原因失败 |
-| `promote_candidate(id)` | 移入 active 槽位；**拒绝覆盖**已存在的 active，且从不隐式断开它 |
+| `reserve_candidate_promotion(id)` | **装入 active 并锁槽**（两阶段的第一阶段）：候选人必须存在、槽位必须为空且无人占用；成功后该 service 即成为 active，且在 commit/cancel 之前，任何其他晋升、同 id 的 connect、`clear_active()` 都被拒绝。它同时锁**槽位**和**id** |
+| `commit_candidate_promotion(reservation)` | 结束本次启动的占用（第二阶段）。ownership 已在 reserve 时取得，所以这里**结构上没有可失败的残余**；拒绝有两种，都是 misuse/corruption 而非竞态：「不是当前那张 reservation」，以及「槽位已不再持有该 service」。两者都**不释放占用**——owner 交代不清时把槽位交回复用是唯一绝不能做的事。**不是流水账**：占用不结束，该 service 将永远无法再被 reserve |
+| `cancel_candidate_promotion(reservation)` | 回滚：把 service 放回**候选槽位**、释放占用。**刻意不抛异常**——它跑在 rollback 里，抛出会跳过 rejection 并把 `CONNECTING` 永久卡住持有 PAPER；是否释放用返回值报告。若该 id 已被别的候选占住（corruption），**返回 `False` 且整调用 no-op**：覆盖会丢掉一个本方法无法交代来源的候选，而它的 broker 连接会就此成为孤儿 |
 | `discard_candidate(id)` | 只断开并遗忘**指定的那一个**候选；active 与其他候选一字不动。断开成功后才移除登记，失败则保留登记并记录错误 |
 | `has_candidate(id)` | 该 id 是否已登记（含飞行中的占位） |
 
@@ -105,7 +110,7 @@ self.paper_trading = PaperTradingService(
 | --- | --- |
 | `connect_active()` | 只**重连**已有 active；无 owner 是编程错误（人工对账针对的是已存在的会话，不是新建一个） |
 | `disconnect()` | 现有 disconnect 语义原样执行一次；**不清空所有权**——断开成功只证明 socket 没了，不证明会话可以释放。失败记录到 `last_error` 并**原样重抛** |
-| `clear_active(*, expected_service=None)` | 释放所有权。**双向 fail-closed**：仍报告 connected 的 active 被拒绝（丢引用=抛弃一个没人能再够到的 socket）；`expected_service` 让晚到的调用方证明自己清的是**它真正想清的那个**，而不是期间替换上来的新 service |
+| `clear_active(*, expected_service=None)` | 释放所有权。**三向 fail-closed**：① 仍有未结束的 promotion 占用时**直接拒绝**——这是「reservation 锁住槽位」这句话的落实，否则 finalization / recovery 调用方可以在 reserve 与 commit 之间把 owner 清掉，启动就会发布一个 owner 已被丢弃的会话（见 `DESKTOP_DECOMPOSITION.md` §27.11(6)）；② 仍报告 connected 的 active 被拒绝（丢引用=抛弃一个没人能再够到的 socket）；③ `expected_service` 让晚到的调用方证明自己清的是**它真正想清的那个**，而不是期间替换上来的新 service |
 
 ### 3.4 一次性探针
 
@@ -196,9 +201,13 @@ order service），代价是若干行 `self.paper_trading.*` 调用点。
 1. **先证明零状态，再断开，再确认**：`capture_finalization_evidence()` →
    `paper_trading.disconnect()` → `confirm_finalization_after_disconnect()`。
    顺序由源码字面量断言钉住。
-2. **先纯检查，再武装，再晋升**：`ensure_candidate_can_promote()` →
-   `publish_armed()` → `promote_candidate()`。检查在武装之前，因此已发布的会话
-   不会出现「没有 owner」的中间态。
+2. **先取晋升，再出版，最后结束占用**：`reserve_candidate_promotion()` →
+   `publish_armed()` → `commit_candidate_promotion()`。owner 在出版**之前**就已存在，
+   因此 `RUNNING` 必然有 owner——不是「窗口很短」，而是不存在这样一个顺序。出版失败则
+   `cancel_candidate_promotion()` 收回槽位，走既有 rollback。
+   （早期版本是 `ensure_candidate_can_promote()` 纯检查 + 出版后 `promote_candidate()`；
+   纯检查让槽位在出版期间是空的，出版后一旦被拒就留下 `RUNNING` 且无 owner 的会话。
+   变动理由与实测见 `DESKTOP_DECOMPOSITION.md` §27.11。）
 3. **只有 workflow 自己报告 finalized，才释放所有权**：
    `finalize_if_safe()` 返回真之后才 `clear_active()`。断开成功本身不作数。
 4. **过期回调只处置自己的候选**：`has_candidate()` → `discard_candidate(id)`，
@@ -675,4 +684,41 @@ callback，未来任何一处再丢字段都会在结构层被拦住，而不是
 | 突变 | 16/16 | **18/18**（新增丢参数与 sentinel 突变体） |
 | `verify.ps1` | exit 0 | **exit 0** |
 
+# 第六部分：forward reference —— 启动链的 ownership 演进（v2O-E1）
 
+本文档记录的历史阶段**不重写**。这一节只做前向引用，说明后续一轮把**启动链**的
+ownership 移动到了哪里，以免读者按本文档的旧描述去 `MainWindow` 找已经不在那里的代码。
+
+## 35. 启动链迁入 `PaperOrchestrator`（v2O-E1）
+
+本文档此前描述的边界是"`PaperTradingService` 拥有 order service 的候选/激活槽，
+`PaperWorkflowController` 拥有 phase / active plan / execution lease，窗口负责启动的
+sequencing"。v2O-E1 把最后那一半——**启动 sequencing**——也移出了窗口：
+
+```text
+desktop_v2/orchestration/paper/
+    models.py        冻结 request / 券商读数 / build 结果 / publication / event
+    queries.py       启动门、冻结 plan、identity 比对、券商门（纯规则）
+    orchestrator.py  READY → CONNECTING → 校验 → arm → publish → promote → RUNNING
+```
+
+所有权**没有变**，只是启动的 driver 换了：
+
+| 事实 | 唯一 owner | E1 之前由谁驱动 | E1 之后由谁驱动 |
+| --- | --- | --- | --- |
+| phase / active_plan / execution lease | `PaperWorkflowController` | `MainWindow` | `PaperOrchestrator`（仍只调它的公开面） |
+| candidate / active broker connection | `PaperTradingService` | `MainWindow` | `PaperOrchestrator`（`candidate_service` 仍是借用） |
+| 已武装 session 的 runtime sequencing | `PaperSessionCoordinator` | 未变 | 未变 |
+| session / book / positions / risk / execution dispatch | `TradingRuntime` | 未变 | 未变 |
+| **启动 sequencing** | — | `MainWindow._start_auto_quant` + `_auto_order_service_connected` | **`PaperOrchestrator`** |
+
+窗口仍是 composition root：它构造 orchestrator、构造 `IBKRConnectionConfig`、提供窄的
+session-build seam（`_build_paper_session`）、接 `session_published` 并沿用既有渲染。
+
+**仍未迁移**（属 v2O-E2/E3/E4）：RUNNING 之后的 pause / resume / stop、HALT recovery、
+manual reconciliation、finalization、`closeEvent` teardown、execution page 的 session
+渲染。本文档 §16–§34 描述的 `PaperTradingService` / gateway / journal 边界在这些阶段
+依然成立。
+
+设计依据见 `docs/DESKTOP_DECOMPOSITION.md` §27 与 `docs/TRADING_ARCHITECTURE_V2.md`
+§8.18。

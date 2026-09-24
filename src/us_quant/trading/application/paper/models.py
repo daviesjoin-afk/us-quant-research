@@ -48,7 +48,32 @@ class PaperReconciliationStatus:
     awaiting_confirmation: bool
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class PaperPromotionReservation:
+    """One launch's outstanding claim on the active order-service slot.
+
+    Handed out by ``reserve_candidate_promotion`` and required back -- as the *same*
+    instance -- by either ``commit_candidate_promotion`` or
+    ``cancel_candidate_promotion``.  It exists because promotion is the one transition
+    that has to be two-phase: the ownership move has to happen *before*
+    ``publish_armed`` creates a workflow that expects an owner, while the launch is
+    only entitled to keep the slot if publication then succeeds.
+
+    So a reservation is not a promise to promote later.  By the time a caller holds
+    one, the named candidate is already installed as the active service; the
+    reservation is the token saying the installation belongs to this launch, plus the
+    exclusivity that stops any other promotion, discard, connection *or clearing* of
+    the active slot until this launch declares which of the two endings it was.
+
+    ``eq=False`` on purpose: identity *is* the meaning of a reservation, so equality
+    must not be a second, quietly weaker notion of it.
+    """
+
+    candidate_id: str
+
+
 __all__ = [
+    "PaperPromotionReservation",
     "PaperReconciliationStatus",
     "PaperTradingLifecycleError",
     "PaperTradingSnapshot",

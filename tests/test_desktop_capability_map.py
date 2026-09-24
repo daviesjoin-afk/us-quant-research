@@ -72,6 +72,35 @@ def test_the_declared_columns_are_present() -> None:
         assert column in text, column
 
 
+def test_the_paper_row_names_the_launch_capability_and_stays_partial() -> None:
+    """v2O-E1 landed the *launch*, and the row must say exactly that.
+
+    Two failures are guarded, in opposite directions.  A row that still said "not
+    started" would send the next maintainer to ``desktop.py`` for a sequence that is
+    no longer there; a row that said "v2O-E complete" would claim the active-session
+    half -- polling, ingress, pause/resume, stop, reconciliation, finalization -- had
+    moved when it has not.  This round is deliberately partial, so the status must
+    stay partial too.
+    """
+
+    text = _MAP.read_text(encoding="utf-8")
+    row = next(
+        line for line in text.splitlines() if line.startswith("| **Paper**")
+    )
+    assert "PaperOrchestrator" in row
+    assert "v2O-E1 launch orchestration complete" in row
+    assert "v2O-E partial" in row
+    # The window must no longer be described as the launch owner...
+    for retired in (
+        "MainWindow._start_auto_quant",
+        "MainWindow._auto_order_service_connected",
+    ):
+        assert retired not in row, retired
+    # ...and the round must not claim the whole capability is done.
+    assert "v2O-E complete" not in row
+    assert "not started" not in row
+
+
 def test_the_history_bridge_is_not_described_backwards() -> None:
     """Direction is the thing readers get wrong, so it is pinned.
 

@@ -144,6 +144,7 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Backtest Orchestration | MIGRATED（v2O-C3，`desktop_v2/orchestration/research/backtest/`） |
 | Research Orchestration | **COMPLETE**（v2O-C；Universe / History / Scanner / Backtest / Cross-Section / Targeted Evidence / Targeted Session 全部已迁） |
 | Shadow Orchestration | MIGRATED（v2O-D，`desktop_v2/orchestration/shadow/`） |
+| Paper Launch Orchestration | MIGRATED（v2O-E1，`desktop_v2/orchestration/paper/`）；active-session 一半仍在 `MainWindow`，属 v2O-E2/E3/E4 |
 
 Shadow 子系统：
 
@@ -1809,9 +1810,10 @@ service、admission 被拒后 busy 保持 True、failure 清空 last-good runs�
 
 **v2O-C1 Universe + History + v2O-C2 Scanner + v2O-C3 Backtest ✅**；
 **v2O-C4 Cross Section ✅**；**v2O-C5A Targeted Evidence ✅**；
-**v2O-C5B Targeted Session + Preflight ✅**；**v2O-D Shadow orchestration ✅** ——
-顶层路线现在是 **v2O-C Research COMPLETE**。下一刀是
-**v2O-E Paper orchestration**。
+**v2O-C5B Targeted Session + Preflight ✅**；**v2O-D Shadow orchestration ✅**；
+**v2O-E1 Paper launch orchestration ✅（v2O-E partial）** ——
+顶层路线现在是 **v2O-C Research COMPLETE**。Paper 能力分四刀：启动已完成（§8.18），
+下一刀是 **v2O-E2 active Paper runtime orchestration**。
 
 维护导航见 `docs/DESKTOP_CAPABILITY_MAP.md`；C5B 的设计依据见
 `DESKTOP_DECOMPOSITION.md` §25，本文的 §8.16 只记该轮改变了哪些 boundary。
@@ -1942,6 +1944,168 @@ lease 句柄）。`_selected_shadow_strategy_record` 是 strategy selection 的 
 
 Shadow 研究算法、Paper workflow 生命周期、Risk / Execution 都未触碰，Paper
 ownership 留给 v2O-E。
+
+### 8.18 Paper launch orchestration 已抽出（v2O-E1）
+
+v2O-D 之后，Paper **启动链**仍是 `MainWindow` 上的一对 handler 加四个只服务它们的
+helper：
+
+```text
+_start_auto_quant                    读 preflight → 冻结 plan → begin_connecting → 提交 broker task
+_auto_order_service_connected        过期判定 → 二次 preflight → identity 复验 → 校验券商 → 建 runtime
+                                     → arm → ensure → publish_armed → promote
+_reject_unpublished_auto_candidate   丢弃单个未武装 candidate + reject 匹配的 plan
+_reject_auto_launch_without_service  连接失败、从未产生 candidate 的收尾
+_current_auto_launch_matches         UI 输入是否仍与冻结 plan 一致
+_reset_auto_launch_controls          只重置属于该 attempt 的控件
+```
+
+全部收口到 `desktop_v2/orchestration/paper/`：
+
+```text
+models.py        冻结 request / 券商读数 / build 结果 / publication / event；两个协作方 Protocol；逐字 operator 文案
+queries.py       启动门、冻结 plan（含参数脱钩与 hash 校验）、identity 比对、券商门，纯规则、Qt-free、无 I/O
+orchestrator.py  只做 sequencing
+__init__.py      只导出 PaperOrchestrator
+```
+
+**本轮的架构要求不是行数。** 早先版本写了逐文件行数上限并做成阻断性 guard，后来退成一条
+"导航阈值"，**两者都已彻底删除**——换名字不改变性质，它仍是一个会让 CI 失败的强制行数上限。
+现在断言的是职责单一、ownership 明确、依赖方向稳定、无重复 truth / context bag / god
+object、关键安全顺序有测试锁住；本 capability 的 guard 里不存在任何 LOC 断言。
+
+**没有第二份 truth。** 这是本轮最重要的一条。`PaperWorkflowController` 仍拥有 phase、
+active plan、execution lease；`PaperTradingService` 仍拥有 candidate 与 active 连接；
+`TradingRuntime` 仍拥有 session / book / risk / execution dispatch。
+orchestrator **不保存**其中任何一样——特别是**不保存** `self._active_plan`。
+
+关键推论：**"启动 attempt 在飞"这件事由 workflow 的 phase 回答，不由镜像 plan 回答。**
+退休代码用 `_active_auto_launch_plan is not None`；它与
+`phase is PaperWorkflowPhase.CONNECTING` 完全等价（`begin_connecting` 是进入该 phase 的
+唯一入口，两条退出路径都清 plan），而且 phase 在 publish **之后**依然正确——那时 plan
+合法地跨越 attempt 存续进 `RUNNING`，`active_plan is None` 就不再是判据。窗口的
+`_launch_locked` 与确认门因此都改读 `paper_trading.phase()`。
+
+**arm / reserve / publish / commit 的顺序是硬安全约束。** broker connect 成功只证明可达，
+不证明可信：
+
+```text
+candidate_service(candidate_id)   借用引用，只存在于本 callback 调用栈
+→ validate_broker_state           净值 > 0 / 空仓 / cash 存在（Decimal 全链路）
+→ build_session                   组合根只建 runtime 与 execution application，并 runtime.start()
+→ service.arm(...)                **orchestrator 自己执行**，不再藏进 build seam
+→ reserve_candidate_promotion     装入 active **并锁槽**（ownership 在此取得）
+→ publish_armed
+→ commit_candidate_promotion      结束本次启动的占用，不再移动任何东西
+```
+
+`reserve_candidate_promotion` **必须早于** `publish_armed`，而且是结构性的：owner 在发布
+之前就已经存在，因此"已发布的 session 没有 owner"不是窗口有多短的问题，而是**不存在这样
+一个顺序**。早期版本在发布前只做 `ensure_candidate_can_promote`（纯检查、零变更），槽位
+在发布期间仍是空的，发布后 promotion 一旦被拒就留下 `RUNNING` + coordinator 持着已武装通道
++ 无人接管，而所有 recovery 路径都从 `has_order_service()` 起步、直接 return。这不再是
+"promote 必须最后"：**broker connect 成功 ≠ session 已获信任**这条约束没有变，只是取得信任
+的时点必须早于 publication，否则会出现无 owner 的运行中会话。publication 失败时由
+`cancel_candidate_promotion` 收回槽位，走下面的原有 rollback。
+
+`arm` 必须由 orchestrator 明确执行。首轮实现把它放在 `_build_paper_session()` 里，于是
+orchestrator 只看到 `_build_session → ensure → publish → promote`，架构 guard 也只能断言
+`_build_session < ensure < publish`——真正的 `arm < ensure < publish < promote` 锁不住。
+既然本轮标题就是 **Launch / Arm orchestration**，这里已收口：build seam 返回
+`session_id / runtime / max_order_notional`，arm 在 orchestrator 里执行。
+
+**publish 前回滚 vs publish 后不变量失败，必须分开。** `publish_armed()` 抛异常发生在
+workflow 转入 `RUNNING` **之前**，所以到它抛为止都还是 rollback（**先 cancel reservation
+把槽位收回**，再丢弃 candidate、reject plan、释放 PAPER）。它返回之后只剩一件事——结束本次
+启动的占用——而 `commit_candidate_promotion()` 已经没有可失败的残余：ownership 是 `reserve`
+时取得的，那时就验证过候选存在、槽位为空且无人占用。若它仍因 bug 被拒，走
+`_fail_after_publication()`：candidate / 租约 / 已发布 workflow **原状保留**，以独立 code
+`PAPER_PROMOTION_INVARIANT` 在 error 级别报出。这是 safety invariant 破坏而非启动失败，
+静默清理只会把真实缺陷伪装成合理的启动失败；而此时的代价是 fail closed 的——下一次启动会被
+拒，当前会话仍然有 owner、可恢复。
+
+`cancel_candidate_promotion()` **刻意不抛异常**：它跑在 rollback 里，抛出会跳过 rejection
+并把 `CONNECTING` 永久卡在持有 PAPER 的状态。所以它**用返回值报告**是否真的释放了，而
+orchestrator 必须**把它当控制信号**而不是日志：返回 `False` 时 ownership 无法证明已归还，
+此时继续回滚会丢掉一个可能仍持有槽位的 service、reject plan 并释放 PAPER（与 Shadow 共享的
+租约），于是改走 `_fail_to_release_promotion()` —— 不回滚、保持 `CONNECTING` 与租约，用独立
+code `PAPER_LAUNCH_ROLLBACK_FAILED` 报出。已发布 LIVE 会话与卡住的启动是两个不同的处境，
+所以 code 也分开。
+
+占用锁的是**槽位与 id 两者**：`clear_active()` 在占用期间直接拒绝，否则 reservation 只是
+"打算"锁住槽位——finalization / recovery 调用方可以在 reserve 与 commit 之间把 owner 清掉，
+启动便发布一个 owner 已被丢弃的会话；而 `connect_candidate()` 拒绝重新登记被占用的 id，因为
+占用期间该 id 已不在候选表里、只查重复是查不到的，一旦重新登记，回滚的 `cancel` 就会覆盖掉新
+候选，使其 broker 连接成为孤儿。所以 `cancel` 自己也在改动任何状态之前确认该 id 未被占住，是则
+返回 `False` 让启动 fail closed。`commit` 另有独立确认：槽位仍持有该 service。
+这是 `RUNNING ⇒ has_order_service()` 成为结构性推论的另一半。相应地 `closeEvent` 里那次
+`clear_active()` 按名字捕获这个拒绝（否则异常会从该 Qt override 逃出去，并跳过
+shadow / 心跳 / 行情 / worker 的收尾），弹窗并 `event.ignore()` 交还给操作员。
+
+**冻结的 request 必须真正冻结参数。** `StrategyVersion` 虽是 frozen dataclass，但
+`__post_init__` 把 `parameters` 规范成普通 `dict`（仍可变），而 `parameter_hash` 只是
+`identity.parameter_hash` 的投影、**从不重算**。直接保存 live `StrategyVersion` 会让
+连接期间的原地修改在 hash 不变的情况下生效：plan 记 hash A，实际运行参数 B。因此 request
+保存的是 `PaperStrategyLaunchFact`——identity / version_id / hash 加一份 **deepcopy** 的
+parameters，并用 domain 的 `parameter_hash_for()` 校验快照确实等于 governed hash；不一致
+即抛 `PaperLaunchIntegrityError` 拒绝启动（不是以旧 hash 跑新参数）。callback 上的
+identity 门把该错误转成 mismatch：在 Qt slot 里抛会逃逸出槽并把 attempt 卡在 `CONNECTING`
+持有租约，而 mismatch 走正常 rejection 释放 PAPER。两条路径都 fail closed。
+
+**borrow 不是 store。** `candidate_service()` 全 package 只有一个调用点
+（`_arm_and_publish`），结果只进局部变量 `service`，永不赋给属性、永不越过 promotion、
+永不交给其他 capability。架构 guard 同时锁住"窗口一次都不再调"和"capability 只有一处"。
+
+**异步 callback 的 stale 保护逐条保留：**
+
+```text
+shape 非法        fail loudly（不吞异常——那正好会让启动既不武装也不回滚）
+connect 失败      只结束本方 attempt，不碰任何 candidate / active service / 更新的 attempt
+plan 已过期       只 discard 自己的 candidate，只 reject 自己未武装的 plan
+                  reject_connecting 返回 False 即"这是过期 callback"：
+                  不清更新的 attempt 的 arm_confirmed、不重绘其控件、不为它弹窗
+二次 preflight    行情 / 账户 / 策略 / candidate / 资金上限都可能已变
+identity 复验     strategy_version_id / parameter_hash / candidate_symbols / requested_capital_limit
+```
+
+`reject_connecting` 的返回值正是退休 `_reset_auto_launch_controls` 的谓词，所以
+presentation 也 gate 在它上面；log 行**不** gate，操作员仍应看到"过期结果已忽略"。
+
+**GUI 与 generic task infrastructure 都不进来。** 拒绝以 payload **发布**，窗口弹窗；
+操作员的确认步骤留在窗口（`_confirm_and_start_auto_quant`），因为 capability 不能 import
+`QMessageBox`。异步 connect 仍走窗口的 `TaskSubmitter`（`resource_group="broker"`），
+不引入 asyncio，也不复制 `TaskThread` / controller / closing gate。任务**未被接纳**时
+必须 `reject_connecting` + 还账：否则会留下持有租约的 CONNECTING zombie。
+
+**session 组装走一条窄 seam。** `RiskApplication` / `ExecutionApplication` /
+`TradingRuntime` 的构造仍是组合根的（窗口的 `_build_paper_session`），orchestrator 只拿到
+已校验券商读数与**借用的** candidate，换回两个 port 加 runtime。因此该 package 不 import
+IBKR adapter、不 import risk / execution implementation、不 import composition 模块。
+资金链保持 `Decimal`：`resolve_paper_session_capital` 以 **cash** 为约束，绝不用
+buying power 替代，也就不会经 float 引入融资。
+
+**发布成功后交付。** `session_published` 携带一个 `PaperLaunchPublication` 值对象
+（runtime + workflow result + session id + candidate count）；窗口的小 handler 沿用既有
+`_apply_paper_workflow_result` 渲染，并保留 `trading_runtime` / `auto_quant_snapshot`
+赋值——这两个 active-session 事实属 E2。
+
+**窗口剩下的 Paper 代码**明确留给后续：`_apply_paper_workflow_result`、
+`_poll_auto_quant_orders`、`_on_market_snapshot_changed` 中的 Paper ingress、
+pause / resume / stop、manual reconciliation、finalization refresh、
+`_finish_auto_quant_session_if_safe`、`closeEvent` teardown、execution page 的
+session 渲染。
+
+后续阶段：
+
+```text
+v2O-E2  active Paper runtime orchestration
+        market ingress / broker poll / pause-resume / orderly stop / workflow-result publication
+v2O-E3  HALT / manual reconciliation / finalization / shutdown
+v2O-E4  Paper render ownership + MainWindow closure guards
+```
+
+本轮**未触碰**任何 frozen core：`trading/runtime/*`、`trading/application/*`、
+broker adapter、IBKR callback/gateway、Paper journal/schema、Shadow core 均无改动。
 
 ## 9. 已删除的旧架构
 
@@ -2718,7 +2882,10 @@ v2O-A Market orchestration      ✅ 已完成（§8.11）
 v2O-B Account orchestration     ✅ 已完成（§8.12）
 v2O-C Research orchestration    ✅ COMPLETE（§8.13–§8.16）
 v2O-D Shadow orchestration      ✅ 已完成（§8.17）
-v2O-E Paper orchestration       ⏭ 后续
+v2O-E Paper orchestration       🔶 部分完成：E1 启动链已完成（§8.18）
+v2O-E2 active Paper runtime     ⏭ 后续
+v2O-E3 HALT / reconciliation / finalization / shutdown   ⏭ 后续
+v2O-E4 Paper render ownership + closure guards           ⏭ 后续
 v2O-F System orchestration      ⏭ 后续
 MainWindow composition closure  ⏭ 后续
 ```
@@ -2853,7 +3020,10 @@ Desktop Dashboard v2
 ```text
 v2O-C Research orchestration    ✅ COMPLETE（C1–C5B 全部完成）
 v2O-D Shadow orchestration      ✅ 已完成（§8.17）
-v2O-E Paper orchestration
+v2O-E1 Paper launch             ✅ 已完成（§8.18）
+v2O-E2 active Paper runtime     ⏭ 后续
+v2O-E3 HALT / reconciliation / finalization / shutdown
+v2O-E4 Paper render ownership + closure guards
 v2O-F System orchestration
 MainWindow composition closure
 Final Architecture Closure

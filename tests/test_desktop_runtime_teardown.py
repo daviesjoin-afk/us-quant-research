@@ -557,8 +557,9 @@ def _install_order_service_spy(window: MainWindow, spy: object) -> None:
 
     Ownership lives in ``PaperTradingService`` now, so a test can no longer
     assign ``window.paper_order_service``.  It rebuilds the service with an
-    injected factory and promotes one candidate -- the production path -- so the
-    window really holds an order service when the close path runs.
+    injected factory and promotes one candidate through the real two-phase
+    promotion -- the production path -- so the window really holds an order service
+    when the close path runs.
     """
 
     from us_quant.trading.application.paper import PaperTradingService
@@ -573,7 +574,9 @@ def _install_order_service_spy(window: MainWindow, spy: object) -> None:
         repository=object(),
         extended_hours_enabled=False,
     )
-    window.paper_trading.promote_candidate("teardown-spy")
+    window.paper_trading.commit_candidate_promotion(
+        window.paper_trading.reserve_candidate_promotion("teardown-spy")
+    )
 
 
 def _install_paper_workflow(monkeypatch, window: MainWindow, workflow: object):

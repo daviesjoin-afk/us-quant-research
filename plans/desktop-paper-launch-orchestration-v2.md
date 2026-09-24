@@ -85,6 +85,14 @@ render + log in `finally`, dialog only when `reject_connecting` returned True an
 `session_published`. Any exception before publish → reject that candidate, never active.
 `ensure_candidate_can_promote < publish_armed < promote_candidate` locked.
 
+> **Implemented differently, on purpose.** This plan was written before the work. Two of
+> its steps were superseded by later review rounds, and the shipped order is
+> `build → arm → reserve_candidate_promotion → publish_armed → commit_candidate_promotion`:
+> `arm` moved out of the injected seam into the orchestrator, and the pure promotability
+> check was replaced by a promotion that *takes* the slot before publication. Both were
+> safety fixes rather than preferences -- the reasons and the measured evidence are in
+> `docs/DESKTOP_DECOMPOSITION.md` §27.9(3) and §27.11.
+
 ## Composition root (MainWindow)
 
 Two callables keep the window the composition root without keeping launch sequencing:

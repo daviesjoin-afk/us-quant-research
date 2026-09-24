@@ -3279,20 +3279,28 @@ render + submit  →  resource_group="broker"；未被接纳则 reject_connectin
 connect **之前**：Shadow / Paper 共享一个执行租约，所以这个顺序**就是**结构性互斥，
 不是 UI gate。
 
-### 27.4 arm / publish / promote 的硬顺序
+### 27.4 arm / reserve / publish / commit 的硬顺序
 
 ```text
-candidate_service(candidate_id)    借用；只存在于本 callback 调用栈
-→ validate_broker_state            净值非空且 > 0；positions 为空；cash 非空（Decimal）
-→ build_session                    组合根建 config / risk / execution / runtime，start()，arm()
-→ ensure_candidate_can_promote     纯检查，无副作用
+candidate_service(candidate_id)     借用；只存在于本 callback 调用栈
+→ validate_broker_state             净值非空且 > 0；positions 为空；cash 非空（Decimal）
+→ build_session                     组合根建 config / risk / execution / runtime，start()，返回 sizing
+→ service.arm(...)                  本模块自己的调用，不藏在 seam 里（见 27.9(3)）
+→ reserve_candidate_promotion       装入 active **并锁槽**：ownership 在此取得
 → publish_armed
-→ promote_candidate
+→ commit_candidate_promotion        结束本次启动的占用；它不再移动任何东西
 ```
 
-`ensure_candidate_can_promote` 早于 `publish_armed` 是刻意的：这样"已发布的 session 因
-一个当时即可知的原因而没有 owner"不可能发生。promote 最后：**broker connect 成功 ≠
-session 已获信任**。
+`reserve` 早于 `publish_armed` 是刻意的，而且是**结构性**的：owner 在发布之前就已经存在，
+所以「已发布的 session 没有 owner」不是一个窗口有多短的问题，而是**不存在这样一个顺序**。
+早期版本在发布前只做 `ensure_candidate_can_promote`（纯检查，零变更），槽位在发布期间仍是
+空的；发布后 promotion 一旦被拒，留下的是 `RUNNING` + coordinator 持着已武装通道 + 无人
+接管，而所有 recovery 路径都从 `has_order_service()` 起步、于是全部直接 return。详见 27.11。
+
+promote 不再最后，是因为它被 `commit` 取代：**broker connect 成功 ≠ session 已获信任**
+这条约束没有变，只是「取得信任」的时点必须早于 `publish_armed`——否则一个正在运行的会话
+可能在没有任何 owner 的情况下存在。publication 失败时由 `cancel_candidate_promotion` 把
+槽位收回，走 27.9(2) 描述的原有 rollback，因此提前取得 ownership 不会留下残留。
 
 ### 27.5 stale callback 的完整保护
 
@@ -3344,8 +3352,16 @@ god object、关键安全顺序有测试锁住**——每一条都由一个直�
 
 ### 27.8 冻结范围
 
-`trading/runtime/*`、`trading/application/*`、broker adapter、IBKR callback/gateway、
-Paper journal/schema、Shadow core **一行未改**。
+`trading/runtime/*`、broker adapter、IBKR callback/gateway、Paper journal/schema、
+Shadow core **一行未改**。
+
+`trading/application/paper/{models,service,__init__}.py` 在第四轮 review 后**有改动**，
+而且是有意为之：本轮发现的安全缺陷（27.11）恰恰是「candidate 与 active 之间缺少原子
+ownership 语义」，而这两个槽位本来就是 `PaperTradingService` 的 canonical ownership。
+把 reservation 放到 orchestrator 里会再造第二份 lifecycle truth 并让 owner 变成两个，
+所以缺口补在拥有者身上：新增 `reserve/commit/cancel_candidate_promotion` 与
+`PaperPromotionReservation`，替换 `ensure_candidate_can_promote` / `promote_candidate`。
+没有新增任何交易语义——不下单、不算风险、不改对账与终局化。
 
 ### 27.9 review 后补的三项修复
 
@@ -3379,9 +3395,12 @@ coordinator 已发布：`reject_connecting()` 此时是 no-op，丢弃 candidate
 "`publish_armed` 是否返回"：它抛异常发生在 `RUNNING` 转换**之前**，所以到它抛为止都仍是
 rollback（丢弃 candidate、reject plan、释放 PAPER）；它返回之后 promotion 再抛，走
 `_fail_after_publication()`——**不做任何回滚**，candidate / PAPER 租约 / 已发布 workflow
-原状保留，并以独立 code `PAPER_PROMOTION_INVARIANT` 在 error 级别报出来。这是"已发布未接管"
-的真实状态，需要人工处理；静默清理只会把真实缺陷伪装成一次看起来合理的启动失败。长期方案
-是在 order-service owner 上做 promotion 的 reserve/commit 两阶段提交，使这个窗口不存在。
+原状保留，并以独立 code `PAPER_PROMOTION_INVARIANT` 在 error 级别报出来。静默清理只会把
+真实缺陷伪装成一次看起来合理的启动失败。
+
+**这一版修法在第四轮 review 被判定仍然不足**：它只保证了「不会错误回滚」，没有保证
+「不存在无 owner 的已发布会话」。当时写在这里的长期方案——在 order-service owner 上做
+promotion 的 reserve/commit 两阶段提交——已经落地，见 27.11。
 
 **（3）`service.arm()` 原本还留在 MainWindow。** `_build_paper_session()` 不只做
 composition，它还执行了 `runtime.start()` **和** `service.arm(...)`，所以 orchestrator 只
@@ -3408,17 +3427,27 @@ runtime event、并向操作员发一条 `refused`。既不掩盖真实目录缺
 
 ### 27.10 mutation 必须 RED
 
+第一至第三轮手工验证。下面前四行的目标代码本轮未改动，因此数字仍然成立；promotion 相关的
+四行引用了已被替换的 `promote_candidate`，已在 27.11 以新形式重测：
+
 ```text
 删掉 duplicate gate                                → RED（4 failed）
 把 stale plan 检查改成 if False                    → RED（2 failed）
 删掉二次 preflight                                 → RED（2 failed）
-把 arm 移到 ensure 之后                            → RED（3 failed）
+把 arm 移到 reserve 之后                           → RED（4 failed）  ← 锚点变更，本轮重测
 freeze 不做 deepcopy（参数不脱钩）                 → RED（2 failed）
 不校验 governed hash                               → RED（2 failed）
-publish 后 promotion 失败仍去 discard candidate    → RED（1 failed）
-publish 后 promotion 失败去 reject_connecting      → RED（1 failed）
-publish 后 promotion 失败去 clear_active           → RED（3 failed）
-promote 被跳过                                     → RED（10 failed）
+```
+
+promotion 升级为 reserve/commit 之后的完整重测（27.11）：
+
+```text
+去掉 reserve + commit（启动根本不晋升）            → RED（15 failed）
+把 commit 提到 publish 之前                        → RED（14 failed）
+publication 失败时不 cancel reservation            → RED（6 failed）
+publish 后 commit 失败仍去 discard candidate       → RED（2 failed）
+publish 后 commit 失败去 reject_connecting         → RED（2 failed）
+publish 后 commit 失败去 clear_active              → RED（3 failed）
 ```
 
 完整性错误的报告路径同样有 mutation 覆盖：
@@ -3431,12 +3460,95 @@ promote 被跳过                                     → RED（10 failed）
 报告后仍继续往下 launch                    → RED（1 failed）
 ```
 
-十五条均已手工验证为 RED（单元 + wiring + 架构 guard 三层合计）。三项修复的 regression
-分别是：参数脱钩与 hash 校验 `test_freeze_launch_detaches_parameters_from_the_live_version`
-/ `test_editing_the_live_parameters_during_the_connect_is_refused` /
-`test_a_version_whose_hash_contradicts_its_parameters_is_refused`；publication 拆分
-`test_a_promotion_failure_after_publication_is_not_rolled_back` /
-`test_a_promotion_failure_after_publication_is_reported_as_an_invariant`；arm 归属
+第一至第三轮的十五条已手工验证为 RED（单元 + wiring + 架构 guard 三层合计）。三项修复的
+regression 分别是：参数脱钩与 hash 校验
+`test_freeze_launch_detaches_parameters_from_the_live_version` /
+`test_editing_the_live_parameters_during_the_connect_is_refused` /
+`test_a_version_whose_hash_contradicts_its_parameters_is_refused`；arm 归属
 `test_the_orchestrator_arms_the_channel_itself` /
 `test_the_window_build_seam_does_not_arm_the_channel`；完整性报告
 `test_an_inconsistent_catalogue_version_does_not_escape_the_qt_slot`。
+publication 拆分的那两条 regression（`test_a_promotion_failure_after_publication_is_not_rolled_back`
+/ `..._is_reported_as_an_invariant`）随 promotion 的换代被 27.11 的四条取代，语义更弱的那
+一半（「不要错误回滚」）保留在 `test_a_commit_failure_after_publication_still_leaves_the_session_owned`。
+
+### 27.11 第四轮 review：publication 与 promotion 之间的事务边界
+
+**（1）`publish_armed()` 成功、`promote_candidate()` 失败时，会话仍在被驱动。**
+27.9(2) 把这条路径判成「不回滚、保留原状」，看起来 fail closed，**实际不是**：
+`publish_armed()` 已经把 workflow 推到 `RUNNING` 并建好 `PaperSessionCoordinator`，而
+coordinator 手里的 `_orders` 就是那个已经 `arm()` 过的 candidate service。`MainWindow`
+的两条驱动路径**只读 phase**：
+
+```text
+_on_market_snapshot_changed   phase ∈ {RUNNING, PAUSED, STOPPING} ⇒ paper_workflow.on_stream(snapshot)
+_poll_auto_quant_orders       同理                      ⇒ paper_workflow.poll()
+```
+
+于是 promotion 失败之后，下一个行情 tick 仍会进入已发布的 coordinator，而它握着一条武装过的
+通道——「Desktop 没正式接管，但已发布通道仍可被 workflow 驱动」。恢复链同样救不回来：
+`has_order_service() == False`，于是 `_reconnect_auto_order_service()` 第一行就 return，
+终局化也依赖 active order service，`clear_active()` 面对的是一个空槽。
+
+在真实 desktop 路径上实测（offscreen `MainWindow` + 真 `PaperTradingService`，仅把 promotion
+换成抛错）：`phase RUNNING`、`has_order_service False`、`lease PAPER` 仍持有、
+`arm_confirmed True`、coordinator 已发布且 `coordinator._orders is <已 arm 的 fake>`、
+`_poll_auto_quant_orders()` 确实调到了 `paper_workflow.poll()`，而
+`begin_manual_reconciliation` 一次都没被进入。
+
+**（2）修法：promotion 升级成 reservation / commit，由 `PaperTradingService` 拥有。**
+
+```text
+reserve_candidate_promotion(candidate_id)
+    候选必须存在；槽位必须为空且无人占用
+    ⇒ 把候选**装入 active**，并把槽位锁给这次启动，返回一张 reservation
+publish_armed()
+commit_candidate_promotion(reservation)      结束占用（结构上不会失败）
+cancel_candidate_promotion(reservation)      publication 失败时把槽位收回
+```
+
+要点是 **ownership 在 `reserve` 时取得，而不是在 `commit`**。只做「纯检查 + 稍后提交」的话，
+`RUNNING` 与「有 owner」之间仍存在一个瞬间；把它前移之后，`RUNNING ⇒ has_order_service()`
+是顺序本身的推论，而不是一条需要靠 review 保证的纪律。`commit` 仍然不是流水账：占用不结束，
+该 service 就永远无法再被 reserve——fail closed，但代价落在**下一个**启动被拒，而不是当前
+会话无人接管。
+
+**（3）为什么 `reserve` 之后不存在「已接管但未发布」的漏洞。** 两条理由都写进了代码注释，
+也各有一条 guard 钉住：一是这段时间只存在于一次 Qt slot 调用栈内，而
+`PaperWorkflowController`（含基类 `ManualReconciliation`）不是 `QObject`、phase 转换不发
+任何信号，本模块在 `publish_armed` 与 `commit` 之间也不 emit 任何东西——由
+`test_nothing_between_publication_and_the_commit_can_yield_control` 断言，而不是靠论证；
+二是 publication 一旦失败，`cancel` **就是逆操作本身**，把 service 放回候选槽位，于是既有的
+`discard_candidate` + `reject_connecting` 原样可用。`cancel` 因此刻意**不抛异常**：它跑在
+rollback 里，抛出会跳过 rejection 并把 `CONNECTING` 永久卡在持有 PAPER 的状态——这条由 AST
+guard（`test_the_rollback_gives_the_reservation_back_before_disposing`）断言。
+
+**（4）本轮 regression。**
+
+```text
+真实路径（真 MainWindow + 真 PaperTradingService，只 fake broker 与 worker）
+    test_every_pre_publication_failure_rolls_back_and_leaves_no_owner   5 个注入点
+    test_a_commit_failure_after_publication_cannot_orphan_the_session
+    test_a_publication_failure_releases_the_promotion_for_the_next_launch
+能力层（fake）
+    test_a_publish_failure_gives_the_reservation_back_and_rolls_back
+    test_a_commit_failure_after_publication_still_leaves_the_session_owned
+    test_a_commit_failure_after_publication_is_reported_as_an_invariant
+架构 guard
+    test_the_rollback_gives_the_reservation_back_before_disposing
+    test_nothing_between_publication_and_the_commit_can_yield_control
+    test_the_commit_refusal_is_caught_by_name
+service 层
+    test_reserving_installs_the_candidate_and_takes_the_slot
+    test_a_second_reservation_cannot_overlap_the_first
+    test_commit_refuses_an_equal_but_foreign_reservation
+    test_cancel_returns_the_service_to_the_candidate_slot
+    test_a_committed_launch_frees_the_slot_for_the_next_one
+```
+
+**（5）一处刻意的语义收窄，供 review 复核。** 提议的写法是 `reserve` 只锁槽、`commit` 才把
+candidate 移入 active。本分支把「移入 active」放在 `reserve`，因为按前一种写法
+`RUNNING` 与「有 owner」之间仍然存在一个瞬间（只是很短、且不可观测），而 27.11(1) 要消除的
+恰恰是这个状态本身。收益是缺陷从「不安全」降级为「fail closed 的活性问题」：commit 若因 bug
+没有执行，会话仍然是**有 owner 且可恢复**的，代价只是下一次启动被拒。代价是 `reserve` 在
+语义上不只是「预定」，文档与 docstring 都按这个语义写。

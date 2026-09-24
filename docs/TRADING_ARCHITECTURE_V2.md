@@ -1986,22 +1986,27 @@ orchestrator **不保存**其中任何一样——特别是**不保存** `self._
 合法地跨越 attempt 存续进 `RUNNING`，`active_plan is None` 就不再是判据。窗口的
 `_launch_locked` 与确认门因此都改读 `paper_trading.phase()`。
 
-**arm / publish / promote 的顺序是硬安全约束。** broker connect 成功只证明可达，不证明
-可信：
+**arm / reserve / publish / commit 的顺序是硬安全约束。** broker connect 成功只证明可达，
+不证明可信：
 
 ```text
 candidate_service(candidate_id)   借用引用，只存在于本 callback 调用栈
 → validate_broker_state           净值 > 0 / 空仓 / cash 存在（Decimal 全链路）
 → build_session                   组合根只建 runtime 与 execution application，并 runtime.start()
 → service.arm(...)                **orchestrator 自己执行**，不再藏进 build seam
-→ ensure_candidate_can_promote    纯检查，无副作用
+→ reserve_candidate_promotion     装入 active **并锁槽**（ownership 在此取得）
 → publish_armed
-→ promote_candidate
+→ commit_candidate_promotion      结束本次启动的占用，不再移动任何东西
 ```
 
-`ensure_candidate_can_promote` **必须早于** `publish_armed`：这样"已发布的 session 因一个
-当时即可知的原因而没有 owner"不可能发生。promote **必须最后**：candidate 只有在 workflow
-publication 成功之后才成为 execution 的 active owner。
+`reserve_candidate_promotion` **必须早于** `publish_armed`，而且是结构性的：owner 在发布
+之前就已经存在，因此"已发布的 session 没有 owner"不是窗口有多短的问题，而是**不存在这样
+一个顺序**。早期版本在发布前只做 `ensure_candidate_can_promote`（纯检查、零变更），槽位
+在发布期间仍是空的，发布后 promotion 一旦被拒就留下 `RUNNING` + coordinator 持着已武装通道
++ 无人接管，而所有 recovery 路径都从 `has_order_service()` 起步、直接 return。这不再是
+"promote 必须最后"：**broker connect 成功 ≠ session 已获信任**这条约束没有变，只是取得信任
+的时点必须早于 publication，否则会出现无 owner 的运行中会话。publication 失败时由
+`cancel_candidate_promotion` 收回槽位，走下面的原有 rollback。
 
 `arm` 必须由 orchestrator 明确执行。首轮实现把它放在 `_build_paper_session()` 里，于是
 orchestrator 只看到 `_build_session → ensure → publish → promote`，架构 guard 也只能断言
@@ -2010,14 +2015,17 @@ orchestrator 只看到 `_build_session → ensure → publish → promote`，架
 `session_id / runtime / max_order_notional`，arm 在 orchestrator 里执行。
 
 **publish 前回滚 vs publish 后不变量失败，必须分开。** `publish_armed()` 抛异常发生在
-workflow 转入 `RUNNING` **之前**，所以到它抛为止都还是 rollback（丢弃 candidate、reject
-plan、释放 PAPER）。它返回之后 promotion 再失败，就已经**没有东西可以回滚**：
-`reject_connecting()` 在 `CONNECTING` 之外是 no-op，丢弃 candidate 会让一个正在运行的会话
-没有 owner，释放 PAPER 会让 Shadow/Paper 互斥失效。此时走
+workflow 转入 `RUNNING` **之前**，所以到它抛为止都还是 rollback（**先 cancel reservation
+把槽位收回**，再丢弃 candidate、reject plan、释放 PAPER）。它返回之后只剩一件事——结束本次
+启动的占用——而 `commit_candidate_promotion()` 已经没有可失败的残余：ownership 是 `reserve`
+时取得的，那时就验证过候选存在、槽位为空且无人占用。若它仍因 bug 被拒，走
 `_fail_after_publication()`：candidate / 租约 / 已发布 workflow **原状保留**，以独立 code
 `PAPER_PROMOTION_INVARIANT` 在 error 级别报出。这是 safety invariant 破坏而非启动失败，
-静默清理只会把真实缺陷伪装成合理的启动失败。长期方案是在 order-service owner 上做 promotion
-的 reserve/commit 两阶段提交。
+静默清理只会把真实缺陷伪装成合理的启动失败；而此时的代价是 fail closed 的——下一次启动会被
+拒，当前会话仍然有 owner、可恢复。
+
+`cancel_candidate_promotion()` **刻意不抛异常**：它跑在 rollback 里，抛出会跳过 rejection
+并把 `CONNECTING` 永久卡在持有 PAPER 的状态。是否真的释放了用返回值报告。
 
 **冻结的 request 必须真正冻结参数。** `StrategyVersion` 虽是 frozen dataclass，但
 `__post_init__` 把 `parameters` 规范成普通 `dict`（仍可变），而 `parameter_hash` 只是

@@ -49,9 +49,13 @@ _order_service: service | None             ← 已被验证并武装的那一个
   策略与资金复核，因此过期的异步回调必须能**只处置自己的候选**，而绝不触碰 active。
   `dict` 值先写 `None` 是**占位（reservation）**：表示该 id 的 connect 正在飞行中，
   这才让 id 冲突真正 fail-closed，而不是 check-then-insert 的竞态。
-- **active 槽位**：`promote_candidate()` 是唯一入口，且**拒绝覆盖**已存在的 active；
-  新候选到达也**绝不隐式断开**旧会话——「旧会话是否结束」是终局化路径的判断，不是
-  新启动的副作用。
+- **active 槽位**：只有一个入口，而且是**两阶段的**：`reserve_candidate_promotion()` 一边
+  把候选装进 active、一边把槽位锁给这次启动，`commit_candidate_promotion()` /
+  `cancel_candidate_promotion()` 结束这次启动的占用。两阶段不是整洁癖——启动必须能在
+  publication 失败时把自己的晋升收回来，同时又必须在 publication **之前**就已经是 owner，
+  否则「已发布但无 owner」的会话会出现（见 `DESKTOP_DECOMPOSITION.md` §27.11）。任一阶段都
+  **拒绝覆盖**已存在的 active；新候选到达也**绝不隐式断开**旧会话——「旧会话是否结束」是
+  终局化路径的判断，不是新启动的副作用。
 
 candidate id 是调用方给的不透明字符串；本模块**从不 import** launch-plan 或 workflow
 类型，边界不需要知道一次策略启动长什么样。
@@ -94,8 +98,9 @@ self.paper_trading = PaperTradingService(
 | --- | --- |
 | `connect_candidate(id, config=, journal=, extended_hours_enabled=)` | 建并连一个候选；**只有成功才登记**。失败时 best-effort 断开；若连断开都失败，则**保留登记**（丢掉引用=丢掉对一个可能还活着的连接的控制） |
 | `candidate_service(id)` | **借出**已登记的候选，供 promotion 前的 arm/submit/publish 接线使用；调用方不得存为成员变量 |
-| `ensure_candidate_can_promote(id)` | **纯检查，零变更**：在不可逆的 `publish_armed` 之前调用，使随后的 promotion 不会因「本可提前知道」的原因失败 |
-| `promote_candidate(id)` | 移入 active 槽位；**拒绝覆盖**已存在的 active，且从不隐式断开它 |
+| `reserve_candidate_promotion(id)` | **装入 active 并锁槽**（两阶段的第一阶段）：候选人必须存在、槽位必须为空且无人占用；成功后该 service 即成为 active，且在 commit/cancel 之前，任何其他晋升、同 id 的 connect 都被拒绝 |
+| `commit_candidate_promotion(reservation)` | 结束本次启动的占用（第二阶段）。ownership 已在 reserve 时取得，所以这里**结构上没有可失败的残余**；唯一拒绝是「不是当前那张 reservation」——编程错误，按名字 loud 拒。**不是流水账**：占用不结束，该 service 将永远无法再被 reserve |
+| `cancel_candidate_promotion(reservation)` | 回滚：把 service 放回**候选槽位**、释放占用。**刻意不抛异常**——它跑在 rollback 里，抛出会跳过 rejection 并把 `CONNECTING` 永久卡住持有 PAPER；是否释放用返回值报告 |
 | `discard_candidate(id)` | 只断开并遗忘**指定的那一个**候选；active 与其他候选一字不动。断开成功后才移除登记，失败则保留登记并记录错误 |
 | `has_candidate(id)` | 该 id 是否已登记（含飞行中的占位） |
 
@@ -196,9 +201,13 @@ order service），代价是若干行 `self.paper_trading.*` 调用点。
 1. **先证明零状态，再断开，再确认**：`capture_finalization_evidence()` →
    `paper_trading.disconnect()` → `confirm_finalization_after_disconnect()`。
    顺序由源码字面量断言钉住。
-2. **先纯检查，再武装，再晋升**：`ensure_candidate_can_promote()` →
-   `publish_armed()` → `promote_candidate()`。检查在武装之前，因此已发布的会话
-   不会出现「没有 owner」的中间态。
+2. **先取晋升，再出版，最后结束占用**：`reserve_candidate_promotion()` →
+   `publish_armed()` → `commit_candidate_promotion()`。owner 在出版**之前**就已存在，
+   因此 `RUNNING` 必然有 owner——不是「窗口很短」，而是不存在这样一个顺序。出版失败则
+   `cancel_candidate_promotion()` 收回槽位，走既有 rollback。
+   （早期版本是 `ensure_candidate_can_promote()` 纯检查 + 出版后 `promote_candidate()`；
+   纯检查让槽位在出版期间是空的，出版后一旦被拒就留下 `RUNNING` 且无 owner 的会话。
+   变动理由与实测见 `DESKTOP_DECOMPOSITION.md` §27.11。）
 3. **只有 workflow 自己报告 finalized，才释放所有权**：
    `finalize_if_safe()` 返回真之后才 `clear_active()`。断开成功本身不作数。
 4. **过期回调只处置自己的候选**：`has_candidate()` → `discard_candidate(id)`，

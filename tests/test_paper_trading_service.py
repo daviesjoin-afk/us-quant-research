@@ -734,6 +734,76 @@ def test_a_cancelled_reservation_leaves_the_slot_reservable_again() -> None:
     assert boundary.reserve_candidate_promotion("attempt-1") is not None
 
 
+# -- a reservation owns its id --------------------------------------------
+
+
+def test_the_reserved_id_cannot_be_registered_again() -> None:
+    """A replacement would be orphaned by the reservation's own rollback.
+
+    Reserving moves the candidate into the active slot, so the id leaves the candidate
+    map and a plain duplicate check would not see it.  A second service registered under
+    that id is then *overwritten* by ``cancel`` -- cancelled into the map it had already
+    replaced -- so its broker connection stays open with nothing tracking it.  The
+    refusal must come before the factory too, or a connection gets built that nothing
+    can reach.
+    """
+
+    first, second = _FakeService(), _FakeService()
+    factory = _FakeFactory(first, second)
+    boundary = _service(factory=factory)
+    boundary.connect_candidate(
+        "attempt-1", config=object(), repository=object(), extended_hours_enabled=False
+    )
+    reservation = boundary.reserve_candidate_promotion("attempt-1")
+
+    with pytest.raises(
+        PaperTradingLifecycleError, match="reserved by an in-flight promotion"
+    ):
+        boundary.connect_candidate(
+            "attempt-1", config=object(), repository=object(), extended_hours_enabled=False
+        )
+
+    # Nothing was built, and nothing moved.
+    assert len(factory.calls) == 1
+    assert second.connect_calls == 0
+    assert boundary.has_order_service() is True
+    # The claim is still the live one, so the rollback still has exactly one thing to do.
+    boundary.commit_candidate_promotion(reservation)
+    assert boundary.has_order_service() is True
+
+
+def test_cancel_refuses_to_overwrite_an_unaccountable_candidate() -> None:
+    """The corruption defence: never put the reserved service back over someone else.
+
+    Unreachable while ``connect_candidate`` refuses a reserved id, and checked anyway
+    because the failure it prevents is both silent and permanent -- the overwritten
+    service would leave every ownership map while its connection stayed open.  The
+    refusal is a whole-call no-op: owner, claim and the existing candidate all stay.
+    """
+
+    first, second = _FakeService(), _FakeService()
+    boundary = _service(factory=_FakeFactory(first, second))
+    boundary.connect_candidate(
+        "attempt-1", config=object(), repository=object(), extended_hours_enabled=False
+    )
+    reservation = boundary.reserve_candidate_promotion("attempt-1")
+    # Constructed directly: the collision the public API can no longer produce.
+    boundary.connect_candidate(
+        "attempt-2", config=object(), repository=object(), extended_hours_enabled=False
+    )
+    boundary._candidates["attempt-1"] = boundary._candidates.pop("attempt-2")
+
+    assert boundary.cancel_candidate_promotion(reservation) is False
+
+    # Everything exactly as it was, including the candidate that would have been lost.
+    assert boundary.candidate_service("attempt-1") is second
+    assert second.disconnect_calls == 0
+    assert boundary.has_order_service() is True
+    # And the claim was not consumed by the refused cancel.
+    boundary.commit_candidate_promotion(reservation)
+    assert boundary.has_order_service() is True
+
+
 # -- a reservation locks the slot -----------------------------------------
 
 

@@ -1033,21 +1033,40 @@ def test_the_rollback_stops_when_the_promotion_cannot_be_released() -> None:
         assert forbidden not in handler, (forbidden, sorted(handler))
 
 
-def test_the_reservation_gates_the_clear_of_the_active_slot() -> None:
-    """``clear_active`` is the other way to empty the slot, so it must honour the claim.
+def test_every_other_way_into_the_slot_honours_the_reservation() -> None:
+    """A claim is a lock only if *every* other mutation consults it, and consults it first.
 
-    Asserted on the service module, because this is the invariant that makes a
-    reservation a *lock* rather than a comment: the clear has to consult the
-    outstanding promotion before it removes the owner.  Without it a finalization or
-    recovery caller could empty the slot between the reserve and the commit, and the
-    launch would publish a session whose owner had already been dropped.
+    Three things can otherwise reach the active slot while a launch is mid-promotion,
+    each with its own failure: ``clear_active`` empties the owner the session about to be
+    published relies on; ``connect_candidate`` lets the reserved id be registered again,
+    so the rollback cancels *into* the map it had already been replaced in and orphans
+    the newer broker connection; and a ``cancel`` that trusts its own map puts the
+    reserved service back over whatever is there.
+
+    Asserted on the service module because the property is "the check precedes the
+    mutation", which behaviour tests can only sample at the cases someone thought of.
     """
 
     source = _SERVICE_PATH.read_text(encoding="utf-8")
-    body = source[source.index("def clear_active(") :]
-    body = body[: body.index("\n    def ", 1)]
-    assert "_promotion_reservation" in body
-    assert body.index("_promotion_reservation") < body.index("self._order_service = None")
+
+    def method(name: str) -> str:
+        text = source[source.index(f"def {name}(") :]
+        return text[: text.index("\n    def ", 1)]
+
+    clears = method("clear_active")
+    assert clears.index("_promotion_reservation") < clears.index(
+        "self._order_service = None"
+    )
+
+    connects = method("connect_candidate")
+    assert connects.index("_promotion_reservation") < connects.index(
+        "self._candidates[key] = None"
+    )
+
+    cancels = method("cancel_candidate_promotion")
+    assert cancels.index("reservation.candidate_id in self._candidates") < cancels.index(
+        "self._order_service = None"
+    )
 
 
 def test_nothing_between_publication_and_the_commit_can_yield_control() -> None:

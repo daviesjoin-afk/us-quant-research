@@ -1113,7 +1113,12 @@ class PaperOrchestrator(QObject):
         if self._paper_trading.has_candidate_ownership():
             return self._ownership_blocked(SHUTDOWN_CANDIDATE_OWNERSHIP_REASON)
         holds_a_slot = self._paper_trading.has_order_service()
-        holds_the_lease = self._workflow.lease is not ExecutionLease.NONE
+        # Only *Paper's own* lease counts.  The lease manager is shared with Shadow, and
+        # ``workflow.lease`` answers with whichever of the two holds it -- so asking "is the
+        # shared lease free?" would make a perfectly healthy Shadow session block every
+        # Paper close (and the Shadow teardown that follows it in ``closeEvent`` would never
+        # run).  Shadow's lease is Shadow's to release, in its own step.
+        holds_the_lease = self._workflow.lease is ExecutionLease.PAPER
         if not holds_a_slot and not holds_the_lease:
             return PaperShutdownResult(PaperShutdownDisposition.READY)
         result = self._workflow.result

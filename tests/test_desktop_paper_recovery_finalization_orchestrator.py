@@ -57,6 +57,7 @@ from us_quant.desktop_v2.orchestration.paper.orchestrator import (
     FINALIZATION_REFRESH_BACKOFF_SECONDS,
     PaperOrchestrator,
 )
+from us_quant.desktop_v2.workflows import WorkflowController
 from us_quant.trading.application.paper import PaperTradingService
 from us_quant.trading.application.paper.models import PaperTradingLifecycleError
 from us_quant.trading.runtime.workflow import PaperWorkflowController
@@ -1975,6 +1976,70 @@ def test_shutdown_blocks_the_discard_failure_state_reached_for_real() -> None:
     assert service.has_candidate_ownership() is True
     assert candidate.disconnect_calls == 1
     assert workflow.phase is PaperWorkflowPhase.READY
+
+
+def test_a_shadow_lease_is_not_paper_ownership() -> None:
+    """The lease manager is *shared*, so ``lease`` can answer ``SHADOW`` -- and that is Shadow's.
+
+    Driven on the real ``WorkflowController``, because the sharing is the thing under test:
+    one ``ExecutionLeaseManager`` is handed to both controllers, so ``paper.lease`` answers
+    with whichever of the two holds it.  A Paper gate that asked "is the shared lease free?"
+    would refuse to close a perfectly healthy Shadow session -- and ``closeEvent`` only
+    reaches the Shadow teardown *after* Paper says ``READY``, so the application could not
+    be closed at all.  Shadow's lease is Shadow's to hand back, in its own step.
+    """
+
+    controller = WorkflowController()
+    paper = controller.paper
+    controller.shadow.start()
+    assert paper.lease is ExecutionLease.SHADOW
+
+    harness = _build(workflow=paper, trading=_Trading(owned=False))
+
+    verdict = harness.orchestrator.prepare_shutdown()
+
+    assert verdict.disposition is PaperShutdownDisposition.READY
+    # Paper neither touched Shadow's lease nor claimed to have released anything.
+    assert paper.lease is ExecutionLease.SHADOW
+    assert harness.events.finalized == 0
+    assert harness.trading.calls == []
+
+    # And it is Shadow's own stop that finally hands the shared lease back.
+    controller.shadow.stop()
+    assert paper.lease is ExecutionLease.NONE
+
+
+def test_a_paper_lease_with_nothing_else_held_still_blocks() -> None:
+    """The counterpart, so fixing the SHADOW case cannot let a real PAPER lease through.
+
+    Same real controller and the same real lease, with nothing at all in the service: this
+    one *is* Paper's ownership, so the close stays refused until the workflow's own gate
+    hands it back.
+    """
+
+    controller = WorkflowController()
+    paper = controller.paper
+    paper.begin_preparing()
+    paper.mark_ready()
+    paper.begin_connecting(
+        build_auto_launch_plan(
+            attempt_id=1,
+            strategy_version_id="version-1",
+            parameter_hash="hash-1",
+            candidate_symbols=("AAPL",),
+            requested_capital_limit=Decimal("1000"),
+        )
+    )
+    assert paper.lease is ExecutionLease.PAPER
+    assert paper.result is None
+
+    harness = _build(workflow=paper, trading=_Trading(owned=False))
+
+    verdict = harness.orchestrator.prepare_shutdown()
+
+    assert verdict.disposition is PaperShutdownDisposition.OWNERSHIP_BLOCKED
+    assert paper.lease is ExecutionLease.PAPER
+    assert harness.trading.calls == []
 
 
 def test_shutdown_blocks_when_the_broker_still_reports_positions() -> None:

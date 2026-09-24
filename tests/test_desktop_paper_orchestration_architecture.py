@@ -1552,8 +1552,21 @@ def test_every_other_way_into_the_slot_honours_the_reservation() -> None:
         return text[: text.index("\n    def ", 1)]
 
     clears = method("clear_active")
-    assert clears.index("_promotion_reservation") < clears.index(
-        "self._order_service = None"
+    # ``clear_active`` no longer carries the checks itself: it *is* the reservation,
+    # reserved and committed, so the promotion claim is refused by the one place that
+    # installs a claim on the slot rather than by a check of its own that a re-open could
+    # slip past.
+    assert "self.reserve_active_release(expected_service=expected_service)" in clears
+    assert "self.commit_active_release(" in clears
+
+    # And the check still precedes the mutation, at its new home.
+    release_source = (_SERVICE_PATH.parent / "active_release.py").read_text(
+        encoding="utf-8"
+    )
+    reserve = release_source[release_source.index("def reserve_active_release(") :]
+    reserve = reserve[: reserve.index("\n    def ", 1)]
+    assert reserve.index("_promotion_reservation") < reserve.index(
+        "self._active_release_reservation = reservation"
     )
 
     connects = method("connect_candidate")
@@ -1667,14 +1680,17 @@ def test_the_malformed_callback_is_raised_not_swallowed() -> None:
 
 
 def test_the_lease_is_never_touched_directly() -> None:
-    """The capability may *ask* whether the lease is free, and nothing else.
+    """The capability may ask whether *Paper's* lease is held, and nothing else.
 
     Two claims, and the second is the sharper one.  It never acquires or releases PAPER:
     those are the workflow's transitions, and a second writer of the lease is a second
-    owner of the Shadow/Paper mutex.  And it never *names* a held lease -- neither
-    ``ExecutionLease.PAPER`` nor ``.SHADOW`` appears -- so the only thing it can do with
-    the enum is compare against ``NONE``, which is a read of canonical truth rather than a
-    claim about who owns it.
+    owner of the Shadow/Paper mutex.
+
+    And the only lease member it may name is ``PAPER`` -- deliberately *not* ``NONE`` and
+    not ``SHADOW``.  The manager is *shared* with Shadow, so ``workflow.lease`` answers
+    with whichever of the two holds it; asking "is the shared lease free?" (``is not
+    NONE``) would read Shadow's ownership as Paper's and make a healthy Shadow session
+    block every Paper close.  ``PAPER`` is the one answer that belongs to Paper's gate.
 
     The calls are matched with their parentheses: the release helper is named
     ``_release_paper_ownership_if_proven`` because that is what it does, and a bare
@@ -1689,12 +1705,10 @@ def test_the_lease_is_never_touched_directly() -> None:
         "release_paper(",
         "_leases.",
         "ExecutionLeaseManager",
-        "ExecutionLease.PAPER",
-        "ExecutionLease.SHADOW",
     ):
         assert forbidden not in source, forbidden
-    # And the one use it does make is the read the shutdown gate needs.
-    assert "ExecutionLease.NONE" in source
+    named = set(re.findall(r"ExecutionLease\.(\w+)", source))
+    assert named == {"PAPER"}, sorted(named)
 
 
 # -- Guard H: the window left recovery and finalization ------------------
@@ -2034,7 +2048,7 @@ def test_the_ownership_block_is_never_downgraded_to_ready() -> None:
     # same claim -- the service owns a candidate slot too.
     assert "self._paper_trading.has_candidate_ownership()" in flat
     assert "holds_a_slot = self._paper_trading.has_order_service()" in flat
-    assert "holds_the_lease = self._workflow.lease is not ExecutionLease.NONE" in flat
+    assert "holds_the_lease = self._workflow.lease is ExecutionLease.PAPER" in flat
     assert (
         "if not holds_a_slot and (not holds_the_lease):"
         " return PaperShutdownResult(PaperShutdownDisposition.READY)"

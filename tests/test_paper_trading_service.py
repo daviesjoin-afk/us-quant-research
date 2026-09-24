@@ -1000,27 +1000,39 @@ def test_a_second_release_reservation_cannot_overlap_the_first() -> None:
 
 
 @pytest.mark.parametrize(
-    "action",
+    "action,match",
     [
-        lambda boundary: boundary.clear_active(),
-        lambda boundary: boundary.connect_active(),
+        (
+            lambda boundary: boundary.clear_active(),
+            "release is already in flight",
+        ),
+        (
+            lambda boundary: boundary.connect_active(),
+            "release is in flight",
+        ),
     ],
 )
-def test_a_reserved_release_locks_every_other_slot_transition(action) -> None:
+def test_a_reserved_release_locks_every_other_slot_transition(
+    action, match: str
+) -> None:
     """Clearing and re-opening are both refused while the release stands.
 
     Enumerated rather than sampled because the commit's totality is exactly this list: any
     one transition that could still slip through is enough to invalidate a commit the
-    caller has already paid for with an execution lease.
+    caller has already paid for with an execution lease.  The two refusals are quoted
+    separately because they are *different* refusals -- ``clear_active`` goes through the
+    reservation itself and is turned away as an overlapping release, while a re-open is
+    turned away by the claim it would invalidate.
     """
 
     service = _FakeService()
     boundary, _reservation = _releasable(service)
 
-    with pytest.raises(PaperTradingLifecycleError, match="release is in flight"):
+    with pytest.raises(PaperTradingLifecycleError, match=match):
         action(boundary)
 
     assert boundary.has_order_service() is True
+    assert boundary.has_candidate_ownership() is False
 
 
 def test_a_reserved_release_refuses_a_promotion_into_the_slot() -> None:
@@ -1283,6 +1295,107 @@ def test_candidate_ownership_survives_a_failed_disposal() -> None:
 
     assert boundary.has_candidate_ownership() is True
     assert boundary.has_order_service() is False
+
+
+def test_a_connect_is_refused_while_a_clear_holds_the_slot() -> None:
+    """``clear_active`` *is* the reservation, so it locks a re-open out exactly like one.
+
+    That is the point of routing the clear through the claim rather than giving it checks
+    of its own: a check of its own would be a fifth check-then-act, and the one it would
+    miss is the re-open that makes the slot live again after the clear read a stale
+    "disconnected".
+    """
+
+    service = _FakeService(connected=False)
+    boundary = _owned_disconnected(service)
+    service.park_connection_reads = True
+    failures: list[Exception] = []
+
+    def clear() -> None:
+        try:
+            boundary.clear_active()
+        except Exception as error:  # noqa: BLE001 - asserted below
+            failures.append(error)
+
+    thread = _in_a_thread(clear)
+    assert service.entered.wait(10), "the clear never reached the connection read"
+
+    with pytest.raises(PaperTradingLifecycleError, match="release is in flight"):
+        boundary.connect_active()
+
+    service.released.set()
+    thread.join(10)
+    assert failures == []
+    assert boundary.has_order_service() is False
+
+
+def test_a_clear_is_refused_while_a_connect_is_in_flight() -> None:
+    """The direction that would race even with a pre-check inside ``clear_active``.
+
+    A check at the top of the clear would read "no re-open yet", unlock, and then drop a
+    slot the re-open was about to make live.  Going through the claim removes the window
+    rather than narrowing it.
+    """
+
+    service = _FakeService(connected=False)
+    boundary = _owned_disconnected(service)
+    service.park_connects = True
+    failures: list[Exception] = []
+
+    def reconnect() -> None:
+        try:
+            boundary.connect_active()
+        except Exception as error:  # noqa: BLE001 - asserted below
+            failures.append(error)
+
+    thread = _in_a_thread(reconnect)
+    assert service.entered.wait(10), "the re-open never reached connect()"
+
+    with pytest.raises(PaperTradingLifecycleError, match="re-open is in flight"):
+        boundary.clear_active()
+
+    service.released.set()
+    thread.join(10)
+    assert failures == []
+    # The re-open finished, so the slot is live again and the owner was never dropped.
+    assert boundary.has_order_service() is True
+    assert boundary.is_connected() is True
+
+
+def test_an_expected_service_that_does_not_match_is_refused_before_the_claim() -> None:
+    """The identity check is inside the critical section that installs the claim.
+
+    So a refusal leaves no claim standing: the slot is exactly as it was found and the
+    legitimate caller can still take it.
+    """
+
+    older, newer = _FakeService(connected=False), _FakeService(connected=False)
+    boundary = _owned(older, factory=_FakeFactory(older, newer))
+
+    with pytest.raises(PaperTradingLifecycleError, match="different active"):
+        boundary.clear_active(expected_service=newer)
+
+    assert boundary.has_order_service() is True
+
+    # No claim was left behind, so the release path is open to the real owner.
+    boundary.disconnect()
+    boundary.commit_active_release(
+        boundary.reserve_active_release(expected_service=older)
+    )
+    assert boundary.has_order_service() is False
+
+
+def test_a_completed_clear_leaves_no_claim_behind() -> None:
+    """``clear_active`` is reserve + commit, so the slot ends up empty *and* unlocked."""
+
+    boundary = _owned_disconnected(_FakeService())
+
+    boundary.clear_active()
+
+    assert boundary.has_order_service() is False
+    # Nothing is claimed: a fresh attempt says "no active service", not "already in flight".
+    with pytest.raises(PaperTradingLifecycleError, match="no active Paper"):
+        boundary.reserve_active_release()
 
 
 # -- active lifecycle ----------------------------------------------------
@@ -1639,7 +1752,6 @@ def test_the_ownership_write_surface_is_the_declared_one() -> None:
         "reserve_candidate_promotion",
         "commit_candidate_promotion",
         "cancel_candidate_promotion",
-        "clear_active",
         "connect_active",
     }, sorted(writers)
 

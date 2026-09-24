@@ -4049,6 +4049,32 @@ claim 生效期间，promotion / clear / reconnect / 第二次 reserve 全部被
 
 即"claim 先于证据，网络调用在锁外"。
 
+**`clear_active` 也走同一套 claim，而不是自己再加一次检查（第三次 review 抓出的 blocker）。**
+第一版给 `clear_active` 保留了独立的检查块，于是 re-open 完全不在它的视野里：
+
+```text
+service 当前 disconnected
+T1 connect_active() → 标记 _active_connect_inflight → 进入 service.connect()，尚未完成
+T2 clear_active()   → capture 同一个 service → connection_snapshot 仍看到 disconnected
+                    → _order_service = None
+T1 service.connect() 成功 → broker socket live → finally 清 claim
+最终：broker socket live + active owner = None   ← 同一个 ownerless connection 问题
+```
+
+而且在 `clear_active` 顶部加一次 `if self._active_connect_inflight: raise` **也没用** —— 那仍然
+是 check-then-act（clear 读到 connect=false → unlock → connect 开始并装 claim → clear 按旧的
+connection reading 清掉 slot）。所以 `clear_active` 不再有自己的检查，它**就是**那笔交易：
+
+```text
+clear_active(expected_service=...)
+  = reserve_active_release(expected_service=...)   # 同一个临界区内校验 identity
+    → commit_active_release(reservation)
+```
+
+于是 clear / release / connect / promotion 对 active slot 的互斥**全部**使用同一套 claim，
+不存在第四种 pre-check。`expected_service` 在**装 reservation 的同一个临界区**里校验，
+所以"调用方决定期间 slot 被换掉"不可能被误清。
+
 **为什么不能在 orchestrator 里 workaround**：唯一能消除竞态的做法是让 slot 侧可锁，
 而 slot 的 owner 是 `PaperTradingService`。在 orchestrator 里读 `_promotion_reservation`
 或自建标志都只是把同一份状态复制到没有所有权的层。
@@ -4174,9 +4200,25 @@ active service 存在 或 PAPER lease 仍 held     → 走 §29.5 的两阶段�
 `_candidates` 里**，同时 `reject_connecting()` 把相位推回 `READY` 并释放 PAPER。于是
 phase=`READY`、active service=`None`、PAPER=`NONE`，而一条可能仍然活着的 broker 连接仍被
 这个 capability 拥有——每一次 canonical 读取（除了 candidate 查询）都在说"这里是干净的"。
-所以 candidate 查询必须进 gate，而且 **`workflow.lease == NONE` 是 READY 的最终硬条件**：
-它是唯一活得比其他所有释放都久的 ownership，只有 workflow 自己那道闸门能交还它，于是
-`READY` 才真正意味着"Paper capability 没有任何尚未解释的 ownership"。
+所以 candidate 查询必须进 gate，而 **`workflow.lease is ExecutionLease.PAPER` 是 READY 的
+最终硬条件**：它是唯一活得比其他所有释放都久的 ownership，只有 workflow 自己那道闸门能交还
+它，于是 `READY` 才真正意味着"Paper capability 没有任何尚未解释的 ownership"。
+
+**lease 这一条必须是 `is PAPER`，不能是 `is not NONE`（第三次 review 抓出的 blocker）。**
+`ExecutionLeaseManager` 是 Shadow 与 Paper **共享**的，`workflow.lease` 会返回持有它的那一方：
+
+```text
+Paper 侧：无 candidate、无 active service、无 session
+Shadow 侧：正在运行，shared lease = SHADOW
+→ 若判据是 lease != NONE：candidate=false, slot=false, lease!=NONE=true
+  → result 缺失 → OWNERSHIP_BLOCKED
+  → Shadow 正常运行时应用无法关闭（而 closeEvent 是 Paper READY 之后才轮到 Shadow teardown）
+```
+
+SHADOW 属于 `ShadowOrchestrator`，在后面的 Shadow shutdown 阶段处理。所以判据是
+`holds_the_lease = self._workflow.lease is ExecutionLease.PAPER`，并且 guard 把 package 里
+出现的 lease 成员**精确钉成 `{PAPER}`** —— 既挡住 `SHADOW`（读别人的 ownership），也挡住
+`NONE`（"共享租约是否为空"正是那个错误的问法）。
 
 E3 **不**自动修复这个 candidate（不删除、不假装清理成功）：返回 `OWNERSHIP_BLOCKED` 即可。
 窄查询是 `PaperTradingService.has_candidate_ownership()`——orchestrator 不读 `_candidates`。
@@ -4238,7 +4280,7 @@ _paper_needs_manual_recovery            _release_close_drain_if_recovery_require
 
 ### 29.9 行为测试与 mutation
 
-新增 `tests/test_desktop_paper_recovery_finalization_orchestrator.py`（95 项），覆盖：
+新增 `tests/test_desktop_paper_recovery_finalization_orchestrator.py`（96 项），覆盖：
 `HALTED → reconcile → RECONCILING` / 重连只收证据（不 resume、不重下订单）/
 成功 → `RECONCILING_READY` / 取不到证据或 task 失败 → sticky HALTED /
 未 admit 回退 attempt / 无 fresh evidence 拒绝且无 task 无 fake result /
@@ -4253,26 +4295,33 @@ finalize_if_safe → commit / release helper 自己也不信任调用方 /
 **slot 拒绝 reserve 时 workflow 根本没被调用（lease 因此不可能被释放）** /
 commit 拒绝报成 invariant / cancel 被拒时停在 fail-closed /
 **candidate 仍被拥有时不得 READY（含用真实 service + 真实 controller 复现 E1 的
-discard 失败路径）** / **只持有 lease 也要拦** / lease + finalized result 可释放 /
+discard 失败路径）** / **只持有 lease 也要拦** / **共享 lease 为 SHADOW 时必须 READY
+（真实 `WorkflowController`：Paper 不放走 Shadow 的 lease，Shadow 自己 stop 才交回）** /
+lease + finalized result 可释放 /
 每个 E3 result 只发布一次且每个 event 恰好请求一次 / `manual_recovery_required` 覆盖与排除 /
 `prepare_shutdown` 的十一种 verdict（含 `CONNECTING` 两种取值、stop 的四种结局、
 三种 ownership 组合）。
 
-`tests/test_paper_trading_service.py` 另加 **26 项**：新协议自身（reserve 的三类拒绝、
+`tests/test_paper_trading_service.py` 另加 **31 项**：新协议自身（reserve 的三类拒绝、
 不可重叠、锁住 clear / reconnect / promote、commit 的 total 与两类误用拒绝、cancel 归还锁、
-外来 reservation 不释放任何东西）、**三组 deterministic race**（用 Event 把第一个 operation
+外来 reservation 不释放任何东西）、**五组 deterministic race**（用 Event 把第一个 operation
 停在 broker 调用内部，再从另一个线程发第二个：release 在读连接时 connect 必须被拒 /
-connect 在飞行中时 reserve 必须被拒 / 重叠的第二个 reserve 必须立刻被拒），以及
-candidate ownership 的真值表与 E1 discard 失败后的状态。
+clear 在读连接时 connect 必须被拒 / connect 在飞行中时 reserve 与 clear 都必须被拒 /
+重叠的第二个 reserve 必须立刻被拒）、`expected_service` 不匹配时在装 claim 之前就拒绝且不留
+残留 claim、clear 完成后 slot 既空且未上锁、连接读抛错不留下 claim，以及 candidate
+ownership 的真值表与 E1 discard 失败后的状态。
 
-`scripts/mutation_e3.ps1` 应用 **38** 项篡改；**38/38 RED**。前 29 项覆盖 E3 主体，M30–M34
-是第一次 review 的 blocker，**M35–M38 是第二次 review 的 blocker**：
+`scripts/mutation_e3.ps1` 应用 **41** 项篡改；**41/41 RED**。前 29 项覆盖 E3 主体，M30–M34
+是第一次 review 的 blocker，M35–M38 是第二次，**M39–M41 是第三次**：
 
 ```text
 M35 release 先读连接再装 claim（check-then-act 回归）
 M36 re-open 不再 claim 它正在重开的 slot（connect/release 互斥失效）
 M37 READY 不问 candidate slot
 M38 READY 不问 execution lease
+M39 clear_active 绕过 reservation 直接清 slot（clear/re-open 竞态回归）
+M40 shutdown gate 把 Shadow 的 lease 当成 Paper 的（is not NONE）
+M41 shutdown gate 忽略 Paper 自己的 lease（holds_the_lease = False）
 ```
 
 脚本还有一道**语法闸门**：篡改后先 `ast.parse`，语法不合法判 `HARNESS-ERROR` 而不是

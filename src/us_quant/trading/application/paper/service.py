@@ -453,55 +453,27 @@ class PaperTradingService(PaperActiveRelease):
     def clear_active(self, *, expected_service: object | None = None) -> None:
         """Release ownership -- only ever after the session is truly finalized.
 
-        Fail-closed four ways: a promotion still in flight, or an active *release* in
-        flight, is refused outright; a service still reporting a live connection is
-        refused (dropping it would abandon a socket nobody can reach); and
-        ``expected_service`` lets a late caller prove which service it means.
+        One *transaction*, not its own set of guards: the slot is reserved and then
+        committed, which is the same claim every other transition of the active slot goes
+        through.  That is deliberate and it is not terseness -- a pre-check here would be a
+        fifth check-then-act, and the one it would miss is the re-open: a connect already in
+        flight can make the slot live again after this call read a stale "disconnected", and
+        the result is a live broker socket whose owner has been dropped, which is exactly
+        the ownerless connection the release protocol exists to prevent.
 
-        The promotion refusal is what makes a reservation *lock the slot* rather than
-        merely say so.  Without it a finalization or recovery caller could empty the
-        slot between ``reserve_candidate_promotion`` and
-        ``commit_candidate_promotion``, and the launch would publish a session whose
-        owner had already been dropped -- the ownerless ``RUNNING`` state the
-        two-phase promotion exists to make unreachable, re-enterable through a
-        different public method.
-
-        The release refusal is its mirror: while a release has reserved the slot, the
-        only thing allowed to empty it is that release's own commit, so a second clearer
-        cannot drop the ownership out from under a caller that has already released the
-        execution lease.
+        So the four refusals are the reservation's, by construction: a promotion still in
+        flight, a release or a re-open in flight, no active service, or a service still
+        reporting a live connection.  ``expected_service`` is validated inside the critical
+        section that installs the reservation, so a slot that changed while the caller was
+        deciding cannot be cleared by mistake.
         """
 
-        with self._lock:
-            self._refuse_if_release_in_flight(action="clear the slot it has reserved")
-            if self._promotion_reservation is not None:
-                raise PaperTradingLifecycleError(
-                    f"Paper candidate {self._promotion_reservation.candidate_id!r} holds"
-                    " the promotion reservation; refusing to clear the slot it is"
-                    " reserved to"
-                )
-            service = self._order_service
-            if service is None:
-                raise PaperTradingLifecycleError(
-                    "no active Paper order service to clear"
-                )
-            if expected_service is not None and service is not expected_service:
-                raise PaperTradingLifecycleError(
-                    "refusing to clear a different active Paper order service"
-                )
-        if bool(service.connection_snapshot().connected):
-            raise PaperTradingLifecycleError(
-                "refusing to clear an active Paper order service that still"
-                " reports a live connection"
-            )
-        with self._lock:
-            if self._order_service is not service:
-                raise PaperTradingLifecycleError(
-                    "the active Paper order service changed while it was being"
-                    " cleared; refusing to remove a different service"
-                )
-            self._order_service = None
-        self._record_error(None)
+        # Reserved and committed as one transaction: going through the reservation is what
+        # makes this mutually exclusive with a promotion, with a re-open and with another
+        # release, rather than merely checked against them.
+        self.commit_active_release(
+            self.reserve_active_release(expected_service=expected_service)
+        )
 
     # -- one-shot probe -------------------------------------------------
 

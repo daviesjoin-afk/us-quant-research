@@ -75,7 +75,9 @@ class PaperActiveRelease:
             f"an active Paper release is in flight; refusing to {action}"
         )
 
-    def reserve_active_release(self) -> PaperActiveReleaseReservation:
+    def reserve_active_release(
+        self, *, expected_service: object | None = None
+    ) -> PaperActiveReleaseReservation:
         """Prove the active slot can be released and lock it for that release.
 
         **The claim goes on first, and the proof afterwards.**  That order is the whole of
@@ -96,12 +98,16 @@ class PaperActiveRelease:
 
         * an overlapping release refuses, so one release's lock is never another's claim;
         * a re-open in flight refuses: a connect this call cannot see the end of must not
-          be locked out of the slot it is about to make live;
+          be locked out of the slot it is about to make live.  This is what makes
+          :meth:`PaperTradingService.clear_active` safe without a check of its own -- it *is*
+          this call;
         * a promotion claim still outstanding refuses.  This is the E1 invariant path and
           the reason the boundary exists: if the slot cannot be accounted for, PAPER must
           not be released either, so the refusal has to arrive *before* the workflow is
           asked;
-        * no active service at all refuses, because there is nothing to release.
+        * no active service at all refuses, because there is nothing to release;
+        * ``expected_service`` -- when given -- is checked here too, so a caller that means
+          one service cannot lock a slot another one replaced while it was deciding.
 
         The connection read then happens outside the lock, and a service that still reports
         a live connection -- or a read that raises -- takes the claim back off again and
@@ -129,6 +135,10 @@ class PaperActiveRelease:
             if service is None:
                 raise PaperTradingLifecycleError(
                     "no active Paper order service to release"
+                )
+            if expected_service is not None and service is not expected_service:
+                raise PaperTradingLifecycleError(
+                    "refusing to clear a different active Paper order service"
                 )
             reservation = PaperActiveReleaseReservation()
             self._active_release_reservation = reservation

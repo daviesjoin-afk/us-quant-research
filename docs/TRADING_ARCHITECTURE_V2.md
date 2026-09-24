@@ -2265,12 +2265,25 @@ check-then-act，而且是双向的——两个重叠的 reserve 可以互相覆
 （读失败或读到 connected 就 cancel 自己的 reservation 再抛）。两条 claim 都在调用 broker
 之前生效，`commit` 的 total 才是结构性的，而网络调用仍然不在锁内。
 
-**`READY` 对应三份 ownership 全空**（同一轮的第二个 blocker）：`_ownership_verdict()` 依次
-检查 candidate（`PaperTradingService.has_candidate_ownership()`）、active slot、以及
-**execution lease**。service 拥有两个 slot，而 E1 的 `discard_candidate()` 失败会留下
-candidate 仍被 track、相位回到 `READY`、PAPER 已释放——"没有 active service"并不等于
-"什么都没持有"。lease 是 READY 的最终硬条件：它是活得最久的 ownership，只有 workflow 自己
-那道闸门能交还它。E3 不自动清理这个 candidate，返回 `OWNERSHIP_BLOCKED`。
+**`clear_active` 走同一套 claim**（第三次 review 的 blocker）：它一度保留自己的检查块，因此
+re-open 完全不在它的视野里——`connect_active` 已装 claim 并在 `service.connect()` 中时，
+`clear_active` 仍可能读到旧的 "disconnected" 把 slot 清掉，最终得到
+`broker socket live + active owner = None`。而在它顶部补一次检查**也没用**（还是
+check-then-act）。所以它不再有检查：`clear_active(expected_service=...)` 就是
+`reserve_active_release(expected_service=...)` + `commit_active_release(...)`，
+`expected_service` 在装 reservation 的同一个临界区里校验。clear / release / connect /
+promotion 对 active slot 的互斥因此全部使用同一套 claim，没有第四种 pre-check。
+
+**`READY` 对应三份 ownership 全空，且 lease 那一份必须 `is PAPER`**（第二、三次 review）：
+`_ownership_verdict()` 依次检查 candidate（`PaperTradingService.has_candidate_ownership()`）、
+active slot、以及 **`workflow.lease is ExecutionLease.PAPER`**。service 拥有两个 slot，而 E1
+的 `discard_candidate()` 失败会留下 candidate 仍被 track、相位回到 `READY`、PAPER 已释放——
+"没有 active service"并不等于"什么都没持有"。lease 判据必须是 `is PAPER` 而不能是
+`is not NONE`：`ExecutionLeaseManager` 与 Shadow **共享**，`lease` 返回持有它的一方，所以
+`is not NONE` 会把一个正在正常运行的 Shadow 会话读成 Paper 的未释放 ownership，从而让应用
+无法关闭（而 `closeEvent` 是 Paper READY 之后才轮到 Shadow teardown）。SHADOW 属于
+`ShadowOrchestrator`，由它自己 stop 时交回。E3 不自动清理 candidate，返回
+`OWNERSHIP_BLOCKED`。
 
 **删掉的数值门禁**：`tests/test_paper_trading_service.py` 原有的 `span < 60` /
 `len(lines) < 500` / `implementation > 2.5 * boundary` 已删除（用户约束：不设行数上限，
@@ -2288,7 +2301,7 @@ PAPER lease，一个未发布的 launch 可能已经连上 candidate）；`RUNNI
 `HALTED`，也可能 fast-stop 到 `FINALIZED`；只有 `_ownership_verdict()` 会返回 `READY`，
 且只在 `has_order_service()` 为假时。
 
-本轮 **38 项 mutation 全部 RED**（`scripts/mutation_e3.ps1`，可复跑），脚本比 E2 版多一道
+本轮 **41 项 mutation 全部 RED**（`scripts/mutation_e3.ps1`，可复跑），脚本比 E2 版多一道
 **语法闸门**：篡改后先 `ast.parse`，语法不合法判 `HARNESS-ERROR` 而不是"抓住"——一个丢掉
 缩进的 `repl` 会让 pytest 报 collection error，那次运行对被测属性什么都没说。
 

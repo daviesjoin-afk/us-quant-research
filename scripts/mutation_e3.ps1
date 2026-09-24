@@ -375,6 +375,33 @@ $mutations = @(
         repl = "        if not holds_a_slot:"
         tests = @($behavior)
         select = @("-k", "unexplained_lease")
+    },
+
+    # -- the third review round: the clear's claim, and Shadow's lease ------
+
+    @{
+        name = "M39 clear_active drops the slot without the reservation"
+        file = $service
+        find = "        self\.commit_active_release\(\r?\n            self\.reserve_active_release\(expected_service=expected_service\)\r?\n        \)"
+        repl = "        self._refuse_if_release_in_flight(action=""clear the slot it has reserved"")`n        self._order_service = None"
+        tests = @($serviceTests)
+        select = @("-k", "clear_is_refused_while_a_connect or expected_service_that_does_not_match or clear_active_is_refused_while_the_connection")
+    },
+    @{
+        name = "M40 the shutdown gate reads Shadow's lease as Paper's"
+        file = $orchestrator
+        find = "        holds_the_lease = self\._workflow\.lease is ExecutionLease\.PAPER"
+        repl = "        holds_the_lease = self._workflow.lease is not ExecutionLease.NONE"
+        tests = @($behavior, $architecture)
+        select = @("-k", "shadow_lease_is_not_paper_ownership or lease_is_never_touched_directly")
+    },
+    @{
+        name = "M41 the shutdown gate ignores Paper's own lease"
+        file = $orchestrator
+        find = "        holds_the_lease = self\._workflow\.lease is ExecutionLease\.PAPER"
+        repl = "        holds_the_lease = False"
+        tests = @($behavior)
+        select = @("-k", "unexplained_lease or paper_lease_with_nothing_else_held")
     }
 )
 

@@ -2506,20 +2506,31 @@ refused write 上抛、每次 paint 重新读 store、burst 只 arm 一次、flu
 迟到 flush 不重画、显式 refresh 与 resolve 立即、task count 逐次读取、export 成败顺序
 与幂等）+ 重写的 `tests/test_desktop_v2_runtime_events_wiring.py` 15 项（页面 intent 直连
 capability、五个 capability 的 fan-in 各一次入库、task 生命周期、resolve 用稳定 id、
-导出 payload 未变与新语义）。
+导出 payload 未变与新语义）+ `tests/test_desktop_runtime_events_timer_seam.py` 3 项
+（真实 `QtFlushTimer`：投递一次、single-shot、disarm 后不投递；以及真实窗口的 burst 走完
+真实 1 秒窗口 —— 这几项是独立 review 指出"fake timer 覆盖不到真实 seam"之后补的）。
 
-**mutation**：`scripts/mutation_system_runtime_events_f1.ps1`，12 个 mutant **全部 RED**
+**mutation**：`scripts/mutation_system_runtime_events_f1.ps1`，**14 个 mutant 全部 RED**
 （M1 record 不写 / M2 不 schedule / M3 用缓存 events / M4 resolve(None) 仍写 /
 M5 resolve(valid) 不重画 / M6 失败仍更新 last_export / M7 失败仍写 EXPORT_OK /
 M8 成功不更新 last_export / M9 task count 构造时捕获 / M10 重复 arm /
-M11 窗口重新直接写 store / M12 窗口重新持有 last_export），无 `HARNESS-ERROR`。
+M11 窗口重新直接写 store / M12 窗口重新持有 last_export /
+M13 真实 Qt timer 只存 callback 不 arm / M14 被取代的迟到 flush 仍重画），无
+`HARNESS-ERROR`。M13 正是 review 找出来的存活 mutant（详见
+`DESKTOP_DECOMPOSITION.md` §31.11）。
+
+**同时修好一个被本刀打断的既有 gate**：`scripts/mutation_e3.ps1` 的 M27 把插入锚点写在本刀
+删掉的那一行上，于是"窗口再次持有 `_paper_finalization_inflight`"静默失去验证（脚本当时
+也没有非零退出码）。M27 已改锚到窗口仍存在的 `__init__` 行，并补上退出码尾巴；重跑
+`mutation_e3.ps1` 全部 RED、exit 0。`mutation_e2.ps1` / `mutation_e4.ps1` 的同类退出码弱点
+留给后续。
 
 **零 diff**：`trading/runtime/**`、`trading/domain/**`、RiskApplication /
 ExecutionApplication、`PaperTradingService`、`PaperActiveRelease`、`ExecutionLease`、
 broker adapter、Shadow、Paper orchestration、Market / Account / Research business
 logic、`DesktopSettingsService`、credential service、`UserPreferencesStore`、
 `SettingsPage`、`SystemPage`、`RuntimeEventStore` schema、`export_service.py` artifact
-schema 全部未改。本轮没有发现需要在 canonical owner 修的 bug，因此**没有**
+schema 全部未改。本轮没有发现需要在 canonical owner 修的业务 bug，因此**没有**
 canonical-owner exception。
 
 设计依据见 `DESKTOP_DECOMPOSITION.md` §31。

@@ -31,7 +31,13 @@
 #     .\scripts\mutation_system_runtime_events_f1.ps1
 
 $ErrorActionPreference = "Stop"
-$env:PYTHONPATH = "src"
+
+# Repo-root anchored, so the script behaves the same from any working directory
+# (the same rule ``verify.ps1`` and ``review.ps1`` follow).  Every path below is
+# absolute for the same reason.
+$projectRoot = Split-Path -Parent $PSScriptRoot
+
+$env:PYTHONPATH = Join-Path $projectRoot "src"
 $env:QT_QPA_PLATFORM = "offscreen"
 $env:PYTHONUTF8 = "1"
 
@@ -40,24 +46,46 @@ function Resolve-Python {
     # machine where the primary venv has another directory name.
     foreach ($candidate in @(
         $env:USQUANT_PYTHON,
-        ".\.venv314\Scripts\python.exe",
-        ".\.venv313\Scripts\python.exe",
-        ".\.venv\Scripts\python.exe"
+        (Join-Path $projectRoot ".venv314\Scripts\python.exe"),
+        (Join-Path $projectRoot ".venv313\Scripts\python.exe"),
+        (Join-Path $projectRoot ".venv\Scripts\python.exe")
     )) {
         if ($candidate -and (Test-Path -LiteralPath $candidate)) {
             return $candidate
         }
     }
-    return "python"
+    $onPath = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $onPath) {
+        Write-Host @"
+No Python interpreter found: none of .venv314 / .venv313 / .venv exists here and
+``python`` is not on PATH.
+
+    .\scripts\bootstrap_windows.ps1    # create the environment
+
+Then re-run this script, or set ``USQUANT_PYTHON`` to an interpreter that has the
+``desktop`` and ``test`` extras installed.
+"@ -ForegroundColor Red
+        exit 2
+    }
+    return $onPath.Source
 }
 
 $py = Resolve-Python
 
-$orchestrator = "src\us_quant\desktop_v2\orchestration\system\runtime_events\orchestrator.py"
-$desktopPath = "src\us_quant\desktop.py"
+# An interpreter that cannot import the suite would report every mutation as a
+# harness error.  Fail with the fix instead of producing misleading rows.
+& $py -c "import pytest, PySide6" 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "The interpreter '$py' cannot import pytest / PySide6; install the ``desktop`` and ``test`` extras into it, or set ``USQUANT_PYTHON`` to one that has them." -ForegroundColor Red
+    exit 2
+}
 
-$behaviour = "tests/test_desktop_runtime_events_orchestrator.py"
-$architecture = "tests/test_desktop_runtime_events_orchestration_architecture.py"
+$orchestrator = Join-Path $projectRoot "src\us_quant\desktop_v2\orchestration\system\runtime_events\orchestrator.py"
+$desktopPath = Join-Path $projectRoot "src\us_quant\desktop.py"
+
+$behaviour = Join-Path $projectRoot "tests/test_desktop_runtime_events_orchestrator.py"
+$architecture = Join-Path $projectRoot "tests/test_desktop_runtime_events_orchestration_architecture.py"
+$timerSeam = Join-Path $projectRoot "tests/test_desktop_runtime_events_timer_seam.py"
 
 function Get-Text([string]$path) { [System.IO.File]::ReadAllText($path) }
 function Set-Text([string]$path, [string]$text) {
@@ -164,6 +192,28 @@ $mutations = @(
         repl = "        self._last_runtime_export = None`n        orchestrator.export_succeeded.connect(`n            self._show_runtime_export_succeeded`n        )"
         tests = @($architecture)
         select = @("-k", "no_runtime_events_sequencing_state")
+    },
+
+    # The two below were added after an independent review demonstrated that the
+    # first one survived every test in the round: nothing drove the real Qt
+    # timer, so a seam that stored its callback and never started the timer went
+    # unnoticed.  ``test_desktop_runtime_events_timer_seam.py`` exists to kill it.
+
+    @{
+        name = "M13 the real timer stores the callback but never arms"
+        file = $orchestrator
+        find = "        self\._callback = callback\r?\n        self\._timer\.start\(round\(delay_seconds \* 1000\)\)"
+        repl = "        self._callback = callback"
+        tests = @($timerSeam)
+        select = @("-k", "real_timer or coalesced_burst or task_count_change_is_repainted")
+    },
+    @{
+        name = "M14 a late flush paints after it was superseded"
+        file = $orchestrator
+        find = "        if not self\._refresh_pending:\r?\n            return\r?\n        self\.refresh\(\)"
+        repl = "        self.refresh()"
+        tests = @($behaviour)
+        select = @("-k", "superseded_flush")
     }
 )
 

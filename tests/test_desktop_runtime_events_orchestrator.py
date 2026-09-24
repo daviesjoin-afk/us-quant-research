@@ -596,7 +596,13 @@ def test_a_successful_export_sequences_fact_event_paint_then_report() -> None:
     target = Path("C:/exports/terminal-9.zip")
     harness = _harness(exporter=RecordingExporter(target=target))
     successes: list = []
+    painted_when_reported: list[int] = []
     harness.orchestrator.export_succeeded.connect(successes.append)
+    # The *order* is the claim, so the count of paints is sampled from inside
+    # the slot: a report emitted before the repaint would see zero views.
+    harness.orchestrator.export_succeeded.connect(
+        lambda _target: painted_when_reported.append(len(harness.page.views))
+    )
 
     harness.orchestrator.export()
 
@@ -615,6 +621,7 @@ def test_a_successful_export_sequences_fact_event_paint_then_report() -> None:
     assert view.last_export_value == "terminal-9.zip"
     assert view.last_export_note == str(target)
     assert view.rows[0].code == "EXPORT_OK"
+    assert painted_when_reported == [1]
     assert successes == [target]
     assert harness.messages == []
 

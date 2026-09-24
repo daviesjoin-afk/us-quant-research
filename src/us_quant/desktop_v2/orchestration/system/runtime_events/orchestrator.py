@@ -323,8 +323,19 @@ class RuntimeEventsOrchestrator(QObject):
         class for nothing but the events.  What this class decides is the
         sequence: read the events once, hand them over, and only once the write
         has actually produced a path treat the export as done -- record it,
-        repaint, then tell the window.  A failure leaves the previous export
-        fact untouched, records nothing and reports the failure instead.
+        repaint, then tell the window.
+
+        Two failure kinds, and they are deliberately not the same:
+
+        * the **export** refusing (``OSError`` / ``ValueError`` from the
+          provider) leaves the previous export fact untouched, records nothing,
+          reports no success and publishes the failure instead;
+        * a **store** failure while recording ``EXPORT_OK`` propagates.  It is
+          not caught here: this class owns no database handle and must not grow
+          one just to catch ``sqlite3.Error``, and swallowing it would invent a
+          success.  The artifact is already on disk at that point, so the
+          operator sees the exception instead of a dialog -- which is exactly
+          what the retired ``_export_terminal_state`` did with the same write.
         """
 
         events = self._store.list_recent(RECENT_EVENT_LIMIT)

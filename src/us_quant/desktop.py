@@ -9,8 +9,7 @@ from pathlib import Path
 import re
 import sqlite3
 import sys
-from time import monotonic
-from typing import Callable
+from typing import Callable, Sequence
 
 from PySide6.QtCore import (
     Qt,
@@ -128,7 +127,7 @@ from us_quant.trading.domain.strategy import (
     StrategyStatus,
     StrategyVersion,
 )
-from us_quant.runtime_events import RuntimeEventStore
+from us_quant.runtime_events import RuntimeEvent, RuntimeEventStore
 from us_quant.export_service import export_terminal_bundle
 from us_quant.shadow.store import ShadowPaperStore
 from us_quant.trading.composition.session_config import (
@@ -236,6 +235,10 @@ from us_quant.desktop_v2.orchestration.research.targeted.session import (
 )
 from us_quant.desktop_v2.orchestration.shadow import ShadowOrchestrator
 from us_quant.desktop_v2.orchestration.shadow.models import ShadowCapitalFact
+from us_quant.desktop_v2.orchestration.system.runtime_events import (
+    RuntimeEventsEnvironment,
+    RuntimeEventsOrchestrator,
+)
 from us_quant.desktop_v2.pages.research import (
     ResearchPage,
     ResearchWorkspace,
@@ -246,10 +249,6 @@ from us_quant.desktop_v2.pages.system import (
 )
 from us_quant.desktop_v2.pages.system.runtime_events import (
     RuntimeEventsPage,
-)
-from us_quant.desktop_v2.pages.system.runtime_events.presenter import (
-    build_runtime_events_view,
-    runtime_info_text,
 )
 from us_quant.desktop_v2.pages.system.settings import SettingsPage
 from us_quant.desktop_v2.pages.system.settings.models import (
@@ -448,9 +447,11 @@ class MainWindow(QMainWindow):
         # "which version does auto rotation run?" has one answer that does not
         # depend on which widget happens to be visible.
         self.strategy_selection = StrategySelectionService(self.strategies)
-        self.runtime_events = RuntimeEventStore(
-            self.paths.runtime_root / "runtime_events.sqlite3"
-        )
+        # The runtime-event store is deliberately *not* built here any more.  It
+        # is constructed inside ``runtime_events_orchestrator``, with the System
+        # pages, so the window holds no handle to it at all: there is no
+        # ``self.runtime_events`` alias for a later handler to reach for, and
+        # "who writes a runtime event?" is the capability rather than a grep.
         self.shadow_store = ShadowPaperStore(
             self.paths.runtime_root / "shadow_paper.sqlite3"
         )
@@ -469,9 +470,15 @@ class MainWindow(QMainWindow):
         # window's.  v2O-E3 moved the proof into ``paper_orchestrator``, so the flags are
         # the orchestrator's own task bookkeeping and there is deliberately no
         # forwarding property left behind.
-        self._last_runtime_events_refresh = 0.0
-        self._runtime_events_refresh_pending = False
-        self._last_runtime_export: tuple[str, str] | None = None
+        #
+        # v2O-F1: ``_last_runtime_events_refresh``,
+        # ``_runtime_events_refresh_pending`` and ``_last_runtime_export`` used to
+        # be assigned here.  They are ``runtime_events_orchestrator``'s own
+        # sequencing state now, and there is deliberately no forwarding property:
+        # a property would keep every unmigrated caller working, so "who owns the
+        # Runtime Events sequence?" would stop being one grep.  The window still
+        # owns the settings presentation facts below -- Settings is v2O-F2.
+        #
         # Settings presentation facts the window owns: the selected API
         # provider and whether the Gateway controls are currently open.
         self._settings_api_provider = (
@@ -600,7 +607,7 @@ class MainWindow(QMainWindow):
             self._on_paper_result_changed
         )
         self.paper_orchestrator.runtime_event_requested.connect(
-            self._record_paper_runtime_event
+            self._route_runtime_event
         )
         # The three v2O-E3 publications.  Each one replaces a decision the window used to
         # make for itself: which controls to repaint when no result exists, whether the
@@ -901,7 +908,7 @@ class MainWindow(QMainWindow):
         self.shadow_orchestrator.refused.connect(self._report_shadow_refusal)
         self.shadow_orchestrator.log_requested.connect(self._log)
         self.shadow_orchestrator.runtime_event_requested.connect(
-            self._record_shadow_runtime_event
+            self._route_runtime_event
         )
         # Wired last, because the Shadow intents reach the orchestrator built
         # just above rather than a window handler.
@@ -1023,9 +1030,38 @@ class MainWindow(QMainWindow):
 
         # The System aggregate is containment only: the two workspaces are
         # built and wired here, then handed to the page as finished widgets.
+        #
+        # Runtime Events is the first System capability with its own owner
+        # (v2O-F1).  The store is constructed inside the orchestrator call and
+        # the window keeps no reference to it, no refresh stamp, no pending flag
+        # and no last-export fact: what stays here is composition -- the
+        # environment facts the info panel prints, the task-count provider, the
+        # cross-capability export provider, the page's three intents and the
+        # dialogs the capability publishes.
         self.runtime_events_page = RuntimeEventsPage(palette=self.theme)
+        self.runtime_events_orchestrator = RuntimeEventsOrchestrator(
+            store=RuntimeEventStore(
+                self.paths.runtime_root / "runtime_events.sqlite3"
+            ),
+            page=self.runtime_events_page,
+            environment=RuntimeEventsEnvironment(
+                version="0.19.0",
+                resource_root=self.paths.resource_root,
+                state_root=self.paths.state_root,
+                runtime_root=self.paths.runtime_root,
+                exports_root=self.paths.exports_root,
+            ),
+            # A provider, not a value: the count is read on every repaint, so a
+            # task that starts or finishes after this line is never missed.  The
+            # lifecycle it counts is still the window's.
+            active_task_count=lambda: len(self.workers),
+            export_bundle=self._export_runtime_bundle,
+            parent=self,
+        )
         self._connect_runtime_events_page()
-        self._refresh_runtime_events()
+        # The first paint goes through the same entry point every later repaint
+        # uses, so "never read" and "read" cannot diverge into two paths.
+        self.runtime_events_orchestrator.refresh()
         self.settings_page = SettingsPage(
             draft=self._settings_draft(),
             storage=self._settings_storage_view(),
@@ -1065,7 +1101,7 @@ class MainWindow(QMainWindow):
             self._render_account_shell_health
         )
         self.account_orchestrator.runtime_event_requested.connect(
-            self._record_account_runtime_event
+            self._route_runtime_event
         )
         self.account_orchestrator.log_requested.connect(self._log)
         # The research-capital widget lives on the Cross Section page and the
@@ -1130,12 +1166,26 @@ class MainWindow(QMainWindow):
         return pages
 
     def _connect_runtime_events_page(self) -> None:
-        """Wire the runtime-events page's intents to the window handlers."""
+        """Wire the Runtime Events page to its owner, both directions.
+
+        The page's three intents are commands on ``runtime_events_orchestrator``,
+        and the owner's three messages are dialogs the window shows.  Neither
+        side reaches across: the page never touches the store and the
+        orchestrator never touches a widget.
+        """
 
         page = self.runtime_events_page
-        page.refresh_requested.connect(self._refresh_runtime_events)
-        page.resolve_requested.connect(self._resolve_runtime_event)
-        page.export_requested.connect(self._export_terminal_state)
+        orchestrator = self.runtime_events_orchestrator
+        page.refresh_requested.connect(orchestrator.refresh)
+        page.resolve_requested.connect(orchestrator.resolve)
+        page.export_requested.connect(orchestrator.export)
+        orchestrator.information_requested.connect(
+            self._show_runtime_information
+        )
+        orchestrator.warning_requested.connect(self._show_runtime_warning)
+        orchestrator.export_succeeded.connect(
+            self._show_runtime_export_succeeded
+        )
 
     def _connect_settings_page(self) -> None:
         """Wire the settings page's nine intent signals to the window."""
@@ -1243,17 +1293,6 @@ class MainWindow(QMainWindow):
             "无需 API Key"
         )
 
-    def _runtime_info_text(self) -> str:
-        """The read-only environment panel the runtime-events page renders."""
-
-        return runtime_info_text(
-            version="0.19.0",
-            resource_root=self.paths.resource_root,
-            state_root=self.paths.state_root,
-            runtime_root=self.paths.runtime_root,
-            exports_root=self.paths.exports_root,
-        )
-
     def _connect_execution_page(self) -> None:
         """Wire the execution page's intents to the handlers that act on them.
 
@@ -1316,7 +1355,7 @@ class MainWindow(QMainWindow):
         )
         orchestrator.log_requested.connect(self._log)
         orchestrator.runtime_event_requested.connect(
-            self._record_market_runtime_event
+            self._route_runtime_event
         )
         orchestrator.task_failure_requested.connect(self._task_failed)
         orchestrator.refused.connect(self._report_market_refusal)
@@ -1400,16 +1439,6 @@ class MainWindow(QMainWindow):
         """Surface a request the market layer refused before touching the feed."""
 
         QMessageBox.warning(self, title, message)
-
-    def _record_market_runtime_event(self, event: object) -> None:
-        """Record one market runtime event; the store is the window's."""
-
-        self._record_runtime_event(
-            severity=event.severity,
-            component=event.component,
-            code=event.code,
-            message=event.message,
-        )
 
     def _render_market_shell_health(self, health: object) -> None:
         """Paint the shell header from the market layer's published facts.
@@ -1551,7 +1580,7 @@ class MainWindow(QMainWindow):
         evidence.refused.connect(self._report_targeted_evidence_refusal)
         evidence.log_requested.connect(self._log)
         evidence.runtime_event_requested.connect(
-            self._record_targeted_evidence_runtime_event
+            self._route_runtime_event
         )
         evidence.minute_status_refresh_requested.connect(
             session.refresh_minute_status
@@ -1607,16 +1636,6 @@ class MainWindow(QMainWindow):
         """Surface a start the Shadow layer refused before building anything."""
 
         QMessageBox.warning(self, title, message)
-
-    def _record_shadow_runtime_event(self, event: object) -> None:
-        """Record one Shadow runtime event; the store is the window's."""
-
-        self._record_runtime_event(
-            severity=event.severity,
-            component=event.component,
-            code=event.code,
-            message=event.message,
-        )
 
     # -- Targeted session presentation inputs -----------------------------
     #
@@ -1900,16 +1919,6 @@ class MainWindow(QMainWindow):
         """
 
         QMessageBox.warning(self, title, message)
-
-    def _record_targeted_evidence_runtime_event(self, event: object) -> None:
-        """Record one evidence runtime event; the store is the window's."""
-
-        self._record_runtime_event(
-            severity=event.severity,
-            component=event.component,
-            code=event.code,
-            message=event.message,
-        )
 
     def _focus_targeted_evidence(self) -> None:
         """Bring the research route and the targeted workspace into view.
@@ -2533,22 +2542,6 @@ class MainWindow(QMainWindow):
 
         QMessageBox.warning(self, title, message)
 
-    def _record_paper_runtime_event(self, event: object) -> None:
-        """Record one Paper runtime event; the store is the window's.
-
-        One handler for every Paper event, launch included: the capability says which
-        events an operation produced and this writes each one exactly once.  It does not
-        decide severity, component or code -- those are the capability's, verbatim from
-        the retired handlers.
-        """
-
-        self._record_runtime_event(
-            severity=event.severity,
-            component=event.component,
-            code=event.code,
-            message=event.message,
-        )
-
     def _auto_quant_order_channel(self) -> PaperOrderChannel:
         """The order channel an attempt connects, composed from current settings.
 
@@ -3057,16 +3050,6 @@ class MainWindow(QMainWindow):
             self.account_badge.setProperty("state", view.account_state)
         self._repolish_health_badges()
 
-    def _record_account_runtime_event(self, event: object) -> None:
-        """Record one account runtime event; the store is the window's."""
-
-        self._record_runtime_event(
-            severity=event.severity,
-            component=event.component,
-            code=event.code,
-            message=event.message,
-        )
-
     # -- strategy governance wiring -------------------------------------
     #
     # This is the whole of the window's strategy role: read a signal from the
@@ -3234,7 +3217,7 @@ class MainWindow(QMainWindow):
             return
         self._refresh_strategy_page()
         self._log(f"{changed.strategy_id} 已变更为 {changed.status}")
-        self._record_runtime_event(
+        self.runtime_events_orchestrator.record(
             severity="info",
             component="strategy",
             code="STATUS_CHANGE",
@@ -3439,7 +3422,7 @@ class MainWindow(QMainWindow):
                 snapshot, symbols=symbols_to_record
             )
         except (OSError, sqlite3.Error) as error:
-            self._record_runtime_event(
+            self.runtime_events_orchestrator.record(
                 severity="warning",
                 component="minute_data",
                 code="MINUTE_PERSIST_FAILED",
@@ -3691,7 +3674,7 @@ class MainWindow(QMainWindow):
         if messages:
             for message in messages:
                 self._log(f"运行期资源释放异常：{message}")
-            self._record_runtime_event(
+            self.runtime_events_orchestrator.record(
                 severity="warning",
                 component="runtime",
                 code="RUNTIME_SHUTDOWN_PARTIAL",
@@ -3790,8 +3773,11 @@ class MainWindow(QMainWindow):
             return False
         worker = TaskThread(task, resource_group=resource_group)
         self.task_controller.register(worker)
-        if hasattr(self, "runtime_events_page"):
-            self._schedule_runtime_events_refresh()
+        # The count card is repainted through the capability that draws it.  The
+        # task's lifecycle -- admission, registration, teardown -- is unchanged
+        # and still entirely the window's.
+        if hasattr(self, "runtime_events_orchestrator"):
+            self.runtime_events_orchestrator.notify_task_count_changed()
         worker.progress.connect(self._log)
         if on_failure is None:
             worker.failed.connect(self._task_failed)
@@ -3833,8 +3819,8 @@ class MainWindow(QMainWindow):
 
     def _worker_finished(self, worker: TaskThread) -> None:
         self.task_controller.finish(worker)
-        if hasattr(self, "runtime_events_page"):
-            self._schedule_runtime_events_refresh()
+        if hasattr(self, "runtime_events_orchestrator"):
+            self.runtime_events_orchestrator.notify_task_count_changed()
         self._publish_execution_controls()
 
     def _task_cancelled(self) -> None:
@@ -3847,7 +3833,7 @@ class MainWindow(QMainWindow):
         self.execution_page.set_arm_confirmed(False)
         self._publish_execution_controls()
         self._log(f"任务失败：{message}")
-        self._record_runtime_event(
+        self.runtime_events_orchestrator.record(
             severity="error",
             component="task",
             code="TASK_FAILED",
@@ -3855,112 +3841,96 @@ class MainWindow(QMainWindow):
         )
         QMessageBox.warning(self, "任务失败", message)
 
-    def _record_runtime_event(
-        self,
-        *,
-        severity: str,
-        component: str,
-        code: str,
-        message: str,
-    ) -> None:
-        self.runtime_events.add(
-            severity=severity,
-            component=component,
-            code=code,
-            message=message,
-        )
-        if hasattr(self, "runtime_events_page"):
-            self._schedule_runtime_events_refresh()
+    def _route_runtime_event(self, event: object) -> None:
+        """Forward one capability's runtime event to its single owner.
 
-    def _schedule_runtime_events_refresh(self) -> None:
-        """M-7 optimization: coalesce full-table rebuilds to 1 per second."""
-        now = monotonic()
-        if now - self._last_runtime_events_refresh >= 1.0:
-            self._last_runtime_events_refresh = now
-            self._refresh_runtime_events()
-        elif not self._runtime_events_refresh_pending:
-            self._runtime_events_refresh_pending = True
-            QTimer.singleShot(1_000, self._flush_runtime_events_refresh)
-
-    def _flush_runtime_events_refresh(self) -> None:
-        self._runtime_events_refresh_pending = False
-        self._refresh_runtime_events()
-
-    def _refresh_runtime_events(self) -> None:
-        events = self.runtime_events.list_recent(500)
-        view = build_runtime_events_view(
-            events=events,
-            active_task_count=len(self.workers),
-            last_export=self._last_runtime_export,
-            info_text=self._runtime_info_text(),
-        )
-        self.runtime_events_page.render(view)
-
-    def _resolve_runtime_event(
-        self,
-        event_id: int | None,
-    ) -> None:
-        """Resolve the event the page reported, by its full integer id.
-
-        The page reports ``None`` when nothing is selected; the decision to
-        prompt belongs here, where the message box and the store already are.
+        This is the *only* runtime-event adapter the window has.  Market,
+        Account, Shadow, Paper and Targeted Evidence all publish the same four
+        fields, so five identical per-capability handlers used to exist -- and a
+        sixth caller would have been free to write the store directly.  This
+        reads the fields and forwards them, and nothing else: it does not filter
+        a severity, rewrite a code, redact a message, cache the event, decide
+        whether to accept it or repaint.  The capability decided what happened,
+        the store decides how it is persisted, and
+        ``runtime_events_orchestrator`` decides when the page repaints.
         """
 
-        if event_id is None:
-            QMessageBox.information(
-                self, "未选择事件", "请先选择一条运行事件。"
-            )
-            return
-        self.runtime_events.resolve(event_id)
-        self._refresh_runtime_events()
+        self.runtime_events_orchestrator.record(
+            severity=event.severity,
+            component=event.component,
+            code=event.code,
+            message=event.message,
+        )
 
-    def _export_terminal_state(self) -> None:
-        # The evidence snapshot is read once into a local.  The export is a reader
-        # and nothing more: it neither selects a run, nor edits the evidence, nor
-        # triggers research.  Reading the capability's snapshot directly is also
-        # what keeps this method from becoming a second truth -- there are no
-        # ``self.targeted_*_results`` lists left for it to prefer over the owner.
+    def _export_runtime_bundle(
+        self, events: Sequence[RuntimeEvent]
+    ) -> Path:
+        """Gather the cross-capability facts one terminal export carries.
+
+        This is the composition root's job, and deliberately not the
+        capability's: the bundle is Account + Market + Strategy + Shadow +
+        Targeted Evidence + the two Paper audit tables, so an orchestrator that
+        gathered it would have to import five capabilities and would become the
+        god object this round exists to avoid.  Only the events half is handed
+        in -- the capability read them from its own store -- so the export and
+        the screen can only ever describe the same rows.
+
+        It is a provider and nothing more: it writes no runtime event, repaints
+        no page, keeps no last-export fact, shows no dialog and schedules
+        nothing.  It returns the artifact path; a refusal raises, and the
+        capability sequences the failure.
+
+        The evidence snapshot is read once into a local.  The export is a reader
+        and nothing more: it neither selects a run, nor edits the evidence, nor
+        triggers research.  Reading the capability's snapshot directly is also
+        what keeps this method from becoming a second truth -- there are no
+        ``self.targeted_*_results`` lists left for it to prefer over the owner.
+        """
+
         evidence = self.targeted_evidence_orchestrator.snapshot
-        try:
-            target = export_terminal_bundle(
-                self.paths.exports_root,
-                portfolio=self.account_orchestrator.portfolio,
-                stream=self.market_orchestrator.snapshot,
-                strategies=self.strategies.list_versions(),
-                events=self.runtime_events.list_recent(500),
-                shadow_fills=self.shadow_orchestrator.recent_fills(500),
-                targeted_replays=evidence.replay_results,
-                targeted_robustness=evidence.robustness_results,
-                targeted_walk_forward=evidence.walk_forward_results,
-                targeted_overfit=evidence.overfit_results,
-                targeted_data_quality=evidence.data_quality_results,
-                targeted_execution_stress=(
-                    evidence.execution_stress_results
-                ),
-                targeted_review=evidence.review_results,
-                paper_order_audit=(
-                    self.order_repository.audit_rows()
-                ),
-                paper_execution_audit=(
-                    self.order_repository.execution_rows()
-                ),
-            )
-        except (OSError, ValueError) as error:
-            QMessageBox.warning(self, "导出失败", str(error))
-            return
-        self._last_runtime_export = (
-            target.name,
-            str(target),
+        return export_terminal_bundle(
+            self.paths.exports_root,
+            portfolio=self.account_orchestrator.portfolio,
+            stream=self.market_orchestrator.snapshot,
+            strategies=self.strategies.list_versions(),
+            events=events,
+            shadow_fills=self.shadow_orchestrator.recent_fills(500),
+            targeted_replays=evidence.replay_results,
+            targeted_robustness=evidence.robustness_results,
+            targeted_walk_forward=evidence.walk_forward_results,
+            targeted_overfit=evidence.overfit_results,
+            targeted_data_quality=evidence.data_quality_results,
+            targeted_execution_stress=(
+                evidence.execution_stress_results
+            ),
+            targeted_review=evidence.review_results,
+            paper_order_audit=(
+                self.order_repository.audit_rows()
+            ),
+            paper_execution_audit=(
+                self.order_repository.execution_rows()
+            ),
         )
-        self._refresh_runtime_events()
-        self._record_runtime_event(
-            severity="info",
-            component="export",
-            code="EXPORT_OK",
-            message=f"终端状态已脱敏导出到 {target}",
-        )
-        QMessageBox.information(
-            self,
+
+    def _show_runtime_information(self, title: str, message: str) -> None:
+        """Show one informational message the Runtime Events owner published.
+
+        The capability decides *what* the operator must be told -- an event was
+        not selected, an export finished -- and the window, which is the only
+        thing here with a widget, decides *how*.
+        """
+
+        QMessageBox.information(self, title, message)
+
+    def _show_runtime_warning(self, title: str, message: str) -> None:
+        """Show one warning the Runtime Events owner published."""
+
+        QMessageBox.warning(self, title, message)
+
+    def _show_runtime_export_succeeded(self, target: object) -> None:
+        """Show the completion dialog for a finished terminal export."""
+
+        self._show_runtime_information(
             "导出完成",
             f"已导出脱敏 CSV / JSON：\n{target}",
         )

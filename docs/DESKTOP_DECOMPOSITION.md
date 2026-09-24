@@ -4615,7 +4615,8 @@ bug，因此**没有** canonical-owner exception。
                                                            采纳与行情切换塞进 PaperOrchestrator）
 _on_paper_session_finalized 的 health 文案                窗口展示
 closeEvent 其余部分 / RuntimeSupervisor shutdown            MainWindow composition closure
-v2O-F System orchestration
+v2O-F1 Runtime Events orchestration                        ✅ 已完成（§31）
+v2O-F2 Settings orchestration                              ⏭ 下一轮
 ```
 
 ### 30.12 判据
@@ -4627,5 +4628,282 @@ session read model，也不再持有它的任何缓存。至此
 **v2O-E Paper ✅ COMPLETE**（E1 启动链 / E2 active runtime / E3 recovery-finalization /
 E4 presentation-render closure）。下一步是 v2O-F System，随后才是 MainWindow composition
 closure 与 Final Architecture Closure。
+
+## 31. v2O-F1：Runtime Events orchestration 提取
+
+### 31.1 这一刀移走什么
+
+System 一级 route 已是 native v2（§8.10），但 Runtime Events 的 **sequencing** 仍在窗口：
+
+```text
+self.runtime_events                     RuntimeEventStore 的长期 alias
+self._last_runtime_events_refresh       coalescing 时间戳
+self._runtime_events_refresh_pending    合并窗口内的 pending 标志
+self._last_runtime_export               最近一次成功导出的 presentation fact
+_runtime_info_text / _record_runtime_event
+_schedule_runtime_events_refresh / _flush_runtime_events_refresh / _refresh_runtime_events
+_resolve_runtime_event / _export_terminal_state
+_record_market_runtime_event / _record_account_runtime_event / _record_shadow_runtime_event
+_record_paper_runtime_event / _record_targeted_evidence_runtime_event
+```
+
+新的数据流（本轮的目标形态）：
+
+```text
+Capability ──runtime_event_requested──▶ MainWindow._route_runtime_event
+                                            │ 只转发 severity/component/code/message
+                                            ▼
+                              RuntimeEventsOrchestrator.record
+                                            ├─ store.add            （唯一写入口，唯一 redaction）
+                                            └─ schedule / coalesce
+                                            ▼
+                              build_runtime_events_view(store.list_recent(500), …)
+                                            ▼
+                                  RuntimeEventsPage.render(view)
+```
+
+`RuntimeEventsPage` 仍然只 render / emit；`MainWindow` 不再 `add` / `resolve` /
+`list_recent`，不再 render 该页面，也不再组装它的 view。
+
+### 31.2 为什么不建 SystemOrchestrator
+
+System 是 **containment route**，不是 capability：Runtime Events 与 Settings 是两个互不相关
+的 capability，只是共用一个页面。一个 `SystemOrchestrator` 要同时持有 event store、settings
+service 与 credential service，正是本轮点名禁止的 god object。因此本轮的目录是
+
+```text
+src/us_quant/desktop_v2/orchestration/system/
+    __init__.py                      只写清"这里没有 SystemOrchestrator"及其原因
+    runtime_events/
+        __init__.py
+        models.py                    RuntimeEventsEnvironment（immutable）
+        orchestrator.py              record / refresh / resolve / export / 消息信号
+```
+
+而 `orchestration/system/orchestrator.py`、`orchestration/system/settings/` 以及
+`SystemOrchestrator` / `SystemManager` / `DesktopSystemManager` / `SystemContext` /
+`ApplicationContext` / `ServiceBag` / `RuntimeManager` 这些名字的**不存在**，都由
+`tests/test_desktop_runtime_events_orchestration_architecture.py` 断言。
+
+### 31.3 canonical truth 不变
+
+`RuntimeEventStore` 仍然是唯一 persisted truth：SQLite schema、`add`、`resolve`、
+`list_recent`、redaction 全部原样，本轮**没有**改 schema，也**没有**把 redaction 搬到
+orchestrator（那会变成第二份脱敏策略）。
+
+orchestrator **不缓存** event list：每次 render / export 都重新
+`store.list_recent(RECENT_EVENT_LIMIT)`（= 500，与原窗口同值），所以导出与屏幕描述的是同一批
+行。`RuntimeEventsOrchestrator` 允许持有的 state 只有 store / page / environment / provider /
+exporter / clock / last_export / 时间戳 / pending / timer —— 这个集合被 guard 精确断言，新增字段
+必须改 guard。
+
+### 31.4 单一写入口
+
+```text
+record(*, severity, component, code, message)
+    → _write(...)                 （全类唯一的 store.add 调用点）
+    → _schedule_refresh()
+```
+
+五个 `runtime_event_requested` 信号与窗口自己的四个事实（`strategy` 的 `STATUS_CHANGE`、
+`minute_data` 的 `MINUTE_PERSIST_FAILED`、`runtime` 的 `RUNTIME_SHUTDOWN_PARTIAL`、`task` 的
+`TASK_FAILED`）全部走这一个入口；五个 per-capability adapter 删除，只留一个只转发四个字段的
+`_route_runtime_event`（guard 用 AST 精确断言它的函数体就是那一次转发调用，多一行逻辑即红）。
+
+`store.add` 失败时异常向上传播：不吞、不假装成功、不 repaint 出一个数据库里并不存在的行。
+
+### 31.5 coalescing 与 scheduler seam
+
+`_last_runtime_events_refresh` / `_runtime_events_refresh_pending` 与三个 refresh 方法整体迁入
+orchestrator，行为保持：
+
+```text
+用户点击 Refresh            → refresh()      立即（page.refresh_requested 直连 orchestrator）
+resolve(valid)              → refresh()      立即（操作员点出来的动作不该等窗口）
+runtime event 到达          → coalesced      1 秒窗口内只 arm 一次 flush
+task count 变化             → coalesced      notify_task_count_changed()
+flush                       → 重新读 store 当前 truth，再 render
+迟到的 flush callback       → pending 已清空 → 什么都不画（不会出现第二次 render）
+```
+
+scheduler 与 clock 都是注入 seam（`FlushTimer` protocol + 真实的 `QtFlushTimer`，后者是
+orchestrator 的 Qt child，销毁即取消），所以"1 秒窗口内最多一次 flush"可以在没有事件循环、
+**没有 sleep** 的情况下稳定测试。
+
+### 31.6 terminal export 的边界
+
+退休的 `_export_terminal_state()` 一段里混着七件事：跨 capability 事实收集、export I/O、成败
+sequencing、`last_export`、store 写入、refresh、`QMessageBox`。把它整段复制进 orchestrator
+会立刻制造一个新的 desktop god object（要 import Account / Market / Strategy / Shadow /
+Targeted / Paper repository）。本轮按 owner 切成两半：
+
+```text
+RuntimeEventsOrchestrator.export()
+    store.list_recent(500)                     ← 自己的 truth
+    injected export_bundle(events)             ← composition provider
+    成功 → last_export = (name, path)
+         → 写 EXPORT_OK（info / export）
+         → refresh()
+         → export_succeeded.emit(target)       ← 顺序：事实 → 记录 → paint → 通知
+    失败(OSError / ValueError)
+         → last_export 保持原值
+         → 不写 EXPORT_OK
+         → 不发成功信号
+         → warning_requested.emit("导出失败", str(error))
+
+MainWindow._export_runtime_bundle(events) -> Path     ← composition root
+    Account.portfolio / Market.snapshot / strategies.list_versions() /
+    Shadow.recent_fills(500) / TargetedEvidence.snapshot（七族）/
+    order_repository.audit_rows() / order_repository.execution_rows()
+    → export_terminal_bundle(...)
+```
+
+provider 不写 runtime 事件、不 render、不持有 `last_export`、不弹框、不 schedule —— 它是
+**合法的 cross-capability composition**，不是 Runtime Events orchestration。`events` 由
+capability 传入，所以导出与页面永远描述同一批行。
+
+**顺序披露（非静默改动）**：退休前窗口的顺序是 `refresh()` → 再写 `EXPORT_OK`，于是
+`EXPORT_OK` 那一行出现在约 1 秒后的合并 refresh 上；本轮按上面的顺序实现（先记录再 paint），
+`EXPORT_OK` 出现在同一次 paint 上。这是 sequencing 变化而非行为回归（导出卡片在两种顺序下都
+立即显示文件名），由
+`test_a_successful_export_sequences_fact_event_paint_then_report`（在 `export_succeeded` 的 slot 里
+采样 paint 次数，断言报告发出时 `EXPORT_OK` 那次 paint 已经发生）与 wiring 测试的
+`EXPORT_OK` 断言共同锁定。
+
+**两类失败不是一回事**（review 指出原 docstring 把两者混为一谈，已改成精确表述）：
+
+```text
+export 拒绝（provider 抛 OSError / ValueError）
+    → last_export 保持原值、不写 EXPORT_OK、不发成功信号、发 warning
+在写 EXPORT_OK 时 store 抛错（例如 sqlite3.Error）
+    → 向上传播。这里刻意不捕：本类不持有数据库句柄，也不该为了捕 sqlite3.Error 而引入一个；
+      吞掉它就等于伪造一次成功。artifact 此时已在磁盘上，因此操作员看到的是异常而不是
+      dialog —— 与退休的 _export_terminal_state 在同一个写入点上的行为完全一致。
+provider 参数求值阶段（strategies.list_versions() / shadow recent_fills / audit_rows /
+account portfolio）抛 sqlite3.Error 同样是既有行为，本轮不重新设计。
+```
+
+### 31.7 runtime info ownership
+
+窗口不再组装 info text（`_runtime_info_text` 退休）。`RuntimeEventsEnvironment`（immutable：
+version + 四个 root）由 composition root 注入，orchestrator 调**既有**纯函数
+`runtime_info_text(...)`。没有引入 `GlobalEnvironmentManager`。
+
+**披露**：version 字面量仍是 `"0.19.0"`，与当前 package metadata（`0.20.0`）不一致。本轮照搬
+原值（不是 blocker，改它属于 packaging/version 事项），留给后续独立处理。
+
+### 31.8 active task count 边界
+
+generic task lifecycle（`TaskThread`、`DesktopTaskController`、worker list、closing admission
+gate、busy dialog、cancellation）仍完全属于窗口。orchestrator 只拿一个窄 provider
+`active_task_count: Callable[[], int]`，**每次 render 都读取**（不是在构造时捕获），
+`_start_task` / `_worker_finished` 只各加一次 `notify_task_count_changed()`。
+
+### 31.9 窗口在本轮之后保留什么
+
+允许：构造 store / page / orchestrator；注入 `active_task_count` 与 export provider；
+连接页面 intent 与 orchestrator 的三个消息信号；路由 `runtime_event_requested`；
+task count 变化通知；`QMessageBox`；跨 capability export 事实收集。
+
+不允许（guard 断言）：`store.add` / `store.resolve` / `store.list_recent`、
+`RuntimeEventsPage.render`、`build_runtime_events_view`、`RuntimeEventsPageView`、
+refresh timer/coalescing state、`last_export`、resolve sequencing、export 成败 sequencing、
+info text 组装。
+
+### 31.10 architecture guards
+
+`tests/test_desktop_runtime_events_orchestration_architecture.py`，逐条对应本轮验收线：
+
+```text
+1  窗口不再持有 RuntimeEventStore alias（AST：self.runtime_events 不存在，构造恰好一次）
+2  窗口不再持有 refresh stamp / pending / last_export（含无 forwarding property）
+3  窗口不调用 store 的 add / resolve / list_recent（AST receiver 判定）
+4  窗口不 render 该页面、不构造 view（唯一允许的页面调用是 set_palette）
+5  view 投影只有 orchestrator 一个调用者（全 src 扫描）
+6  orchestrator 不 import 任何其它 capability / trading / sqlite
+7  page / table / models 仍不 import store 或 sqlite3
+8  SystemPage 仍是 containment only，且不认识 orchestrator
+9  export provider 不写事件、不 render、不持有 last_export、不弹框
+10 Settings orchestration 仍在窗口（15 个方法仍在，且不存在 SettingsOrchestrator）
+11 Gateway probe ownership 未变（_probe_gateway / probe_ibkr_socket / gateway_badge）
+12 orchestrator 不缓存 event list（state 精确集合 + _build_view 每次读 store）
+13 orchestrator 不 import generic task lifecycle
+14 五个 per-capability adapter 已退休，只剩纯转发的 _route_runtime_event
+```
+
+另有真实窗口断言（无 alias、无 state、依赖被正确注入）与 capability map 的 System 行断言。
+
+### 31.11 mutation 与 OpenCodeReview 闭环
+
+`scripts/mutation_system_runtime_events_f1.ps1`，**14 个 mutant 全部 RED**，无
+`HARNESS-ERROR`（脚本本身 repo-root anchored，找不到解释器时给可执行提示并以 2 退出；
+pattern 不匹配、语法不合法、pytest exit 5 都判 HARNESS-ERROR；有未抓住的 mutant 时 exit 1）：
+
+```text
+M1  record 不写 store                              M8  export 成功不更新 last_export
+M2  record 不 schedule repaint                     M9  task count 构造时捕获
+M3  refresh 复用缓存 events                        M10 coalescing 重复 arm
+M4  resolve(None) 仍调用 store.resolve              M11 窗口再次直接写 store
+M5  resolve(valid) 不立即重画                      M12 窗口再次持有 last_export
+M6  export 失败仍更新 last_export                  M13 真实 Qt timer 只存 callback 不 arm
+M7  export 失败仍记录 EXPORT_OK                    M14 被取代的迟到 flush 仍然重画
+```
+
+**M13 是 review 找出来的漏洞，不是自测发现的。** 行为测试注入 `ManualTimer`（这正是 1 秒
+窗口能确定性测试的原因），因此没有任何测试驱动真实的 `QtFlushTimer`：一个"存下 callback
+但从不 `timer.start()`"的 mutant 在整轮 58 个相关测试下**存活**。生产后果是合并重画的最后
+一次到达永远不会被投递——页面会一直停在 burst 之前的那一帧，直到下一次到达或显式
+refresh。修法是新增 `tests/test_desktop_runtime_events_timer_seam.py`（3 项）：直接驱动真实
+`QtFlushTimer`（投递一次、single-shot、`disarm()` 后不再投递），并把真实窗口的 burst 走完
+整条链路（等待真实 1 秒窗口到期）。截止时间取 1 秒窗口的六倍余量，超时是失败不是 skip。
+
+**M14 同样来自 review** 的观察：`_flush_pending_refresh` 里的 pending 复查是迟到 callback 的
+第二道防线，值得单独钉住。
+
+**同时修好一个被本轮改动打断的既有 gate。** `scripts/mutation_e3.ps1` 的 M27
+（"窗口再次持有 `_paper_finalization_inflight`"）把插入锚点写在
+`self._last_runtime_events_refresh = 0.0` 这一行上，而本轮正好删掉了那一行：mutation 变成
+"什么都没改"，脚本却把 no-match 记成 ERROR 之后**仍然 exit 0**，于是那条 E3 属性静默失去
+验证。修法两点：锚点改到窗口自己仍存在的 `__init__` composition 行
+（`self._connection_settings_enabled = True`），并给脚本补上与 F1 脚本相同的退出码尾巴
+（有未抓住的 mutant 就 exit 1）。这是本轮 diff 造成的真实退化，不是顺手清理；
+`mutation_e2.ps1` / `mutation_e4.ps1` 有同样的退出码弱点，留给后续（不在本轮 scope）。
+
+### 31.12 零 diff 与剩余项
+
+`trading/runtime/**`、`trading/domain/**`、RiskApplication、ExecutionApplication、
+`PaperTradingService`、`PaperActiveRelease`、`ExecutionLease`、broker adapter、Shadow、
+Paper orchestration、Market / Account / Research business logic、`DesktopSettingsService`、
+credential service、`UserPreferencesStore`、`SettingsPage`、`SystemPage`、
+`RuntimeEventStore` schema、`export_service.py` artifact schema **全部零 diff**。
+本轮没有发现需要在 canonical owner 修的业务 bug，因此**没有** canonical-owner exception；
+唯一的非文档生产改动是上面那个被 diff 打断的 mutation 脚本锚点。
+
+明确留给后续的：
+
+```text
+Settings 的 15 项职责（_settings_draft / _publish_settings_view / _preview_theme_changed /
+_save_user_preferences / _save_api_credentials / _paper_order_capability_toggled …）  v2O-F2
+_probe_gateway / probe_ibkr_socket / gateway_badge                v2O-F2 之后再判断是否单独 F3
+DesktopSettingsService 的 validate→derive→preflight→guard→persist→apply 事务顺序  冻结
+version 字面量与 package metadata 不一致（"0.19.0" vs 0.20.0）    已披露；独立 packaging 事项
+desktop_v2/orchestration/{paper,market,…}/models.py 中
+"the window owns the event store" 这句 docstring                 文档漂移，随各自 capability 的下一轮改
+export 成功后写 EXPORT_OK 失败（store 异常）时无任何 dialog      既有行为，本轮不重新设计
+mutation_e2.ps1 / mutation_e4.ps1 缺少非零退出码尾巴             脚本健壮性，独立事项
+closeEvent 其余部分 / RuntimeSupervisor shutdown                  MainWindow composition closure
+```
+
+### 31.13 判据
+
+Runtime Events 的写、合并重画、resolve、导出成败与 last-export 事实各自只有一个 owner；
+`RuntimeEventStore` 仍是唯一 persisted truth；`RuntimeEventsPage` 仍只 render / emit；
+窗口只剩 composition（事件路由、跨 capability 导出事实、task-count provider、dialog）。
+Settings 与 Gateway probe **未迁**，generic task lifecycle **未迁**。至此
+
+**v2O-F1 Runtime Events orchestration ✅**；下一轮是 **v2O-F2 Settings orchestration ⏭**，
+之后才重新扫描 System 剩余职责（Gateway probe 是否需要独立 F3），随后是 MainWindow
+composition closure 与 Final Architecture Closure。本轮不声称 "System orchestration
+complete" / "MainWindow decomposition complete" / "Architecture Closure complete"。
 
 

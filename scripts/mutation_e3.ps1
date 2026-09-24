@@ -270,8 +270,14 @@ $mutations = @(
     @{
         name = "M27 the window keeps the proof flag again"
         file = $desktopPath
-        find = "        self\._last_runtime_events_refresh = 0\.0"
-        repl = "        self._last_runtime_events_refresh = 0.0`n        self._paper_finalization_inflight = False"
+        # The anchor moved in v2O-F1: the line this used to insert after
+        # (``self._last_runtime_events_refresh = 0.0``) retired with the Runtime
+        # Events extraction, so the mutation applied nothing and the E3 property
+        # stopped being verified.  It is anchored on a line that belongs to the
+        # window's own ``__init__`` composition facts instead -- the mutation only
+        # needs one stable insertion point there.
+        find = "        self\._connection_settings_enabled = True"
+        repl = "        self._connection_settings_enabled = True`n        self._paper_finalization_inflight = False"
         tests = @($architecture)
         select = @("-k", "keeps_no_finalization_state or finalization_seam_is_gone")
     },
@@ -472,3 +478,10 @@ $results | Format-Table -AutoSize | Out-String | Write-Host
 $uncaught = @($results | Where-Object { $_.Caught -ne $true })
 Write-Host "mutations not caught: $($uncaught.Count)"
 foreach ($row in $uncaught) { Write-Host "  SURVIVED: $($row.Mutation) -> $($row.Detail)" }
+
+# A survived mutation, a mutation whose anchor no longer matches, or any other
+# harness failure must not exit 0.  Without this tail the "the window keeps the
+# proof flag again" gate reported a hole as harmless after v2O-F1 moved the line
+# its anchor was written against.
+if ($uncaught.Count -gt 0) { exit 1 }
+exit 0

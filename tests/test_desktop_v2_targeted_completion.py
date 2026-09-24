@@ -258,7 +258,9 @@ def _capture_views(window: MainWindow, monkeypatch) -> list[object]:
         lambda view: seen.append(view),
     )
     monkeypatch.setattr(window.shell, "navigate_to", lambda *args, **kwargs: None)
-    monkeypatch.setattr(window, "_record_runtime_event", lambda **kwargs: None)
+    monkeypatch.setattr(
+        window.runtime_events_orchestrator, "record", lambda **kwargs: None
+    )
     monkeypatch.setattr(window, "_log", lambda *args, **kwargs: None)
     return seen
 

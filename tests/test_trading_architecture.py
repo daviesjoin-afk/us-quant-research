@@ -657,6 +657,23 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
     ``queries.py`` the pure rules (normalization, the symbol gate, the Universe
     and quote lookups, the two status lines, the controls projection) and
     ``orchestrator.py`` the commands, the ordering and the render.
+
+    ``orchestration/system/runtime_events/`` arrived with v2O-F1: the System
+    route's event workspace -- the store write, the coalesced repaint, the
+    resolve command, the terminal export's outcome sequencing, the last-export
+    presentation fact and the info-panel environment the window used to assemble
+    -- moved out of ``MainWindow``.  It is a subpackage of ``system/`` rather
+    than ``system/`` itself because System is a *containment* route: Runtime
+    Events and Settings are two unrelated capabilities that share a page, so a
+    ``system/orchestrator.py`` owning both would be the god object the round's
+    brief forbids by name.  Settings is v2O-F2, and the absence of
+    ``orchestration/system/settings/`` is itself asserted by
+    ``tests/test_desktop_runtime_events_orchestration_architecture.py``.
+    ``models.py`` holds one immutable value -- the environment facts the info
+    panel prints -- and ``orchestrator.py`` the single store write, the
+    immediate-or-coalesced repaint, the scheduler seam that makes the coalescing
+    testable without a real timer, and the three presentation signals the window
+    turns into dialogs.
     """
 
     desktop_v2 = _SRC / "desktop_v2"
@@ -712,6 +729,10 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "orchestration/paper/queries.py",
         "orchestration/paper/orchestrator.py",
         "orchestration/paper/presentation.py",
+        "orchestration/system/__init__.py",
+        "orchestration/system/runtime_events/__init__.py",
+        "orchestration/system/runtime_events/models.py",
+        "orchestration/system/runtime_events/orchestrator.py",
         "orchestration/tasking.py",
         "pages/__init__.py",
         "pages/account.py",

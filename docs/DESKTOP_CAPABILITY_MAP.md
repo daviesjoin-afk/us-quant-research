@@ -29,11 +29,11 @@ belongs in one of those. Every orchestration PR updates this table.
 | **Scanner** | `ScannerOrchestrator.scan` | `ScannerOrchestrator` | `DesktopMarketScanService` | `scan`, `request_scan`, `request_chart`, `restore_saved`, `adopt_external_scan`, `render_current`, signals | `scan_changed` → `_refresh_market_scope_summary`. AutoQuant **publishes** its finished scan in through `adopt_external_scan` (direction: AutoQuant → Scanner) | v2O-C2 complete |
 | **Backtest** | `BacktestOrchestrator._runs` (private) | `BacktestOrchestrator` | `DesktopBacktestService` | `refresh_strategy_options`, `request_selected`, `request_compare_all`, `select_run`, `render_current`, signals | None. `MainWindow` only constructs, connects and shows the refusal dialog; the strategy catalogue arrives as a provider callable | v2O-C3 complete |
 | **Cross Section** | `CrossSectionOrchestrator._report` (private) | `CrossSectionOrchestrator` | `DesktopCrossSectionService` | `request_capital_change`, `request_run`, `restore_saved`, `render_current`, signals | `capital_changed` → `_on_research_scenario_capital_changed` (Account presentation only). `report_changed` → `_on_cross_section_report_changed` (reloads the artifact catalogue, repaints the Dashboard). Startup `restore_saved()` publishes nothing | v2O-C4 complete |
-| **Targeted Evidence** | `TargetedEvidenceOrchestrator.snapshot` (published: the terminal export reads all seven families) | `TargetedEvidenceOrchestrator` (evidence half only) | `DesktopTargetedEvidenceService` | `snapshot`, `request_replay`, `request_robustness`, `select_robustness_run`, `select_review_run`, `restore_saved`, `render_current`, signals | `refused` → `_report_targeted_evidence_refusal` (dialog). `runtime_event_requested` → `_record_targeted_evidence_runtime_event` (store). `minute_status_refresh_requested` → `TargetedSessionOrchestrator.refresh_minute_status`. `focus_requested` → `_focus_targeted_evidence` (research route + targeted workspace) | v2O-C5A complete |
+| **Targeted Evidence** | `TargetedEvidenceOrchestrator.snapshot` (published: the terminal export reads all seven families) | `TargetedEvidenceOrchestrator` (evidence half only) | `DesktopTargetedEvidenceService` | `snapshot`, `request_replay`, `request_robustness`, `select_robustness_run`, `select_review_run`, `restore_saved`, `render_current`, signals | `refused` → `_report_targeted_evidence_refusal` (dialog). `runtime_event_requested` → `_route_runtime_event` (the window's one router, into the Runtime Events store). `minute_status_refresh_requested` → `TargetedSessionOrchestrator.refresh_minute_status`. `focus_requested` → `_focus_targeted_evidence` (research route + targeted workspace) | v2O-C5A complete |
 | **Targeted Session / Preflight** | `TargetedSessionOrchestrator.snapshot` (target draft / target status / minute status / preflight) | `TargetedSessionOrchestrator` | `DesktopTargetedSessionService` | `snapshot`, `refresh_strategy_options`, `adopt_target_draft`, `request_strategy_selection`, `request_target_apply`, `request_target_subscribe`, `refresh_minute_status`, `refresh_preflight`, `render_current`, signals | Market snapshot → `refresh_preflight`. Account portfolio → `refresh_preflight`. Evidence replay completion → `refresh_minute_status`. Shadow snapshot change → `render_current` (repaint only). Subscription and start go out through two narrow injected Market commands | v2O-C5B complete |
-| **Shadow** | `ShadowOrchestrator.snapshot` (the engine stays the session's own state owner) | `ShadowOrchestrator` (session half only, via the injected repaint) | `us_quant.shadow.*` (`ShadowPaperEngine`, `ShadowPaperStore`, `build_targeted_shadow_config`), the shared execution lease | `snapshot`, `is_active`, `recent_fills`, `start` (no-op when already active; never releases a lease it does not hold), `stop`, `shutdown`, `on_market_snapshot`, signals | Market snapshot → `on_market_snapshot` (a no-op when nothing runs; repaints the session, never the evidence tables). `refused` → `_report_shadow_refusal` (dialog). `runtime_event_requested` → `_record_shadow_runtime_event` (store). `log_requested` → `_log`. Market stop takes it down through the window's interlock, which may name Shadow because Market may not | v2O-D complete |
+| **Shadow** | `ShadowOrchestrator.snapshot` (the engine stays the session's own state owner) | `ShadowOrchestrator` (session half only, via the injected repaint) | `us_quant.shadow.*` (`ShadowPaperEngine`, `ShadowPaperStore`, `build_targeted_shadow_config`), the shared execution lease | `snapshot`, `is_active`, `recent_fills`, `start` (no-op when already active; never releases a lease it does not hold), `stop`, `shutdown`, `on_market_snapshot`, signals | Market snapshot → `on_market_snapshot` (a no-op when nothing runs; repaints the session, never the evidence tables). `refused` → `_report_shadow_refusal` (dialog). `runtime_event_requested` → `_route_runtime_event` (the window's one router, into the Runtime Events store). `log_requested` → `_log`. Market stop takes it down through the window's interlock, which may name Shadow because Market may not | v2O-D complete |
 | **Paper** | `PaperWorkflowController` (phase / active plan / execution lease / latest result / reconciliation evidence / finalization evidence); `PaperTradingService` (candidate and active broker connections, plus the two-phase promotion *and* release of the active slot); `PaperOrchestrator.presentation` (the **retained immutable presentation snapshot** — the last published result projected for display, kept because `finalize_if_safe` clears the canonical result when it releases PAPER) | `PaperOrchestrator` (the whole run: launch, active session, recovery, finalization, the shutdown verdict, and the presentation projection); `MainWindow` renders from `paper_orchestrator.presentation` and shows the two confirmation dialogs | `PaperTradingService`, the injected session-build seam (`_build_paper_session`), a market-snapshot provider, a reconciliation-rows provider, the workflow controller | `start`, `on_market_snapshot`, `poll`, `pause`, `resume`, `stop`, `reconcile`, `confirm_reconciliation_resume`, `prepare_shutdown`, `result`, `runtime_active`, `has_runtime_obligations`, `presentation`, `session_control_facts`, signals (`refused`, `log_requested`, `result_changed`, `runtime_event_requested`, `presentation_refresh_requested`, `session_finalized`, `manual_recovery_required`) | `start_requested` → `_confirm_and_start_auto_quant` and `resume_reconciliation_requested` → `_confirm_paper_reconciliation_resume`: the two `QMessageBox` confirmations, which may not move into the capability. `pause_requested` / `resume_requested` / `stop_requested` / `reconcile_requested` / `paper_order_timer.timeout` reach the capability **directly**. Market `snapshot_changed` → `_on_market_snapshot_changed` hands the fact over → `on_market_snapshot` (the fan-out decides nothing about Paper). `result_changed` → `_on_paper_result_changed`: render only, **and it stores nothing** — the session fact it draws is `paper_orchestrator.presentation`, and the read model around it is `pages/execution/projector.build_session_view`. `_publish_execution_controls` asks `session_control_facts` rather than comparing phase values. `presentation_refresh_requested` → `_apply_paper_workflow_button_state`; `manual_recovery_required` → `_on_paper_manual_recovery_required` (undo a refused close); `session_finalized` → `_on_paper_session_finalized` (health line + clear the arm flag). The market stop/switch interlock reads `has_runtime_obligations` and Shadow's capital gate reads `runtime_active`, both from the canonical result rather than any window cache. `closeEvent` asks `prepare_shutdown()` and only presents its verdict. Still the window's: the launch/resume confirmations, the candidate-preparation sequencing, `closeEvent`'s generic teardown, and the route's fetching | v2O-E complete |
-| **System** | `RuntimeEventStore`, `DesktopSettingsService` | the two System pages | `RuntimeEventStore`, `DesktopSettingsService` | none yet | Runtime events are *requested* by other capabilities rather than written by them; orchestration scheduled for v2O-F | pages done, orchestration not started |
+| **System** | `RuntimeEventStore` (persisted events); `DesktopSettingsService` (settings) | `RuntimeEventsOrchestrator` (Runtime Events); `MainWindow` (Settings) | `RuntimeEventStore`, `export_terminal_bundle` via the injected bundle provider; `DesktopSettingsService` | Runtime Events: `record`, `refresh`, `resolve`, `export`, `notify_task_count_changed`, `last_export`, signals (`information_requested`, `warning_requested`, `export_succeeded`). Settings: none yet | Runtime Events: every capability's `runtime_event_requested` → `_route_runtime_event` → the one store write; the export's cross-capability facts stay in `_export_runtime_bundle`; the three page intents go straight to the orchestrator. Settings: the whole half is still the window's | Runtime Events **v2O-F1 complete**; Settings **v2O-F2 next** |
 
 ## Bridges that need spelling out
 
@@ -43,64 +43,63 @@ gets wrong.
 **Market.** Three separate paths, and they must not be collapsed:
 
 ```text
-snapshot_changed            → MainWindow._on_market_snapshot_changed
-    → workflow readiness, minute snapshot evidence, Dashboard,
-      AutoQuant candidate presentation, targeted preflight refresh,
-      the targeted session repaint (when Shadow is active),
-      and the stream ingress handed to an active Paper / Shadow workflow
-      (each capability decides for itself whether the fact belongs to it)
-
-shell_health_changed        → MainWindow._render_market_shell_health
+snapshot_changed       → MainWindow._on_market_snapshot_changed
+    → workflow readiness, minute snapshot evidence, Dashboard, AutoQuant candidate
+      presentation, targeted preflight refresh, the targeted session repaint (when
+      Shadow is active), and the stream ingress handed to an active Paper / Shadow
+      workflow (each capability decides whether the fact belongs to it)
+shell_health_changed   → MainWindow._render_market_shell_health
     → the shell badges only; it does not go through snapshot_changed
-
 load_scan_watchlist_requested (a Market-page user intent)
-                            → MainWindow._apply_intraday_watchlist
-    → reads Scanner's scan + Account's paper capital + research capital,
-      then sets Market's subscription symbols
+                       → MainWindow._apply_intraday_watchlist
+    → reads Scanner's scan + Account's paper capital + research capital, then sets
+      Market's subscription symbols
 ```
 
-The third one is a **Market + Scanner cross-workflow command**, not a reaction to
-a snapshot. It is triggered by the operator clicking on the market page.
+The third is a **Market + Scanner cross-workflow command**, not a reaction to a
+snapshot: the operator clicked on the market page.
 
 **History.** The only bridge is `history_changed → _refresh_market_scope_summary`.
 The AutoQuant preparation path does schedule history gaps and render the History
 page, but that direction is **AutoQuant → History** — AutoQuant calls the
-capability. It is not `history_changed → AutoQuant`.
+capability, not the reverse.
 
 **Cross Section.** Two bridges, neither a second truth:
 
 ```text
 capital_changed  → MainWindow._on_research_scenario_capital_changed
     → _publish_account_presentation_inputs + AccountOrchestrator.render_current
-    (Account presentation only; Scanner / AutoQuant / Targeted / the watchlist
-     pull the canonical scalar when they next build a request)
-
+    (Account presentation only; Scanner / AutoQuant / Targeted / the watchlist pull
+     the canonical scalar when they next build a request)
 report_changed   → MainWindow._on_cross_section_report_changed
     → reload the artifact catalogue + repaint the Dashboard
 ```
-
-Neither the Dashboard nor the artifact catalogue is known to the capability.
-`restore_saved()` deliberately emits neither signal: the catalogue is read during
-the same startup pass, so announcing a re-read would fan out twice.
 
 **Targeted Evidence.** Four bridges, each for a fact that is *not* an evidence
 decision:
 
 ```text
 refused                          → _report_targeted_evidence_refusal (QMessageBox)
-runtime_event_requested          → _record_targeted_evidence_runtime_event (store)
+runtime_event_requested          → _route_runtime_event (the one store write)
 minute_status_refresh_requested  → TargetedSessionOrchestrator.refresh_minute_status
 focus_requested                  → _focus_targeted_evidence
                                      (shell.navigate_to("research") +
                                       research_page.set_active_workspace(TARGETED))
 ```
 
-The first three exist so the capability holds no dialog, no event store and no
-minute-status ownership. The fourth is the split that matters: a completed suite
-navigates its **own page's** evidence workspace to REVIEW (the capability's
-presentation behaviour), and separately *asks* for the desktop route through
-`focus_requested` (shell composition, which stays on the window). See
-`tests/test_desktop_targeted_evidence_orchestration.py`.
+**System.** Runtime Events has moved; Settings has not:
+
+```text
+runtime_event_requested (Market / Account / Shadow / Paper / Targeted Evidence)
+  → MainWindow._route_runtime_event   (forwards four fields, decides nothing)
+  → RuntimeEventsOrchestrator.record → RuntimeEventStore.add   (the one write path)
+refresh / resolve / export intents  → RuntimeEventsOrchestrator, directly
+export → _export_runtime_bundle (cross-capability facts; writes and paints nothing)
+       → export_terminal_bundle → EXPORT_OK recorded → repaint → success reported
+```
+
+Settings stays the window's (v2O-F2) and there is no `SystemOrchestrator`; see §31
+of `docs/DESKTOP_DECOMPOSITION.md`.
 
 **Targeted Session.** Two bridges out, four facts in:
 
@@ -109,7 +108,6 @@ refused        → _report_targeted_session_refusal (QMessageBox; level honoured
                  warning for a mistyped symbol, information for a running Shadow
                  session or a live feed)
 log_requested  → _log
-
 Market snapshot    → refresh_preflight       (a new quote changes the verdict)
 Account portfolio  → refresh_preflight       (broker truth is half the gates)
 Evidence replay    → refresh_minute_status   (fresh local rows landed)

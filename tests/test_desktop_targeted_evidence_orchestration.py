@@ -273,13 +273,11 @@ ALLOWED_WINDOW_TARGETED_METHODS = (
     "_connect_targeted_validation_page",
     "_report_targeted_session_refusal",
     "_report_targeted_evidence_refusal",
-    "_record_targeted_evidence_runtime_event",
     "_focus_targeted_evidence",
     "_selected_shadow_strategy_record",
     "_shadow_capital_fact",
     "_shadow_account_alias",
     "_report_shadow_refusal",
-    "_record_shadow_runtime_event",
     "_paper_runtime_is_active",
     "_targeted_account_snapshot",
     "_targeted_displayed_strategy",
@@ -412,16 +410,23 @@ def test_the_window_declares_no_targeted_method_outside_the_declared_set() -> No
 
 
 def test_the_window_declares_the_four_bridges_it_needs() -> None:
-    """The capability publishes facts; the window routes them.  All four exist."""
+    """The capability publishes facts; the window routes them.  All of them exist.
+
+    v2O-F1 replaced the evidence-specific event adapter with the window's single
+    ``_route_runtime_event`` forwarder, so the bridge the evidence capability's
+    ``runtime_event_requested`` reaches is that one -- asserted here beside the
+    three routes that stayed evidence-specific.
+    """
 
     declared = _declared_names(_DESKTOP)
     for name in (
         "_report_targeted_evidence_refusal",
-        "_record_targeted_evidence_runtime_event",
+        "_route_runtime_event",
         "_focus_targeted_evidence",
         "_report_targeted_session_refusal",
     ):
         assert name in declared, name
+    assert "_record_targeted_evidence_runtime_event" not in declared
 
 
 # -- Guard B: exactly one owner of the evidence render --------------------
@@ -716,14 +721,20 @@ def test_the_window_holds_no_targeted_results_cache() -> None:
 
 
 def test_the_export_does_not_write_evidence_state() -> None:
-    """A read-only consumer: no selection edit, no commit, no research trigger."""
+    """A read-only consumer: no selection edit, no commit, no research trigger.
+
+    v2O-F1 renamed the window's half of the export: it is the composition
+    provider ``_export_runtime_bundle`` the Runtime Events orchestrator calls,
+    so the property this guard locks is unchanged and the method it inspects
+    moved with the sequencing.
+    """
 
     tree = ast.parse(_DESKTOP.read_text(encoding="utf-8"))
     method = None
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_export_terminal_state":
+        if isinstance(node, ast.FunctionDef) and node.name == "_export_runtime_bundle":
             method = node
-    assert method is not None, "MainWindow._export_terminal_state not found"
+    assert method is not None, "MainWindow._export_runtime_bundle not found"
 
     body = ast.unparse(method)
     for forbidden in (

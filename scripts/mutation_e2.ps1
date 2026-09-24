@@ -53,7 +53,12 @@ $mutations = @(
     @{
         name = "M4  the poll ignores the finalization seam"
         file = $orchestrator
-        find = 'if self\._finalization_inflight_provider\(\):\s+return\s+last_ingress = '
+        # E3 replaced the ``_finalization_inflight_provider()`` callable with the
+        # flag itself; the anchor kept the old spelling, so this mutant silently
+        # stopped applying and the property went unverified.  Found by running the
+        # script on the v2O-F2 diff (the diff did not cause it), and re-anchored on
+        # the same property: the poll defers the ingress while a finalization runs.
+        find = 'if self\._finalization_inflight:\s+return\s+last_ingress = '
         repl = 'last_ingress = '
         tests = @($behavior)
         select = @("-k", "finalization")
@@ -101,8 +106,14 @@ $mutations = @(
     @{
         name = "M9  the window keeps a runtime handle again"
         file = $desktopPath
-        find = 'self\._paper_render_snapshot: AutoQuantSnapshot \| None = None'
-        repl = "self._paper_render_snapshot: AutoQuantSnapshot | None = None`n        self.trading_runtime = None"
+        # The anchor (``self._paper_render_snapshot: AutoQuantSnapshot | None = None``)
+        # retired with the E4 presentation extraction, so this mutant silently stopped
+        # applying.  Found by running the script on the v2O-F2 diff (the diff did not
+        # cause it).  Re-anchored on the window's adoption of the application
+        # preferences -- a composition line every later round keeps -- because the
+        # mutation only needs an insertion point inside ``__init__``.
+        find = 'self\.preferences = self\.preferences_store\.load\(defaults\)'
+        repl = "self.preferences = self.preferences_store.load(defaults)`n        self.trading_runtime = None"
         tests = @($architecture)
         select = @("-k", "keeps_no_active_paper_state")
     },

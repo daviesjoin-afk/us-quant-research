@@ -270,14 +270,15 @@ $mutations = @(
     @{
         name = "M27 the window keeps the proof flag again"
         file = $desktopPath
-        # The anchor moved in v2O-F1: the line this used to insert after
-        # (``self._last_runtime_events_refresh = 0.0``) retired with the Runtime
-        # Events extraction, so the mutation applied nothing and the E3 property
-        # stopped being verified.  It is anchored on a line that belongs to the
-        # window's own ``__init__`` composition facts instead -- the mutation only
-        # needs one stable insertion point there.
-        find = "        self\._connection_settings_enabled = True"
-        repl = "        self._connection_settings_enabled = True`n        self._paper_finalization_inflight = False"
+        # This anchor has moved twice, and the lesson is the point of it:
+        # v2O-F1 retired ``self._last_runtime_events_refresh = 0.0`` and v2O-F2
+        # retired ``self._connection_settings_enabled = True``, so each round's
+        # first choice silently stopped applying the mutation.  It is anchored on
+        # the window's adoption of the application preferences, which both rounds
+        # deliberately kept on the composition root -- the mutation only needs one
+        # stable insertion point inside ``__init__``.
+        find = "        self\.preferences = self\.preferences_store\.load\(defaults\)"
+        repl = "        self.preferences = self.preferences_store.load(defaults)`n        self._paper_finalization_inflight = False"
         tests = @($architecture)
         select = @("-k", "keeps_no_finalization_state or finalization_seam_is_gone")
     },

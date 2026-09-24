@@ -165,6 +165,25 @@ PUBLIC_COMMAND_SURFACE = (
     "subscription_symbols",
 )
 
+#: The orchestrator's published signals.  Subscribing to one is how the window
+#: learns a fact; a signal is a declared public member and never a handle to
+#: runtime state, so it belongs in the allowed surface beside the reads and the
+#: commands.  (``test_the_orchestrator_exposes_exactly_the_declared_surface``
+#: enumerates methods only, so signals are listed and checked here instead --
+#: and every name below is asserted to be a real declaration of the class.)
+PUBLIC_SIGNALS = (
+    "automatic_switch_requested",
+    "connection_settings_enabled_changed",
+    "controls_changed",
+    "log_requested",
+    "refused",
+    "runtime_event_requested",
+    "shell_health_changed",
+    "snapshot_changed",
+    "snapshot_invalidated",
+    "task_failure_requested",
+)
+
 #: Runtime state that must never be a public attribute or property.
 FORBIDDEN_PUBLIC_RUNTIME_STATE = (
     "worker",
@@ -318,6 +337,24 @@ def _public_members(path: pathlib.Path, name: str) -> set[str]:
     return members
 
 
+def _declared_signals(path: pathlib.Path, name: str) -> set[str]:
+    """The class-level ``name = Signal(...)`` declarations of one class."""
+
+    signals: set[str] = set()
+    for node in _class_of(path, name).body:
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        if not isinstance(value, ast.Call):
+            continue
+        if ast.unparse(value.func) != "Signal":
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                signals.add(target.id)
+    return signals
+
+
 def _method_source(path: pathlib.Path, name: str) -> str:
     source = path.read_text(encoding="utf-8")
     for node in _main_window(path).body:
@@ -372,11 +409,21 @@ def test_the_window_never_reaches_through_the_orchestrator() -> None:
     """``market_orchestrator._worker`` is the leak this guard exists for.
 
     Every ``self.market_orchestrator.<name>`` in the module must be a declared
-    public member.  A private read would let the window keep a second handle on
-    the feed, which is the ownership the extraction removed.
+    public member -- a read, a command, or a published signal.  A private read
+    would let the window keep a second handle on the feed, which is the
+    ownership the extraction removed.
     """
 
-    allowed = set(PUBLIC_READ_SURFACE) | set(PUBLIC_COMMAND_SURFACE)
+    signals = _declared_signals(_ORCHESTRATOR_PATH, "MarketOrchestrator")
+    assert set(PUBLIC_SIGNALS) <= signals, sorted(
+        set(PUBLIC_SIGNALS) - signals
+    )
+
+    allowed = (
+        set(PUBLIC_READ_SURFACE)
+        | set(PUBLIC_COMMAND_SURFACE)
+        | set(PUBLIC_SIGNALS)
+    )
     offending: list[tuple[str, int]] = []
     for node in ast.walk(_tree(_DESKTOP_PATH)):
         if not isinstance(node, ast.Attribute):

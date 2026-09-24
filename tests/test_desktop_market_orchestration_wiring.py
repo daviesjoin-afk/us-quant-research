@@ -410,12 +410,17 @@ def test_a_refused_request_is_surfaced_by_the_window(window, monkeypatch) -> Non
 def test_the_settings_provider_write_reaches_the_page_without_intent(
     window,
 ) -> None:
-    """Restoring a saved provider is programmatic, and must not recurse."""
+    """Restoring a saved provider is programmatic, and must not recurse.
+
+    v2O-F2 moved the sequencing to ``SettingsOrchestrator``; the property is
+    unchanged: the route's combo follows the published selection, and the page
+    emits nothing back.
+    """
 
     seen: list[str] = []
     window.market_page.provider_selected.connect(seen.append)
 
-    window._settings_provider_selected("alpaca_iex")
+    window.settings_orchestrator.select_market_provider("alpaca_iex")
 
     assert window.market_page.selected_provider() == "alpaca_iex"
     assert seen == []

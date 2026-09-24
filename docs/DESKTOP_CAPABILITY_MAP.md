@@ -33,7 +33,7 @@ belongs in one of those. Every orchestration PR updates this table.
 | **Targeted Session / Preflight** | `TargetedSessionOrchestrator.snapshot` (target draft / target status / minute status / preflight) | `TargetedSessionOrchestrator` | `DesktopTargetedSessionService` | `snapshot`, `refresh_strategy_options`, `adopt_target_draft`, `request_strategy_selection`, `request_target_apply`, `request_target_subscribe`, `refresh_minute_status`, `refresh_preflight`, `render_current`, signals | Market snapshot → `refresh_preflight`. Account portfolio → `refresh_preflight`. Evidence replay completion → `refresh_minute_status`. Shadow snapshot change → `render_current` (repaint only). Subscription and start go out through two narrow injected Market commands | v2O-C5B complete |
 | **Shadow** | `ShadowOrchestrator.snapshot` (the engine stays the session's own state owner) | `ShadowOrchestrator` (session half only, via the injected repaint) | `us_quant.shadow.*` (`ShadowPaperEngine`, `ShadowPaperStore`, `build_targeted_shadow_config`), the shared execution lease | `snapshot`, `is_active`, `recent_fills`, `start` (no-op when already active; never releases a lease it does not hold), `stop`, `shutdown`, `on_market_snapshot`, signals | Market snapshot → `on_market_snapshot` (a no-op when nothing runs; repaints the session, never the evidence tables). `refused` → `_report_shadow_refusal` (dialog). `runtime_event_requested` → `_route_runtime_event` (the window's one router, into the Runtime Events store). `log_requested` → `_log`. Market stop takes it down through the window's interlock, which may name Shadow because Market may not | v2O-D complete |
 | **Paper** | `PaperWorkflowController` (phase / active plan / execution lease / latest result / reconciliation evidence / finalization evidence); `PaperTradingService` (candidate and active broker connections, plus the two-phase promotion *and* release of the active slot); `PaperOrchestrator.presentation` (the **retained immutable presentation snapshot** — the last published result projected for display, kept because `finalize_if_safe` clears the canonical result when it releases PAPER) | `PaperOrchestrator` (the whole run: launch, active session, recovery, finalization, the shutdown verdict, and the presentation projection); `MainWindow` renders from `paper_orchestrator.presentation` and shows the two confirmation dialogs | `PaperTradingService`, the injected session-build seam (`_build_paper_session`), a market-snapshot provider, a reconciliation-rows provider, the workflow controller | `start`, `on_market_snapshot`, `poll`, `pause`, `resume`, `stop`, `reconcile`, `confirm_reconciliation_resume`, `prepare_shutdown`, `result`, `runtime_active`, `has_runtime_obligations`, `presentation`, `session_control_facts`, signals (`refused`, `log_requested`, `result_changed`, `runtime_event_requested`, `presentation_refresh_requested`, `session_finalized`, `manual_recovery_required`) | `start_requested` → `_confirm_and_start_auto_quant` and `resume_reconciliation_requested` → `_confirm_paper_reconciliation_resume`: the two `QMessageBox` confirmations, which may not move into the capability. `pause_requested` / `resume_requested` / `stop_requested` / `reconcile_requested` / `paper_order_timer.timeout` reach the capability **directly**. Market `snapshot_changed` → `_on_market_snapshot_changed` hands the fact over → `on_market_snapshot` (the fan-out decides nothing about Paper). `result_changed` → `_on_paper_result_changed`: render only, **and it stores nothing** — the session fact it draws is `paper_orchestrator.presentation`, and the read model around it is `pages/execution/projector.build_session_view`. `_publish_execution_controls` asks `session_control_facts` rather than comparing phase values. `presentation_refresh_requested` → `_apply_paper_workflow_button_state`; `manual_recovery_required` → `_on_paper_manual_recovery_required` (undo a refused close); `session_finalized` → `_on_paper_session_finalized` (health line + clear the arm flag). The market stop/switch interlock reads `has_runtime_obligations` and Shadow's capital gate reads `runtime_active`, both from the canonical result rather than any window cache. `closeEvent` asks `prepare_shutdown()` and only presents its verdict. Still the window's: the launch/resume confirmations, the candidate-preparation sequencing, `closeEvent`'s generic teardown, and the route's fetching | v2O-E complete |
-| **System** | `RuntimeEventStore` (persisted events); `DesktopSettingsService` (settings) | `RuntimeEventsOrchestrator` (Runtime Events); `MainWindow` (Settings) | `RuntimeEventStore`, `export_terminal_bundle` via the injected bundle provider; `DesktopSettingsService` | Runtime Events: `record`, `refresh`, `resolve`, `export`, `notify_task_count_changed`, `last_export`, signals (`information_requested`, `warning_requested`, `export_succeeded`). Settings: none yet | Runtime Events: every capability's `runtime_event_requested` → `_route_runtime_event` → the one store write; the export's cross-capability facts stay in `_export_runtime_bundle`; the three page intents go straight to the orchestrator. Settings: the whole half is still the window's | Runtime Events **v2O-F1 complete**; Settings **v2O-F2 next** |
+| **System** | `RuntimeEventStore` (persisted events); `DesktopSettingsService` (settings transaction) | `RuntimeEventsOrchestrator` (Runtime Events); `SettingsOrchestrator` (Settings) | `RuntimeEventStore`, `export_terminal_bundle` via the injected bundle provider; `DesktopSettingsService`, `DesktopCredentialService` | Runtime Events: `record`, `refresh`, `resolve`, `export`, `notify_task_count_changed`, `last_export`, signals. Settings: `render_current`, `select_api_provider`, `select_market_provider`, `adopt_market_provider`, `set_connection_settings_enabled`, `preview_theme`, `save_credentials`, `clear_credentials`, `save_preferences`, `request_provider_switch`, `request/confirm_paper_order_capability`, `request/confirm_extended_hours`, `selected_api_provider`, `connection_settings_enabled`, signals | Runtime Events: every capability's `runtime_event_requested` → `_route_runtime_event` → the one store write; the export's cross-capability facts stay in `_export_runtime_bundle`. Settings: the page's nine intents reach the capability directly; the window keeps the theme fan-out, the market selection/switch bridges, the commit adoption and the dialogs | Runtime Events **v2O-F1 complete**; Settings **v2O-F2 complete** |
 
 ## Bridges that need spelling out
 
@@ -61,8 +61,7 @@ snapshot: the operator clicked on the market page.
 
 **History.** The only bridge is `history_changed → _refresh_market_scope_summary`.
 The AutoQuant preparation path does schedule history gaps and render the History
-page, but that direction is **AutoQuant → History** — AutoQuant calls the
-capability, not the reverse.
+page, but that direction is **AutoQuant → History** — AutoQuant calls the capability.
 
 **Cross Section.** Two bridges, neither a second truth:
 
@@ -87,19 +86,22 @@ focus_requested                  → _focus_targeted_evidence
                                       research_page.set_active_workspace(TARGETED))
 ```
 
-**System.** Runtime Events has moved; Settings has not:
+**System.** Two capabilities, two owners, one page:
 
 ```text
-runtime_event_requested (Market / Account / Shadow / Paper / Targeted Evidence)
-  → MainWindow._route_runtime_event   (forwards four fields, decides nothing)
-  → RuntimeEventsOrchestrator.record → RuntimeEventStore.add   (the one write path)
-refresh / resolve / export intents  → RuntimeEventsOrchestrator, directly
-export → _export_runtime_bundle (cross-capability facts; writes and paints nothing)
-       → export_terminal_bundle → EXPORT_OK recorded → repaint → success reported
+Runtime Events: runtime_event_requested (5 capabilities) → MainWindow._route_runtime_event
+  → RuntimeEventsOrchestrator.record → RuntimeEventStore.add (the one write path)
+  → coalesced repaint; refresh / resolve / export intents reach the capability directly
+export → _export_runtime_bundle (cross-capability facts) → EXPORT_OK → repaint → report
+Settings: the page's nine intents → SettingsOrchestrator directly
+  render: credential status + live market source, both read on every repaint
+  credentials / preferences sequenced here; the transaction stays the service's
+  commit ok → settings_committed (window adopts + fans out) → market_switch_requested
+  theme preview → MainWindow._apply_theme;  toggles → confirmation → confirm_*(accepted)
 ```
 
-Settings stays the window's (v2O-F2) and there is no `SystemOrchestrator`; see §31
-of `docs/DESKTOP_DECOMPOSITION.md`.
+No `SystemOrchestrator`: the two workspaces share the page and nothing else (§31, §32
+of `docs/DESKTOP_DECOMPOSITION.md`).
 
 **Targeted Session.** Two bridges out, four facts in:
 

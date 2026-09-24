@@ -786,6 +786,11 @@ wrapper 或脱敏框架。
 `_clear_saved_finnhub_key` 按规格保留为私有兼容方法（AST 引用扫描确认全仓零调用，但
 「顺手大扫除」不在本阶段范围），仅把内部调用改走 `clear_provider("finnhub_trades")`。
 
+> **前向引用（v2O-F2）**：那个"零调用"的事实就是 v2O-F2 退休它的依据——它已被删除且不留
+> shim，guard 防止死 handler 回来。同时 `_api_provider_changed` 与
+> `_set_connection_settings_enabled` 也已退休：它们搬进了 `SettingsOrchestrator`，窗口只剩
+> composition。见 §32。**（前向引用结束）**
+
 ### 11.8 体积与测试
 
 | | before | after |
@@ -4905,5 +4910,427 @@ Settings 与 Gateway probe **未迁**，generic task lifecycle **未迁**。至�
 之后才重新扫描 System 剩余职责（Gateway probe 是否需要独立 F3），随后是 MainWindow
 composition closure 与 Final Architecture Closure。本轮不声称 "System orchestration
 complete" / "MainWindow decomposition complete" / "Architecture Closure complete"。
+
+> **前向引用（v2O-F2）**：那"下一轮"已经落地，Settings 的 15 项职责按 §32 搬进
+> `orchestration/system/settings/`。上面 31.12 列出的 15 项职责、`_api_provider_changed` 与
+> `_set_connection_settings_enabled`（11.7 曾判为"表现层、不搬"）以及 `_clear_saved_finnhub_key`
+> （11.7 曾"按规格保留"）都在 §32 有了终局；Gateway probe 仍留在窗口，是否独立 F3 继续待定。
+> **（前向引用结束）**
+
+
+## 32. v2O-F2：Settings orchestration 提取
+
+**结论：Settings 桌面编排（render、凭据 save/clear 排序、偏好事务适配、provider 同步、
+两个 capability 确认、以及两个 presentation fact）已经迁出 `MainWindow`，落在
+`desktop_v2/orchestration/system/settings/`。窗口只剩 composition：九个 page intent 的
+转发、`self.config`/`self.preferences` 的采纳与跨 capability fan-out、全局主题应用、
+market selection/switch bridge（含 Paper interlock）、以及全部 dialog 与日志。**
+
+本轮同时修掉一个**真实的 provider 切换顺序 bug**（见 32.9），它只在"设置保存被拒"时
+才会显形：行情路由会被切到一条从未落盘的偏好上，同时界面告诉操作者默认行情源已切换。
+
+### 32.1 这一刀移走什么
+
+窗口曾经自己持有并决定：
+
+```text
+self._settings_api_provider                  选中的 API provider（凭据编辑目标）
+self._connection_settings_enabled            连接参数的启用事实
+_settings_draft / _settings_storage_view     SettingsPage 的初始值组装
+_publish_settings_view / _credential_status_text   SettingsPageView 组装 + 状态行投影
+_settings_provider_selected / _stream_provider_selected / _switch_to_settings_provider
+_api_provider_changed / _set_connection_settings_enabled
+_save_user_preferences / _save_api_credentials / _clear_selected_api_credentials
+_clear_saved_finnhub_key                     全仓零 caller 的死 handler
+_preview_theme_changed / _paper_order_capability_toggled / _extended_hours_paper_toggled
+```
+
+现在的数据流（唯一一条）：
+
+```text
+SettingsPage ──九个 intent──▶ SettingsOrchestrator
+      render_current():  credential_service.status(provider)     ← 每次重画现读
+                         active_market_source_id()              ← 每次重画现读
+                         selected_api_provider / connection_settings_enabled（本类两个 fact）
+      save_credentials / clear_credentials  → DesktopCredentialService
+      save_preferences                      → DesktopSettingsService.commit
+      发布： settings_committed / market_switch_requested / theme_preview_requested /
+             market_provider_selection_requested / information_requested /
+             warning_requested / log_requested / 两个 confirmation_requested
+                    │
+MainWindow（composition only）
+      ├─ adopt commit： self.config / self.preferences，然后 fan-out（主题、market provider、
+      │                 safety badge、preflight、extended-hours 状态行）
+      ├─ theme_preview_requested → _apply_theme（全工作台，不属于 Settings）
+      ├─ provider bridges：selection → market_orchestrator.set_selected_provider；
+      │                    switch → 无订阅直设 / 有订阅走 _request_market_switch
+      └─ dialog（QMessageBox）与 _log
+```
+
+`_publish_settings_view`、`_settings_draft`、`_settings_storage_view`、`_credential_status_text`
+这四个组装点**同时消失**：它们不是被搬走，而是不再需要——视图的唯一组装者是 capability。
+
+### 32.2 三个 canonical owner 逐字未动
+
+| owner | 本轮状态 |
+|---|---|
+| `UserPreferencesStore`（`user_settings.py`） | persisted preferences truth；schema / validate / 原子写逐字节未改 |
+| `DesktopSettingsService`（`desktop_settings.py`） | transaction owner；validate → derive → preflight → runtime guard → persist → runtime apply 顺序逐字未改，仍无 rollback / two-phase |
+| `DesktopCredentialService`（`desktop_credentials.py`） | credential semantics owner；provider→字段映射、DPAPI 存储、status/save/clear 语义未改 |
+
+`SettingsOrchestrator` 对这三者都只是**调用者**：它不重新校验偏好、不自己写盘、不读密文。
+`DesktopSettingsService.commit` 的调用点在全仓仍然只有一处（迁移前在窗口，现在在
+`SettingsOrchestrator._commit`），这一点由 guard 钉住（32.12 #4/#5）。
+
+### 32.3 为什么 `self.config` / `self.preferences` 不搬
+
+它们是**全局应用 composition fact**，不是 Settings 的 state：Market 用它选行情源与端点、
+Paper / Risk / Research / Gateway 也各自读它。把它们搬进 Settings 会让所有这些 capability
+反向依赖 Settings，等于用一个新 owner 复制旧的耦合。所以：
+
+* 窗口继续持有 `self.config` / `self.preferences`；
+* capability 通过窄 provider 拿它需要的东西：`current_config`、`broker_config`、
+  `runtime_guards`（三者都是 callable，在 commit 时刻现读）；
+* 事务结束时 capability 发布**已完成**的 `DesktopSettingsCommit`，窗口采纳它。
+
+因此 `SettingsOrchestrator` 的 state 是精确的九项，不含 `config` / `preferences`：
+
+```text
+_page  _settings_service  _credential_service  _current_config  _broker_config
+_runtime_guards  _active_market_source_id  _selected_api_provider
+_connection_settings_enabled
+```
+
+guard 用**精确集合相等**断言它（32.12 #7），并拒绝 `_config` / `_preferences` /
+`_snapshot` / `_events` / `_cache` / `_status` / `_credentials` 等任何"第二份状态"的名字。
+
+### 32.4 单一 render owner
+
+`SettingsPage.render(SettingsPageView)` 在全仓只有一个 orchestration 调用者，即
+`SettingsOrchestrator.render_current()`（guard 32.12 #2/#3 双向断言：窗口文本里
+`settings_page.render(` 出现 0 次，且 `SettingsPageView` 只作为 identifier 出现在
+page 自己的 `models.py` / `page.py` 与 capability 的 `orchestrator.py`）。
+
+三个读取**每次都现读**，这一条是本轮的要害之一：
+
+* 凭据状态来自 `self._credential_service.status(provider)`——缓存会让"保存成功后状态行
+  仍显示未保存"；
+* 活动行情源来自 `self._active_market_source_id()`（窗口传进来的 `market_orchestrator.active_source_id`）——
+  在构造时捕获会让"之后才启动的行情"绕过清除门禁，从而删掉正在被使用的凭据；
+* 两个 presentation fact 是本类自己的 state，不是外部读。
+
+mutation M3（缓存凭据状态）与 M4（构造时捕获行情源）都 RED，M5（删掉活动源门禁）也 RED。
+
+### 32.5 凭据 save / clear 的排序（语义原样冻结）
+
+Save：
+
+```text
+credential_save_plan(provider, api_key, api_secret)   ← 纯函数，唯一决策点
+  NOT_REQUIRED  → information「无需 API Key」，不写
+  NO_CHANGE     → information「没有新的凭据」，不写
+  INCOMPLETE    → warning「凭据不完整」，不写
+  SAVE          → save_provider(plan.provider, api_key=plan.api_key, api_secret=plan.api_secret)
+                  → clear_credential_inputs() → render_current() → log
+```
+
+* 输入在 plan 里**只 trim 一次**，写入的就是 plan 里的值（guard 与 mutation M6 钉住
+  "半填 Alpaca 被接受"这个问题不能回来）；
+* 保存失败（`CredentialStoreError` / `OSError` / `ValueError`）只报 warning：
+  不清输入、不重画、不写成功日志（mutation M8 让失败路径假装成功，RED）；
+* 其它 provider（含 `ibkr` / `ibkr_extended` / 未知 id）一律 `NOT_REQUIRED`，
+  与退休前 `else` 分支的行为一致。
+
+Clear：
+
+```text
+1. provider == active_market_source_id()?  → warning「行情运行中」，什么都不做
+2. provider_requires_api_key(provider)?    → information「无需清除」，什么都不做
+3. clear_provider(provider) → clear_credential_inputs() → render_current() → log
+```
+
+**顺序有意义且被专门钉住**：门禁先比较 provider，再走"是否需要 key"分支。若反过来，
+`provider == active_source == "ibkr"` 时就会从"行情运行中"变成"无需清除"——那是行为变化，
+不是清理。mutation M5 删掉门禁、guard `test_a_live_ibkr_source_is_reported_as_live_not_as_needing_no_clear`
+钉住这个顺序。
+
+**`_clear_saved_finnhub_key` 被删除且不留 shim**（32.11）。
+
+### 32.6 纯规则：`queries.py`
+
+`queries.py` 是 Qt-free、service-free 的纯函数模块，承载四个决策：
+
+| 函数 | 作用 |
+|---|---|
+| `credential_save_plan(provider, *, api_key, api_secret) -> CredentialSavePlan` | 上面的四态决策；trim 只在这里发生 |
+| `credential_status_text(status) -> str` | Finnhub / Alpaca 两半 / IBKR 的三种状态行 |
+| `preferences_from_draft(draft)` / `settings_draft_from_preferences(preferences)` | 互逆映射，page 与 service 之间唯一的翻译层 |
+| `settings_storage_view(*, state_root, runtime_root, exports_root)` | 存储路径展示 |
+| `provider_requires_api_key(provider)` / `provider_label(provider)` | 转发 frozen 语义（provider 集合仍来自 `desktop_credentials`） |
+
+`api_provider_for_market_provider` 的**唯一副本**在
+`pages/system/settings/models.py`（Qt-free 的 page 契约模块）：page 需要它在自身契约里，
+capability 需要它来同步选择——两处各写一份就是两条规则。window 里原本那份按 provider
+内联计算的逻辑随 `_settings_api_provider` 一起退休。
+
+`queries.py` 里不允许出现 `has_secret(` / `load_secret(` / `save_secret(` /
+`delete_secret(` / `WindowsCredentialStore` 等字样（guard 32.12 #6 的一半），
+所以"投影顺手读一下 store"在文本层面就走不通。
+
+### 32.7 provider selection 的两个方向（非对称是原样保留的）
+
+```text
+Settings → Market   page.market_provider_selected → select_market_provider(provider)
+                      ├─ self._selected_api_provider = api_provider_for_market_provider(provider)
+                      ├─ page.set_api_provider(api_provider, emit_change=False)   ← 静默
+                      ├─ render_current()
+                      └─ market_provider_selection_requested.emit(provider)       ← 唯一发布
+                    → 窗口 bridge → market_orchestrator.set_selected_provider(provider)
+
+Market → Settings   market_page.provider_selected → 窗口 _on_market_provider_selected
+                      ├─ 读 market_orchestrator.selected_provider() 现读
+                      └─ adopt_market_provider(provider)
+                           └─ page.set_market_provider(provider, emit_change=False) ← 只同步，不发布
+```
+
+两点刻意的非对称，都不"顺手修"：
+
+1. Settings 侧选择 provider 会**带动** selected API provider（操作者选它就是为了配置它）；
+   Market 侧的变化**不带动**（操作者在这里编辑哪份凭据，不该被路由侧的一次刷新改掉）。
+2. 所有 programmatic setter 都是 `emit_change=False`。否则两个 combo 会互相驱动成环——
+   退休前窗口是把 setter 内联调用的，本轮把"静默"变成 guard：
+   `test_every_programmatic_page_write_is_silent` 遍历 `select_*` / `adopt_*` / `confirm_*`
+   四个 setter 调用点，要求关键字 `emit_change` 存在且**字面为 `False`**。
+
+M12（把同步改成 `emit_change=True`）与 M13（选择时不再同步 API provider）都 RED。
+
+### 32.8 preference transaction 与 commit fan-out
+
+```text
+page.save_preferences_requested → SettingsOrchestrator.save_preferences(draft)
+    commit = self._commit(draft)          ← preferences_from_draft + service.commit
+    if commit is None: return             ← 拒绝路径：只发过 warning，什么都不做
+    settings_committed.emit(commit)
+
+page.switch_provider_requested  → SettingsOrchestrator.request_provider_switch(draft)
+    commit = self._commit(draft)
+    if commit is None: return             ← 拒绝路径：不切换（32.9）
+    settings_committed.emit(commit)
+    market_switch_requested.emit(commit.preferences.market_provider)   ← 用落盘后的值
+```
+
+`_commit` 是**唯一**捕获事务异常的地方，`except` 明确列出三种声明失败：
+
+```text
+UserSettingsError        us_quant.user_settings
+MarketDataActiveError    us_quant.trading.ports.market_data
+BrokerAccountError       us_quant.trading.ports.broker_account
+```
+
+`caught` 集合被 guard 精确断言（32.12 #4），并且整个 settings 包**不允许出现裸 `except`**：
+把编程错误（`TypeError`）也说成"设置未保存"是坏行为，`test_a_programming_error_is_not_reported_as_an_unsaved_setting`
+钉住了它。导入 `us_quant.trading.ports.*` 是本轮唯一的跨向导入，且是刻意的（失败类型属
+ports 契约，不是实现）。
+
+窗口侧 `_on_settings_committed` 只做采纳 + fan-out，guard 用 AST 断言它的函数体（去掉
+docstring 后）不含 `settings_service.commit` / `credential_service` / `preferences_store` /
+`validated(` / `SettingsPageView` / `settings_page.render`，且必须含
+`self.preferences = saved`、`self.config = commit.config`、
+`self.market_orchestrator.set_selected_provider(`（M21 让窗口再提交一次，RED）。
+
+fan-out 里的 market provider 恢复**走 orchestrator 而不是 page**：
+`market_orchestrator.set_selected_provider(...)` 是该 capability 的公开 API，由它自己的
+renderer 去点 page。guard `test_the_window_only_touches_the_market_page_palette` 断言窗口对
+`self.market_page.*` 的全部调用恰好是 `{set_palette}`。
+
+### 32.9 本轮修掉的 provider 切换顺序 bug
+
+**症状（迁移前的真实行为）。** 退休前 `MainWindow._switch_to_settings_provider` 是：
+
+```python
+provider = draft.market_provider
+self._save_user_preferences(draft)          # 所有路径都返回 None
+if not self.market_orchestrator.subscription_symbols():
+    self.market_orchestrator.set_selected_provider(provider)
+    self._log("默认行情源已切换；当前没有订阅代码。…")
+    return
+self._request_market_switch(provider)
+```
+
+`_save_user_preferences` 没有返回值，所以**保存被拒**时控制流照样落进行情分支。
+
+**复现证据（在任何 F2 改动之前采集）。** 让 `settings_service.commit` 抛 `UserSettingsError`，
+再点"切换"：
+
+```text
+warnings  : [('设置未保存', '凭据/设置被拒绝')]
+switched  : ['alpaca_iex']        # 有订阅：直接 request_switch
+preference: finnhub_trades        # 磁盘上还是旧值
+selected  : ['alpaca_iex']        # 无订阅：直接 set_selected_provider
+log       : ['默认行情源已切换；当前没有订阅代码。…']
+```
+
+也就是说：一条**从未落盘**的偏好被用来重配正在运行的行情源，而且界面告诉操作者
+"默认行情源已切换"，磁盘上的值却没有变。
+
+**canonical fix。** 顺序责任归 Settings（它本来就知道 commit 成没成），所以
+`request_provider_switch` 只在 commit 返回后发布：`settings_committed` →（窗口采纳）→
+`market_switch_requested`。信号是同步的，因此市场路径被触发时 `self.preferences` 已经是新值。
+窗口侧只保留它本来就拥有的东西：无订阅时直设 + 那条日志、有订阅时 `_request_market_switch`
+（Paper / 运行状态 interlock 仍在窗口，capability 不得 import 它们）。
+
+**回归测试**：`tests/test_desktop_settings_provider_switch_regression.py`（4 项，都是真实窗口）。
+其中顺序断言在**切换回调内部采样** `window.preferences.market_provider`，因此它测的是交错
+而不是两个孤立事实：把 emit 顺序倒过来就会读到旧值。文件头 docstring 记着上面那段复现证据。
+
+**mutation**：M10（拒绝后仍切换）与 M11（先切换后发布 commit）都 RED。M11 第一次是**存活**的
+——原断言只检查"两个信号各自发生过"，对顺序不敏感；这正是"测试必须真的测它声称的属性"的
+一个现场例子，测试已按上面的采样方式加强。
+
+### 32.10 两个 capability 确认（Paper / 扩展时段）
+
+两个 checkbox 的 intent 到达 capability 后：
+
+```text
+toggled(False)  → 什么都不做
+toggled(True)   → paper_order_capability_confirmation_requested(title, message)
+                → 窗口 QMessageBox.warning(... Yes|No, default No)
+                → confirm_paper_order_capability(answer == Yes)
+                     accepted → 保留 checked（它只是 draft）
+                     refused  → page.set_paper_order_capability(False, emit_change=False)
+```
+
+* 逐字保留了两段安全说明（"不会立即下单" / "不会自动武装" / "维护窗口仍会拒绝订单" /
+  "是否保留开启状态"等字样由测试断言）；
+* 打开开关**只改 draft**，不落盘、不武装、不启动任何东西（"接受后 preferences 仍未变"
+  由真实窗口测试与 orchestrator 测试各钉一次）；
+* 拒绝时回滚必须**静默**，否则会再发一次 intent（M15 / M16 RED；
+  真实窗口的 `test_paper_capability_refusal_resets_without_a_second_intent` 仍在）。
+
+### 32.11 退休的死 handler
+
+`_clear_saved_finnhub_key` 在 `src/` 与 `tests/` 全仓零 caller（只有文档与 F1 的 guard 清单
+提到它）。本轮删除它，**不留 shim、不留第二个 Finnhub 清除路径**，并由 guard 断言
+`MainWindow` 没有 `_clear_finnhub_key` / `_clear_saved_key` 之类的新名字、模块文本里也不再
+出现该标识符（M17 之外的最后一项 guard）。11.7 里"按规格保留"的说法由 §32 取代。
+
+### 32.12 architecture guards（`tests/test_desktop_settings_orchestration_architecture.py`）
+
+| # | guard | 断言 |
+|---|---|---|
+| 1 | `test_the_window_holds_no_settings_presentation_state` | AST：窗口既不赋值也不读 `_settings_api_provider` / `_connection_settings_enabled`；`self.*` 里以 `settings` 开头的名字只能是 `settings_page` / `settings_orchestrator` / `settings_service` |
+| 2 | `test_the_window_never_renders_the_settings_page` | 文本 0 次 `settings_page.render(`；`SettingsPageView` 不是窗口的 identifier；窗口对 settings_page 的属性调用集合为空 |
+| 3 | `test_the_orchestrator_is_the_only_caller_of_the_settings_render` | capability 里有 `self._page.render(`；`SettingsPageView` 只出现在 page 的 models/page 与 capability 的 orchestrator |
+| 4 | `test_the_window_calls_no_settings_service` | AST：窗口无 `credential_service.{status,save_provider,clear_provider}` 与 `settings_service.commit`；文本同样 0 次 |
+| 5 | `test_the_commit_adapter_catches_only_the_declared_failures` | `_commit` 的 `except` 恰好一个，捕获集合恰好三种声明失败；整个包无裸 `except` |
+| 6 | `test_the_orchestrator_imports_no_other_capability` | 禁 import 其它 capability、MainWindow、page、`trading.{application,adapters,runtime,domain}`、`sqlite3`；禁名 `MainWindow` / `MarketOrchestrator` / `PaperTradingService` / `RiskApplication` …；`us_quant.trading.*` 只允许 `ports` |
+| 7 | `test_the_orchestrator_caches_no_application_state` | state **精确等于**九项；禁 `_config` / `_preferences` / `_snapshot` / `_events` / `_cache` / `_status` …；`_commit` 必须调用三个 provider，render 必须调用 `self._active_market_source_id()` |
+| 8 | `test_the_orchestrator_public_surface_is_small` | 公开方法 + property 恰好等于声明的 16 项 |
+| 9 | `test_the_settings_page_intent_surface_is_unchanged` | page 的九个 `Signal` 逐一列出、不多不少 |
+| 10 | `test_the_live_market_source_is_never_cached` | settings 包里不出现 `active_source_id` / `active_source` / `is_live` 这些 identifier |
+| 11 | `test_every_programmatic_page_write_is_silent` | `select_*` / `adopt_*` / `confirm_*` 里的四个 setter 调用都必须显式 `emit_change=False` |
+| 12 | `test_theme_application_does_not_enter_settings` | 包里无 `_apply_theme` / `set_palette` / `build_stylesheet`，也不 import `PySide6.QtWidgets` |
+| 13 | `test_the_market_switch_interlocks_do_not_enter_settings` | 包里不出现 `request_switch` / `_request_market_switch` / `subscription_symbols` / `has_runtime_obligations` / `paper_orchestrator` … |
+| 14 | `test_the_window_keeps_the_global_composition_it_owns` | 窗口保留 `_apply_theme` / `_on_settings_committed` / 三个 bridge / 两个 confirm / 两个 message / `_probe_gateway`；`_on_settings_committed` 函数体（去 docstring）的正反断言 |
+| 15 | `test_the_window_only_touches_the_market_page_palette` | 窗口对 `market_page` 的调用恰好是 `{set_palette}` |
+| 16 | `test_system_page_is_still_containment_only` | `SystemPage` 仍只有三个方法；page 包里不出现两个 capability owner 的 identifier |
+| 17 | `test_the_runtime_events_ownership_has_not_regressed` | F1 的核心事实仍在（窗口无 `runtime_events` 状态、`RuntimeEventStore(` 只构造一次、无 `runtime_events_page.render(`、无三个 refresh 状态）；两个 capability 互不 import |
+| 18 | `test_the_gateway_probe_ownership_is_unchanged` | 窗口仍持有 `_probe_gateway` / `probe_ibkr_socket` / `gateway_badge`；settings 包不出现 probe / gateway_badge |
+| 19 | `test_no_god_object_was_created` | 全仓无 `SystemOrchestrator` / `SystemManager` / `SettingsManager` / `DesktopManager` / `ApplicationContext` / `ServiceBag` / `GlobalController`；无 `system/orchestrator.py` |
+| 20 | `test_the_dead_finnhub_clear_handler_is_gone_without_a_shim` | 窗口无三个 Finnhub-clear 名字；全仓 identifier 扫描无 `clear_saved_finnhub_key` |
+| 21 | `test_the_retired_window_methods_are_absent` | 18 个退休名字逐项不在窗口方法表里 |
+| 22 | `test_a_real_window_holds_no_settings_state_of_its_own` | 真实窗口：有 `settings_page` / `settings_orchestrator`，18 个退休名字都 `hasattr == False`，`preferences` / `config` 仍在窗口 |
+| 23 | `test_the_connection_fact…`（在 wiring 文件） | 见 32.13 的真实窗口部分 |
+
+同时 `tests/test_desktop_runtime_events_orchestration_architecture.py`（F1 的 guard）按其自身
+"断言反转"惯例更新：`test_settings_orchestration_is_still_the_windows` →
+`test_settings_orchestration_has_left_the_window`（15 个退休方法必须缺席、8 个 composition
+方法必须存在、`SettingsOrchestrator` 必须存在），`test_no_god_object_was_created_for_the_system_route`
+从"settings 目录不存在"改为"两个 sibling capability 各自有 owner、且没有聚合 owner"。
+
+### 32.13 真实窗口与 mutation
+
+`tests/test_desktop_v2_settings_wiring.py` 增补 7 项真实窗口测试：状态行由 capability 每次
+重画（改 provider 即重投影）、market route 通过 capability 关闭/打开连接控件、保存后
+fan-out 恰好一次走 `market_orchestrator.set_selected_provider`（并断言没有直接点 page）、
+两个 toggle 接受后仍只是 draft、凭据保存失败保留输入、`config`/`preferences` 仍在
+composition root 且 capability 没有它们的副本。
+
+`scripts/mutation_system_settings_f2.ps1`：21 个 mutant，**21 RED / 0 survived / 0 harness-error**。
+
+```text
+M1  窗口再次持有 _settings_api_provider                      M12 同步改成 emit_change=True
+M2  窗口再次持有 _connection_settings_enabled                 M13 选择时不带 selected API provider
+M3  render 缓存凭据状态                                       M14 连接事实变化不重画
+M4  行情源在构造时捕获                                        M15 Paper 拒绝后不回滚
+M5  删掉活动源清除门禁                                        M16 扩展时段拒绝后不回滚
+M6  接受半填 Alpaca                                           M17 窗口重画 Settings 页
+M7  保存成功不清输入/不重画                                   M18 窗口自己保存凭据
+M8  保存失败报成功                                            M19 capability import MarketOrchestrator
+M9  事务拒绝仍发布 commit                                     M20 capability 自己驱动 market switch
+M10 事务拒绝仍请求切换                                        M21 窗口采纳后再跑一次事务
+M11 先切换后发布 commit（首次存活→测试加强后 RED）
+```
+
+**F1 留下的另一个坑在本轮又被踩了一次并修好。** `mutation_e3.ps1` 的 M27 锚点在 F1 时被改到
+`self._connection_settings_enabled = True`，而本轮正好删掉了那一行——脚本会又一次"什么都没改"
+却按旧逻辑收场。锚点已改到窗口两轮都刻意保留的
+`self.preferences = self.preferences_store.load(defaults)`。
+
+**顺带发现两个更早轮次留下的死锚点（不是本轮 diff 造成的）。** 因为上面那条教训，本轮把
+`mutation_e2 / e3 / e4` 三个脚本在 F2 diff 上**实跑了一遍**，结果：
+
+```text
+mutation_e3  0 not caught    （M27 修复后）
+mutation_e4  0 not caught
+mutation_e2  2 not caught → 修好后 0 not caught
+    M4  the poll ignores the finalization seam
+        E3 把 `_finalization_inflight_provider()` 换成 `self._finalization_inflight`，
+        锚点没跟着改，于是这个 mutant 长期"什么都没改"
+    M9  the window keeps a runtime handle again
+        E4 删掉了 `self._paper_render_snapshot: AutoQuantSnapshot | None = None`，
+        锚点随之失效
+```
+
+两个都只改锚点、不改属性，并且都按"在 `__init__` 里找一个后续轮次都会保留的 composition
+行"重新落点，重跑后 e2 全部 RED。教训写在脚本注释里：**每个动 `desktop.py` 或 paper
+orchestrator 的轮次都要重跑所有旧 mutation 脚本**。`mutation_e2.ps1` / `mutation_e4.ps1`
+仍缺非零退出码尾巴（§31.11 已披露），所以这两个脚本的"survived"只能靠读输出发现——
+它们的 no-match 现在会打 `HARNESS-ERROR`，但**不会**让脚本失败；这一项仍留给后续。
+
+### 32.14 零 diff 与剩余项
+
+零 diff（逐字节）：`trading/runtime/**`、`trading/domain/**`、RiskApplication、
+ExecutionApplication、`PaperTradingService`、`PaperActiveRelease`、`ExecutionLease`、
+broker adapter、Shadow、Paper orchestration、Market / Account / Research 业务逻辑、
+`RuntimeEventsOrchestrator`、`RuntimeEventStore`、`export_service.py`、
+`DesktopSettingsService` 事务顺序、`DesktopCredentialService` 存储语义、
+`UserPreferences` 校验与 schema、IBKR 只读默认、Paper 安全门。
+
+明确留给后续：
+
+```text
+_probe_gateway / probe_ibkr_socket / gateway_badge                F2 之后再判断是否独立 F3
+MainWindow 其余 composition（closeEvent / shutdown / 启动装配）    MainWindow composition closure
+Dashboard 相关职责                                               未开始（本轮不碰）
+trading/live / AI / Python support metadata 清理                  未开始（本轮不碰）
+"the window owns the event store" 之类 docstring 漂移              随各自 capability 的下一轮改
+mutation_e2.ps1 / mutation_e4.ps1 缺少非零退出码尾巴               脚本健壮性，独立事项
+```
+
+### 32.15 判据
+
+Settings 的 render、凭据 save/clear 排序、偏好事务适配、provider 同步、两个确认与两个
+presentation fact 各自只有一个 owner；`UserPreferencesStore` / `DesktopSettingsService` /
+`DesktopCredentialService` 仍是各自的 canonical owner 且语义未改；`SettingsPage` 只
+render / emit；窗口只剩 composition。`RuntimeEventsOrchestrator` 的 F1 边界**未回退**
+（32.12 #17）。Gateway probe、MainWindow composition closure、Dashboard、trading/live/AI
+**未开始**。至此
+
+**v2O-F1 Runtime Events orchestration ✅**、**v2O-F2 Settings orchestration ✅**；
+System 剩余职责（Gateway probe 是否独立 F3）需重新扫描，随后才是 MainWindow composition
+closure 与 Final Architecture Closure。本轮**不**声称 "v2O-F System COMPLETE" /
+"System orchestration complete" / "MainWindow decomposition complete" /
+"Architecture Closure complete"。
 
 

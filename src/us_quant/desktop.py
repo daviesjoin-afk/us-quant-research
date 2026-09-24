@@ -151,7 +151,6 @@ from us_quant.trading.runtime.preflight import (
     calculate_quote_readiness_breakdown,
     evaluate_auto_quant_preflight,
 )
-from us_quant.trading.runtime.trading import TradingRuntime
 from us_quant.runtime_supervisor import RuntimeSnapshot, RuntimeSupervisor
 from us_quant.paper_order_models import PaperOrderReconciliation
 from us_quant.trading.ports.broker_execution import ExecutionRefused
@@ -178,7 +177,6 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     DUPLICATE_CONFIRM_MESSAGE,
     DUPLICATE_TITLE,
     PaperAccountReading,
-    PaperLaunchPublication,
     PaperLaunchRequest,
     PaperOrderChannel,
     PaperSessionBuildResult,
@@ -452,7 +450,6 @@ class MainWindow(QMainWindow):
         self._minute_recorded_keys: dict[
             tuple[str, str, str], bool
         ] = {}
-        self._last_stream_ingress_monotonic = 0.0
         self._paper_finalization_inflight = False
         self._last_paper_finalization_started: float | None = None
         self._last_runtime_events_refresh = 0.0
@@ -493,9 +490,21 @@ class MainWindow(QMainWindow):
         # grep.  The store is still owned here because the terminal export reads
         # it through the orchestrator, and the lease is still the shared one the
         # workflow controller composes.
-        self.trading_runtime: TradingRuntime | None = None
-        self.auto_quant_snapshot: AutoQuantSnapshot | None = None
-        self.paper_execution_health: PaperExecutionHealth | None = None
+        # The active Paper session's run -- the market ingress, the watchdog poll,
+        # pause/resume, an orderly stop -- belongs to ``paper_orchestrator``, built
+        # below.  Note what is *not* stored here any more: no ``trading_runtime``
+        # handle, no ``paper_execution_health``, and no compatibility property for
+        # either.  The runtime is held by the canonical chain
+        # (``paper_workflow`` -> coordinator -> engine) and by nobody else; a handle
+        # kept here was a second owner of a live session, which is why the Shadow
+        # and candidate gates now ask the orchestrator instead.
+        #
+        # What remains is *presentation only*: the last snapshot the execution route
+        # drew, kept so a page opened after a session ended still shows the session it
+        # is reporting on.  ``_paper_render_snapshot`` may be read by render paths and
+        # by nothing else -- no launch gate, no market or Shadow interlock, no broker,
+        # no stop and no lifecycle decision may consult it.
+        self._paper_render_snapshot: AutoQuantSnapshot | None = None
         # Paper and internal Shadow simulation share one explicit execution
         # lease.  The desktop renders controller results but never owns the
         # normal Paper event ordering itself.  The Shadow *handle* stays here
@@ -541,6 +550,14 @@ class MainWindow(QMainWindow):
             capital_limit_provider=lambda: self.execution_page.capital_limit(),
             order_channel_provider=self._auto_quant_order_channel,
             shadow_is_active=lambda: self.shadow_orchestrator.is_active,
+            # The market fact an orderly stop is judged against, as a provider: the
+            # Paper capability must not import Market, and the snapshot has to be the
+            # one that exists when the operator clicks rather than one frozen here.
+            market_snapshot_provider=lambda: self.market_orchestrator.snapshot,
+            # TEMPORARY -- removed by v2O-E3.  Active ingress must know whether the
+            # zero-state proof is running, and that proof is still this window's.
+            # The flag stays here; the orchestrator only reads it.
+            finalization_inflight_provider=lambda: self._paper_finalization_inflight,
             clear_arm_confirmation=lambda: self.execution_page.set_arm_confirmed(
                 False
             ),
@@ -551,11 +568,15 @@ class MainWindow(QMainWindow):
         )
         self.paper_orchestrator.refused.connect(self._report_paper_launch_refusal)
         self.paper_orchestrator.log_requested.connect(self._log)
-        self.paper_orchestrator.session_published.connect(
-            self._on_paper_session_published
+        # Every Paper result -- the launch that reached RUNNING and every later stream
+        # tick, poll, pause, resume and stop -- arrives here and nowhere else.  One
+        # handler means one render path and one place the E3 bridge can live until E3
+        # deletes it.
+        self.paper_orchestrator.result_changed.connect(
+            self._on_paper_result_changed
         )
         self.paper_orchestrator.runtime_event_requested.connect(
-            self._record_paper_launch_event
+            self._record_paper_runtime_event
         )
         # Research Scenario Capital: the initial-equity figure historical
         # research, replay, scan affordability and cross-sectional portfolio
@@ -678,11 +699,13 @@ class MainWindow(QMainWindow):
         # lifecycle (stale-BUY cancel, SELL intervention, health evaluation)
         # must keep running even when the market stream is down or stopped;
         # it only skips when stream ticks have driven the same watchdog
-        # recently.
+        # recently.  The heartbeat, the phase gate and the suppression window
+        # are all active-Paper orchestration, so the timer enters the
+        # orchestrator directly rather than through a window handler.
         self.paper_order_timer = QTimer(self)
         self.paper_order_timer.setInterval(1_000)
         self.paper_order_timer.timeout.connect(
-            self._poll_auto_quant_orders
+            self.paper_orchestrator.poll
         )
         self.paper_order_timer.start()
         self.extended_session_timer = QTimer(self)
@@ -1198,10 +1221,12 @@ class MainWindow(QMainWindow):
     def _connect_execution_page(self) -> None:
         """Wire the execution page's intents to the handlers that act on them.
 
-        Every entry is a page signal and an existing window handler: the page
-        reports what the operator asked for, and the orchestration that decides
-        whether it may happen lives here, where the workflow and the services
-        are.
+        Every entry is a page signal and one owner.  The session controls --
+        pause, resume and stop -- are *active Paper orchestration* and go straight
+        to ``paper_orchestrator``, which is the only thing that decides whether the
+        request may happen and what the workflow makes of it.  The rest still pass
+        through the window, because their orchestration is not Paper's: the launch
+        confirmation is presentation, and the recovery steps are v2O-E3.
         """
 
         page = self.execution_page
@@ -1211,9 +1236,9 @@ class MainWindow(QMainWindow):
         page.channel_check_requested.connect(self._check_auto_order_channel)
         page.start_requested.connect(self._confirm_and_start_auto_quant)
         page.stop_stream_requested.connect(self._stop_auto_market_data)
-        page.pause_requested.connect(self._pause_auto_quant_entries)
-        page.resume_requested.connect(self._resume_auto_quant_entries)
-        page.stop_requested.connect(self._stop_auto_quant)
+        page.pause_requested.connect(self.paper_orchestrator.pause)
+        page.resume_requested.connect(self.paper_orchestrator.resume)
+        page.stop_requested.connect(self.paper_orchestrator.stop)
         page.reconcile_requested.connect(self._reconnect_auto_order_service)
         page.resume_reconciliation_requested.connect(
             self._resume_auto_quant_from_reconciliation
@@ -1291,16 +1316,15 @@ class MainWindow(QMainWindow):
 
         The Paper interlock is the reason this bridge exists at all: the
         orchestrator may not import the Paper workflow, so the refusal decision
-        stays here and the market layer is only asked once it is allowed.
+        stays here and the market layer is only asked once it is allowed.  The
+        fact it is decided on is the Paper capability's own answer
+        (``has_runtime_obligations``), read from the canonical result rather than
+        from a snapshot cache this window keeps, so the interlock and the panel
+        the operator is looking at can never disagree.
         """
 
         if (
-            self.auto_quant_snapshot is not None
-            and (
-                self.auto_quant_snapshot.active
-                or self.auto_quant_snapshot.positions
-                or self.auto_quant_snapshot.pending_orders
-            )
+            self.paper_orchestrator.has_runtime_obligations
             and not allow_auto_session_switch
         ):
             QMessageBox.warning(
@@ -1324,14 +1348,7 @@ class MainWindow(QMainWindow):
         join verdict and the switch path both see the truth.
         """
 
-        if (
-            self.auto_quant_snapshot is not None
-            and (
-                self.auto_quant_snapshot.active
-                or self.auto_quant_snapshot.positions
-                or self.auto_quant_snapshot.pending_orders
-            )
-        ):
+        if self.paper_orchestrator.has_runtime_obligations:
             QMessageBox.warning(
                 self,
                 "自动量化会话仍在运行",
@@ -1384,7 +1401,9 @@ class MainWindow(QMainWindow):
         round will own: minute evidence, auto-quant candidates, execution
         preflight, Paper and Shadow.  What this method must never do again is
         render the market page, touch the worker or maintain the readiness
-        cache -- those moved into the orchestrator, and a guard pins that.
+        cache -- those moved into the orchestrator, and a guard pins that -- and
+        since v2O-E2 neither does it decide anything about the Paper session: it
+        hands each capability the fact and lets the capability answer for itself.
         """
 
         self.workflow_controller.market_account.update(
@@ -1396,24 +1415,12 @@ class MainWindow(QMainWindow):
         self._publish_dashboard_view()
         self._populate_auto_quant_candidates()
         self.targeted_session_orchestrator.refresh_preflight()
-        if (
-            not getattr(self, "_paper_finalization_inflight", False)
-            and self.paper_trading.phase() in {
-            PaperWorkflowPhase.RUNNING,
-            PaperWorkflowPhase.PAUSED,
-            PaperWorkflowPhase.STOPPING,
-            }
-        ):
-            self._last_stream_ingress_monotonic = monotonic()
-            try:
-                self._apply_paper_workflow_result(
-                    self.paper_workflow.on_stream(snapshot)
-                )
-            except WorkflowStateError as error:
-                self._log(str(error))
-        # The internal simulation consumes the same market fact.  It is handed
-        # the snapshot and repaints its own session panel -- a no-op when nothing
-        # runs, so this bridge stays a fan-out rather than a Shadow decision.
+        # Paper and Shadow each decide for themselves whether this fact belongs to a
+        # live session, so the fan-out hands it over and stops there.  The window no
+        # longer checks the Paper phase, stamps an ingress or reaches the workflow here:
+        # "when does the active session consume the market?" is one owner's question,
+        # and a second answer to it is how a halted session gets re-entered.
+        self.paper_orchestrator.on_market_snapshot(snapshot)
         self.shadow_orchestrator.on_market_snapshot(snapshot)
 
     def _on_market_snapshot_invalidated(self) -> None:
@@ -1552,13 +1559,12 @@ class MainWindow(QMainWindow):
 
         Read here because the competing session's lifecycle is the execution
         route's, not Shadow's: the Shadow orchestrator must not learn that an
-        auto-rotation session exists, only whether it may start.
+        auto-rotation session exists, only whether it may start.  The answer comes
+        from the Paper capability, which reads its own canonical result -- the window
+        holds no runtime handle to ask.
         """
 
-        return (
-            self.trading_runtime is not None
-            and self.trading_runtime.session.active
-        )
+        return self.paper_orchestrator.runtime_active
 
     def _report_shadow_refusal(self, title: str, message: str) -> None:
         """Surface a start the Shadow layer refused before building anything."""
@@ -2147,7 +2153,7 @@ class MainWindow(QMainWindow):
             return
         if (
             self.paper_trading.has_order_service()
-            or self.trading_runtime is not None
+            or self.paper_orchestrator.runtime_active
         ):
             QMessageBox.information(
                 self,
@@ -2236,10 +2242,7 @@ class MainWindow(QMainWindow):
                 "请先在总览刷新官方标的池，再执行全市场扫描。",
             )
             return
-        if (
-            self.trading_runtime is not None
-            and self.trading_runtime.session.active
-        ):
+        if self.paper_orchestrator.runtime_active:
             QMessageBox.information(
                 self,
                 "自动量化运行中",
@@ -2441,14 +2444,7 @@ class MainWindow(QMainWindow):
         self.market_orchestrator.start()
 
     def _stop_auto_market_data(self) -> None:
-        if (
-            self.auto_quant_snapshot is not None
-            and (
-                self.auto_quant_snapshot.active
-                or self.auto_quant_snapshot.positions
-                or self.auto_quant_snapshot.pending_orders
-            )
-        ):
+        if self.paper_orchestrator.has_runtime_obligations:
             QMessageBox.information(
                 self,
                 "请先停止模拟下单",
@@ -2500,8 +2496,14 @@ class MainWindow(QMainWindow):
 
         QMessageBox.warning(self, title, message)
 
-    def _record_paper_launch_event(self, event: object) -> None:
-        """Record one launch runtime event; the store is the window's."""
+    def _record_paper_runtime_event(self, event: object) -> None:
+        """Record one Paper runtime event; the store is the window's.
+
+        One handler for every Paper event, launch included: the capability says which
+        events an operation produced and this writes each one exactly once.  It does not
+        decide severity, component or code -- those are the capability's, verbatim from
+        the retired handlers.
+        """
 
         self._record_runtime_event(
             severity=event.severity,
@@ -2509,21 +2511,6 @@ class MainWindow(QMainWindow):
             code=event.code,
             message=event.message,
         )
-
-    def _on_paper_session_published(
-        self, publication: PaperLaunchPublication
-    ) -> None:
-        """Adopt one published session and render it.
-
-        The two assignments are the *active-session* state this window still owns
-        until v2O-E2 moves it: the session's runtime handle and the snapshot the
-        execution route draws.  They are set here, in response to the capability's
-        publication, rather than by the launch sequence itself.
-        """
-
-        self.trading_runtime = publication.runtime
-        self.auto_quant_snapshot = publication.result.engine_snapshot
-        self._apply_paper_workflow_result(publication.result)
 
     def _auto_quant_order_channel(self) -> PaperOrderChannel:
         """The order channel an attempt connects, composed from current settings.
@@ -2639,7 +2626,6 @@ class MainWindow(QMainWindow):
             orders=service,
             session_id=snapshot.session_id,
             candidate_count=snapshot.candidate_count,
-            runtime=runtime,
             max_order_notional=(
                 Decimal(paper_capital) * config.max_position_fraction
             ),
@@ -2676,15 +2662,64 @@ class MainWindow(QMainWindow):
         )
         return evaluate_paper_execution_health(reconciliations=models, **kwargs)  # type: ignore[arg-type]
 
-    def _apply_paper_workflow_result(self, result: PaperSessionResult) -> None:
-        """Render one controller result; desktop never replays its ingress."""
-        self.auto_quant_snapshot = result.engine_snapshot  # type: ignore[assignment]
-        self.paper_execution_health = result.health  # type: ignore[assignment]
-        self._render_auto_quant_snapshot()
+    def _publish_window_paper_result(self, result: PaperSessionResult) -> None:
+        """Publish a result the *window* produced, and record its events.
+
+        TEMPORARY -- removed by v2O-E3.  Three paths still call the workflow directly
+        from here because they are E3's to own -- the finalization proof, the manual
+        reconciliation reconnect, and the confirmation that resumes a reconciled
+        session.  A result they produce has never been through
+        ``PaperOrchestrator._publish_result``, so the window does both halves itself:
+        request each event once, then hand the result to the one render path.
+
+        Nothing that the capability already published may be routed through here -- a
+        second publication is how an event gets recorded twice.
+        """
+
         for event in result.events:
-            self._record_runtime_event(severity=event.severity, component="paper_execution", code=event.code, message=event.message)
+            self._record_runtime_event(
+                severity=event.severity,
+                component="paper_execution",
+                code=event.code,
+                message=event.message,
+            )
+        self._on_paper_result_changed(result)
+
+    def _on_paper_result_changed(self, result: PaperSessionResult) -> None:
+        """Render one Paper result; the events were requested upstream.
+
+        The window's one result handler, and deliberately thin.  It does two clearly
+        separated things:
+
+        * **presentation** -- keep the snapshot the execution route draws, repaint from
+          it, and republish the route's control state.  Nothing here decides anything
+          about the session;
+        * **the temporary v2O-E3 bridge** in :meth:`_handle_paper_e3_result_bridge`,
+          kept in its own method so E3 can delete it whole rather than excavating
+          business logic back out of a render path.
+
+        It must never reach the workflow: no ``on_stream``, no ``poll``, no
+        ``set_entries_paused``, no ``request_stop``, and no risk, execution or broker
+        mutation.  Those are the capability's, and a guard pins that.
+        """
+
+        self._paper_render_snapshot = result.engine_snapshot  # type: ignore[assignment]
+        self._render_auto_quant_snapshot()
         # Reconciliation controls *and* the refused-close recovery hook.
         self._apply_paper_workflow_button_state()
+        self._handle_paper_e3_result_bridge(result)
+
+    def _handle_paper_e3_result_bridge(self, result: PaperSessionResult) -> None:
+        """TEMPORARY -- removed by v2O-E3.
+
+        The two decisions about a result that are still the window's, because the
+        lifecycle they belong to is E3's: whether a ``STOPPING`` session should start
+        the broker zero-state proof, and whether a finalized session can be closed out.
+
+        Kept verbatim, and kept together, so that deleting this method is the whole of
+        E3's work on the render path.
+        """
+
         phase = self.paper_trading.phase()
         if (
             phase is PaperWorkflowPhase.STOPPING
@@ -2758,7 +2793,7 @@ class MainWindow(QMainWindow):
         """Render finalization while suppressing an immediate duplicate task."""
 
         try:
-            self._apply_paper_workflow_result(result)  # type: ignore[arg-type]
+            self._publish_window_paper_result(result)  # type: ignore[arg-type]
         finally:
             self._paper_finalization_inflight = False
 
@@ -2771,34 +2806,6 @@ class MainWindow(QMainWindow):
         # ``fail_finalization_refresh`` moves STOPPING -> HALTED, the automatic
         # failure route; the button-state helper carries the recovery hook.
         self._apply_paper_workflow_button_state()
-
-    def _pause_auto_quant_entries(self) -> None:
-        try:
-            self._apply_paper_workflow_result(self.paper_workflow.set_entries_paused(True))
-        except WorkflowStateError as error:
-            self._log(str(error))
-            return
-        self._log(
-            "自动量化已暂停新开仓；现有持仓的止损、止盈和时段退出继续运行。"
-        )
-
-    def _resume_auto_quant_entries(self) -> None:
-        try:
-            self._apply_paper_workflow_result(self.paper_workflow.set_entries_paused(False))
-        except WorkflowStateError as error:
-            self._log(str(error))
-            return
-        self._log("自动量化已恢复新开仓。")
-
-    def _stop_auto_quant(self) -> None:
-        try:
-            self._apply_paper_workflow_result(
-                self.paper_workflow.request_stop(
-                    self.market_orchestrator.snapshot
-                )
-            )
-        except WorkflowStateError as error:
-            self._log(str(error))
 
     def _resume_auto_quant_from_reconciliation(self) -> None:
         """Resume only after an explicit reconciliation action and confirmation.
@@ -2829,7 +2836,7 @@ class MainWindow(QMainWindow):
 
         started = self._start_task(
             task,
-            on_success=lambda result: self._apply_paper_workflow_result(result),
+            on_success=lambda result: self._publish_window_paper_result(result),
             on_failure=self._auto_order_resume_failed,
             start_message="Paper reconciliation confirmation in progress...",
             resource_group="broker",
@@ -2837,26 +2844,6 @@ class MainWindow(QMainWindow):
         if not started:
             # The controller was not invoked; keep the proof available.
             self._apply_paper_workflow_button_state()
-
-    def _poll_auto_quant_orders(self) -> None:
-        if getattr(self, "_paper_finalization_inflight", False):
-            return
-        if (
-            monotonic() - self._last_stream_ingress_monotonic < 1.2
-        ):
-            # Stream ticks already drove the identical watchdog sequence
-            # (drain, stale-BUY cancel, SELL intervention, health).
-            return
-        if self.paper_trading.phase() not in {
-            PaperWorkflowPhase.RUNNING,
-            PaperWorkflowPhase.PAUSED,
-            PaperWorkflowPhase.STOPPING,
-        }:
-            return
-        try:
-            self._apply_paper_workflow_result(self.paper_workflow.poll())
-        except WorkflowStateError as error:
-            self._log(str(error))
 
     def _reconnect_auto_order_service(self) -> None:
         if not self.paper_trading.has_order_service():
@@ -2908,7 +2895,7 @@ class MainWindow(QMainWindow):
     def _auto_order_service_reconnected(self, result: object) -> None:
         # Reconnect is evidence collection only.  It must never resume or
         # re-submit; the separate explicit confirmation handles that.
-        self._apply_paper_workflow_result(result)  # type: ignore[arg-type]
+        self._publish_window_paper_result(result)  # type: ignore[arg-type]
 
     def _apply_paper_workflow_button_state(self) -> None:
         """Render every execution control from controller truth.
@@ -2943,10 +2930,12 @@ class MainWindow(QMainWindow):
         if not self.paper_workflow.finalize_if_safe():
             return
         # Ownership is released only now, after the workflow itself reported the
-        # session finalized -- a successful disconnect alone proves nothing.
+        # session finalized -- a successful disconnect alone proves nothing.  What the
+        # window no longer has to do is *forget* anything: it kept no runtime handle and
+        # no health cache, so releasing the order service is the whole of it.  The
+        # presentation snapshot stays, which is what keeps the route showing the session
+        # it just finished instead of blanking out.
         self.paper_trading.clear_active()
-        self.trading_runtime = None
-        self.paper_execution_health = None
         self.execution_page.render_execution_health(
             "执行对账：会话已安全结束，券商持仓和订单均已核对。"
         )
@@ -2983,7 +2972,7 @@ class MainWindow(QMainWindow):
                 recently_ready=self.market_orchestrator.was_recently_ready,
             )
         )
-        snapshot = self.auto_quant_snapshot
+        snapshot = self._paper_render_snapshot
         if snapshot is None:
             return
         candidate_symbols = {row.symbol for row in candidates}
@@ -3093,7 +3082,7 @@ class MainWindow(QMainWindow):
             or self._channel_check_inflight
             or self.paper_trading.phase() is PaperWorkflowPhase.CONNECTING
             or self.paper_trading.has_order_service()
-            or self.trading_runtime is not None
+            or self.paper_orchestrator.runtime_active
         )
 
     def _set_launch_busy(self, busy: bool) -> None:
@@ -3197,7 +3186,7 @@ class MainWindow(QMainWindow):
         """
 
         self._publish_dashboard_view()
-        if self.auto_quant_snapshot is not None:
+        if self._paper_render_snapshot is not None:
             self._render_auto_quant_snapshot()
         self.targeted_session_orchestrator.refresh_preflight()
         self._refresh_auto_quant_preflight()
@@ -3828,7 +3817,10 @@ class MainWindow(QMainWindow):
             }:
                 # Automatic safe stop: request_stop -> STOPPING -> the
                 # zero-state proof.  The gate stays down while that runs.
-                self._stop_auto_quant()
+                # This window still decides *when* a shutdown asks for the stop --
+                # that is E4's -- but the stop itself is the active Paper
+                # orchestrator's, so it goes through the one owner.
+                self.paper_orchestrator.stop()
             # But if no automatic route is left -- HALTED, RECONCILING or
             # RECONCILING_READY can only be left by the operator, and every
             # one of those steps is a task -- this close has been refused in

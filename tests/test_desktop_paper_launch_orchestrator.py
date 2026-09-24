@@ -47,7 +47,6 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     PREFLIGHT_CHANGED_MESSAGE,
     STALE_PLAN_MESSAGE,
     PaperAccountReading,
-    PaperLaunchPublication,
     PaperLaunchRequest,
     PaperOrderChannel,
     PaperSessionBuildResult,
@@ -171,12 +170,19 @@ class _Workflow:
 
 
 class _Result:
-    """Stands in for ``PaperSessionResult``; carries a snapshot identity."""
+    """Stands in for ``PaperSessionResult``; carries a snapshot identity.
+
+    ``events`` is present because the capability requests one runtime-event write per
+    event a result carries, launch included: a fake without it would make the launch
+    publication path unreachable rather than asserted.
+    """
 
     class _State:
         finalized = False
 
     state = _State()
+    events: tuple[object, ...] = ()
+    health = None
 
     def __init__(self) -> None:
         self.engine_snapshot = {"session_id": "session-1", "active": True}
@@ -338,7 +344,10 @@ class _Events:
     def __init__(self) -> None:
         self.refusals: list[tuple[str, str]] = []
         self.logs: list[str] = []
-        self.publications: list[PaperLaunchPublication] = []
+        # The workflow's own results, as ``result_changed`` carries them.  The launch
+        # publishes through the same path every later operation uses, so this is where
+        # a launch's outcome is observed now -- fakes make it the ``_Result`` above.
+        self.results: list[object] = []
         self.runtime_events: list[object] = []
 
 
@@ -443,7 +452,6 @@ class _Builder:
             orders=service,
             session_id="session-1",
             candidate_count=len(request.candidates),
-            runtime="runtime",
             max_order_notional=Decimal("1000"),
         )
 
@@ -459,11 +467,17 @@ def _build(
     candidates: tuple[_Row, ...] | None = None,
     capital_limit: Decimal = Decimal("20000"),
     shadow_active: bool = False,
+    market_snapshot: object | None = None,
+    finalization_inflight: bool = False,
+    clock: object | None = None,
 ):
     """Assemble an orchestrator over fakes, returning it with its collaborators.
 
     ``preflights`` is a queue so a test can make the second pass disagree with the
-    first -- which is the whole point of the re-run.
+    first -- which is the whole point of the re-run.  The three E2 providers are given
+    inert defaults here: these tests are about the launch, and the active-session
+    behaviours have their own file, where the clock and both providers are driven
+    deliberately.
     """
 
     workflow = workflow or _Workflow()
@@ -497,15 +511,18 @@ def _build(
             config="config", repository="repository", extended_hours_enabled=False
         ),
         shadow_is_active=lambda: shadow_active,
+        market_snapshot_provider=lambda: market_snapshot,
+        finalization_inflight_provider=lambda: finalization_inflight,
         clear_arm_confirmation=lambda: arm_clears.append(1),
         render_launch_state=lambda: renders.append(None),
         render_launch_context=lambda summary: renders.append(summary),
+        **({"clock": clock} if clock is not None else {}),
     )
     orchestrator.refused.connect(
         lambda title, message: events.refusals.append((title, message))
     )
     orchestrator.log_requested.connect(events.logs.append)
-    orchestrator.session_published.connect(events.publications.append)
+    orchestrator.result_changed.connect(events.results.append)
     orchestrator.runtime_event_requested.connect(events.runtime_events.append)
     return (
         type(
@@ -665,10 +682,9 @@ def test_a_successful_launch_publishes_the_session_and_promotes_once() -> None:
     assert harness.trading.promoted == ["1"]
     assert harness.trading.active is not None
     assert harness.trading.candidate_ids == set()
-    assert len(harness.events.publications) == 1
-    publication = harness.events.publications[0]
-    assert publication.session_id == "session-1"
-    assert publication.candidate_count == 1
+    assert len(harness.events.results) == 1
+    result = harness.events.results[0]
+    assert result.engine_snapshot["session_id"] == "session-1"
     assert len(harness.events.runtime_events) == 1
     event = harness.events.runtime_events[0]
     assert event.code == messages.PAPER_ARMED_CODE
@@ -960,7 +976,7 @@ def test_a_broker_gate_refuses_without_publishing(candidate, expected) -> None:
     assert harness.workflow.published == []
     assert harness.workflow.phase is PaperWorkflowPhase.READY
     assert harness.workflow.lease.active is False
-    assert harness.events.publications == []
+    assert harness.events.results == []
     assert expected in harness.events.refusals[-1][1]
 
 
@@ -1101,7 +1117,7 @@ def test_a_promotion_refused_before_publication_leaves_no_session() -> None:
     assert harness.trading.reserved == []
     assert harness.trading.cancelled == []
     assert harness.trading.promoted == []
-    assert harness.events.publications == []
+    assert harness.events.results == []
 
 
 def test_a_publish_failure_gives_the_reservation_back_and_rolls_back() -> None:
@@ -1128,7 +1144,7 @@ def test_a_publish_failure_gives_the_reservation_back_and_rolls_back() -> None:
     assert harness.workflow.phase is PaperWorkflowPhase.READY
     assert harness.workflow.lease.active is False
     assert harness.workflow.published == []
-    assert harness.events.publications == []
+    assert harness.events.results == []
     assert harness.events.refusals[-1][0] == messages.LAUNCH_FAILED_TITLE
 
 
@@ -1163,7 +1179,7 @@ def test_a_rollback_that_cannot_give_the_slot_back_stays_in_flight() -> None:
     assert harness.trading.active is not None
     assert harness.trading.cancelled == []
     assert harness.arm_clears == []
-    assert harness.events.publications == []
+    assert harness.events.results == []
     # And it is loud, under a code of its own rather than the published-session one.
     assert harness.events.refusals[-1][0] == messages.PAPER_LAUNCH_ROLLBACK_TITLE
     event = harness.events.runtime_events[-1]
@@ -1243,7 +1259,7 @@ def test_the_orchestrator_never_publishes_when_the_broker_gate_refuses() -> None
 
     _launch(harness)
 
-    assert harness.events.publications == []
+    assert harness.events.results == []
     assert harness.events.runtime_events == []
     assert harness.builder.calls == []
     assert harness.workflow.published == []
@@ -1439,7 +1455,7 @@ def test_a_commit_failure_after_publication_still_leaves_the_session_owned() -> 
     )
     # The session is deliberately *not* handed to the desktop: the fault is reported
     # rather than papered over by adopting a runtime whose launch bookkeeping failed.
-    assert harness.events.publications == []
+    assert harness.events.results == []
 
 
 def test_a_commit_failure_after_publication_is_reported_as_an_invariant() -> None:

@@ -24,18 +24,28 @@ def _orchestrator_source(name: str) -> str:
 
 
 def test_normal_paper_ingress_delegates_once_to_workflow_controller() -> None:
+    """Each active-session intent reaches the workflow exactly once, from the capability.
+
+    v2O-E2 moved the pause/resume/stop controls, the watchdog poll and the market
+    ingress into ``PaperOrchestrator``, so these read the capability -- and the
+    fan-out assertion is the other half: the window hands the fact over instead of
+    delegating on the session's behalf.
+    """
+
     expected = {
-        "_pause_auto_quant_entries": "paper_workflow.set_entries_paused(True)",
-        "_resume_auto_quant_entries": "paper_workflow.set_entries_paused(False)",
-        "_stop_auto_quant": "paper_workflow.request_stop",
-        "_poll_auto_quant_orders": "paper_workflow.poll()",
-        "_on_market_snapshot_changed": "paper_workflow.on_stream(snapshot)",
+        "pause": "self._workflow.set_entries_paused(True)",
+        "resume": "self._workflow.set_entries_paused(False)",
+        "stop": "self._workflow.request_stop",
+        "poll": "self._workflow.poll()",
+        "on_market_snapshot": "self._workflow.on_stream(snapshot)",
     }
     for name, delegation in expected.items():
-        source = _source(name)
-        assert source.count(delegation) == 1
+        source = _orchestrator_source(name)
+        assert source.count(delegation) == 1, name
     stream_source = _source("_on_market_snapshot_changed")
-    assert "_poll_auto_quant_orders()" not in stream_source
+    assert "paper_orchestrator.on_market_snapshot(snapshot)" in stream_source
+    assert "paper_workflow.on_stream" not in stream_source
+    assert "paper_workflow.poll" not in stream_source
 
 
 def test_manual_resume_cannot_resubmit_pending_orders() -> None:
@@ -165,11 +175,18 @@ def test_finalization_proves_zero_state_before_disconnect_and_lease_release() ->
 
 
 def test_finalization_suppresses_desktop_poll_and_stream_ingress() -> None:
-    poll_source = _source("_poll_auto_quant_orders")
-    stream_source = _source("_on_market_snapshot_changed")
-    assert poll_source.index("_paper_finalization_inflight") < poll_source.index(
-        "paper_workflow.poll()"
+    """Both entry points consult the finalization seam *before* they do anything.
+
+    The deferral moved with the operations in v2O-E2, so the ordering is asserted on
+    the capability: a poll or an ingress that ran first and consulted the seam second
+    would interleave two readers of the same broker connection.
+    """
+
+    poll_source = _orchestrator_source("poll")
+    stream_source = _orchestrator_source("on_market_snapshot")
+    assert poll_source.index("_finalization_inflight_provider()") < poll_source.index(
+        "self._workflow.poll()"
     )
-    assert stream_source.index("_paper_finalization_inflight") < stream_source.index(
-        "paper_workflow.on_stream(snapshot)"
-    )
+    assert stream_source.index(
+        "_finalization_inflight_provider()"
+    ) < stream_source.index("self._workflow.on_stream(snapshot)")

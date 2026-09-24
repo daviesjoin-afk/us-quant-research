@@ -485,6 +485,26 @@ class _Snapshot:
         self.pending_orders = pending
 
 
+class _PaperResult:
+    """The one fact the interlock reads: the workflow's rendered engine snapshot."""
+
+    def __init__(self, snapshot: object) -> None:
+        self.engine_snapshot = snapshot
+
+
+def _hold_paper_facts(window, snapshot) -> None:
+    """Install a Paper session fact where the *workflow* keeps it.
+
+    The interlock reads the canonical result now rather than the snapshot cache this
+    window used to keep, so a test that wants a Paper session to hold something has to
+    put it where the workflow keeps it.  ``None`` withdraws the session.
+    """
+
+    window.paper_workflow._result = (
+        None if snapshot is None else _PaperResult(snapshot)
+    )
+
+
 def test_an_active_paper_session_refuses_a_normal_stop(monkeypatch) -> None:
     """Stopping the feed under a live session would starve its exit gates."""
 
@@ -493,7 +513,7 @@ def test_an_active_paper_session_refuses_a_normal_stop(monkeypatch) -> None:
         messages = _capture_messages(monkeypatch)
         worker = _FakeWorker(running=True)
         window.market_orchestrator._worker = worker
-        window.auto_quant_snapshot = _Snapshot(active=True)
+        _hold_paper_facts(window, _Snapshot(active=True))
 
         refused = window._stop_market_data()
 
@@ -503,7 +523,7 @@ def test_an_active_paper_session_refuses_a_normal_stop(monkeypatch) -> None:
         # And the feed is still running: a refusal must not half-stop it.
         assert worker.requested is False
     finally:
-        window.auto_quant_snapshot = None
+        _hold_paper_facts(window, None)
         window.market_orchestrator._worker = None
         window.close()
         window.deleteLater()
@@ -514,14 +534,17 @@ def test_open_positions_refuse_a_normal_stop(monkeypatch) -> None:
     try:
         messages = _capture_messages(monkeypatch)
         window.market_orchestrator._worker = _FakeWorker(running=True)
-        window.auto_quant_snapshot = _Snapshot(
-            positions=(object(),), pending=()
+        _hold_paper_facts(
+            window,
+            _Snapshot(
+                positions=(object(),), pending=()
+            ),
         )
 
         assert window._stop_market_data() is False
         assert messages
     finally:
-        window.auto_quant_snapshot = None
+        _hold_paper_facts(window, None)
         window.market_orchestrator._worker = None
         window.close()
         window.deleteLater()
@@ -532,11 +555,11 @@ def test_a_pending_order_refuses_a_normal_stop(monkeypatch) -> None:
     try:
         _capture_messages(monkeypatch)
         window.market_orchestrator._worker = _FakeWorker(running=True)
-        window.auto_quant_snapshot = _Snapshot(pending=(object(),))
+        _hold_paper_facts(window, _Snapshot(pending=(object(),)))
 
         assert window._stop_market_data() is False
     finally:
-        window.auto_quant_snapshot = None
+        _hold_paper_facts(window, None)
         window.market_orchestrator._worker = None
         window.close()
         window.deleteLater()
@@ -552,7 +575,7 @@ def test_the_declared_auto_session_switch_path_is_still_allowed(
         _capture_messages(monkeypatch)
         worker = _FakeWorker(running=True)
         window.market_orchestrator._worker = worker
-        window.auto_quant_snapshot = _Snapshot(active=True)
+        _hold_paper_facts(window, _Snapshot(active=True))
         window.market_page.set_subscription_symbols(("SPY",))
         # The automatic path runs the whole switch, which would build a real
         # feed once the fake worker reports itself stopped; the activation is
@@ -568,7 +591,7 @@ def test_the_declared_auto_session_switch_path_is_still_allowed(
         assert worker.requested is True
         assert activated == ["start"]
     finally:
-        window.auto_quant_snapshot = None
+        _hold_paper_facts(window, None)
         window.market_orchestrator._worker = None
         window.close()
         window.deleteLater()
@@ -584,7 +607,7 @@ def test_a_normal_switch_is_refused_while_a_paper_session_holds(
         messages = _capture_messages(monkeypatch)
         worker = _FakeWorker(running=True)
         window.market_orchestrator._worker = worker
-        window.auto_quant_snapshot = _Snapshot(active=True)
+        _hold_paper_facts(window, _Snapshot(active=True))
         window.market_page.set_subscription_symbols(("SPY",))
 
         window._request_market_switch("ibkr")
@@ -592,7 +615,7 @@ def test_a_normal_switch_is_refused_while_a_paper_session_holds(
         assert worker.requested is False
         assert len(messages) == 1
     finally:
-        window.auto_quant_snapshot = None
+        _hold_paper_facts(window, None)
         window.market_orchestrator._worker = None
         window.close()
         window.deleteLater()

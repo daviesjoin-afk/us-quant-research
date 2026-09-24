@@ -27,32 +27,35 @@ from us_quant.trading.application.strategy_selection import StrategySelectionPur
 
 _APP = QApplication.instance() or QApplication([])
 
-#: Each page signal and the window method that must receive it, in the order the
-#: window's wiring table declares them.
+#: Each page signal and the handler that must receive it, in the order the window's
+#: wiring table declares them.  A target is a *path*, not a name, because the session
+#: controls belong to the capability: ``self.paper_orchestrator.pause`` is where the
+#: click lands, and a test that patched the window instead would observe nothing while
+#: the button was dead.
 EXPECTED_WIRING = (
-    ("strategy_selected", "_auto_strategy_selected"),
-    ("preflight_inputs_changed", "_refresh_auto_quant_preflight"),
-    ("prepare_requested", "_prepare_auto_quant_candidates"),
-    ("channel_check_requested", "_check_auto_order_channel"),
-    ("start_requested", "_confirm_and_start_auto_quant"),
-    ("stop_stream_requested", "_stop_auto_market_data"),
-    ("pause_requested", "_pause_auto_quant_entries"),
-    ("resume_requested", "_resume_auto_quant_entries"),
-    ("stop_requested", "_stop_auto_quant"),
-    ("reconcile_requested", "_reconnect_auto_order_service"),
-    ("resume_reconciliation_requested", "_resume_auto_quant_from_reconciliation"),
+    ("strategy_selected", "self._auto_strategy_selected"),
+    ("preflight_inputs_changed", "self._refresh_auto_quant_preflight"),
+    ("prepare_requested", "self._prepare_auto_quant_candidates"),
+    ("channel_check_requested", "self._check_auto_order_channel"),
+    ("start_requested", "self._confirm_and_start_auto_quant"),
+    ("stop_stream_requested", "self._stop_auto_market_data"),
+    ("pause_requested", "self.paper_orchestrator.pause"),
+    ("resume_requested", "self.paper_orchestrator.resume"),
+    ("stop_requested", "self.paper_orchestrator.stop"),
+    ("reconcile_requested", "self._reconnect_auto_order_service"),
+    ("resume_reconciliation_requested", "self._resume_auto_quant_from_reconciliation"),
 )
 
 #: The buttons that must reach a handler, in click order.
 CLICK_ORDER = (
-    ("prepare_button", "_prepare_auto_quant_candidates"),
-    ("channel_check_button", "_check_auto_order_channel"),
-    ("start_button", "_confirm_and_start_auto_quant"),
-    ("stop_stream_button", "_stop_auto_market_data"),
-    ("pause_button", "_pause_auto_quant_entries"),
-    ("resume_button", "_resume_auto_quant_entries"),
-    ("stop_button", "_stop_auto_quant"),
-    ("resume_reconciliation_button", "_resume_auto_quant_from_reconciliation"),
+    ("prepare_button", "self._prepare_auto_quant_candidates"),
+    ("channel_check_button", "self._check_auto_order_channel"),
+    ("start_button", "self._confirm_and_start_auto_quant"),
+    ("stop_stream_button", "self._stop_auto_market_data"),
+    ("pause_button", "self.paper_orchestrator.pause"),
+    ("resume_button", "self.paper_orchestrator.resume"),
+    ("stop_button", "self.paper_orchestrator.stop"),
+    ("resume_reconciliation_button", "self._resume_auto_quant_from_reconciliation"),
 )
 
 
@@ -60,6 +63,21 @@ def _window() -> MainWindow:
     window = MainWindow()
     _APP.processEvents()
     return window
+
+
+def _handler_owner(window: MainWindow, target: str) -> tuple[object, str]:
+    """Resolve ``self.paper_orchestrator.pause`` to ``(orchestrator, "pause")``.
+
+    The capability's own attributes are addressed from the window, so a recorder has to
+    be installed on the object the click actually lands on.
+    """
+
+    owner, _, name = target.rpartition(".")
+    resolved: object = window
+    for part in owner.split("."):
+        if part != "self":
+            resolved = getattr(resolved, part)
+    return resolved, name
 
 
 def _all_enabled() -> ExecutionControlState:
@@ -83,8 +101,9 @@ def _all_enabled() -> ExecutionControlState:
 def test_every_execution_intent_has_a_handler_on_both_sides() -> None:
     window = _window()
     try:
-        for signal, handler in EXPECTED_WIRING:
-            assert hasattr(MainWindow, handler), handler
+        for signal, target in EXPECTED_WIRING:
+            owner, name = _handler_owner(window, target)
+            assert hasattr(owner, name), target
             assert hasattr(window.execution_page, signal), signal
     finally:
         window.close()
@@ -96,27 +115,28 @@ def test_a_real_click_reaches_the_window_handler(monkeypatch) -> None:
 
     The handlers are recorded rather than invoked, and the connections are then
     rebuilt against the recorders -- so this asserts the page's signals and the
-    window's table agree, which is the property a dead button violates.
+    window's table agree, which is the property a dead button violates.  The
+    recorders are installed on the *owner* of each target, which for the three
+    session controls is the capability itself.
     """
 
     window = _window()
     try:
         page = window.execution_page
         seen: list[str] = []
-        for _signal, handler in EXPECTED_WIRING:
-            monkeypatch.setattr(
-                window, handler, lambda handler=handler: seen.append(handler)
-            )
-        for signal, _handler in EXPECTED_WIRING:
+        for _signal, target in EXPECTED_WIRING:
+            owner, name = _handler_owner(window, target)
+            monkeypatch.setattr(owner, name, lambda name=name: seen.append(name))
+        for signal, _target in EXPECTED_WIRING:
             getattr(page, signal).disconnect()
         window._connect_execution_page()
 
         page.set_control_state(_all_enabled())
-        for attribute, _handler in CLICK_ORDER:
+        for attribute, _target in CLICK_ORDER:
             getattr(page.controls, attribute).click()
         page.details.reconcile_button.click()
 
-        assert seen == [handler for _attribute, handler in CLICK_ORDER] + [
+        assert seen == [target.rpartition(".")[2] for _attribute, target in CLICK_ORDER] + [
             "_reconnect_auto_order_service"
         ]
     finally:

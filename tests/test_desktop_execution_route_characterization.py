@@ -10,7 +10,7 @@ What changed is only *where* the window keeps them: the window now knows one
 object, ``self.execution_page``, and the controls inside it are the page's
 business.  The tests read them through the page for the same reason.
 
-The phase-driven cases go through ``_apply_paper_workflow_result`` rather than
+The phase-driven cases go through the window's one result handler rather than
 poking the controls, because the mapping is produced by the render path and a
 test that set the controls directly would pass with that path broken.
 """
@@ -67,7 +67,7 @@ def _apply(window: MainWindow, phase: PaperWorkflowPhase, *, awaiting=False):
     """Drive one result through the real render path for ``phase``."""
 
     window.paper_workflow = _Phase(phase, awaiting=awaiting)  # type: ignore[assignment]
-    window._apply_paper_workflow_result(_Result())  # type: ignore[arg-type]
+    window._on_paper_result_changed(_Result())  # type: ignore[arg-type]
 
 
 def test_the_execution_route_starts_ready_to_prepare_only() -> None:
@@ -207,7 +207,7 @@ def test_the_candidates_are_visible_before_a_session_is_armed() -> None:
 
     window = _window()
     try:
-        assert window.auto_quant_snapshot is None
+        assert window._paper_render_snapshot is None
 
         window.auto_quant_candidates = (
             _candidate("AAA"),
@@ -288,9 +288,13 @@ def test_the_window_no_longer_owns_the_execution_widgets() -> None:
             "auto_execution_health_label",
         ):
             assert not hasattr(window, retired), retired
-        # The two pieces of business state the window legitimately keeps.
+        # The two pieces of state the window legitimately keeps: the prepared
+        # shortlist, and the presentation-only snapshot the route draws.  The second
+        # one is named for what it is since v2O-E2 -- the session's own truth lives in
+        # the Paper capability, and this may be read by render paths and nothing else.
         assert hasattr(window, "auto_quant_candidates")
-        assert hasattr(window, "auto_quant_snapshot")
+        assert hasattr(window, "_paper_render_snapshot")
+        assert not hasattr(window, "trading_runtime")
         assert window.execution_page is not None
     finally:
         window.close()

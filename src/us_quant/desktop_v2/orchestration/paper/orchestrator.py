@@ -1,18 +1,23 @@
-"""Paper launch orchestration: the one owner of starting a Paper AutoQuant session.
+"""Paper orchestration: the one owner of a Paper session's whole run.
 
-Sequence: READY -> CONNECTING -> (2nd preflight + identity revalidation) -> broker gate
+Launch: READY -> CONNECTING -> (2nd preflight + identity revalidation) -> broker gate
 -> build runtime -> arm -> reserve the promotion -> publish_armed -> commit -> RUNNING.
-The active-session half -- polling, stream ingress, pause/resume, an orderly stop, halt
-recovery, manual reconciliation, finalization -- is v2O-E2/E3 and named nowhere here.
+
+Active session: market ingress, the watchdog poll, pause/resume and an orderly stop.
+The remaining half -- halt recovery, manual reconciliation and finalization -- is
+v2O-E3 and named nowhere here.
 
 Three rules matter more than the rest:
 
-* **there is no second truth.**  The workflow owns the phase, the active plan and the
-  lease; the order-service owner owns the candidate and active connections; the runtime
-  owns the session.  This class mirrors none of them -- no ``_active_plan``, and the
-  duplicate and staleness gates read ``workflow.phase``, which is equivalent to the
-  retired ``_active_auto_launch_plan is not None`` and stays correct after publication,
-  when the plan legitimately outlives the attempt;
+* **there is no second truth.**  The workflow owns the phase, the active plan, the
+  lease *and* the latest result; the order-service owner owns the candidate and active
+  connections.  This class mirrors none of them -- no ``_active_plan``, no ``_result``,
+  no ``_runtime`` -- and the duplicate and staleness gates read ``workflow.phase``,
+  which is equivalent to the retired ``_active_auto_launch_plan is not None`` and stays
+  correct after publication, when the plan legitimately outlives the attempt;
+* **one result publication path.**  Every operation ends in :meth:`_publish_result`, so
+  the launch's ``RUNNING`` and each later tick are published by the same code, and an
+  event is requested exactly once per operation;
 * **the arm/reserve/publish/commit order is a safety constraint, and the promotion is
   taken rather than checked.**  The order-service owner installs the candidate as the
   active service *and* locks the slot in one call, so the workflow cannot reach
@@ -29,12 +34,17 @@ It does not own the workflow transitions it merely *calls*; the generic task lif
 (``TaskThread``, the controller, the closing gate and the busy dialog stay on the window,
 reached through an injected ``TaskSubmitter`` -- no ``asyncio``); widgets and dialogs,
 which is why the confirmation step stays on the window; or the session's composition.
+The two seams it reads across the capability boundary -- the market fact a stop is
+judged against, and whether a finalization task is in flight -- arrive as providers for
+that reason, never as imports: Market is not a dependency of Paper, and the
+finalization-inflight provider is a deliberately temporary v2O-E3 seam.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from decimal import Decimal
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QObject, Signal
@@ -55,6 +65,7 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     IDENTITY_CHANGED_MESSAGE,
     LAUNCH_FAILED_TITLE,
     PAPER_ARMED_CODE,
+    PAPER_EXECUTION_COMPONENT,
     PAPER_LAUNCH_COMPONENT,
     PAPER_LAUNCH_ROLLBACK_CODE,
     PAPER_LAUNCH_ROLLBACK_MESSAGE,
@@ -64,17 +75,18 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     PAPER_PROMOTION_INVARIANT_TITLE,
     PAPER_STRATEGY_INTEGRITY_CODE,
     PAPER_STRATEGY_INTEGRITY_TITLE,
+    PAUSE_SUCCEEDED_MESSAGE,
     PREFLIGHT_CHANGED_MESSAGE,
     PREFLIGHT_PREFIX,
     PREFLIGHT_TITLE,
+    RESUME_SUCCEEDED_MESSAGE,
     SHADOW_ACTIVE_MESSAGE,
     SHADOW_ACTIVE_TITLE,
     STALE_PLAN_MESSAGE,
-    PaperLaunchEvent,
     PaperLaunchIntegrityError,
-    PaperLaunchPublication,
     PaperLaunchRequest,
     PaperOrderChannel,
+    PaperRuntimeEventRequest,
     PaperSessionBuilder,
 )
 from us_quant.trading.application.paper.models import PaperTradingLifecycleError
@@ -84,19 +96,30 @@ if TYPE_CHECKING:
     from us_quant.trading.application.paper.models import PaperPromotionReservation
     from us_quant.trading.application.paper.service import PaperTradingService
     from us_quant.trading.runtime.models import AutoQuantCandidate
+    from us_quant.trading.runtime.paper_models import PaperSessionResult
     from us_quant.trading.runtime.preflight import AutoQuantPreflight
     from us_quant.trading.runtime.workflow import PaperWorkflowController
 
     from us_quant.desktop_v2.orchestration.tasking import TaskSubmitter
 
+#: How long a stream tick suppresses the watchdog poll that would repeat its work.
+#: The comparison is strictly ``<``: 1.199s is suppressed, 1.200s is not.
+STREAM_INGRESS_SUPPRESSION_SECONDS = 1.2
+
 
 class PaperOrchestrator(QObject):
-    """Owns the Paper launch sequence and the facts it publishes about itself.
+    """Owns a Paper session's run: the launch sequence and the active-session loop.
 
     It is *not* the workflow and *not* the order-service owner: it asks each for the
     step it owns and publishes what the outcome should look like.  Everything deciding
     what a Paper session *is* -- the phase machine, the lease, the arming rules, the risk
-    verdict, order submission -- stays where it lived.
+    verdict, order submission, the latest result -- stays where it lived.
+
+    It is a **sequencing owner**, not a second state owner.  What it keeps is only what
+    nothing else can: the next attempt's sequence number, and the monotonic stamp of the
+    last stream ingress the poll suppression reads.  Both are bookkeeping about *this
+    object's own calls*; neither is a fact about the session, and every question about
+    the session is answered by reading the workflow.
     """
 
     #: A start was refused before anything was built; the window shows the dialog.
@@ -105,8 +128,8 @@ class PaperOrchestrator(QObject):
     #: A status line for the window's footer.
     log_requested = Signal(str)
 
-    #: A launch reached ``RUNNING``; the window adopts the runtime and renders.
-    session_published = Signal(object)
+    #: The workflow's latest result, from any operation.  One emission per operation.
+    result_changed = Signal(object)
 
     #: One runtime event the window should record.
     runtime_event_requested = Signal(object)
@@ -125,9 +148,12 @@ class PaperOrchestrator(QObject):
         capital_limit_provider: Callable[[], Decimal],
         order_channel_provider: Callable[[], PaperOrderChannel],
         shadow_is_active: Callable[[], bool],
+        market_snapshot_provider: Callable[[], object | None],
+        finalization_inflight_provider: Callable[[], bool],
         clear_arm_confirmation: Callable[[], None],
         render_launch_state: Callable[[], None],
         render_launch_context: Callable[[str], None],
+        clock: Callable[[], float] = monotonic,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -146,13 +172,36 @@ class PaperOrchestrator(QObject):
         self._capital_limit_provider = capital_limit_provider
         self._order_channel_provider = order_channel_provider
         self._shadow_is_active = shadow_is_active
+        # The market fact an orderly stop is judged against, injected rather than
+        # imported: Market is not a dependency of Paper.  Read at call time, so the stop
+        # sees the snapshot that exists when the operator clicks, never one frozen when
+        # this orchestrator was built.
+        self._market_snapshot_provider = market_snapshot_provider
+        # TEMPORARY -- removed by v2O-E3.  Active ingress has to know whether a
+        # finalization task is in flight, and finalization is not this round's to own.
+        # A provider keeps the flag on the window, where E3 will retire it; copying the
+        # flag here would be a second owner of a lifecycle fact.
+        self._finalization_inflight_provider = finalization_inflight_provider
         self._clear_arm_confirmation = clear_arm_confirmation
         self._render_launch_state = render_launch_state
         self._render_launch_context = render_launch_context
+        # Injected so the suppression boundary is testable without sleeping: production
+        # passes ``monotonic``, tests pass a clock they advance by hand.
+        self._clock = clock
         # Desktop orchestration bookkeeping, not session truth: it only gives each
         # attempt a distinct identity, and keeps the retired integer-increment
         # semantics -- a UUID would change the candidate id on the wire for nothing.
         self._next_attempt = 0
+        # Also bookkeeping, and also about this object's own calls: the moment of the
+        # last stream ingress, which only decides whether the next watchdog poll would
+        # repeat work this object just did.  Nothing reads it as session state.
+        #
+        # ``None`` rather than ``0.0``: "no ingress has happened yet" and "an ingress
+        # happened at the clock's origin" are different facts, and the retired
+        # ``0.0`` conflated them -- harmless only because a real ``monotonic()`` is
+        # never near zero.  Under an injected clock the conflation silently suppresses
+        # the first poll, which is exactly the poll that has to run.
+        self._last_stream_ingress_monotonic: float | None = None
 
     # -- lifecycle -------------------------------------------------------
 
@@ -165,6 +214,45 @@ class PaperOrchestrator(QObject):
     def _paper_trading(self) -> PaperTradingService:
         """Whichever order-service owner is live -- see the getter's note."""
         return self._paper_trading_getter()
+
+    # -- delegated queries -----------------------------------------------
+    #
+    # Three questions other capabilities ask about a Paper session.  Each one is
+    # answered by reading the workflow *now*: nothing is cached, because a cached
+    # answer is a second truth that can disagree with the session it describes.
+
+    @property
+    def result(self) -> PaperSessionResult | None:
+        """The workflow's latest result, or ``None`` when it holds none."""
+
+        return self._workflow.result
+
+    @property
+    def runtime_active(self) -> bool:
+        """Whether a Paper session is running.
+
+        Read off the latest result's engine snapshot, which is the workflow's own
+        projection of the runtime it owns.  The window used to answer this from a
+        runtime handle it held; that handle was a second owner of a live session.
+        """
+
+        result = self._workflow.result
+        return queries.session_active(
+            result.engine_snapshot if result is not None else None
+        )
+
+    @property
+    def has_runtime_obligations(self) -> bool:
+        """Whether the session holds positions or orders a market stop would strand.
+
+        The interlock a market stop or source switch is refused against.  It reads the
+        same snapshot the operator is looking at rather than a counter kept beside it.
+        """
+
+        result = self._workflow.result
+        return queries.runtime_obligations(
+            result.engine_snapshot if result is not None else None
+        )
 
     def start(self) -> None:
         """Run the launch gates, freeze the attempt, acquire PAPER and connect.
@@ -224,7 +312,7 @@ class PaperOrchestrator(QObject):
             self._clear_arm_confirmation()
             self.log_requested.emit(str(error))
             self.runtime_event_requested.emit(
-                PaperLaunchEvent(
+                PaperRuntimeEventRequest(
                     severity="error",
                     component=PAPER_LAUNCH_COMPONENT,
                     code=PAPER_STRATEGY_INTEGRITY_CODE,
@@ -316,7 +404,134 @@ class PaperOrchestrator(QObject):
             return
         self._arm_and_publish(candidate_id, request)
 
+    # -- the active session ----------------------------------------------
+    #
+    # What happens between ``RUNNING`` and recovery: the market fact going in, the
+    # watchdog poll that keeps running when the market is quiet, the two entry controls
+    # and the orderly stop.  Each of these is an *intent* about the active session, and
+    # all four of them now have exactly one owner.
+
+    def on_market_snapshot(self, snapshot: object) -> None:
+        """Feed one market fact into a live session, and do nothing otherwise.
+
+        Three gates, and the retired handler's order is preserved rather than tidied:
+
+        * **a finalization task defers the ingress entirely.**  The proof of broker
+          zero-state is reading the same broker the session is, so letting a tick in
+          while it runs would interleave two readers of one connection;
+        * **the phase gate.**  Only ``RUNNING``, ``PAUSED`` and ``STOPPING`` own the run
+          loop.  A session that halted must not be re-entered by the next tick -- the
+          halt is sticky by design and its recovery is v2O-E3, so nothing here may
+          "repair" it;
+        * **the ingress is stamped before the workflow is called**, so the stamp means
+          "the stream just did this work" even if the call itself raises.
+
+        ``STOPPING`` deliberately still receives the stream: the exits, the broker events
+        and the health the operator watches all still depend on it while the session
+        flattens.
+        """
+
+        if self._finalization_inflight_provider():
+            return
+        if not queries.active_session_phase(self._workflow.phase):
+            return
+        self._last_stream_ingress_monotonic = self._clock()
+        try:
+            self._publish_result(self._workflow.on_stream(snapshot))
+        except WorkflowStateError as error:
+            self.log_requested.emit(str(error))
+
+    def poll(self) -> None:
+        """Drive one watchdog poll, unless a stream tick just did the same work.
+
+        The timer's entry point.  It exists independently of the market stream because
+        the order lifecycle -- stale-BUY cancel, SELL intervention, health evaluation --
+        must keep running while the feed is down; it only skips when a stream tick
+        recently drove the identical sequence.
+        """
+
+        if self._finalization_inflight_provider():
+            return
+        last_ingress = self._last_stream_ingress_monotonic
+        if (
+            last_ingress is not None
+            and self._clock() - last_ingress < STREAM_INGRESS_SUPPRESSION_SECONDS
+        ):
+            return
+        if not queries.active_session_phase(self._workflow.phase):
+            return
+        try:
+            self._publish_result(self._workflow.poll())
+        except WorkflowStateError as error:
+            self.log_requested.emit(str(error))
+
+    def pause(self) -> None:
+        """Pause new entries; the exits keep running.
+
+        A refusal is a *log line and nothing else*: no dialog, no fabricated result and
+        no attempt to move the phase by hand.  ``WorkflowStateError`` here means the
+        session is not in a phase that can pause -- a condition the operator fixes by
+        looking at the panel, not one to be papered over with a result that did not come
+        from the workflow.
+        """
+
+        try:
+            result = self._workflow.set_entries_paused(True)
+        except WorkflowStateError as error:
+            self.log_requested.emit(str(error))
+            return
+        self._publish_result(result)
+        self.log_requested.emit(PAUSE_SUCCEEDED_MESSAGE)
+
+    def resume(self) -> None:
+        """Resume new entries, from ``PAUSED`` only."""
+
+        try:
+            result = self._workflow.set_entries_paused(False)
+        except WorkflowStateError as error:
+            self.log_requested.emit(str(error))
+            return
+        self._publish_result(result)
+        self.log_requested.emit(RESUME_SUCCEEDED_MESSAGE)
+
+    def stop(self) -> None:
+        """Ask for an orderly stop, judged against the market fact of *this* moment.
+
+        The snapshot is read through the provider at call time rather than captured when
+        the orchestrator was built: a stop is judged against the quotes that exist when
+        the operator asks for it, and a frozen one would silently age.
+        """
+
+        try:
+            result = self._workflow.request_stop(self._market_snapshot_provider())
+        except WorkflowStateError as error:
+            self.log_requested.emit(str(error))
+            return
+        self._publish_result(result)
+
     # -- publication -----------------------------------------------------
+
+    def _publish_result(self, result: PaperSessionResult) -> None:
+        """Publish one workflow result, and request its events exactly once.
+
+        The capability's *only* result path.  Two things happen, in this order, and
+        nothing else may emit either signal on a result's behalf:  the window is handed
+        the result to render, and each event the operation produced is requested as one
+        runtime-event write.  The window still owns the store -- this only says which
+        events a Paper operation produces -- and it owns the rendering, so neither a
+        result nor an event is ever recorded twice for one operation.
+        """
+
+        self.result_changed.emit(result)
+        for event in result.events:
+            self.runtime_event_requested.emit(
+                PaperRuntimeEventRequest(
+                    severity=event.severity,
+                    component=PAPER_EXECUTION_COMPONENT,
+                    code=event.code,
+                    message=event.message,
+                )
+            )
 
     def _arm_and_publish(
         self, candidate_id: str, request: PaperLaunchRequest
@@ -407,16 +622,12 @@ class PaperOrchestrator(QObject):
             # an exception leaving a Qt slot is reported nowhere at all.
             self._fail_after_publication(error)
             return
-        self.session_published.emit(
-            PaperLaunchPublication(
-                runtime=built.runtime,
-                result=result,
-                session_id=built.session_id,
-                candidate_count=built.candidate_count,
-            )
-        )
+        # The launch's own result goes out through the same path every later tick will
+        # use, so "how is a Paper result published?" has one answer and one code path
+        # from the first ``RUNNING`` to the last ``FINALIZED``.
+        self._publish_result(result)
         self.runtime_event_requested.emit(
-            PaperLaunchEvent(
+            PaperRuntimeEventRequest(
                 severity="warning",
                 component=PAPER_LAUNCH_COMPONENT,
                 code=PAPER_ARMED_CODE,
@@ -447,7 +658,7 @@ class PaperOrchestrator(QObject):
         message = PAPER_PROMOTION_INVARIANT_MESSAGE.format(error=error)
         self.log_requested.emit(message)
         self.runtime_event_requested.emit(
-            PaperLaunchEvent(
+            PaperRuntimeEventRequest(
                 severity="error",
                 component=PAPER_LAUNCH_COMPONENT,
                 code=PAPER_PROMOTION_INVARIANT_CODE,
@@ -482,7 +693,7 @@ class PaperOrchestrator(QObject):
         message = PAPER_LAUNCH_ROLLBACK_MESSAGE.format(error=error)
         self.log_requested.emit(message)
         self.runtime_event_requested.emit(
-            PaperLaunchEvent(
+            PaperRuntimeEventRequest(
                 severity="error",
                 component=PAPER_LAUNCH_COMPONENT,
                 code=PAPER_LAUNCH_ROLLBACK_CODE,

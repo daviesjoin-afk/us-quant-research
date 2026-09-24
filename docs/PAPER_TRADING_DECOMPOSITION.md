@@ -722,3 +722,35 @@ manual reconciliation、finalization、`closeEvent` teardown、execution page �
 
 设计依据见 `docs/DESKTOP_DECOMPOSITION.md` §27 与 `docs/TRADING_ARCHITECTURE_V2.md`
 §8.18。
+
+**注意（forward reference）**：§35 最后两段描述的 seam 已在 v2O-E2 改变——窗口不再接
+`session_published`，也不再有 ingress / poll / pause / resume / stop。见下面的 §36。
+
+## 36. active runtime 迁入 `PaperOrchestrator`（v2O-E2）
+
+同样是前向引用，不重写上面的历史。v2O-E1 迁走了**启动 sequencing**；v2O-E2 把
+`RUNNING` 之后到 recovery 之前的那一段也移出窗口：
+
+```text
+desktop_v2/orchestration/paper/
+    models.py        新增 session 事件形状（launch 与 stream 共用一种）+ 文案
+    queries.py       新增 active phase 集合与 snapshot 判读（纯规则）
+    orchestrator.py  新增 on_market_snapshot / poll / pause / resume / stop
+                     + 唯一的 _publish_result（result_changed）
+```
+
+| 事实 | 唯一 owner | E2 之后由谁驱动 |
+| --- | --- | --- |
+| 何时把行情喂给会话 | `PaperOrchestrator` | 窗口的 cross-capability fan-out 只做转交 |
+| 何时跑 watchdog poll | `PaperOrchestrator` | `paper_order_timer.timeout` 直连 |
+| pause / resume / stop | `PaperOrchestrator` | 页面信号直连 |
+| active session 的 runtime | `PaperWorkflowController` → coordinator → engine | 窗口不再持有 handle |
+| result 发布 | `PaperOrchestrator._publish_result` | 一条路径，launch 也走它 |
+
+本文档 §16–§34 描述的 `PaperTradingService` / gateway / journal 边界不受影响：E2 只改
+desktop 侧的 sequencing owner，没有改 service、没有改 coordinator，也没有改 E1 刚完成的
+promotion reservation。窗口仍负责 manual reconciliation、HALT recovery、finalization 与
+`closeEvent`（E3/E4）。
+
+设计依据见 `docs/DESKTOP_DECOMPOSITION.md` §28 与 `docs/TRADING_ARCHITECTURE_V2.md`
+§8.19。

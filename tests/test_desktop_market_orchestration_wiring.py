@@ -255,19 +255,29 @@ def test_an_invalidated_snapshot_repaints_the_dashboard_as_stopped(
 
 
 def test_a_snapshot_reaches_a_running_paper_session(window, quiet_minutes) -> None:
-    """The Paper fan-out is the one a careless extraction would drop."""
+    """The Paper fan-out is the one a careless extraction would drop.
+
+    Since v2O-E2 the phase gate that decides this lives in ``PaperOrchestrator``, so the
+    session is put into ``RUNNING`` on the *workflow* -- the canonical phase the
+    capability reads -- rather than on the facade.  The recorder is installed on the
+    workflow too, which is where the capability's ingress lands, so this still asserts
+    the whole path: market fact -> fan-out -> capability -> workflow.
+    """
 
     received: list[object] = []
-    original_phase = window.paper_trading.phase
-    window.paper_trading.phase = lambda: PaperWorkflowPhase.RUNNING  # type: ignore[assignment]
+    original_phase = window.paper_workflow._phase
+    window.paper_workflow._phase = PaperWorkflowPhase.RUNNING
     original_on_stream = window.paper_workflow.on_stream
-    window.paper_workflow.on_stream = (  # type: ignore[assignment]
-        lambda snapshot: received.append(snapshot) or original_on_stream(snapshot)
-    )
+
+    def recording_on_stream(snapshot):
+        received.append(snapshot)
+        return original_on_stream(snapshot)
+
+    window.paper_workflow.on_stream = recording_on_stream  # type: ignore[assignment]
     try:
         window.market_orchestrator._on_snapshot(_snapshot())
     finally:
-        window.paper_trading.phase = original_phase  # type: ignore[assignment]
+        window.paper_workflow._phase = original_phase
         window.paper_workflow.on_stream = original_on_stream  # type: ignore[assignment]
 
     assert len(received) == 1

@@ -814,12 +814,26 @@ def test_a_normal_session_refresh_leaves_the_evidence_tables_alone(
 def test_shadow_start_rejects_active_trading_runtime(
     window: MainWindow, dialogs
 ) -> None:
-    window.trading_runtime = SimpleNamespace(
-        session=SimpleNamespace(active=True)
+    """The capital-truth gate reads the Paper capability's canonical result.
+
+    v2O-E2 removed the window's runtime handle, so this installs the fact where the
+    workflow keeps it -- which is where the gate reads it.  The result carries the whole
+    shape the facade reads, not just the one field under test, so the window that is
+    torn down afterwards still sees a well-formed session.
+    """
+
+    window.paper_workflow._result = SimpleNamespace(
+        engine_snapshot=SimpleNamespace(active=True),
+        state=SimpleNamespace(active=True, halted=False, finalized=False),
+        events=(),
+        health=None,
     )
-    window.shadow_orchestrator.start()
-    assert dialogs[0][0] == "warning"
-    assert dialogs[0][1][1] == "IBKR Paper 自动量化运行中"
+    try:
+        window.shadow_orchestrator.start()
+        assert dialogs[0][0] == "warning"
+        assert dialogs[0][1][1] == "IBKR Paper 自动量化运行中"
+    finally:
+        window.paper_workflow._result = None
 
 
 def test_shadow_start_rejects_missing_paper_capital(

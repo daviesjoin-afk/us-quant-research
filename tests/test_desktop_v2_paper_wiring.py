@@ -350,16 +350,26 @@ def test_an_inconsistent_catalogue_version_does_not_escape_the_qt_slot(
     assert window._test_events[-1].severity == "error"
 
 
-def test_the_session_reaches_the_window_through_the_publication(
+def test_the_session_reaches_the_window_through_the_result(
     window: MainWindow,
 ) -> None:
-    """The window adopts the runtime it is handed, and renders the result."""
+    """The window renders the result it is handed, and keeps no runtime handle.
+
+    v2O-E2 moved the active session's run into the capability, so the window is handed
+    a ``PaperSessionResult`` and nothing else: the snapshot it draws is presentation,
+    and the canonical session truth is asked for rather than cached.
+    """
 
     _launch(window)
 
-    assert window.trading_runtime is not None
-    assert window.auto_quant_snapshot is not None
-    assert window.auto_quant_snapshot.session_id is not None
+    assert window.paper_orchestrator.result is not None
+    assert window.paper_orchestrator.runtime_active is True
+    # Presentation: the render snapshot is kept so the route can still draw the
+    # session it is reporting on.
+    assert window._paper_render_snapshot is not None
+    assert window._paper_render_snapshot.session_id is not None
+    # And the window holds no runtime handle of its own -- the second owner is gone.
+    assert not hasattr(window, "trading_runtime")
 
 
 def test_the_lease_is_held_by_the_workflow_after_a_successful_launch(
@@ -498,8 +508,8 @@ class _HoldingSubmitter:
 # promotion that could still be refused, and a refusal there left **``RUNNING`` with
 # no active owner**: measured on this very wiring (phase RUNNING, ``has_order_service``
 # False, lease PAPER held, a published coordinator whose order port was the armed
-# broker channel, ``_poll_auto_quant_orders`` still reaching the workflow, and manual
-# reconciliation never entered because it starts at ``has_order_service``).
+# broker channel, the watchdog still reaching the workflow, and manual reconciliation
+# never entered because it starts at ``has_order_service``).
 #
 # Ownership is now taken *before* publication, so that state cannot be built.  These
 # tests assert the invariant by injection rather than by reading the source: every
@@ -515,9 +525,9 @@ _RUNNING_PHASES = (
 def _assert_never_ownerless_while_running(window: MainWindow) -> None:
     """``RUNNING`` must imply an active owner -- the whole round in one assertion.
 
-    ``_on_market_snapshot_changed`` and ``_poll_auto_quant_orders`` both drive the
-    workflow on the phase alone, so an ownerless ``RUNNING`` session is one the window
-    keeps feeding orders through while nothing can adopt it.
+    The market fan-out and the watchdog heartbeat both drive the workflow on the phase
+    alone, so an ownerless ``RUNNING`` session is one the capability keeps feeding
+    orders through while nothing can adopt it.
     """
 
     if window.paper_trading.phase() in _RUNNING_PHASES:
@@ -608,7 +618,9 @@ def test_every_pre_publication_failure_rolls_back_and_leaves_no_owner(
     assert window._test_events == [] or all(
         event.code != PAPER_PROMOTION_INVARIANT_CODE for event in window._test_events
     )
-    assert window.trading_runtime is None
+    assert window.paper_orchestrator.result is None
+    assert window.paper_orchestrator.runtime_active is False
+    assert window._paper_render_snapshot is None
 
 
 def test_a_commit_failure_after_publication_cannot_orphan_the_session(
@@ -746,7 +758,8 @@ def test_a_refused_clear_cannot_be_reached_between_the_reserve_and_the_commit(
     # The theft was refused, so publication never ran and the attempt rolled back
     # the ordinary way: nothing owned, nothing published, nothing leased.
     _assert_rolled_back(window)
-    assert window.trading_runtime is None
+    assert window.paper_orchestrator.result is None
+    assert window.paper_orchestrator.runtime_active is False
     _assert_never_ownerless_while_running(window)
 
 
@@ -779,3 +792,114 @@ def test_a_stuck_launch_is_not_closed_over_silently(window: MainWindow) -> None:
     assert torn_down == []
     assert window.paper_trading.has_order_service() is True
     assert window.paper_workflow.lease is ExecutionLease.PAPER
+
+
+# -- v2O-E2: the active session's run reaches the capability -------------
+#
+# The same rule as the launch half above, for the session half: the page's session
+# controls and the watchdog heartbeat end at ``PaperOrchestrator``, which owns the
+# phase gate, the ingress stamp and the one result path.  Everything between the page
+# and the capability here is production code -- a real ``MainWindow``, a real
+# ``ExecutionPage``, the real controller with its real lease, and the real
+# ``PaperSessionCoordinator`` built by ``publish_armed``.
+
+
+def test_the_page_pause_control_reaches_the_workflow(window: MainWindow) -> None:
+    """A real click, through the real page and the real controller."""
+
+    _launch(window)
+    assert window.paper_workflow.phase is PaperWorkflowPhase.RUNNING
+
+    window.execution_page.pause_requested.emit()
+    _APP.processEvents()
+
+    assert window.paper_workflow.phase is PaperWorkflowPhase.PAUSED
+
+
+def test_the_page_resume_control_reaches_the_workflow(window: MainWindow) -> None:
+    _launch(window)
+    window.execution_page.pause_requested.emit()
+    _APP.processEvents()
+    assert window.paper_workflow.phase is PaperWorkflowPhase.PAUSED
+
+    window.execution_page.resume_requested.emit()
+    _APP.processEvents()
+
+    assert window.paper_workflow.phase is PaperWorkflowPhase.RUNNING
+
+
+def test_the_page_stop_control_reaches_the_workflow(window: MainWindow) -> None:
+    """The stop is judged against the market snapshot, and the phase moves."""
+
+    _launch(window)
+
+    window.execution_page.stop_requested.emit()
+    _APP.processEvents()
+
+    assert window.paper_workflow.phase in {
+        PaperWorkflowPhase.STOPPING,
+        PaperWorkflowPhase.FINALIZED,
+    }
+
+
+def test_the_watchdog_heartbeat_reaches_the_workflow_through_the_capability(
+    window: MainWindow,
+) -> None:
+    """The timer's real wiring: ``timeout`` -> ``PaperOrchestrator.poll`` -> workflow.
+
+    Asserted by emitting the timer's own signal, so a mis-wired heartbeat is observed
+    rather than inferred: nothing in this test calls ``poll`` by hand.  The stamp is
+    asserted to be unset rather than cleared, so the suppression window cannot mask a
+    missing connection.
+    """
+
+    _launch(window)
+    assert window.paper_orchestrator._last_stream_ingress_monotonic is None
+
+    polled: list[int] = []
+    real_poll = window.paper_workflow.poll
+
+    def counting_poll():
+        polled.append(1)
+        return real_poll()
+
+    window.paper_workflow.poll = counting_poll
+
+    window.paper_order_timer.timeout.emit()
+    _APP.processEvents()
+
+    assert polled == [1]
+
+
+def test_the_holding_gates_ask_the_capability_not_a_runtime_handle(
+    window: MainWindow,
+) -> None:
+    """``_paper_runtime_is_active`` -- the fact Shadow is refused on -- is the session's.
+
+    Before the launch there is no session; after it there is one.  The window answers
+    with no runtime handle either way, which is the point of the round: that handle was
+    a second owner of a live session, kept beside the workflow's own.
+    """
+
+    assert window._paper_runtime_is_active() is False
+    assert not hasattr(window, "trading_runtime")
+    assert not hasattr(window, "paper_execution_health")
+
+    _launch(window)
+
+    assert window._paper_runtime_is_active() is True
+
+
+def test_the_channel_probe_is_still_refused_while_a_session_is_live(
+    window: MainWindow,
+) -> None:
+    """The probe gate lost its runtime clause and must not have lost its effect."""
+
+    _launch(window)
+    connects = window._test_submitter.connect_count
+
+    window._check_auto_order_channel()
+    _APP.processEvents()
+
+    assert window._channel_check_inflight is False
+    assert window._test_submitter.connect_count == connects

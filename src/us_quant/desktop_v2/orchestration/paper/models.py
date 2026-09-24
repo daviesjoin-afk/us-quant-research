@@ -1,9 +1,14 @@
-"""The immutable facts and driven-port contracts of Paper launch orchestration.
+"""The immutable facts and driven-port contracts of Paper orchestration.
 
 Frozen plain data and declared Protocols only -- Qt-free and adapter-free.  Every
 operator string is verbatim from the retired ``MainWindow`` handlers; a broker adapter,
 a risk or execution application and a widget are never imported here.  The design
 rationale lives in ``docs/DESKTOP_DECOMPOSITION.md`` §27.
+
+The launch half and the active-session half share this file deliberately: both publish
+through the same ``PaperSessionResult``, and the event shape one launch files under
+``PAPER_SESSION_ARMED`` is the same shape a stream tick files a halt under.  Two event
+types would mean two publication paths wearing different names.
 """
 
 from __future__ import annotations
@@ -24,12 +29,15 @@ if TYPE_CHECKING:
         PaperEngine,
         PaperOrderPort,
     )
-    from us_quant.trading.runtime.paper_models import PaperSessionResult
-    from us_quant.trading.runtime.trading import TradingRuntime
 
 #: The component one launch's runtime event is filed under, and its code.
 PAPER_LAUNCH_COMPONENT = "auto_quant"
 PAPER_ARMED_CODE = "PAPER_SESSION_ARMED"
+
+#: The component the *session's* own coordinator events are filed under.  Distinct from
+#: the launch component above because the operator reads them as different things: one
+#: is "a session was armed", the others are what the running session did.
+PAPER_EXECUTION_COMPONENT = "paper_execution"
 
 #: Why a start was refused: the exact title and message the retired handler showed.
 #: ``BAD_CALLBACK_MESSAGE`` is the one *delegation* message -- a malformed callback
@@ -88,6 +96,14 @@ CONNECT_START_MESSAGE = "IBKR Paper 自动量化连接中…"
 CONNECT_PROGRESS = "连接 IBKR Paper 订单通道…"
 CONNECT_VERIFIED_PROGRESS = "已核验 {alias}；准备逐会话武装…"
 ARMED_EVENT_MESSAGE = "IBKR Paper 自动量化会话 {session} 已武装；候选 {candidates}；Live 永久阻断"
+
+#: The two entry-control confirmations, verbatim from the retired handlers.  They are
+#: logged only after the workflow accepted the change, so the operator never reads
+#: "paused" about a session whose phase disagreed.
+PAUSE_SUCCEEDED_MESSAGE = (
+    "自动量化已暂停新开仓；现有持仓的止损、止盈和时段退出继续运行。"
+)
+RESUME_SUCCEEDED_MESSAGE = "自动量化已恢复新开仓。"
 
 #: The broker gates' text -- the sentences naming the failed account fact.
 NET_LIQUIDATION_MESSAGE = "IBKR Paper 订单会话未返回有效净值"
@@ -167,33 +183,33 @@ class PaperAccountReading:
 
 @dataclass(frozen=True, slots=True)
 class PaperSessionBuildResult:
-    """What the build seam returns: the built runtime and what arming it needs.
+    """What the build seam returns: the started runtime and what arming it needs.
 
     The seam composes and starts the runtime but deliberately does **not** arm, so
     ``arm -> ensure -> publish -> promote`` is one sequence in the orchestrator.
+
+    ``engine`` *is* the started runtime -- it satisfies ``PaperEngine`` -- and it is
+    handed straight to ``publish_armed``.  There is deliberately no second field
+    carrying the same object under a ``runtime`` name: that would have offered every
+    caller a way to keep a runtime handle beside the workflow's own, which is exactly
+    the second owner the capability boundary exists to prevent.
     """
 
     engine: PaperEngine
     orders: PaperOrderPort
     session_id: str
     candidate_count: int
-    runtime: TradingRuntime
     max_order_notional: Decimal
 
 
 @dataclass(frozen=True, slots=True)
-class PaperLaunchPublication:
-    """One successful launch's outcome: the workflow's own result, never a copy."""
+class PaperRuntimeEventRequest:
+    """One runtime event the orchestrator asks the window to record.
 
-    runtime: TradingRuntime
-    result: PaperSessionResult
-    session_id: str
-    candidate_count: int
-
-
-@dataclass(frozen=True, slots=True)
-class PaperLaunchEvent:
-    """One runtime event the orchestrator asks the window to record."""
+    One shape for every operation, launch included.  The window owns the event store
+    and is the only thing allowed to write it; the orchestrator owns *which* events a
+    Paper operation produces, and requests each exactly once.
+    """
 
     severity: str
     component: str
@@ -231,16 +247,19 @@ __all__ = [
     "CONNECTING_SUMMARY", "CONNECT_PROGRESS", "CONNECT_START_MESSAGE",
     "CONNECT_VERIFIED_PROGRESS", "DUPLICATE_CONFIRM_MESSAGE", "DUPLICATE_MESSAGE",
     "DUPLICATE_TITLE", "IDENTITY_CHANGED_MESSAGE", "LAUNCH_FAILED_TITLE",
-    "NET_LIQUIDATION_MESSAGE", "PAPER_ARMED_CODE", "PAPER_LAUNCH_COMPONENT",
+    "NET_LIQUIDATION_MESSAGE", "PAPER_ARMED_CODE", "PAPER_EXECUTION_COMPONENT",
+    "PAPER_LAUNCH_COMPONENT",
     "PAPER_LAUNCH_ROLLBACK_CODE", "PAPER_LAUNCH_ROLLBACK_MESSAGE",
     "PAPER_LAUNCH_ROLLBACK_TITLE",
     "PAPER_PROMOTION_INVARIANT_CODE", "PAPER_PROMOTION_INVARIANT_MESSAGE",
     "PAPER_PROMOTION_INVARIANT_TITLE", "PAPER_STRATEGY_INTEGRITY_CODE",
-    "PAPER_STRATEGY_INTEGRITY_TITLE", "POSITIONS_MESSAGE",
+    "PAPER_STRATEGY_INTEGRITY_TITLE", "PAUSE_SUCCEEDED_MESSAGE", "POSITIONS_MESSAGE",
     "PREFLIGHT_CHANGED_MESSAGE", "PREFLIGHT_PREFIX", "PREFLIGHT_TITLE",
-    "PaperAccountReading", "PaperCandidateOrder", "PaperLaunchEvent",
-    "PaperLaunchIntegrityError", "PaperLaunchPublication", "PaperLaunchRefusal",
-    "PaperLaunchRequest", "PaperOrderChannel", "PaperSessionBuildResult",
-    "PaperSessionBuilder", "PaperStrategyLaunchFact", "SHADOW_ACTIVE_MESSAGE",
+    "PaperAccountReading", "PaperCandidateOrder",
+    "PaperLaunchIntegrityError", "PaperLaunchRefusal",
+    "PaperLaunchRequest", "PaperOrderChannel", "PaperRuntimeEventRequest",
+    "PaperSessionBuildResult",
+    "PaperSessionBuilder", "PaperStrategyLaunchFact", "RESUME_SUCCEEDED_MESSAGE",
+    "SHADOW_ACTIVE_MESSAGE",
     "SHADOW_ACTIVE_TITLE", "STALE_PLAN_MESSAGE", "WorkflowStateError",
 ]

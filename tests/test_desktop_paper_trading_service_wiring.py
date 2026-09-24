@@ -229,19 +229,27 @@ def test_migrated_reads_no_longer_touch_the_workflow_directly() -> None:
     The one place that turns the phase into control state is the publisher; the
     handlers that used to read it themselves now call that instead, so the
     assertion moved with the read rather than being dropped.
+
+    Two entries changed shape in v2O-E2.  The result handler and the market fan-out
+    no longer read a Paper phase *at all* -- whether a live session wants this fact is
+    the capability's question now -- so for those the claim is the stronger one: they
+    read neither the workflow's phase nor the service's.
     """
 
     for name in (
-        "_apply_paper_workflow_result",
         "_publish_execution_controls",
         "_paper_needs_manual_recovery",
-        "_poll_auto_quant_orders",
-        "_on_market_snapshot_changed",
+        "_handle_paper_e3_result_bridge",
         "_auto_candidate_preparation_failed",
     ):
         source = _source(name)
         assert "self.paper_workflow.phase" not in source, name
         assert "self.paper_trading.phase()" in source, name
+
+    for name in ("_on_paper_result_changed", "_on_market_snapshot_changed"):
+        source = _source(name)
+        assert "self.paper_workflow.phase" not in source, name
+        assert "self.paper_trading.phase()" not in source, name
 
     # And the render path still reaches the controls through the publisher
     # rather than by writing them itself.

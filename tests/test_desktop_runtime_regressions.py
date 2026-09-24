@@ -28,6 +28,7 @@ from PySide6.QtWidgets import QApplication
 from us_quant import desktop
 from us_quant.desktop import MainWindow
 from us_quant.desktop_v2.navigation import DEFAULT_ROUTE, ROUTES
+from us_quant.desktop_v2.orchestration.paper.orchestrator import PaperOrchestrator
 
 
 _APP = QApplication.instance() or QApplication([])
@@ -67,7 +68,13 @@ def test_default_desktop_builds_every_v2_route() -> None:
 
 
 def test_paper_order_watchdog_heartbeat_is_wired() -> None:
-    """H-1 regression: the order watchdog must not depend on stream ticks."""
+    """H-1 regression: the order watchdog must not depend on stream ticks.
+
+    The heartbeat, its phase gate and the suppression window are active-Paper
+    orchestration since v2O-E2, so the source assertions moved with them; what the
+    window still owns is the timer, and that is asserted here on the real one.
+    """
+
     window = _window()
     try:
         timer = window.paper_order_timer
@@ -75,16 +82,13 @@ def test_paper_order_watchdog_heartbeat_is_wired() -> None:
         assert timer.interval() == 1_000
         assert timer.isActive()
         # The heartbeat callback must be safe to invoke in any phase.
-        window._poll_auto_quant_orders()
-        # Stream ingress must refresh the watchdog liveness stamp.
-        source = inspect.getsource(MainWindow._on_market_snapshot_changed)
-        assert "_last_stream_ingress_monotonic = monotonic()" in source
-        # The heartbeat skips when stream ticks drove the watchdog recently.
-        poll_source = inspect.getsource(MainWindow._poll_auto_quant_orders)
-        assert (
-            "monotonic() - self._last_stream_ingress_monotonic < 1.2"
-            in poll_source
-        )
+        window.paper_orchestrator.poll()
+        # Stream ingress must refresh the watchdog liveness stamp...
+        ingress = inspect.getsource(PaperOrchestrator.on_market_snapshot)
+        assert "_last_stream_ingress_monotonic = self._clock()" in ingress
+        # ...and the heartbeat skips when stream ticks drove the watchdog recently.
+        poll_source = inspect.getsource(PaperOrchestrator.poll)
+        assert "STREAM_INGRESS_SUPPRESSION_SECONDS" in poll_source
     finally:
         window.close()
         window.deleteLater()
@@ -101,8 +105,12 @@ def test_finalization_deferral_replaces_halt_on_busy_resource() -> None:
         # the busy-resource branch must defer instead of halting the session.
         assert refresh.count("fail_finalization_refresh") == 1
         assert "suppress_busy_message=True" in refresh
-        apply = inspect.getsource(MainWindow._apply_paper_workflow_result)
-        assert "_schedule_paper_finalization_refresh(result)" in apply
+        # The decision belongs to the E3 bridge, kept in its own method so E3 can
+        # delete it whole -- and still reached from the one result handler.
+        apply = inspect.getsource(MainWindow._on_paper_result_changed)
+        assert "_handle_paper_e3_result_bridge(result)" in apply
+        bridge = inspect.getsource(MainWindow._handle_paper_e3_result_bridge)
+        assert "_schedule_paper_finalization_refresh(result)" in bridge
         schedule = inspect.getsource(
             MainWindow._schedule_paper_finalization_refresh
         )

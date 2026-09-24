@@ -98,11 +98,15 @@ def active_session_phase(phase: PaperWorkflowPhase) -> bool:
 
 
 def session_active(snapshot: object | None) -> bool:
-    """Whether one engine snapshot says its session is still running.
+    """Whether one engine snapshot positively reports a live session.
 
-    A missing snapshot and a snapshot with no ``active`` flag both answer ``False``:
-    neither states that a session is live, and the fail-closed reading of an absent
-    fact is the one that keeps a launch gate shut rather than opening it.
+    A missing snapshot, or one with no active flag, answers ``False`` because this
+    helper only reports positive runtime activity from the workflow's canonical
+    result.
+
+    Callers that need admission or launch safety must combine this fact with the
+    canonical workflow phase, active order-service ownership and the shared
+    execution lease.  Absence here is not, by itself, a fail-closed launch verdict.
     """
 
     return bool(getattr(snapshot, "active", False))

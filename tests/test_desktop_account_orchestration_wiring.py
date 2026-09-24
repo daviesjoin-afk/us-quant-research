@@ -176,7 +176,9 @@ def test_the_orchestrator_portfolio_is_the_application_portfolio(window) -> None
 def test_a_successful_refresh_promotes_the_shell_badges(
     window, monkeypatch
 ) -> None:
-    monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
+    monkeypatch.setattr(
+        window.runtime_events_orchestrator, "record", lambda **_: None
+    )
     monkeypatch.setattr(window, "_log", lambda _message: None)
     monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
     monkeypatch.setattr(
@@ -199,7 +201,9 @@ def test_a_successful_refresh_promotes_the_shell_badges(
 def test_a_successful_refresh_does_not_touch_the_market_badge(
     window, monkeypatch
 ) -> None:
-    monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
+    monkeypatch.setattr(
+        window.runtime_events_orchestrator, "record", lambda **_: None
+    )
     monkeypatch.setattr(window, "_log", lambda _message: None)
     monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
     monkeypatch.setattr(
@@ -224,7 +228,9 @@ def test_a_successful_refresh_repaints_the_dashboard_card(
 ) -> None:
     """Read the rendered fact, not "was the callback called"."""
 
-    monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
+    monkeypatch.setattr(
+        window.runtime_events_orchestrator, "record", lambda **_: None
+    )
     monkeypatch.setattr(window, "_log", lambda _message: None)
     monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
     monkeypatch.setattr(
@@ -270,7 +276,9 @@ def test_a_successful_refresh_records_a_runtime_event(
 def test_a_successful_refresh_refreshes_both_preflights(
     window, monkeypatch
 ) -> None:
-    monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
+    monkeypatch.setattr(
+        window.runtime_events_orchestrator, "record", lambda **_: None
+    )
     monkeypatch.setattr(window, "_log", lambda _message: None)
     monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
@@ -331,7 +339,9 @@ def test_the_targeted_preflight_reads_the_canonical_account(
     """
 
     monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
-    monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
+    monkeypatch.setattr(
+        window.runtime_events_orchestrator, "record", lambda **_: None
+    )
     monkeypatch.setattr(window, "_log", lambda _message: None)
     monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
@@ -417,7 +427,9 @@ def test_a_successful_refresh_moves_the_execution_route_equity_card(
     while every callback-level assertion still passed.
     """
 
-    monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
+    monkeypatch.setattr(
+        window.runtime_events_orchestrator, "record", lambda **_: None
+    )
     monkeypatch.setattr(window, "_log", lambda _message: None)
     monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
     monkeypatch.setattr(
@@ -450,7 +462,9 @@ def test_a_successful_refresh_puts_a_row_in_the_real_ledger_table(
     environment/alias, is invisible to a call-count assertion and visible here.
     """
 
-    monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
+    monkeypatch.setattr(
+        window.runtime_events_orchestrator, "record", lambda **_: None
+    )
     monkeypatch.setattr(window, "_log", lambda _message: None)
     monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
     monkeypatch.setattr(
@@ -483,7 +497,9 @@ def test_a_failed_refresh_preserves_the_last_good_truth(
     job here is to have changed nothing.
     """
 
-    monkeypatch.setattr(window, "_record_runtime_event", lambda **_: None)
+    monkeypatch.setattr(
+        window.runtime_events_orchestrator, "record", lambda **_: None
+    )
     monkeypatch.setattr(window, "_log", lambda _message: None)
     monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
     monkeypatch.setattr(
@@ -543,7 +559,9 @@ def test_the_terminal_export_reads_the_canonical_portfolio(
 
     portfolio = _portfolio()
     window.broker_account._portfolio = portfolio
-    window._export_terminal_state()
+    # v2O-F1: the export is the Runtime Events capability's command; the window
+    # contributes the portfolio through the composition provider it injects.
+    window.runtime_events_orchestrator.export()
 
     assert seen["kwargs"]["portfolio"] is portfolio
 

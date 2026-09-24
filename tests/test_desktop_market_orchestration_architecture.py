@@ -781,6 +781,16 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
     ``MainWindow``.  It is a capability directory like ``market`` and ``account``,
     and it owns no second truth -- the workflow still owns the phase, the plan and
     the lease, and ``PaperTradingService`` still owns the connections.
+
+    ``system/`` arrived with v2O-F1, and it is the second route aggregate rather
+    than a capability: ``RuntimeEventsPage`` and ``SettingsPage`` are two
+    unrelated capabilities that share one page, so the runtime-event workspace
+    gets ``system/runtime_events/`` and the settings half stays on the window
+    until v2O-F2.  There is deliberately no ``system/orchestrator.py`` -- an
+    orchestrator owning both workspaces would hold the event store, the settings
+    service and the credential service at once, which is the God object in a new
+    costume.  That absence is asserted in
+    ``tests/test_desktop_runtime_events_orchestration_architecture.py``.
     """
 
     children = {
@@ -794,6 +804,7 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
         "research",
         "shadow",
         "paper",
+        "system",
     }, children
 
     # The route aggregate must stay an aggregate: a capability-level

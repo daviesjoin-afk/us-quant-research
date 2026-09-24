@@ -182,13 +182,16 @@ RETIRED_WINDOW_ACTIVE_CALLS = (
 )
 
 #: The launch method that legitimately stays: the operator confirmation is
-#: presentation, and the capability may not import ``QMessageBox``.
+#: presentation, and the capability may not import ``QMessageBox``.  The runtime
+#: event adapter is the window's single generic forwarder since v2O-F1: the Paper
+#: signal reaches ``_route_runtime_event`` and the store write is the Runtime
+#: Events capability's.
 RETAINED_WINDOW_LAUNCH_METHODS = (
     "_confirm_and_start_auto_quant",
     "_auto_quant_order_channel",
     "_build_paper_session",
     "_report_paper_launch_refusal",
-    "_record_paper_runtime_event",
+    "_route_runtime_event",
 )
 
 #: What legitimately stays on the window after v2O-E3: the one result render path, the
@@ -1843,11 +1846,16 @@ def test_the_window_publishes_no_paper_result_of_its_own() -> None:
     handler = _method_source(_DESKTOP_PATH, "_on_paper_result_changed")
     assert "_record_runtime_event" not in handler
     # The capability still has exactly one, and the window's one writer is the
-    # capability's event publication.
+    # capability's event publication -- routed through the window's single
+    # runtime-event adapter since v2O-F1.
     assert "for event in result.events:" in _function_source(
         _ORCHESTRATOR_PATH, "_publish_result"
     )
-    assert "_record_paper_runtime_event" in desktop
+    assert (
+        "self.paper_orchestrator.runtime_event_requested.connect("
+        "self._route_runtime_event)"
+    ) in _dense(_DESKTOP_PATH)
+    assert "_record_paper_runtime_event" not in desktop
 
 
 @pytest.mark.parametrize("signal,target", E3_SIGNAL_WIRING)

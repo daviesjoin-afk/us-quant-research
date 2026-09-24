@@ -536,7 +536,9 @@ def test_a_robustness_completion_asks_for_focus_and_navigates_semantically(
         lambda ws: navigations.append(f"evidence:{ws}"),
     )
     monkeypatch.setattr(window.shell, "navigate_to", lambda *args, **kwargs: None)
-    monkeypatch.setattr(window, "_record_runtime_event", lambda **kwargs: None)
+    monkeypatch.setattr(
+        window.runtime_events_orchestrator, "record", lambda **kwargs: None
+    )
     monkeypatch.setattr(window, "_log", lambda *args, **kwargs: None)
 
     window.targeted_evidence_orchestrator._robustness_finished(
@@ -923,7 +925,9 @@ def test_shadow_start_allowed_path_builds_and_starts_engine(
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "render_current", lambda: None
     )
-    monkeypatch.setattr(window, "_record_runtime_event", lambda **kwargs: None)
+    monkeypatch.setattr(
+        window.runtime_events_orchestrator, "record", lambda **kwargs: None
+    )
     monkeypatch.setattr(window, "_log", lambda *args, **kwargs: None)
     _fake_live_market(window, _ready_stream())
     window.universe_orchestrator.restore_snapshot(_eligible_universe())
@@ -958,7 +962,9 @@ def test_shadow_stop_calls_engine_and_workflow(window: MainWindow, monkeypatch) 
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "render_current", lambda: None
     )
-    monkeypatch.setattr(window, "_record_runtime_event", lambda **kwargs: None)
+    monkeypatch.setattr(
+        window.runtime_events_orchestrator, "record", lambda **kwargs: None
+    )
 
     window.shadow_orchestrator.stop()
 
@@ -986,7 +992,9 @@ def _arm_shadow_start(window: MainWindow, monkeypatch) -> None:
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "render_current", lambda: None
     )
-    monkeypatch.setattr(window, "_record_runtime_event", lambda **kwargs: None)
+    monkeypatch.setattr(
+        window.runtime_events_orchestrator, "record", lambda **kwargs: None
+    )
     monkeypatch.setattr(window, "_log", lambda *args, **kwargs: None)
     _fake_live_market(window, _ready_stream())
     window.universe_orchestrator.restore_snapshot(_eligible_universe())

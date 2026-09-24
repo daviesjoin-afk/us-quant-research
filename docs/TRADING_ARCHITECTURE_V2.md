@@ -98,6 +98,13 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 > 17 个 `settings_*` alias 与 7 个 runtime widget 归属全部退休。一级 native route
 > 计数变为 **7 / 8**。见 §8.10。
 
+> **进度更新（v2O-F1 Runtime Events orchestration）**：System 两个 workspace 的第一个
+> capability 已迁出窗口——`RuntimeEventsOrchestrator` 成为 Runtime Events 的唯一
+> sequencing owner（store 写入、合并重画、resolve、terminal export 成败与 last-export
+> fact、页面 render），`RuntimeEventStore` 仍是唯一 persisted truth，
+> `RuntimeEventsPage` 仍只 render / emit。Settings **未迁**（v2O-F2），Gateway probe
+> **未迁**。见 §8.22；顶层路线现为 **v2O-F1 ✅ / v2O-F2 ⏭**。
+
 ## 迁移状态一览
 
 | 链 | 状态 |
@@ -121,7 +128,7 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Desktop CrossSectionResearchPage | MIGRATED |
 | Desktop Dashboard | TRANSITIONAL |
 | Desktop Research aggregate | MIGRATED |
-| Desktop System | TRANSITIONAL |
+| Desktop System | TRANSITIONAL（页面 native v2；Runtime Events orchestration 已迁 v2O-F1 §8.22，Settings 仍暂留 → v2O-F2） |
 | AutoQuant Risk Integration | MIGRATED |
 | Execution Domain | MIGRATED |
 | Execution Application | MIGRATED |
@@ -145,6 +152,8 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Research Orchestration | **COMPLETE**（v2O-C；Universe / History / Scanner / Backtest / Cross-Section / Targeted Evidence / Targeted Session 全部已迁） |
 | Shadow Orchestration | MIGRATED（v2O-D，`desktop_v2/orchestration/shadow/`） |
 | Paper Orchestration | MIGRATED（v2O-E1 启动链 + v2O-E2 active runtime + v2O-E3 recovery/finalization/shutdown + v2O-E4 presentation / render closure，`desktop_v2/orchestration/paper/`）；Paper 的 presentation fact 也由 capability 持有（`PaperOrchestrator.presentation`），`MainWindow` 不再持有任何 Paper session 缓存 |
+| Runtime Events Orchestration | MIGRATED（v2O-F1，`desktop_v2/orchestration/system/runtime_events/`）；store 仍是唯一 truth，页面仍只 render / emit，窗口只剩 composition（事件路由 / 跨 capability 导出事实 / task-count provider / dialog） |
+| Settings Orchestration | 仍暂留 `MainWindow`（v2O-F2）——`DesktopSettingsService` 的 validate→derive→preflight→guard→persist→apply 顺序冻结 |
 
 Shadow 子系统：
 
@@ -632,8 +641,9 @@ system     → desktop_v2/pages/system/             ✅ native v2 aggregate
 ```
 
 前端进度：**7 / 8 native v2**。Research 与 System 一级 route 均已由原生 aggregate
-承接；只剩 Dashboard 仍是 transitional。Research / System orchestration 仍暂留在
-MainWindow，后续统一拆分。
+承接；只剩 Dashboard 仍是 transitional。Research orchestration 已全部抽出；System
+orchestration 已抽出 Runtime Events 一半（v2O-F1，§8.22），Settings 一半仍暂留
+MainWindow（v2O-F2）。
 
 ### 8.2 execution 页已完成（Desktop Execution v2）
 
@@ -1200,6 +1210,9 @@ settings view       SettingsPageView → SettingsPage.render()
 - **编排仍暂留 MainWindow。** System UI ownership = migrated；System orchestration
   = still MainWindow transitional。MainWindow 仍持有 store、settings service、
   credential service 与全部 handler。
+  **（前向引用）** 其中 Runtime Events 一半已由 v2O-F1 迁出（§8.22）：窗口不再持有
+  store alias、refresh stamp / pending 标志与 last-export fact，也不再组装 info text
+  或 render 该页面；本文 §8.10 描述的状态只对 **Settings** 一半仍然成立。**（前向引用结束）**
 
 新增守卫位于 `tests/test_desktop_v2_system_page.py`、
 `tests/test_desktop_v2_system_architecture.py`、`tests/test_desktop_v2_settings_*.py`
@@ -1812,15 +1825,18 @@ service、admission 被拒后 busy 保持 True、failure 清空 last-good runs�
 **v2O-C4 Cross Section ✅**；**v2O-C5A Targeted Evidence ✅**；
 **v2O-C5B Targeted Session + Preflight ✅**；**v2O-D Shadow orchestration ✅**；
 **v2O-E1 Paper launch orchestration ✅**；**v2O-E2 active Paper runtime orchestration ✅**；
-**v2O-E3 recovery / finalization orchestration ✅**；**v2O-E4 presentation / render closure ✅** ——
-顶层路线现在是 **v2O-E Paper COMPLETE**。Paper 能力分四刀：启动链（§8.18）、active
-runtime（§8.19）、recovery/finalization/shutdown（§8.20）与 presentation/render closure
-（§8.21）全部完成，`MainWindow` 不再决定 active session 何时 poll / 何时吃行情 / 何时
-pause/resume/stop，不再持有 runtime handle，不再决定 HALT 之后如何对账、zero-state 证明
-何时开始、ownership 何时可以释放，也不再持有任何 Paper session 的展示缓存——它保留的
-presentation fact 是 capability 发布的 immutable 投影，且不参与任何业务判断；下一刀是
-**v2O-F System orchestration**，随后才是 MainWindow composition closure 与 Final
-Architecture Closure。
+**v2O-E3 recovery / finalization orchestration ✅**；**v2O-E4 presentation / render closure ✅**；
+**v2O-F1 Runtime Events orchestration ✅** —— 顶层路线现在是 **v2O-E Paper COMPLETE +
+v2O-F1 ✅**。Paper 能力分四刀：启动链（§8.18）、active runtime（§8.19）、
+recovery/finalization/shutdown（§8.20）与 presentation/render closure（§8.21）全部完成，
+`MainWindow` 不再决定 active session 何时 poll / 何时吃行情 / 何时 pause/resume/stop，
+不再持有 runtime handle，不再决定 HALT 之后如何对账、zero-state 证明何时开始、ownership
+何时可以释放，也不再持有任何 Paper session 的展示缓存——它保留的 presentation fact 是
+capability 发布的 immutable 投影，且不参与任何业务判断。v2O-F1 把 System 的 Runtime
+Events 一半收进 `RuntimeEventsOrchestrator`（写入 / 合并重画 / resolve / 导出成败 /
+last-export / render，§8.22）；下一刀是 **v2O-F2 Settings orchestration**，之后才重新
+扫描 System 剩余职责（Gateway probe 是否需要独立 F3），随后是 MainWindow composition
+closure 与 Final Architecture Closure。
 
 维护导航见 `docs/DESKTOP_CAPABILITY_MAP.md`；C5B 的设计依据见
 `DESKTOP_DECOMPOSITION.md` §25，本文的 §8.16 只记该轮改变了哪些 boundary。
@@ -2400,6 +2416,113 @@ M10 窗口重新拼 view / M11 先 emit 再保留）。
 canonical owner 修的 bug，因此**没有** canonical-owner exception。
 
 设计依据见 `DESKTOP_DECOMPOSITION.md` §30。
+
+### 8.22 Runtime Events orchestration 已抽出（v2O-F1）
+
+System route 的页面是 native v2（§8.10），但它两个 workspace 的**运行时**仍全在窗口。
+这一刀只处理第一个：**Runtime Events**（Settings 是 v2O-F2，Gateway probe 冻结）。
+
+**新 home**：
+
+```text
+desktop_v2/orchestration/system/
+  __init__.py            只写清"这里没有 SystemOrchestrator"及其原因
+  runtime_events/
+    __init__.py          export RuntimeEventsOrchestrator + RuntimeEventsEnvironment
+    models.py            Qt-free：RuntimeEventsEnvironment（version + 四个 root）
+    orchestrator.py      record / refresh / resolve / export / notify_task_count_changed
+                         + FlushTimer 注入 seam + QtFlushTimer + 三个消息信号
+```
+
+**数据流**：
+
+```text
+Capability ──runtime_event_requested──▶ MainWindow._route_runtime_event（只转发四个字段）
+                                          → RuntimeEventsOrchestrator.record
+                                          → RuntimeEventStore.add（唯一写入口，唯一 redaction）
+                                          → schedule / coalesce → build_runtime_events_view
+                                          → RuntimeEventsPage.render
+
+RuntimeEventsPage.refresh_requested / resolve_requested / export_requested
+    → orchestrator.refresh / resolve / export（直连，不再经过窗口）
+```
+
+**窗口退出的东西**：`self.runtime_events`（store alias）、`_last_runtime_events_refresh`、
+`_runtime_events_refresh_pending`、`_last_runtime_export`、`_runtime_info_text`、
+`_record_runtime_event`、`_schedule_runtime_events_refresh`、`_flush_runtime_events_refresh`、
+`_refresh_runtime_events`、`_resolve_runtime_event`、`_export_terminal_state`，以及五个
+`_record_*_runtime_event` per-capability adapter（全部无 alias / 无 property / 无 shim）。
+
+**窗口留下的东西**：构造 store（内联在 orchestrator 构造里，窗口不留句柄）/ page /
+orchestrator；注入 `active_task_count` provider 与 export provider；连接页面三个 intent 与
+orchestrator 三个消息信号；`_route_runtime_event`（唯一 runtime-event adapter，只转发四个
+字段）；窗口自己的四个事实走 `orchestrator.record(...)`（strategy `STATUS_CHANGE` /
+minute_data `MINUTE_PERSIST_FAILED` / runtime `RUNTIME_SHUTDOWN_PARTIAL` / task
+`TASK_FAILED`）；`_start_task` / `_worker_finished` 各一次
+`notify_task_count_changed()`；`QMessageBox`；以及跨 capability 的
+`_export_runtime_bundle(events) -> Path`。
+
+**terminal export 的切法**：跨 capability 事实收集留在 composition root
+（Account + Market + Strategy + Shadow + Targeted 七族 + Paper 两张 audit 表 →
+`export_terminal_bundle`），成败 sequencing / `last_export` / `EXPORT_OK` / refresh /
+成功与失败信号全部属于 capability。provider 不写事件、不 render、不持 `last_export`、
+不弹框、不 schedule。顺序为：读取当前 events（一次）→ exporter → 更新 `last_export`
+→ 写 `EXPORT_OK` → refresh → `export_succeeded.emit(target)`；失败则 `last_export`
+保持原值、不写 `EXPORT_OK`、不发成功信号、发 `warning_requested`。
+
+> **顺序披露。** 退休前窗口是 refresh 之后再写 `EXPORT_OK`，那一行因此出现在约 1 秒后的
+> 合并 refresh 上；本轮先记录再 paint，`EXPORT_OK` 出现在同一次 paint 上。这是 sequencing
+> 变化而非行为回归，由 `test_a_successful_export_sequences_fact_event_paint_then_report`
+> 锁定（断言最后一次 view 的首行就是 `EXPORT_OK`，且只 paint 一次）。
+
+**coalescing**：显式 Refresh 与 resolve(valid) 立即重画；runtime event 与 task-count 变化
+按 1 秒窗口合并为一次 flush；flush 重新读 store 当前 truth；被显式重画取代的迟到 callback
+发现 pending 已清空，什么都不画。clock 与 scheduler 都是注入 seam，因此该时序测试不需要
+事件循环、也**不需要 sleep**。
+
+**不变量**：`RuntimeEventStore` 仍是唯一 persisted truth（schema / add / resolve /
+list_recent / redaction 全未改，也没有在 orchestrator 再做一次 redaction）；
+orchestrator 不缓存 event list（每次 render / export 都 `list_recent(500)`，state 集合被
+guard 精确断言）；不 import 任何其它 capability、trading、sqlite；generic task lifecycle
+（`TaskThread` / `DesktopTaskController` / worker list / closing gate / busy dialog）仍在
+窗口；`RuntimeEventsPage` 仍只 render / emit；`SystemPage` 仍 containment only，且不认识
+orchestrator；Settings 15 项职责与 Gateway probe 原样冻结。
+
+**没有 SystemOrchestrator。** System 是 containment route：一个同时持有 event store、
+settings service 与 credential service 的对象正是本轮点名禁止的 god object。
+`orchestration/system/orchestrator.py`、`orchestration/system/settings/` 与
+`SystemOrchestrator` / `SystemManager` / `DesktopSystemManager` / `SystemContext` /
+`ApplicationContext` / `ServiceBag` / `RuntimeManager` 的**不存在**由 guard 断言。
+
+**新增 guards**：`tests/test_desktop_runtime_events_orchestration_architecture.py` 14 条
+（无 store alias / 无 refresh 与 last-export state / 不调 store 方法 / 不 render 页面 /
+view 投影唯一调用者 / orchestrator 无 capability import / page 与 table 不碰 store /
+SystemPage 仍 containment / export provider 只做 composition / Settings 仍在窗口 /
+Gateway probe 未动 / 不缓存 event list / 不 import task lifecycle / 只剩一个纯转发
+adapter），加上 capability map 的 System 行断言。
+
+**行为测试**：`tests/test_desktop_runtime_events_orchestrator.py` 22 项（record 单写、
+refused write 上抛、每次 paint 重新读 store、burst 只 arm 一次、flush 读当前 truth、
+迟到 flush 不重画、显式 refresh 与 resolve 立即、task count 逐次读取、export 成败顺序
+与幂等）+ 重写的 `tests/test_desktop_v2_runtime_events_wiring.py` 15 项（页面 intent 直连
+capability、五个 capability 的 fan-in 各一次入库、task 生命周期、resolve 用稳定 id、
+导出 payload 未变与新语义）。
+
+**mutation**：`scripts/mutation_system_runtime_events_f1.ps1`，12 个 mutant **全部 RED**
+（M1 record 不写 / M2 不 schedule / M3 用缓存 events / M4 resolve(None) 仍写 /
+M5 resolve(valid) 不重画 / M6 失败仍更新 last_export / M7 失败仍写 EXPORT_OK /
+M8 成功不更新 last_export / M9 task count 构造时捕获 / M10 重复 arm /
+M11 窗口重新直接写 store / M12 窗口重新持有 last_export），无 `HARNESS-ERROR`。
+
+**零 diff**：`trading/runtime/**`、`trading/domain/**`、RiskApplication /
+ExecutionApplication、`PaperTradingService`、`PaperActiveRelease`、`ExecutionLease`、
+broker adapter、Shadow、Paper orchestration、Market / Account / Research business
+logic、`DesktopSettingsService`、credential service、`UserPreferencesStore`、
+`SettingsPage`、`SystemPage`、`RuntimeEventStore` schema、`export_service.py` artifact
+schema 全部未改。本轮没有发现需要在 canonical owner 修的 bug，因此**没有**
+canonical-owner exception。
+
+设计依据见 `DESKTOP_DECOMPOSITION.md` §31。
 
 ## 9. 已删除的旧架构
 
@@ -3179,7 +3302,8 @@ v2O-D Shadow orchestration      ✅ 已完成（§8.17）
 v2O-E Paper orchestration       ✅ COMPLETE：E1 启动链（§8.18）+ E2 active runtime（§8.19）
                                     + E3 recovery/finalization/shutdown（§8.20）
                                     + E4 presentation/render closure（§8.21）
-v2O-F System orchestration      ⏭ 后续
+v2O-F1 Runtime Events orchestration  ✅ 已完成（§8.22）
+v2O-F2 Settings orchestration        ⏭ 下一轮
 MainWindow composition closure  ⏭ 后续
 ```
 
@@ -3262,7 +3386,8 @@ v2。**Desktop Research v2E 已完成**（§8.8），CrossSectionResearchPage �
 **Desktop Research v2R-F 已完成**（§8.9），Research aggregate 已 native v2，
 但 Research orchestration 仍暂留在 MainWindow。**Desktop System v2 已完成**（§8.10），
 System aggregate 已 native v2 且两类大 UI 耦合已清零；System orchestration 仍暂留在
-MainWindow。**v2O-A Market orchestration 已完成**（§8.11），Market runtime truth 已
+MainWindow——**其中 Runtime Events 一半已由 v2O-F1 迁出（§8.22），Settings 一半仍暂留
+（v2O-F2）**。**v2O-A Market orchestration 已完成**（§8.11），Market runtime truth 已
 从 `MainWindow` 迁入 `desktop_v2/orchestration/market/`，窗口只保留跨 workflow
 safety bridge 与 snapshot fan-out。**v2O-B Account orchestration 已完成**（§8.12），
 Account 的 refresh / ledger / page render / shell 事实已迁入
@@ -3317,7 +3442,8 @@ v2O-E1 Paper launch             ✅ 已完成（§8.18）
 v2O-E2 active Paper runtime     ✅ 已完成（§8.19）
 v2O-E3 HALT / reconciliation / finalization / shutdown   ✅ 已完成（§8.20）
 v2O-E4 presentation / render closure + MainWindow guards  ✅ 已完成（§8.21）
-v2O-F System orchestration
+v2O-F1 Runtime Events orchestration                      ✅ 已完成（§8.22）
+v2O-F2 Settings orchestration                            ⏭ 下一轮
 MainWindow composition closure
 Final Architecture Closure
 ```
@@ -3424,6 +3550,30 @@ v2O-D 刻意没有做的事，留给更后面：
 - 没有提前建 `CapitalAllocator` / Risk Kernel / Champion-Challenger / AI / Live
   broker / Live order：未来目标不进这一轮；
 - 没有清理本轮之外的 legacy。
+
+v2O-F1 刻意没有做的事，留给更后面：
+
+- 只抽 Runtime Events，没有 Settings orchestration（v2O-F2），也没有搬 Gateway
+  probe（`_probe_gateway` / `probe_ibkr_socket` / `gateway_badge`）；
+- 没有创建 `SystemOrchestrator` / `SystemManager` / `DesktopSystemManager` /
+  `SystemContext` / `ApplicationContext` / `ServiceBag` / `RuntimeManager`：System 是
+  containment route，Runtime Events 与 Settings 是两个不相关的 capability，共用一个
+  对象会同时持有 event store、settings service 与 credential service，那正是本轮要
+  避免的 god object；
+- 没有搬 generic task lifecycle（`TaskThread` / `DesktopTaskController` / worker
+  列表 / closing admission gate / busy dialog）：orchestrator 只拿到窄 provider
+  `active_task_count`，窗口在 task 数量变化时通知它；
+- 没有把跨 capability 的导出事实收集搬进 orchestrator：provider 留在 composition
+  root，只做事实汇总，不做 sequencing；
+- 没有给 orchestrator 加 `events` / `rows` / `recent_events` 之类的 accessor 或缓存：
+  每次 render / export 都从 store 重新读；
+- 没有改 `RuntimeEventStore` 的 schema，也没有把 redaction 复制进 orchestrator；
+- 没有改 `export_service.py` 的 artifact schema、`DesktopSettingsService` 的
+  validate→derive→preflight→guard→persist→apply 顺序、Paper release 协议、
+  reconciliation / finalization、execution risk ordering、broker retry 或 strategy
+  lifecycle；
+- 没有统一 Market / Account / Shadow / Paper / Research 各自的 runtime event model：
+  窗口的一个纯转发 adapter 就是它们唯一需要的公共点。
 
 Framework v2C 刻意没有做的事，留给更后面：
 

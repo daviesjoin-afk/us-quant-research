@@ -240,6 +240,36 @@ def test_the_shadow_row_names_its_capability_owner() -> None:
     assert "v2O-D next" not in row
 
 
+def test_the_system_row_names_the_half_that_moved_and_the_half_that_did_not() -> None:
+    """v2O-F1 landed for Runtime Events, and Settings has not moved.
+
+    Two failures are guarded, in opposite directions.  A row that still sends the
+    maintainer to ``desktop.py`` for the event store write, the coalescing or the
+    export sequence would describe owners that no longer exist; a row claiming
+    "System orchestration complete" would be the false claim this round's brief
+    forbids, because the settings half is v2O-F2.
+    """
+
+    text = _MAP.read_text(encoding="utf-8")
+    row = next(
+        line for line in text.splitlines() if line.startswith("| **System**")
+    )
+    assert "RuntimeEventsOrchestrator" in row
+    assert "v2O-F1 complete" in row
+    assert "v2O-F2 next" in row
+    for retired in (
+        "MainWindow._record_runtime_event",
+        "MainWindow._refresh_runtime_events",
+        "MainWindow._schedule_runtime_events_refresh",
+        "MainWindow._resolve_runtime_event",
+        "MainWindow._export_terminal_state",
+        "MainWindow._last_runtime_export",
+    ):
+        assert retired not in row, retired
+    assert "System orchestration complete" not in row
+    assert "v2O-F complete" not in row
+
+
 def test_the_shared_research_capital_fact_has_an_entry() -> None:
     """The scalar is not a page capability, so it gets its own section.
 

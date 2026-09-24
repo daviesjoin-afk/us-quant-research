@@ -1,11 +1,11 @@
 """Immutable contracts for the Settings capability's desktop sequencing.
 
 Two value objects, both frozen, neither able to call a service: the *decision*
-one credential action came to, and the provider shape that decision is made
-against.  They exist so the rules themselves (``queries.py``) are pure functions
-of immutable input -- a credential save that reads a widget, a store or a clock
-could not be tested without a window, and the four outcomes below are exactly
-what the operator sees.
+one credential action came to, and that decision together with the payload it
+authorised.  They exist so the rules themselves (``queries.py``) are pure
+functions of immutable input -- a credential save that read a widget, a store or
+a clock could not be tested without a window, and the four outcomes below are
+exactly what the operator sees.
 """
 
 from __future__ import annotations

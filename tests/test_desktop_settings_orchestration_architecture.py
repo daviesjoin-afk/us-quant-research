@@ -407,6 +407,33 @@ def test_both_presentation_facts_have_exactly_one_owner() -> None:
 # -- 2 / 3 / 4: one render caller, and no window-side service calls ------
 
 
+def test_the_window_imports_no_retired_settings_failure_type() -> None:
+    """The three transaction failures are the capability's business now.
+
+    They were imported into ``desktop.py`` only so the retired save/clear
+    handlers could catch them.  Leaving them imported would be a standing
+    invitation to catch one in the window again, which is exactly the second
+    owner this round removed -- and the repository's existing unused-import guard
+    only scans ``PySide6`` imports, so nothing else would notice.
+    """
+
+    imported = _imported_names(_desktop())
+    for name in (
+        "UserSettingsError",
+        "MarketDataActiveError",
+        "BrokerAccountError",
+        "CredentialStoreError",
+    ):
+        assert name not in imported, name
+
+    source = _DESKTOP.read_text(encoding="utf-8")
+    for module in (
+        "us_quant.trading.ports.broker_account",
+        "us_quant.trading.ports.market_data",
+    ):
+        assert module not in source, module
+
+
 def test_the_window_never_renders_the_settings_page() -> None:
     tree = _desktop()
     source = _DESKTOP.read_text(encoding="utf-8")

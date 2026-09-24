@@ -1,10 +1,12 @@
 """Pure rules and projections for the Settings capability.
 
 Qt-free, service-free, I/O-free: everything here is a function of its arguments.
-That is what makes the four decisions the Settings workspace actually makes
-testable without a window -- which credential action a click means, what the
-status line says, which API provider a market provider maps to, and what the
-page is built from.
+That is what makes the decisions the Settings workspace actually makes testable
+without a window -- which credential action a click means, what the status line
+says, and what the page is built from.  The fourth rule, "which API provider a
+market provider maps to", is ``api_provider_for_market_provider`` in the page's
+own ``models.py``: the page needs it in its own contract, so it lives there and
+this module imports nothing back from the page.
 
 What is deliberately **not** here: reading the credential store, committing
 preferences, or deciding whether a live stream may change.  Those belong to
@@ -19,6 +21,9 @@ from pathlib import Path
 
 from us_quant.desktop_credentials import (
     API_KEY_PROVIDERS,
+    PROVIDER_ALPACA_IEX,
+    PROVIDER_FINNHUB_TRADES,
+    STREAM_CREDENTIAL_SOURCES,
     CredentialStatus,
 )
 from us_quant.desktop_v2.pages.system.settings.models import (
@@ -32,9 +37,12 @@ from .models import (
     CredentialSavePlan,
 )
 
-#: The two providers that store an API key here, and the one that does not.
-PROVIDER_FINNHUB = "finnhub_trades"
-PROVIDER_ALPACA = "alpaca_iex"
+#: The two providers whose status line and clear log this workspace names.  They
+#: are aliases of the credential service's own constants rather than new string
+#: literals: a rename there must not leave the status line looking up a provider
+#: the table no longer has.
+PROVIDER_FINNHUB = PROVIDER_FINNHUB_TRADES
+PROVIDER_ALPACA = PROVIDER_ALPACA_IEX
 
 #: Operator-facing credential provider labels, frozen with the status line.
 CREDENTIAL_PROVIDER_LABELS: dict[str, str] = {
@@ -55,6 +63,17 @@ def provider_requires_api_key(provider: str) -> bool:
     return provider in API_KEY_PROVIDERS
 
 
+def provider_has_two_halves(provider: str) -> bool:
+    """Whether this provider stores an API Key *and* an API Secret.
+
+    The count comes from the credential service's own table -- the same one its
+    ``save_provider`` switches on -- rather than a second list of provider ids
+    that could drift from it the first time a provider is added.
+    """
+
+    return len(STREAM_CREDENTIAL_SOURCES.get(provider, ())) > 1
+
+
 def provider_label(provider: str) -> str:
     """The label the clear-success log line names."""
 
@@ -70,10 +89,20 @@ def credential_save_plan(
     """Resolve one Save-credentials click into an outcome and its payload.
 
     Semantics are the retired handler's, verbatim: blank input is "no change"
-    rather than an error, a half-filled Alpaca pair is refused outright, and a
-    provider that stores no key here is explained rather than written.  Trimming
-    happens here, once, so the value that is written is the value that was
-    judged complete.
+    rather than an error, a half-filled two-part credential is refused outright,
+    and a provider that stores no key here is explained rather than written.
+    Which providers take two halves comes from the credential service's table
+    (see :func:`provider_has_two_halves`), so this file does not keep a second
+    copy of that knowledge.  Trimming happens here, once, so the value that is
+    written is the value that was judged complete.
+
+    One disclosed difference, currently unreachable: a provider added to the
+    credential service's table later would be saved *and* cleared here by shape,
+    where the retired handlers branched on the two provider ids and answered
+    "no API key" for anything else.  Both refuse nothing that could be written;
+    this one honours the credential service's own shape instead of a second
+    list, and its refusal comes from that service rather than from a hardcoded
+    ``else``.
     """
 
     if not provider_requires_api_key(provider):
@@ -83,7 +112,7 @@ def credential_save_plan(
 
     trimmed_key = api_key.strip()
     trimmed_secret = api_secret.strip()
-    if provider == PROVIDER_ALPACA:
+    if provider_has_two_halves(provider):
         if not trimmed_key and not trimmed_secret:
             return CredentialSavePlan(
                 provider=provider, outcome=CredentialSaveOutcome.NO_CHANGE
@@ -211,6 +240,7 @@ __all__ = [
     "credential_save_plan",
     "credential_status_text",
     "preferences_from_draft",
+    "provider_has_two_halves",
     "provider_label",
     "provider_requires_api_key",
     "settings_draft_from_preferences",

@@ -39,10 +39,7 @@ from PySide6.QtWidgets import (
 
 
 from us_quant.config import load_config
-from us_quant.credential_store import (
-    CredentialStoreError,
-    WindowsCredentialStore,
-)
+from us_quant.credential_store import WindowsCredentialStore
 from us_quant.desktop_credentials import DesktopCredentialService
 from us_quant.artifact_state import (
     ArtifactCatalog,
@@ -76,13 +73,8 @@ from us_quant.trading.domain.market import (
     MarketDataMode,
     MarketSnapshot,
 )
-from us_quant.trading.ports.broker_account import (
-    BrokerAccountError,
-)
-from us_quant.trading.ports.market_data import (
-    MarketDataActiveError,
-)
 from us_quant.desktop_settings import (
+    DesktopSettingsCommit,
     DesktopSettingsService,
     ibkr_config_from_preferences,
 )
@@ -300,7 +292,6 @@ from us_quant.desktop_v2.shell import DesktopShellV2
 from us_quant.user_settings import (
     UserPreferences,
     UserPreferencesStore,
-    UserSettingsError,
 )
 
 
@@ -1094,7 +1085,17 @@ class MainWindow(QMainWindow):
             # the window was built.
             current_config=lambda: self.config,
             broker_config=lambda: self.broker_account,
-            runtime_guards=lambda: (self.market_data,),
+            # Read at commit time, and the empty tuple is deliberate: the
+            # retired adapter passed the market-data application only when it
+            # existed, and the service iterates this sequence calling
+            # ``ensure_reconfiguration_allowed()`` on each member, so a ``None``
+            # in it would be an uncaught ``AttributeError`` rather than a
+            # refusal the service reports.
+            runtime_guards=lambda: (
+                (self.market_data,)
+                if self.market_data is not None
+                else ()
+            ),
             # Read on every repaint: whether a credential may be cleared depends
             # on the stream that is running *now*.
             active_market_source_id=(
@@ -3334,6 +3335,13 @@ class MainWindow(QMainWindow):
         The selected *API* provider deliberately does not follow here — the
         Settings combo is where the operator chooses which credential to edit —
         which is the asymmetry the retired handler had.
+
+        The signal's payload is ignored and the route's own ``selected_provider()``
+        is read instead, exactly as the retired handler did.  Today the two are
+        the same string -- ``MarketControls`` emits ``selected_provider()``
+        itself -- so this is not a behavioural distinction; re-reading keeps the
+        sync tied to the route's finished value rather than to whatever a future
+        emitter of that signal happens to pass.
         """
 
         provider = str(
@@ -3360,7 +3368,7 @@ class MainWindow(QMainWindow):
             return
         self._request_market_switch(provider)
 
-    def _on_settings_committed(self, commit: object) -> None:
+    def _on_settings_committed(self, commit: DesktopSettingsCommit) -> None:
         """Adopt one finished settings transaction, then fan it out.
 
         Composition and nothing else: the commit is already validated,

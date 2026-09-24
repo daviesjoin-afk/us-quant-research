@@ -5248,6 +5248,16 @@ toggled(True)   → paper_order_capability_confirmation_requested(title, message
 方法必须存在、`SettingsOrchestrator` 必须存在），`test_no_god_object_was_created_for_the_system_route`
 从"settings 目录不存在"改为"两个 sibling capability 各自有 owner、且没有聚合 owner"。
 
+**一处既有 guard 的允许集合被显式扩大，披露如下。**
+`tests/test_desktop_market_orchestration_architecture.py::test_the_window_never_reaches_through_the_orchestrator`
+原先只允许窗口读 `PUBLIC_READ_SURFACE` 与 `PUBLIC_COMMAND_SURFACE` 里的成员；本轮窗口需要在
+Settings 接线处订阅市场路由的 `connection_settings_enabled_changed` 信号。退休前的窗口做的是
+**同一件事**，只是写成了 `orchestrator = self.market_orchestrator` 再用局部名访问，所以那条
+guard 当时看不到它——也就是说这不是新增耦合，而是把既有事实写清楚。做法是新增
+`PUBLIC_SIGNALS`（十个真实声明的 Signal，并在 guard 内断言它们确实是该类的 Signal 声明）并把它
+并入允许集合，而不是用局部别名绕过 guard。这是本轮**唯一**放宽性质的 guard 改动，其余三处
+（F1 两条反转、capability map 行、desktop_v2 文件清单）都是加强或补全。
+
 ### 32.13 真实窗口与 mutation
 
 `tests/test_desktop_v2_settings_wiring.py` 增补 7 项真实窗口测试：状态行由 capability 每次
@@ -5256,7 +5266,7 @@ fan-out 恰好一次走 `market_orchestrator.set_selected_provider`（并断言�
 两个 toggle 接受后仍只是 draft、凭据保存失败保留输入、`config`/`preferences` 仍在
 composition root 且 capability 没有它们的副本。
 
-`scripts/mutation_system_settings_f2.ps1`：21 个 mutant，**21 RED / 0 survived / 0 harness-error**。
+`scripts/mutation_system_settings_f2.ps1`：22 个 mutant，**22 RED / 0 survived / 0 harness-error**。
 
 ```text
 M1  窗口再次持有 _settings_api_provider                      M12 同步改成 emit_change=True
@@ -5269,7 +5279,7 @@ M7  保存成功不清输入/不重画                                   M18 窗
 M8  保存失败报成功                                            M19 capability import MarketOrchestrator
 M9  事务拒绝仍发布 commit                                     M20 capability 自己驱动 market switch
 M10 事务拒绝仍请求切换                                        M21 窗口采纳后再跑一次事务
-M11 先切换后发布 commit（首次存活→测试加强后 RED）
+M11 先切换后发布 commit（首次存活→测试加强后 RED）            M22 窗口重新 import 退休的失败类型
 ```
 
 **F1 留下的另一个坑在本轮又被踩了一次并修好。** `mutation_e3.ps1` 的 M27 锚点在 F1 时被改到
@@ -5298,8 +5308,26 @@ orchestrator 的轮次都要重跑所有旧 mutation 脚本**。`mutation_e2.ps1
 仍缺非零退出码尾巴（§31.11 已披露），所以这两个脚本的"survived"只能靠读输出发现——
 它们的 no-match 现在会打 `HARNESS-ERROR`，但**不会**让脚本失败；这一项仍留给后续。
 
-### 32.14 零 diff 与剩余项
+### 32.13.1 独立 review 与 triage
 
+`.\scripts\review.ps1 -To refactor/desktop-system-settings-orchestration-v2`（delegate 模式）产出
+review spec（24 个可审文件 / merge base `3a828a9`），LLM 推理由独立 reviewer 在**只读**上下文中
+完成，结论与 triage：
+
+| 级别 | 发现 | 处置 |
+|---|---|---|
+| MEDIUM | `desktop.py` 里 `CredentialStoreError` / `BrokerAccountError` / `MarketDataActiveError` / `UserSettingsError` 四个 import 随退休 handler 变成死 import（仓库既有的 unused-import guard 只扫 `PySide6`） | **已修**：删除四处 import（两个整条 import 语句随之消失），并新增 guard `test_the_window_imports_no_retired_settings_failure_type` + mutation M22 钉住 |
+| LOW | `orchestrator.py` 两处 docstring 说"两个异常来自 ports"，实际捕三个且 `UserSettingsError` 来自 store | **已修**：改成"两个来自 ports、第三个来自 preferences store" |
+| LOW | `queries.py` 重新声明了 `finnhub_trades` / `alpaca_iex` 字面量，而它已经 import 了 credential service 的同名常量 | **已修**：改为 `PROVIDER_FINNHUB = PROVIDER_FINNHUB_TRADES` / `PROVIDER_ALPACA = PROVIDER_ALPACA_IEX` 的显式别名，漂移风险消失 |
+| LOW | `queries.py` 模块 docstring 说"四个决策都在这里"，其中 `api_provider_for_market_provider` 在 page 的 `models.py` | **已修**：改成"三个在这里，第四个是 page 自己的契约函数" |
+| LOW | `_on_market_provider_selected` 的注释声称"payload 是 combo 报的、`selected_provider()` 才是路由会用的"，而 `MarketControls` 发的就是同一个 `selected_provider()` | **已修**：注释改成事实——今天两者是同一个字符串，忽略 payload 只是与退休 handler 一致，并让同步绑定路由的 finished value |
+
+CRITICAL / HIGH：**0 项**。reviewer 另给出"checked and clean"清单（八条面向操作者的字符串逐字
+一致、凭据四态语义与 live-source 门禁顺序等价、六个 `_publish_settings_view()` 调用点 1:1 映射到
+新的 render 点、九个 intent 与九个 signal 接线完整且元数匹配、`None` 路径、异常集合、
+`emit_change=False` 与 `blockSignals` 双向验证、`select_market_provider` 调序反转不可观测）。
+
+### 32.14 零 diff 与剩余项
 零 diff（逐字节）：`trading/runtime/**`、`trading/domain/**`、RiskApplication、
 ExecutionApplication、`PaperTradingService`、`PaperActiveRelease`、`ExecutionLease`、
 broker adapter、Shadow、Paper orchestration、Market / Account / Research 业务逻辑、

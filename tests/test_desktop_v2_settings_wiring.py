@@ -339,7 +339,15 @@ def test_inactive_provider_credentials_can_be_cleared(
 def test_the_credential_status_line_is_reprojected_by_the_capability(
     monkeypatch, tmp_path
 ) -> None:
-    """The page's label follows the service on every capability repaint."""
+    """The page's label follows the service on every capability repaint.
+
+    The status service is stubbed *after* the window is built, so the label must
+    change without any window-side call: pointing the provider combo is a page
+    intent, the capability repaints from the live status, and the new text
+    appears.  The provider is moved away and back because the combo's silent
+    setter only reports a real change, and the round trip is what makes the
+    second repaint happen.
+    """
 
     window = _window(monkeypatch, tmp_path)
     try:

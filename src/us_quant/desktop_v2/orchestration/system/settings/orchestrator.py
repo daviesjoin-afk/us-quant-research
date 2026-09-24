@@ -27,8 +27,11 @@ The boundary it draws:
   messages are signals, and the market route is asked through a signal -- this
   module does not import ``MarketOrchestrator``, ``AccountOrchestrator``,
   ``PaperOrchestrator``, any Research orchestrator, Risk, Execution or a broker
-  adapter.  The two exception types it catches come from the *ports* those
-  applications already declare;
+  adapter.  The three exception types it catches are the transaction's declared
+  contract: two are ports (``us_quant.trading.ports.market_data`` and
+  ``us_quant.trading.ports.broker_account``) and the third,
+  ``UserSettingsError``, is the preferences store's own -- so nothing here knows
+  a concrete broker, stream, repository or store;
 * **its presentation facts are presentation facts.**  The selected API provider
   and whether the connection controls are enabled describe the workspace, not
   the application; the live market source is read through a provider on every
@@ -396,11 +399,12 @@ class SettingsOrchestrator(QObject):
     ) -> DesktopSettingsCommit | None:
         """Run the settings transaction, or report why it refused.
 
-        The three exception types are the transaction's declared contract and
-        they come from ports, not implementations: nothing here knows a concrete
-        broker, stream or repository.  Catching them (rather than a bare
-        ``Exception``) is what keeps a programming error visible instead of
-        being reported to the operator as "not saved".
+        The three exception types are the transaction's declared contract: the
+        market-data and broker-account failures come from the *ports* those
+        applications declare, and ``UserSettingsError`` is the preferences
+        store's.  Catching them (rather than a bare ``Exception``) is what keeps
+        a programming error visible instead of being reported to the operator as
+        "not saved".
         """
 
         try:

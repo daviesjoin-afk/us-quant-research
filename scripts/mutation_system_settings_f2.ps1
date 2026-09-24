@@ -265,6 +265,14 @@ $mutations = @(
         repl = "        saved = commit.preferences`n        self.settings_service.commit(`n            saved,`n            current_config=self.config,`n            broker_config=self.broker_account,`n            runtime_guards=(self.market_data,),`n        )`n        self.config = commit.config"
         tests = @($architecture)
         select = @("-k", "window_keeps_the_global_composition")
+    },
+    @{
+        name = "M22 the window imports a retired settings failure type again"
+        file = $desktopPath
+        find = "from us_quant\.user_settings import \(\r?\n    UserPreferences,\r?\n    UserPreferencesStore,\r?\n\)"
+        repl = "from us_quant.user_settings import (`n    UserPreferences,`n    UserPreferencesStore,`n    UserSettingsError,`n)"
+        tests = @($architecture)
+        select = @("-k", "imports_no_retired_settings_failure_type")
     }
 )
 

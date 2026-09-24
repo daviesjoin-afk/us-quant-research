@@ -243,6 +243,56 @@ def test_the_api_key_providers_come_from_the_credential_service(
 
 @pytest.mark.parametrize(
     "provider,expected",
+    [
+        ("alpaca_iex", True),
+        ("finnhub_trades", False),
+        ("ibkr", False),
+        ("unknown", False),
+    ],
+)
+def test_the_two_halves_rule_comes_from_the_credential_table(
+    provider: str, expected: bool
+) -> None:
+    assert queries.provider_has_two_halves(provider) is expected
+
+
+def test_a_new_two_part_provider_needs_no_change_here(monkeypatch) -> None:
+    """The drift the provider-id comparison would have caused.
+
+    Adding a provider to the credential service's table must be enough: the
+    plan reads the *shape* from that table, so it refuses a half-filled pair for
+    the new provider too, without this module keeping a second list to update.
+    """
+
+    from us_quant import desktop_credentials
+
+    monkeypatch.setitem(
+        desktop_credentials.STREAM_CREDENTIAL_SOURCES,
+        "hypothetical_pair",
+        (("hypothetical_key", "ENV_KEY"), ("hypothetical_secret", "ENV_SECRET")),
+    )
+    monkeypatch.setattr(
+        queries,
+        "API_KEY_PROVIDERS",
+        frozenset(
+            {"finnhub_trades", "alpaca_iex", "hypothetical_pair"}
+        ),
+    )
+
+    assert queries.provider_has_two_halves("hypothetical_pair") is True
+    half = queries.credential_save_plan(
+        "hypothetical_pair", api_key="key", api_secret=""
+    )
+    assert half.outcome is CredentialSaveOutcome.INCOMPLETE
+    full = queries.credential_save_plan(
+        "hypothetical_pair", api_key="key", api_secret="secret"
+    )
+    assert full.outcome is CredentialSaveOutcome.SAVE
+    assert (full.api_key, full.api_secret) == ("key", "secret")
+
+
+@pytest.mark.parametrize(
+    "provider,expected",
     [("finnhub_trades", "Finnhub"), ("alpaca_iex", "Alpaca")],
 )
 def test_the_log_label_names_the_provider(provider: str, expected: str) -> None:

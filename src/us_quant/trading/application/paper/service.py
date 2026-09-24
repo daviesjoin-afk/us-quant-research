@@ -205,9 +205,9 @@ class PaperTradingService:
         state of the slot -- after publication the workflow cannot be ownerless,
         because there is no longer an ordering in which it could be.
 
-        Exclusive while it lasts.  A second reservation, a
-        :meth:`connect_candidate` for the same id, and a slot that already holds a
-        service are all refused, so the ending is deterministic rather than a race.
+        Exclusive while it lasts: a second reservation, and a slot that already holds
+        a service, are both refused.  So the ending is deterministic rather than a
+        race -- and the rollback below has exactly one thing to undo.
         """
 
         key = self._candidate_key(candidate_id)

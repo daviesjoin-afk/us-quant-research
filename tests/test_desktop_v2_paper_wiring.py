@@ -903,3 +903,111 @@ def test_the_channel_probe_is_still_refused_while_a_session_is_live(
 
     assert window._channel_check_inflight is False
     assert window._test_submitter.connect_count == connects
+
+
+# -- v2O-E3: the operator's resume confirmation --------------------------
+#
+# The one recovery intent that legitimately hops through the window.  It is a
+# ``QMessageBox``, and the capability may not import one -- so the hop is the point.  The
+# failure this guards is not a crash: it is a *question asked and then acted on anyway*,
+# or a confirmation counted twice, and both are invisible to a test that only checks the
+# handler exists.
+
+class _ResumeWorkflow:
+    """The two facts the confirmation reads, and the one call it makes.
+
+    ``result`` is ``None`` deliberately: the fixture closes the window at teardown, and
+    the close asks the service whether a session is still awaiting finalization.  A fake
+    that raised there would make this test file fail for a reason that has nothing to do
+    with the confirmation.
+    """
+
+    result = None
+
+    def __init__(self, *, ready: bool, evidence_id: str | None) -> None:
+        self.phase = (
+            PaperWorkflowPhase.RECONCILING_READY
+            if ready
+            else PaperWorkflowPhase.HALTED
+        )
+        self._evidence_id = evidence_id
+        self.confirmed: list[str] = []
+
+    @property
+    def reconciliation_evidence(self):
+        if self._evidence_id is None:
+            return None
+        return type("_Evidence", (), {"evidence_id": self._evidence_id})()
+
+    def confirm_manual_resume(self, evidence_id: str) -> object:
+        # Records the attempt before doing anything, so "the confirmation was never
+        # reached" stays distinguishable from "it was reached and refused".
+        self.confirmed.append(evidence_id)
+        return object()
+
+
+def _ask_resume(window: MainWindow) -> None:
+    """Emit the page's confirmation intent, as the operator's click would."""
+
+    window.execution_page.resume_reconciliation_requested.emit()
+    _APP.processEvents()
+
+
+def test_declining_the_resume_confirmation_never_reaches_the_capability(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``No`` is not a slow yes: nothing is submitted and nothing is confirmed."""
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    workflow = _ResumeWorkflow(ready=True, evidence_id="reconciliation-1")
+    window.paper_workflow = workflow  # type: ignore[assignment]
+    window._test_submitter.calls.clear()
+
+    _ask_resume(window)
+
+    assert workflow.confirmed == []
+    assert window._test_submitter.calls == []
+    # And the proof is still where it was, so the operator can change their mind.
+    assert workflow.phase is PaperWorkflowPhase.RECONCILING_READY
+
+
+def test_confirming_the_resume_reaches_the_capability_exactly_once(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``Yes`` hands the current proof's id over once, on the broker group."""
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    workflow = _ResumeWorkflow(ready=True, evidence_id="reconciliation-1")
+    window.paper_workflow = workflow  # type: ignore[assignment]
+    window._test_submitter.calls.clear()
+
+    _ask_resume(window)
+
+    assert workflow.confirmed == ["reconciliation-1"]
+    assert len(window._test_submitter.calls) == 1
+    assert window._test_submitter.calls[0]["resource_group"] == "broker"
+
+
+def test_a_confirmation_with_no_current_proof_submits_nothing(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even a stray ``Yes`` cannot confirm a proof that is not there.
+
+    The window asks and forwards; the capability re-reads the phase and the evidence and
+    refuses.  That division is the point: a handler that decided for itself whether a
+    proof was current would be a second reader of the workflow's evidence.
+    """
+
+    asked: list[int] = []
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: asked.append(1) or QMessageBox.Yes
+    )
+    workflow = _ResumeWorkflow(ready=False, evidence_id=None)
+    window.paper_workflow = workflow  # type: ignore[assignment]
+    window._test_submitter.calls.clear()
+
+    _ask_resume(window)
+
+    assert asked == [1], "the window's job is to ask"
+    assert workflow.confirmed == []
+    assert window._test_submitter.calls == []

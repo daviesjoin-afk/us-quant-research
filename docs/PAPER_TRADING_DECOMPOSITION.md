@@ -754,3 +754,41 @@ promotion reservation。窗口仍负责 manual reconciliation、HALT recovery、
 
 设计依据见 `docs/DESKTOP_DECOMPOSITION.md` §28 与 `docs/TRADING_ARCHITECTURE_V2.md`
 §8.19。
+
+**注意（forward reference）**：上面最后一段"窗口仍负责 manual reconciliation / HALT
+recovery / finalization"已在 v2O-E3 改变——这三件事也移进了 `PaperOrchestrator`。见下面的
+§37。
+
+## 37. recovery / finalization 迁入 `PaperOrchestrator`（v2O-E3）
+
+同样是前向引用，不重写上面的历史。v2O-E3 把 HALT 之后的人工恢复、STOPPING 之后的
+zero-state 证明、以及关闭时对 Paper 的判断一并移出窗口：
+
+```text
+desktop_v2/orchestration/paper/
+    models.py        新增 PaperShutdownDisposition / PaperShutdownResult + recovery 文案
+    queries.py       新增 manual_recovery_phase（三个"只能由人离开"的相位，唯一定义）
+    orchestrator.py  新增 reconcile / confirm_reconciliation_resume / prepare_shutdown
+                     + _after_result（result 的后果只在一处决定）
+                     + signals: presentation_refresh_requested / session_finalized /
+                                manual_recovery_required
+```
+
+| 事实 | 唯一 owner | E3 之后由谁驱动 |
+| --- | --- | --- |
+| HALT 之后如何取回证据 | `PaperOrchestrator.reconcile` | `page.reconcile_requested` 直连 |
+| 哪份证据还能 resume | `PaperWorkflowController` | capability 在**用户确认之后**重读，冻结 evidence_id |
+| 谁问操作员 | `MainWindow._confirm_paper_reconciliation_resume` | 纯 presentation（`QMessageBox`），点 No 则 capability 根本不被调用 |
+| zero-state 证明何时开始 | `PaperOrchestrator._maybe_schedule_finalization` | 唯一的 post-result hook + 5s backoff |
+| disconnect / clear_active 何时发生 | `PaperOrchestrator._release_paper_ownership_if_proven` | `finalize_if_safe()` 是释放 PAPER 的唯一闸门 |
+| 关闭时对 Paper 的判断 | `PaperOrchestrator.prepare_shutdown` | `closeEvent` 只展示 verdict |
+| "这个 session 需要人" | `PaperOrchestrator.manual_recovery_required` | 窗口不再自己做相位推理 |
+
+本文档 §16–§34 描述的 `PaperTradingService` / gateway / journal 边界同样不受影响：E3 只改
+desktop 侧的 sequencing owner，没有改 service、没有改 coordinator、没有改
+`workflow.py` / `recovery.py` / `reconciliation.py`，也没有改 E1 的 promotion reservation。
+窗口仍负责两个 `QMessageBox` 确认、`closeEvent` 的 generic teardown 与 execution page 的
+session 渲染（E4）。
+
+设计依据见 `docs/DESKTOP_DECOMPOSITION.md` §29 与 `docs/TRADING_ARCHITECTURE_V2.md`
+§8.20。

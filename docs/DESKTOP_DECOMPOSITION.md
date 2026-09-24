@@ -3839,3 +3839,286 @@ HARNESS-ERROR 而不是"抓住"——一个匹配不到测试的选择器否则�
 本轮**未触碰**任何 frozen core：`trading/runtime/*`、`trading/application/*`、broker
 adapter、execution lease、Shadow 全部零 diff，包括 E1 刚完成的
 `reserve/commit/cancel_candidate_promotion` 与 reserved-id ownership。
+
+## 29. v2O-E3：Paper recovery / finalization 提取
+
+### 29.1 这一刀移走什么
+
+E1 移走了启动，E2 移走了 active run。剩下三段仍在窗口：**HALT 之后的人工恢复**、
+**STOPPING 之后的 zero-state 证明**、以及**关闭时对 Paper 的判断**。它们散在
+`_reconnect_auto_order_service` / `_resume_auto_quant_from_reconciliation` /
+`_schedule_paper_finalization_refresh` / `_start_paper_finalization_refresh` /
+`_paper_finalization_completed` / `_paper_finalization_failed` /
+`_finish_auto_quant_session_if_safe` 这七个方法，加上一把临时 bridge。整体迁入同一个
+orchestrator——**没有新建** `PaperRecoveryOrchestrator` / `PaperFinalizationManager` /
+`PaperShutdownController`，Paper capability 仍然只有一个 sequencing owner。
+
+```text
+HALTED → reconcile → RECONCILING → 一次性证据 → RECONCILING_READY
+       → 操作员明确确认 → resume 既有 session → RUNNING
+
+STOPPING → 排程 zero-state 证明（5s backoff）
+         → capture evidence（在 disconnect 之前）
+         → disconnect
+         → confirm evidence（在 disconnect 之后）
+         → workflow.finalize_if_safe()
+         → clear_active() → PAPER lease 释放
+```
+
+§28.6 的 `finalization_inflight_provider` 与 §28.7 的
+`_handle_paper_e3_result_bridge` / `_publish_window_paper_result` 在本轮删除。
+
+**本轮不迁**（属 v2O-E4）：`_paper_render_snapshot` 的退休、execution page 的最终
+render ownership、`build_runtime_view` / ExecutionPage presenter、整个 `closeEvent`
+（除 Paper 判断外）、generic RuntimeSupervisor shutdown、MainWindow 整体架构收口。
+
+### 29.2 result 仍然只有一条出口，并多了一个"后果"钩子
+
+```text
+workflow operation → PaperSessionResult → PaperOrchestrator._publish_result(result)
+                        ├─ result_changed.emit(result)          → 窗口唯一的渲染入口
+                        ├─ 每个 event 一次 runtime_event_requested
+                        └─ _after_result(result)
+                              ├─ _maybe_schedule_finalization(result)
+                              ├─ _maybe_finish_finalized_session(result)
+                              └─ _announce_manual_recovery_if_required()
+```
+
+窗口的 `_publish_window_paper_result` 随之删除：三条仍由窗口直调 workflow 的 E3 路径
+（finalization completed / reconnect / manual resume 确认）现在都在 capability 内走
+`_publish_result`。**整个 `desktop.py` 已不存在 `for event in result.events`**，guard 直接
+钉住这一点——这就是"result 只被发布一次"的可执行定义。
+
+`_after_result` 存在的理由不是整洁：一个 `STOPPING` result 会从 stop、stream tick 和 poll
+三个地方到达，三份"该不该开始证明"就是其中一个开始自己排程的方式。
+
+### 29.3 HALT 只能由人离开，而且要走两次
+
+```text
+ExecutionPage.reconcile_requested          → PaperOrchestrator.reconcile
+ExecutionPage.resume_reconciliation_requested
+    → MainWindow._confirm_paper_reconciliation_resume   （QMessageBox，纯 presentation）
+    → 用户 Yes → PaperOrchestrator.confirm_reconciliation_resume
+```
+
+`reconcile()` 的顺序是硬的：先确认存在 active order service（没有就 log 并 return，**相位
+不动**）→ `begin_manual_reconciliation()` → 请求 presentation refresh → submit broker task
+→ task 内"若 active service 已断开则 `connect_active()`" → `complete_manual_reconciliation(attempt_id)`。
+task 未被 admit 时显式 `fail_manual_reconciliation(attempt_id)` 回退——否则会留下一个
+`RECONCILING` 僵尸，唯一出口是确认一份从未取到的证据。
+
+**重连不是 resume。** pending broker rows 只是证据，任何一步都不重建 intent、不重下订单、
+不补单、不绕过人工确认。`reconcile` 成功后停在 `RECONCILING_READY`。
+
+`confirm_reconciliation_resume()` 的关键是**在用户确认之后**才实时读 `workflow.phase` 与
+`workflow.reconciliation_evidence`：在弹窗之前读到的证据可能在用户思考期间被消费或替换，
+拿着过期证据恢复才是真的危险。读到的 `evidence_id` 被冻结进本次 task 的闭包，因此
+**stale / consumed / changed evidence 都不能恢复 session**，拒绝只 log、不造 result、不
+自己修相位。
+
+窗口侧只保留纯 presentation 的确认 handler：不读 evidence、不存 evidence_id、不
+reconnect、不转换相位、不提交 task。
+
+### 29.4 zero-state 证明：顺序、backoff、以及"未排程 != 失败"
+
+排程门（`_maybe_schedule_finalization`）四条例，缺一不可：
+
+```text
+phase is STOPPING                     只有 STOPPING 在向证明收敛
+and not result.state.finalized        已经证明过的不再证明
+and not self._finalization_inflight   同一个 broker 不能有两个读者
+and not (engine_active and clock() - last_finalization_started < 5.0)
+```
+
+最后一条只在 **engine 仍 active** 时生效：退出还在跑，每个 tick 重新读一遍整个 broker 学不
+到新东西；engine 已静默则不该被 backoff 拖住关闭。`clock` 可注入，测试推进它而不 sleep。
+
+task 内部顺序是安全约束：
+
+```text
+capture_finalization_evidence()   ← 读的还是 session 仍持有连接的那个 broker
+  若 evidence_id is None: 直接 return result
+disconnect()
+confirm_finalization_after_disconnect(evidence_id)   ← 回调线程 join 之后才消费证据
+```
+
+证明本身**不释放任何东西**：一次成功的 disconnect 不是 finalized。
+
+`TaskSubmitter` 返回 `False` 与"task 跑了然后失败"是两件事：
+
+```text
+not started        broker resource group busy / 正在关闭 → 什么都没有发生
+                   → _finalization_inflight = False，**不** fail_finalization_refresh
+                   → 下一次合法 result 按 backoff 重试
+task 真失败          → _finalization_inflight = False
+                   → workflow.fail_finalization_refresh() → STOPPING → HALTED
+                   → 保持 PAPER lease、保持 ownership、log、请求 presentation refresh
+                   → manual_recovery_required
+```
+
+把"忙"当"失败"会把一次排程冲突升级成一次 HALT。
+
+### 29.5 释放 ownership：只有 workflow 那道闸门
+
+```text
+1. workflow.result 存在，且 result.state.finalized == True
+2. 读取当前 session_id
+3. 若存在 active Paper service：broker_state() + reconciliation_rows(session_id)
+4. broker positions 非空 → return，不释放
+5. 存在 unreconciled row → return，不释放
+6. disconnect active service
+7. workflow.finalize_if_safe()
+8. False → 不 clear_active，不释放 ownership
+9. True  → paper_trading.clear_active()
+```
+
+不变量：
+
+```text
+broker disconnected      != finalized
+socket stopped           != PAPER lease 可释放
+finalize_if_safe()       == 释放 PAPER 的唯一 canonical gate
+```
+
+`PaperTradingService.broker_state()` 在无 owner 时返回 `None`，所以这里读
+`getattr(broker_state, "positions", ())`：无 owner 一律视为"没有持仓"，而不是崩。
+
+journal 证据走**窄 provider**：注入
+`reconciliation_rows_provider: Callable[[str], Sequence[object]]`（composition root 里是
+`lambda session_id: self.order_repository.reconciliation_rows(session_id=session_id)`），
+而不是把整个 repository 交进 capability——package 的 import allowlist 不允许
+`us_quant.trading.adapters`，而"给一个 session_id、还一批 rows"就是证明所需的全部。
+
+`clear_active()` 的拒绝（promotion reservation 仍占着 slot，E1 的 invariant）被**按名接住**
+并变成一个 reason，既不逃出 Qt slot，也不被吞掉：`prepare_shutdown()` 把它报成
+`OWNERSHIP_BLOCKED`，保持 restart-required，而不是为了让进程能退出而强清。
+
+### 29.6 三个无 payload 的 publication
+
+有些 transition 没有新的 `PaperSessionResult`：`HALTED → RECONCILING`、task 未被 admit、
+finalization task 失败 → `HALTED`。**禁止制造 fake result**，所以新增三个信号：
+
+```text
+presentation_refresh_requested   Signal()   没有新 result 但控件状态变了 → 重绘
+session_finalized                Signal()   disconnect → finalize_if_safe → clear_active 之后
+manual_recovery_required         Signal()   这个 session 只能靠操作员继续
+```
+
+三个都不携带 phase copy / bool mirror / state dict——那些正是本轮要拆掉的第二份 truth。
+
+`session_finalized` 之后窗口只做 presentation：写 health 文案、`set_arm_confirmed(False)`、
+`_apply_paper_workflow_button_state()`。它**不能**再 disconnect / clear_active /
+finalize_if_safe / release lease：已经释放的 ownership 再"释放"一次只会篡改记录。
+
+`manual_recovery_required` 取代了窗口自己的相位推理。窗口原先用
+`_paper_needs_manual_recovery()` 判断 `HALTED`/`RECONCILING`/`RECONCILING_READY` 与
+close-drain 的关系——那正是 Paper recovery phase reasoning，本轮删除。现在 capability 在
+相位属于那三个之一时**每次都发**（不是只在"进入"时发：窗口不比对前后相位，比对就是镜像
+状态），窗口的 handler 幂等：`_cancel_close_drain()`。
+
+相位集合本身只有一个定义（`queries._MANUAL_RECOVERY_PHASES` /
+`queries.manual_recovery_phase`），halt 公告与 shutdown disposition 共用它——两份"哪些
+session 在等人"就是其中一份开始提供另一份禁止的自动路径的方式。
+
+### 29.7 Paper shutdown 判定
+
+`prepare_shutdown() -> PaperShutdownResult(disposition, message="")`：
+
+```text
+READY                    所有 Paper ownership 已可证明地释放（或本来就未持有）
+WAITING_FOR_FINALIZATION 自动路径仍在跑：刚请求停止，或 zero-state 证明还在进行
+MANUAL_RECOVERY_REQUIRED 只有操作员能离开：HALTED / RECONCILING / RECONCILING_READY
+OWNERSHIP_BLOCKED        报告 finalized，但 ownership 无法证明已释放 → fail closed
+```
+
+```text
+RUNNING / PAUSED  → 复用 self.stop()（**不**自己再调一次 request_stop）→ WAITING
+STOPPING          → WAITING，**不**提前 disconnect（退出还在跑，证明才是观察者）
+HALTED / RECONCILING / RECONCILING_READY → MANUAL_RECOVERY_REQUIRED，不代办确认
+workflow 报 finalized 且无 ownership → READY
+workflow 报 finalized 但仍持有 slot → 走 §29.5 的释放序列；拒绝则 OWNERSHIP_BLOCKED
+```
+
+`closeEvent` 只剩 presentation 与 generic teardown：
+
+```python
+paper_shutdown = self.paper_orchestrator.prepare_shutdown()
+if paper_shutdown.disposition is not PaperShutdownDisposition.READY:
+    if paper_shutdown.disposition is MANUAL_RECOVERY_REQUIRED:
+        self._cancel_close_drain()      # 否则会拒绝掉唯一能 finalize 的那个 task
+    event.ignore()
+    QMessageBox.information(self, _PAPER_SHUTDOWN_TITLES[...], paper_shutdown.message)
+    return
+```
+
+三个 disposition 的对话框标题留在窗口（`_PAPER_SHUTDOWN_TITLES`）：capability 说的是
+**为什么**（Qt-free 纯文本），窗口决定怎么问。`OWNERSHIP_BLOCKED` 刻意**不**解除 drain：
+所有权无法确认时既不强清也不假装可退出——E1 的 invariant 不因为现在有恢复路径而放松。
+
+### 29.8 删掉的 E3 sequencing
+
+窗口不再声明：
+
+```text
+_reconnect_auto_order_service           _auto_order_service_reconnected
+_resume_auto_quant_from_reconciliation  _auto_order_resume_failed
+_auto_order_reconciliation_failed
+_schedule_paper_finalization_refresh    _start_paper_finalization_refresh
+_paper_finalization_completed           _paper_finalization_failed
+_finish_auto_quant_session_if_safe
+_handle_paper_e3_result_bridge          _publish_window_paper_result
+_paper_needs_manual_recovery            _release_close_drain_if_recovery_required
+```
+
+窗口不再直接调用 workflow 的 `begin_manual_reconciliation` /
+`complete_manual_reconciliation` / `fail_manual_reconciliation` / `confirm_manual_resume` /
+`capture_finalization_evidence` / `confirm_finalization_after_disconnect` /
+`fail_finalization_refresh` / `finalize_if_safe`，也不再自己编排
+`paper_trading.connect_active` / Paper 的 finalization disconnect / `clear_active`。
+
+窗口不再持有 `_paper_finalization_inflight` 与 `_last_paper_finalization_started`——它们现在
+是 orchestrator **自己 task 时序的记账**，不是 session 事实。**不留 forwarding property**。
+
+`closeEvent` 剩下的纯粹是 composition / presentation / generic 职责：admission gate、
+"后台任务仍在运行"对话框、`prepare_shutdown()` 的判定与对话框、`_cancel_close_drain()`、
+`shadow_orchestrator.shutdown()`、`runtime_supervisor.shutdown()`、worker join、
+`event.accept()` / `ignore()`。
+
+### 29.9 行为测试与 mutation
+
+新增 `tests/test_desktop_paper_recovery_finalization_orchestrator.py`（81 项），覆盖：
+`HALTED → reconcile → RECONCILING` / 重连只收证据（不 resume、不重下订单）/
+成功 → `RECONCILING_READY` / 取不到证据或 task 失败 → sticky HALTED /
+未 admit 回退 attempt / 无 fresh evidence 拒绝且无 task 无 fake result /
+consumed 与 superseded 证据不能恢复 / 确认后恰好调一次 `confirm_manual_resume` /
+resume 不 reconnect 不 resubmit / STOPPING result 只排程一次 / in-flight 不重复提交 /
+active engine + `<5s` 不重提、`>=5s` 允许 / dormant engine 不被拖住 /
+只有 STOPPING 排程 / broker busy defer 不 HALT / task 真失败 → HALTED /
+HALT 后不再自动 finalization / capture < disconnect < confirm（跨两个 fake 的交错 trace）/
+disconnect 失败不释放 / broker position 非空不释放 / unreconciled row 非零不释放 /
+`finalize_if_safe() == False` 不 clear_active / 全部通过 → disconnect → finalize_if_safe →
+clear_active / 每个 E3 result 只发布一次且每个 event 恰好请求一次 /
+`manual_recovery_required` 覆盖与排除 / `prepare_shutdown` 的八种 disposition。
+
+真实 wiring 另加在 `tests/test_desktop_v2_paper_wiring.py`：operator 点 **No** 时
+capability 根本不被调用、点 **Yes** 时 `confirm_manual_resume` 恰好一次、没有 fresh 证据
+时窗口只负责问而 capability 负责拒。
+
+`scripts/mutation_e3.ps1` 应用 29 项篡改；**29/29 RED**：删 in-flight 门、删 backoff、
+backoff 不再依赖 engine、放开 STOPPING-only、finalized result 重新排程、broker busy 被当成
+finalization failure、capture/disconnect 换序、disconnect/confirm 换序、release helper 信任
+调用方、broker positions 不拦、unreconciled rows 不拦、忽略 `finalize_if_safe`、
+finalization failure 仍 clear_active、reconciliation 自动 resume、resume 不查 fresh evidence、
+失败 reconciliation 不回退 attempt、未 admit 不回退、confirmation 在 task 内重读证据、
+`HALTED` 当自动路径、STOPPING 强制 disconnect、`OWNERSHIP_BLOCKED` 当 `READY`（两条）、
+未释放就报 `READY`、stop 两次、halt 公告不触发、窗口重新调 `finalize_if_safe`、窗口重新
+持有 proof flag、reconcile 又走窗口、recovery result 绕开唯一出口。
+
+脚本比 E2 版多一道**语法闸门**：篡改后先 `ast.parse`，语法不合法就判 `HARNESS-ERROR` 而不是
+"抓住"。这不是洁癖——一个丢掉了缩进的 `repl` 会把模块变成 SyntaxError，pytest 报 collection
+error，而那次运行对被测属性什么都没说。
+
+本轮 frozen core 同样零 diff：`trading/runtime/*`（含 `workflow.py` / `recovery.py` /
+`reconciliation.py` / `coordinator.py` / `trading.py`）、`trading/application/*`、broker
+adapter、execution lease、Shadow。
+

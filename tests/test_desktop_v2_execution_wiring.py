@@ -32,6 +32,10 @@ _APP = QApplication.instance() or QApplication([])
 #: controls belong to the capability: ``self.paper_orchestrator.pause`` is where the
 #: click lands, and a test that patched the window instead would observe nothing while
 #: the button was dead.
+#:
+#: v2O-E3 moved ``reconcile_requested`` onto the same rule -- the reconciliation is the
+#: capability's -- and left the resume *confirmation* on the window, because it is a
+#: ``QMessageBox`` and the capability may not import one.
 EXPECTED_WIRING = (
     ("strategy_selected", "self._auto_strategy_selected"),
     ("preflight_inputs_changed", "self._refresh_auto_quant_preflight"),
@@ -42,8 +46,8 @@ EXPECTED_WIRING = (
     ("pause_requested", "self.paper_orchestrator.pause"),
     ("resume_requested", "self.paper_orchestrator.resume"),
     ("stop_requested", "self.paper_orchestrator.stop"),
-    ("reconcile_requested", "self._reconnect_auto_order_service"),
-    ("resume_reconciliation_requested", "self._resume_auto_quant_from_reconciliation"),
+    ("reconcile_requested", "self.paper_orchestrator.reconcile"),
+    ("resume_reconciliation_requested", "self._confirm_paper_reconciliation_resume"),
 )
 
 #: The buttons that must reach a handler, in click order.
@@ -55,7 +59,7 @@ CLICK_ORDER = (
     ("pause_button", "self.paper_orchestrator.pause"),
     ("resume_button", "self.paper_orchestrator.resume"),
     ("stop_button", "self.paper_orchestrator.stop"),
-    ("resume_reconciliation_button", "self._resume_auto_quant_from_reconciliation"),
+    ("resume_reconciliation_button", "self._confirm_paper_reconciliation_resume"),
 )
 
 
@@ -137,7 +141,7 @@ def test_a_real_click_reaches_the_window_handler(monkeypatch) -> None:
         page.details.reconcile_button.click()
 
         assert seen == [target.rpartition(".")[2] for _attribute, target in CLICK_ORDER] + [
-            "_reconnect_auto_order_service"
+            "reconcile"
         ]
     finally:
         window.close()

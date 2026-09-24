@@ -226,6 +226,20 @@ class _Events:
         self.runtime_events: list[object] = []
 
 
+class _Trading:
+    """A minimal order-service owner, for the one question a result now asks it.
+
+    Since v2O-E3 a ``STOPPING`` result makes the orchestrator consider the zero-state
+    proof, and the proof refuses to run against an order service nobody holds -- so the
+    fake answers "owned".  The submitter in this harness always refuses, so the proof is
+    never actually started and the workflow is never reached for it: these tests stay
+    about the ingress, the poll, the entry controls and the stop.
+    """
+
+    def has_order_service(self) -> bool:
+        return True
+
+
 class _Clock:
     """A deterministic monotonic clock, advanced by hand."""
 
@@ -248,27 +262,22 @@ def _build(
     *,
     workflow: _Workflow | None = None,
     market_snapshot: object | None = "market-snapshot",
-    finalization_inflight: list[bool] | None = None,
     clock: _Clock | None = None,
 ) -> _Harness:
-    """Assemble an orchestrator over the active-session fakes.
-
-    ``finalization_inflight`` is a *list* so a test can flip the seam mid-flight the
-    way the window's real flag moves when the zero-state proof starts and ends.
-    """
+    """Assemble an orchestrator over the active-session fakes."""
 
     workflow = workflow or _Workflow()
     events = _Events()
     render_snapshots: list[object] = []
-    inflight = finalization_inflight if finalization_inflight is not None else [False]
     clock = clock or _Clock()
+    trading = _Trading()
     # A one-element list, so a test can replace the market fact between two calls and
     # assert the stop was judged against the newer one.
     market = [market_snapshot]
 
     orchestrator = PaperOrchestrator(
         workflow_getter=lambda: workflow,
-        paper_trading_getter=lambda: None,
+        paper_trading_getter=lambda: trading,
         build_session=lambda *args, **kwargs: None,
         submit_task=lambda *args, **kwargs: False,
         health_evaluator="health",
@@ -279,7 +288,9 @@ def _build(
         order_channel_provider=lambda: None,
         shadow_is_active=lambda: False,
         market_snapshot_provider=lambda: market[0],
-        finalization_inflight_provider=lambda: inflight[0],
+        # The release sequencing's journal read.  This harness never finalizes a
+        # session, so "no rows" is the honest answer rather than a stub.
+        reconciliation_rows_provider=lambda session_id: (),
         clear_arm_confirmation=lambda: None,
         render_launch_state=lambda: None,
         render_launch_context=lambda summary: render_snapshots.append(summary),
@@ -293,7 +304,6 @@ def _build(
         workflow=workflow,
         events=events,
         clock=clock,
-        inflight=inflight,
         market=market,
     )
 
@@ -356,12 +366,20 @@ def test_stopping_still_receives_the_market() -> None:
 
 
 # -- the finalization seam ----------------------------------------------
+#
+# v2O-E3 moved the zero-state proof itself into this capability, so the flag that
+# defers the ingress is no longer read across the boundary: it is the orchestrator's
+# own task bookkeeping, exactly as these tests now set it.  The property they pin is
+# unchanged -- two readers of one broker connection must not interleave -- and the last
+# one is the important half: the flag must be read at call time rather than captured,
+# or a finished proof would defer the ingress for ever.
 
 
 def test_ingress_is_deferred_while_a_finalization_task_runs() -> None:
     """The proof of zero-state reads the same broker; two readers must not interleave."""
 
-    harness = _build(finalization_inflight=[True])
+    harness = _build()
+    harness.orchestrator._finalization_inflight = True
 
     harness.orchestrator.on_market_snapshot(object())
 
@@ -370,7 +388,8 @@ def test_ingress_is_deferred_while_a_finalization_task_runs() -> None:
 
 
 def test_the_poll_is_deferred_while_a_finalization_task_runs() -> None:
-    harness = _build(finalization_inflight=[True])
+    harness = _build()
+    harness.orchestrator._finalization_inflight = True
     harness.clock.advance(STREAM_INGRESS_SUPPRESSION_SECONDS)
 
     harness.orchestrator.poll()
@@ -379,12 +398,13 @@ def test_the_poll_is_deferred_while_a_finalization_task_runs() -> None:
 
 
 def test_the_deferral_ends_when_the_proof_ends() -> None:
-    """The seam is a live question, not a flag captured at construction."""
+    """The flag is read live, not captured when the orchestrator was built."""
 
-    harness = _build(finalization_inflight=[True])
+    harness = _build()
+    harness.orchestrator._finalization_inflight = True
     harness.orchestrator.on_market_snapshot(object())
 
-    harness.inflight[0] = False
+    harness.orchestrator._finalization_inflight = False
     harness.orchestrator.on_market_snapshot(object())
 
     assert harness.workflow.attempts == ["on_stream"]
@@ -827,7 +847,7 @@ def test_the_delegated_queries_never_cache() -> None:
         order_channel_provider=lambda: None,
         shadow_is_active=lambda: False,
         market_snapshot_provider=lambda: None,
-        finalization_inflight_provider=lambda: False,
+        reconciliation_rows_provider=lambda session_id: (),
         clear_arm_confirmation=lambda: None,
         render_launch_state=lambda: None,
         render_launch_context=lambda summary: None,

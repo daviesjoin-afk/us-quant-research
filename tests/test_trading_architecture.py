@@ -3207,14 +3207,15 @@ def test_the_paper_workflow_owns_lifecycle_and_no_broker() -> None:
 
 
 def test_the_desktop_does_not_drive_the_paper_lifecycle_by_hand() -> None:
-    """Guard N: the window asks the workflow; it does not become one.
+    """Guard N: the window asks the capability; it does not become one.
 
-    v2O-E1 split this guard's *required* half by owner.  The launch transitions --
-    ``begin_connecting`` and ``publish_armed`` -- are now driven by
-    ``PaperOrchestrator``, while the manual-reconciliation and finalization paths are
-    still the window's until v2O-E3.  Both halves are asserted, on the object that
-    owns each, so the guard cannot pass by the launch having simply stopped
-    happening.
+    v2O-E1 split this guard's *required* half by owner and v2O-E3 finished the split: the
+    launch transitions, the manual-reconciliation protocol and the finalization proof are
+    all driven by ``PaperOrchestrator`` now, so every required call is asserted on the
+    capability and every one of them is asserted *absent* from the window.  Both halves
+    matter: requiring the calls on the capability stops the lifecycle from having simply
+    stopped happening, and forbidding them on the window stops the capacity from gaining a
+    copy while the window kept its own.
     """
 
     desktop = _SRC / "desktop.py"
@@ -3239,13 +3240,21 @@ def test_the_desktop_does_not_drive_the_paper_lifecycle_by_hand() -> None:
     ):
         assert forbidden not in source, forbidden
 
-    # The launch half moved to the capability, and is driven there through the same
-    # documented surface; the recovery half is still the window's.
+    # Both halves moved to the capability, and are driven there through the same
+    # documented surface.
     orchestrator = PAPER_ORCHESTRATOR.read_text(encoding="utf-8")
     for required in (
         "begin_connecting(",
         "publish_armed(",
         "reject_connecting(",
+        "begin_manual_reconciliation()",
+        "complete_manual_reconciliation(",
+        "fail_manual_reconciliation(",
+        "confirm_manual_resume(",
+        "capture_finalization_evidence()",
+        "confirm_finalization_after_disconnect(",
+        "fail_finalization_refresh()",
+        "finalize_if_safe()",
     ):
         assert required in orchestrator, required
     # Neither owner may reach for the lease or the coordinator directly.
@@ -3259,11 +3268,17 @@ def test_the_desktop_does_not_drive_the_paper_lifecycle_by_hand() -> None:
     ):
         assert forbidden not in orchestrator, forbidden
 
-    for required in (
-        "paper_workflow.begin_manual_reconciliation()",
-        "paper_workflow.finalize_if_safe()",
+    for retired in (
+        "paper_workflow.begin_manual_reconciliation",
+        "paper_workflow.complete_manual_reconciliation",
+        "paper_workflow.fail_manual_reconciliation",
+        "paper_workflow.confirm_manual_resume",
+        "paper_workflow.capture_finalization_evidence",
+        "paper_workflow.confirm_finalization_after_disconnect",
+        "paper_workflow.fail_finalization_refresh",
+        "paper_workflow.finalize_if_safe",
     ):
-        assert required in source, required
+        assert retired not in source, retired
 
 
 # -- scripts/ -------------------------------------------------------------

@@ -213,14 +213,31 @@ def test_disconnect_goes_through_the_service_exactly_once() -> None:
 
 
 def test_migrated_reads_no_longer_touch_the_order_service_directly() -> None:
-    """The UI stops reading the order service for status."""
+    """The UI stops reading the order service for status.
+
+    v2O-E3 deleted ``_finish_auto_quant_session_if_safe`` with the rest of the
+    finalization sequencing, so the list follows the window methods that remain -- and
+    the capability's own release path is checked to read through the service facade
+    rather than through a raw order-service handle.
+    """
 
     for name in (
         "_render_auto_quant_snapshot",
         "_check_auto_order_channel",
-        "_finish_auto_quant_session_if_safe",
+        "_publish_execution_controls",
+        "_on_paper_session_finalized",
+        "closeEvent",
     ):
         assert "self.paper_order_service" not in _source(name), name
+
+    release = _orchestrator_source("_release_paper_ownership_if_proven")
+    for forbidden in (
+        "self._order_service",
+        "self._active_service",
+        "candidate_service(",
+        "connection_snapshot",
+    ):
+        assert forbidden not in release, forbidden
 
 
 def test_migrated_reads_no_longer_touch_the_workflow_directly() -> None:
@@ -230,23 +247,31 @@ def test_migrated_reads_no_longer_touch_the_workflow_directly() -> None:
     handlers that used to read it themselves now call that instead, so the
     assertion moved with the read rather than being dropped.
 
-    Two entries changed shape in v2O-E2.  The result handler and the market fan-out
-    no longer read a Paper phase *at all* -- whether a live session wants this fact is
-    the capability's question now -- so for those the claim is the stronger one: they
-    read neither the workflow's phase nor the service's.
+    Two entries changed shape in v2O-E2 and three more in v2O-E3.  The result handler
+    and the market fan-out no longer read a Paper phase *at all* -- whether a live
+    session wants this fact is the capability's question now -- and v2O-E3 added three
+    more such handlers: the close, the recovery announcement and the finished-session
+    render.  For all of them the claim is the stronger one: they read neither the
+    workflow's phase nor the service's.
     """
 
     for name in (
         "_publish_execution_controls",
-        "_paper_needs_manual_recovery",
-        "_handle_paper_e3_result_bridge",
         "_auto_candidate_preparation_failed",
     ):
         source = _source(name)
         assert "self.paper_workflow.phase" not in source, name
         assert "self.paper_trading.phase()" in source, name
 
-    for name in ("_on_paper_result_changed", "_on_market_snapshot_changed"):
+    for name in (
+        "_on_paper_result_changed",
+        "_on_market_snapshot_changed",
+        "closeEvent",
+        "_on_paper_manual_recovery_required",
+        "_on_paper_session_finalized",
+        "_confirm_paper_reconciliation_resume",
+        "_apply_paper_workflow_button_state",
+    ):
         source = _source(name)
         assert "self.paper_workflow.phase" not in source, name
         assert "self.paper_trading.phase()" not in source, name
@@ -312,30 +337,44 @@ def test_a_late_callback_disposes_only_its_own_candidate() -> None:
 
 
 def test_finalization_releases_ownership_only_after_the_workflow_agrees() -> None:
-    source = _source("_finish_auto_quant_session_if_safe")
-    disconnect = source.index("self.paper_trading.disconnect()")
-    finalize = source.index("self.paper_workflow.finalize_if_safe()")
-    clear = source.index("self.paper_trading.clear_active()")
+    """Disconnect, then the workflow's gate, then the slot -- on the new owner.
+
+    v2O-E3 moved the sequencing into ``PaperOrchestrator``, so the claim reads there.
+    It was never about *where* the three calls were written: it is that a successful
+    disconnect proves nothing, and ``finalize_if_safe`` is the only thing allowed to
+    release PAPER and, therefore, the only thing that may precede clearing the slot.
+    """
+
+    source = _orchestrator_source("_release_paper_ownership_if_proven")
+    disconnect = source.index("self._paper_trading.disconnect()")
+    finalize = source.index("self._workflow.finalize_if_safe()")
+    clear = source.index("self._paper_trading.clear_active()")
 
     assert disconnect < finalize < clear
+    # And a refusal from the gate returns before the slot is touched.
+    assert "if not self._workflow.finalize_if_safe():" in source
+    assert source.index("if not self._workflow.finalize_if_safe():") < clear
 
 
 def test_close_still_blocks_an_unfinalized_session_before_any_disconnect() -> None:
-    """The safety ordering survives the move of ownership into the service."""
+    """The safety ordering survives the move of ownership into the capability."""
 
     source = _source("closeEvent")
 
-    assert "self.paper_trading.is_finalized()" in source
-    assert source.index("self.paper_trading.is_finalized()") < source.index(
-        "self.paper_trading.disconnect()"
+    assert "self.paper_orchestrator.prepare_shutdown()" in source
+    assert source.index("self.paper_orchestrator.prepare_shutdown()") < source.index(
+        "self.runtime_supervisor.shutdown()"
     )
+    # The window no longer disconnects Paper at all: the only disconnect is the
+    # capability's, and it sits behind the same gate.
+    assert "self.paper_trading.disconnect()" not in source
 
 
 def test_close_releases_ownership_only_after_a_successful_disconnect() -> None:
-    source = _source("closeEvent")
+    source = _orchestrator_source("_release_paper_ownership_if_proven")
 
-    assert source.index("self.paper_trading.disconnect()") < source.index(
-        "self.paper_trading.clear_active()"
+    assert source.index("self._paper_trading.disconnect()") < source.index(
+        "self._paper_trading.clear_active()"
     )
 
 
@@ -349,21 +388,50 @@ def test_the_order_channel_check_never_owns_the_channel_it_probes() -> None:
 
 
 def test_manual_reconciliation_reconnects_the_owned_service_only() -> None:
-    source = _source("_reconnect_auto_order_service")
+    source = _orchestrator_source("reconcile")
 
-    assert "self.paper_trading.has_order_service()" in source
-    assert "self.paper_trading.connect_active()" in source
+    assert "self._paper_trading.has_order_service()" in source
+    assert "self._paper_trading.connect_active()" in source
     assert "IBKRPaperOrderService(" not in source
+    # The reconnect is conditional on the *active* service being down, and it is the only
+    # thing here that touches the connection -- nothing creates, promotes or disconnects.
+    assert "if not self._paper_trading.is_connected():" in source
+    for forbidden in (
+        "connect_candidate",
+        "reserve_candidate_promotion",
+        "commit_candidate_promotion",
+        "discard_candidate",
+        "disconnect",
+    ):
+        assert forbidden not in source, forbidden
 
 
-def test_high_risk_calls_stay_in_the_desktop_on_purpose() -> None:
-    """submit/cancel/lease and manual recovery are NOT migrated in this step.
+def test_high_risk_calls_now_belong_to_the_capability() -> None:
+    """v2O-E3 moved the recovery and finalization calls off the window.
 
-    v2O-E1 moved the *launch* only.  ``begin_connecting``, ``publish_armed`` and
-    ``reject_connecting`` now live on the orchestrator, but every manual-recovery
-    and finalization call is still the window's and must stay so until v2O-E3 --
-    which is why the assertions below split by owner rather than by feature.
+    This guard read the other way round while E1 and E2 were the only rounds landed: it
+    asserted the window still owned every manual-recovery and finalization call, so a
+    later round could not claim the move had happened early.  It has happened now, so the
+    assertion inverts -- each call must be *absent* from the window and *present* on the
+    capability.  Inverting rather than deleting keeps the same protection in both
+    directions, and the calls are enumerated so none can quietly stay behind.
     """
+
+    workflow_calls = (
+        "begin_manual_reconciliation",
+        "complete_manual_reconciliation",
+        "fail_manual_reconciliation",
+        "confirm_manual_resume",
+        "capture_finalization_evidence",
+        "confirm_finalization_after_disconnect",
+        "fail_finalization_refresh",
+        "finalize_if_safe",
+    )
+    window = inspect.getsource(MainWindow)
+    for call in workflow_calls:
+        assert f"paper_workflow.{call}" not in window, call
+    for call in ("prepare_shutdown", "reconcile", "confirm_reconciliation_resume"):
+        assert call in inspect.getsource(PaperOrchestrator), call
 
     assert "self._workflow.begin_connecting(" in _orchestrator_source("start")
     assert "self._paper_trading.commit_candidate_promotion(" in _orchestrator_source(
@@ -372,14 +440,14 @@ def test_high_risk_calls_stay_in_the_desktop_on_purpose() -> None:
     assert "self._workflow.publish_armed(" in _orchestrator_source(
         "_arm_and_publish"
     )
-    assert "paper_workflow.confirm_manual_resume" in _source(
-        "_resume_auto_quant_from_reconciliation"
+    assert "confirm_manual_resume(" in _orchestrator_source(
+        "confirm_reconciliation_resume"
     )
-    assert "paper_workflow.begin_manual_reconciliation()" in _source(
-        "_reconnect_auto_order_service"
+    assert "self._workflow.begin_manual_reconciliation()" in _orchestrator_source(
+        "reconcile"
     )
-    assert "paper_workflow.finalize_if_safe()" in _source(
-        "_finish_auto_quant_session_if_safe"
+    assert "self._workflow.finalize_if_safe()" in _orchestrator_source(
+        "_release_paper_ownership_if_proven"
     )
 
 
@@ -395,11 +463,35 @@ def test_the_service_is_not_rebuilt_on_every_read() -> None:
         window.deleteLater()
 
 
-@pytest.mark.parametrize("name", ["closeEvent", "_finish_auto_quant_session_if_safe"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "closeEvent",
+        "_on_paper_session_finalized",
+        "_on_paper_manual_recovery_required",
+        "_confirm_paper_reconciliation_resume",
+        "_release_paper_ownership_if_proven",
+        "_start_finalization",
+        "prepare_shutdown",
+        "reconcile",
+    ],
+)
 def test_no_path_hands_the_order_service_back_to_the_window(name: str) -> None:
-    """Ownership must never be reassigned onto the window again."""
+    """Ownership must never be reassigned onto the window again.
 
-    assert "paper_order_service =" not in _source(name)
+    Read on the window for the window's methods and on the capability for the ones
+    v2O-E3 moved, so the claim follows each owner rather than being dropped for the
+    half that changed.
+    """
+
+    owner = (
+        MainWindow
+        if name in {"closeEvent", "_on_paper_session_finalized",
+                    "_on_paper_manual_recovery_required",
+                    "_confirm_paper_reconciliation_resume"}
+        else PaperOrchestrator
+    )
+    assert "paper_order_service =" not in inspect.getsource(getattr(owner, name))
 
 
 def test_the_raw_candidate_bridge_is_confined_to_one_critical_wiring_point() -> None:
@@ -473,7 +565,7 @@ def test_a_failed_finalization_keeps_the_active_ownership() -> None:
         workflow = _HaltedWorkflow()
         window.paper_workflow = workflow  # type: ignore[assignment]
 
-        window._paper_finalization_failed("zero-state proof failed")
+        window.paper_orchestrator._finalization_failed("zero-state proof failed")
 
         assert workflow.fail_calls == 1
         # Still owned: the disconnect was not a finalization.

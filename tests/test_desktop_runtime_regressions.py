@@ -95,26 +95,36 @@ def test_paper_order_watchdog_heartbeat_is_wired() -> None:
 
 
 def test_finalization_deferral_replaces_halt_on_busy_resource() -> None:
-    """H-3 regression: a busy broker group defers the proof, never halts."""
+    """H-3 regression: a busy broker group defers the proof, never halts.
+
+    v2O-E3 moved the proof into the capability, so the assertions read there.  The claim
+    is unchanged and is now checkable in three pieces: the refused-submission branch
+    clears its own flag and touches the workflow not at all (``fail_finalization_refresh``
+    appears *once*, on the genuinely-failed path, not twice); the proof is only ever asked
+    for on a ``STOPPING`` result; and the backoff is what stops a stream tick from
+    re-reading the whole broker while the exits are still flattening.
+    """
+
     window = _window()
     try:
-        refresh = inspect.getsource(
-            MainWindow._start_paper_finalization_refresh
-        )
-        # fail_finalization_refresh remains only for the service-None branch;
-        # the busy-resource branch must defer instead of halting the session.
-        assert refresh.count("fail_finalization_refresh") == 1
-        assert "suppress_busy_message=True" in refresh
-        # The decision belongs to the E3 bridge, kept in its own method so E3 can
-        # delete it whole -- and still reached from the one result handler.
-        apply = inspect.getsource(MainWindow._on_paper_result_changed)
-        assert "_handle_paper_e3_result_bridge(result)" in apply
-        bridge = inspect.getsource(MainWindow._handle_paper_e3_result_bridge)
-        assert "_schedule_paper_finalization_refresh(result)" in bridge
-        schedule = inspect.getsource(
-            MainWindow._schedule_paper_finalization_refresh
-        )
-        assert "monotonic() - last < 5.0" in schedule
+        start = inspect.getsource(PaperOrchestrator._start_finalization)
+        # fail_finalization_refresh remains only for the no-service branch; the
+        # busy-resource branch must defer instead of halting the session.
+        assert start.count("fail_finalization_refresh") == 1
+        assert "suppress_busy_message=True" in start
+        assert "if not started:" in start
+        assert "self._finalization_inflight = False" in start[start.index("if not started:") :]
+
+        schedule = inspect.getsource(PaperOrchestrator._maybe_schedule_finalization)
+        assert "FINALIZATION_REFRESH_BACKOFF_SECONDS" in schedule
+        assert "PaperWorkflowPhase.STOPPING" in schedule
+
+        # And the one post-result hook is what reaches it, from the one result path.
+        publish = inspect.getsource(PaperOrchestrator._publish_result)
+        assert "self._after_result(result)" in publish
+        after = inspect.getsource(PaperOrchestrator._after_result)
+        assert "_maybe_schedule_finalization(result)" in after
+        assert "_maybe_finish_finalized_session(result)" in after
     finally:
         window.close()
         window.deleteLater()

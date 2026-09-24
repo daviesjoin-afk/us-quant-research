@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Mapping, Protocol
 
 from us_quant.auto_launch import AutoLaunchPlan
@@ -109,6 +110,96 @@ RESUME_SUCCEEDED_MESSAGE = "自动量化已恢复新开仓。"
 NET_LIQUIDATION_MESSAGE = "IBKR Paper 订单会话未返回有效净值"
 POSITIONS_MESSAGE = "首期自动量化要求 Paper 账户启动时空仓；当前持仓：{symbols}"
 CASH_MESSAGE = "IBKR Paper 订单会话未返回现金；禁止使用保证金借款代替现金"
+
+#: Manual reconciliation (v2O-E3), verbatim from the retired window handlers.  The
+#: started sentence is deliberately explicit that reconnecting is *not* resuming: the
+#: operator's next decision is a separate, confirmed step.
+RECONCILIATION_NO_SERVICE_MESSAGE = (
+    "Paper 处于停机状态但没有可用的订单会话，无法对账；请重启客户端。"
+)
+RECONCILIATION_STARTED_MESSAGE = (
+    "执行对账：正在重新连接 IBKR Paper 并读取开放订单、"
+    "当日成交和当前持仓；不会自动恢复交易。"
+)
+RECONCILIATION_PROGRESS = "重新连接 IBKR Paper 并恢复订单快照…"
+RECONCILIATION_START_MESSAGE = "IBKR Paper 重新对账中…"
+
+#: The confirmation step.  ``RESUME_*_MESSAGE`` are refusals rather than errors: a
+#: consumed, changed or missing proof is an operator condition, and the only honest
+#: answer is a log line plus another reconciliation -- never a fabricated result.
+RESUME_NOT_READY_MESSAGE = (
+    "A fresh reconciliation proof is required before Paper can resume."
+)
+RESUME_EVIDENCE_MISSING_MESSAGE = (
+    "Reconciliation proof is missing; run manual reconciliation again."
+)
+RESUME_PROGRESS = "Revalidating the complete IBKR Paper snapshot..."
+RESUME_START_MESSAGE = "Paper reconciliation confirmation in progress..."
+
+#: The zero-state proof.  Wording verbatim so the footer reads the same as before the
+#: move.
+FINALIZATION_PROGRESS = "Verifying complete Paper zero-state before disconnect..."
+FINALIZATION_START_MESSAGE = "Paper safe finalization check in progress..."
+
+#: The shutdown dispositions' own sentences.  Qt-free plain text: the window decides the
+#: dialog title and shows this as its body, so the capability owns *why* the close is
+#: refused without owning a widget.
+SHUTDOWN_STOP_REQUESTED_MESSAGE = (
+    "已请求安全停止 Paper 会话；请等待平仓、券商对账和最终确认完成后再关闭程序。"
+)
+SHUTDOWN_FINALIZATION_PENDING_MESSAGE = (
+    "必须先完成安全停止和券商对账。停机状态需要人工对账与明确确认；"
+    "客户端不会在未 finalized 时断开订单会话或退出。"
+)
+SHUTDOWN_MANUAL_RECOVERY_MESSAGE = (
+    "Paper 会话已停机，只能通过人工对账与明确确认继续；"
+    "客户端不会在未 finalized 时断开订单会话或退出。"
+)
+SHUTDOWN_OWNERSHIP_BLOCKED_MESSAGE = (
+    "Paper 订单所有权无法确认已释放；客户端不会释放该所有权或正常退出。"
+    "请重启客户端后重新启动 Paper 会话。"
+)
+SHUTDOWN_OWNERSHIP_BLOCKED_WITH_REASON_MESSAGE = (
+    SHUTDOWN_OWNERSHIP_BLOCKED_MESSAGE + "\n\n{reason}"
+)
+
+
+class PaperShutdownDisposition(str, Enum):
+    """What a close must do about the Paper session, decided without doing it.
+
+    One value per *situation the operator has to be told apart*, not one per phase:
+    ``WAITING_FOR_FINALIZATION`` covers both "a stop was just requested" and "the
+    zero-state proof is still running", because the operator's instruction is the same
+    (wait), while ``MANUAL_RECOVERY_REQUIRED`` and ``OWNERSHIP_BLOCKED`` are separated on
+    purpose -- the first is "do the reconciliation", the second is "this process cannot
+    fix it".
+    """
+
+    #: Every Paper ownership this capability could hold has been provably released, or
+    #: was never taken.  The close may proceed.
+    READY = "READY"
+
+    #: An automatic route is running: an orderly stop, or the zero-state proof it leads
+    #: to.  The admission gate must stay down while that finishes.
+    WAITING_FOR_FINALIZATION = "WAITING_FOR_FINALIZATION"
+
+    #: The session can only be left by the operator -- HALTED, RECONCILING or
+    #: RECONCILING_READY -- and every step of that is a task, so the close has to hand
+    #: the client back rather than hold the gate down.
+    MANUAL_RECOVERY_REQUIRED = "MANUAL_RECOVERY_REQUIRED"
+
+    #: The session reports finalized but an ownership cannot be shown to have been
+    #: released.  Fail closed: nothing is forced, nothing is swallowed, and the process
+    #: must not exit over it.
+    OWNERSHIP_BLOCKED = "OWNERSHIP_BLOCKED"
+
+
+@dataclass(frozen=True, slots=True)
+class PaperShutdownResult:
+    """One shutdown verdict: what the close should do, and what to tell the operator."""
+
+    disposition: PaperShutdownDisposition
+    message: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,7 +337,8 @@ __all__ = [
     "BEGIN_REFUSED_TITLE", "CASH_MESSAGE", "CONNECT_FAILED_MESSAGE",
     "CONNECTING_SUMMARY", "CONNECT_PROGRESS", "CONNECT_START_MESSAGE",
     "CONNECT_VERIFIED_PROGRESS", "DUPLICATE_CONFIRM_MESSAGE", "DUPLICATE_MESSAGE",
-    "DUPLICATE_TITLE", "IDENTITY_CHANGED_MESSAGE", "LAUNCH_FAILED_TITLE",
+    "DUPLICATE_TITLE", "FINALIZATION_PROGRESS", "FINALIZATION_START_MESSAGE",
+    "IDENTITY_CHANGED_MESSAGE", "LAUNCH_FAILED_TITLE",
     "NET_LIQUIDATION_MESSAGE", "PAPER_ARMED_CODE", "PAPER_EXECUTION_COMPONENT",
     "PAPER_LAUNCH_COMPONENT",
     "PAPER_LAUNCH_ROLLBACK_CODE", "PAPER_LAUNCH_ROLLBACK_MESSAGE",
@@ -259,7 +351,16 @@ __all__ = [
     "PaperLaunchIntegrityError", "PaperLaunchRefusal",
     "PaperLaunchRequest", "PaperOrderChannel", "PaperRuntimeEventRequest",
     "PaperSessionBuildResult",
-    "PaperSessionBuilder", "PaperStrategyLaunchFact", "RESUME_SUCCEEDED_MESSAGE",
+    "PaperSessionBuilder", "PaperShutdownDisposition", "PaperShutdownResult",
+    "PaperStrategyLaunchFact",
+    "RECONCILIATION_NO_SERVICE_MESSAGE", "RECONCILIATION_PROGRESS",
+    "RECONCILIATION_STARTED_MESSAGE", "RECONCILIATION_START_MESSAGE",
+    "RESUME_EVIDENCE_MISSING_MESSAGE", "RESUME_NOT_READY_MESSAGE",
+    "RESUME_PROGRESS", "RESUME_START_MESSAGE", "RESUME_SUCCEEDED_MESSAGE",
     "SHADOW_ACTIVE_MESSAGE",
-    "SHADOW_ACTIVE_TITLE", "STALE_PLAN_MESSAGE", "WorkflowStateError",
+    "SHADOW_ACTIVE_TITLE", "SHUTDOWN_FINALIZATION_PENDING_MESSAGE",
+    "SHUTDOWN_MANUAL_RECOVERY_MESSAGE", "SHUTDOWN_OWNERSHIP_BLOCKED_MESSAGE",
+    "SHUTDOWN_OWNERSHIP_BLOCKED_WITH_REASON_MESSAGE",
+    "SHUTDOWN_STOP_REQUESTED_MESSAGE",
+    "STALE_PLAN_MESSAGE", "WorkflowStateError",
 ]

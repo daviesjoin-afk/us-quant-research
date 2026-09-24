@@ -97,6 +97,46 @@ def active_session_phase(phase: PaperWorkflowPhase) -> bool:
     return phase in _ACTIVE_SESSION_PHASES
 
 
+#: The phases whose *only* exit is an explicit operator recovery step.  v2O-E3 added this
+#: set: the halt announcement and the shutdown disposition both need the answer, and two
+#: copies of "which sessions are waiting on a human" is how one of them starts offering an
+#: automatic route the other forbids.
+_MANUAL_RECOVERY_PHASES = frozenset(
+    {
+        PaperWorkflowPhase.HALTED,
+        PaperWorkflowPhase.RECONCILING,
+        PaperWorkflowPhase.RECONCILING_READY,
+    }
+)
+
+
+def manual_recovery_phase(phase: PaperWorkflowPhase) -> bool:
+    """Whether ``phase`` can only be left by the operator.
+
+    ``RUNNING``/``PAUSED`` are excluded deliberately: closing those still has an
+    automatic route (``request_stop`` -> ``STOPPING`` -> the zero-state proof), so a
+    caller that treated them as manual-recovery would hold the admission gate down for a
+    drain that is still running.  ``STOPPING`` is excluded for the same reason.
+    """
+
+    return phase in _MANUAL_RECOVERY_PHASES
+
+
+def reconciliation_resume_ready(
+    phase: PaperWorkflowPhase, evidence: object | None
+) -> bool:
+    """Whether a fresh proof is waiting for the operator's confirmation.
+
+    A **delegated** question, not a verdict: it reports that the workflow holds a one-shot
+    proof produced by an explicit reconciliation, which is the condition under which
+    asking the operator to confirm is meaningful.  Whether the proof is still *current*
+    is not answered here -- only the workflow can decide that, and it revalidates the
+    evidence it is handed when the confirmation actually arrives.
+    """
+
+    return phase is PaperWorkflowPhase.RECONCILING_READY and evidence is not None
+
+
 def session_active(snapshot: object | None) -> bool:
     """Whether one engine snapshot positively reports a live session.
 
@@ -308,8 +348,10 @@ __all__ = [
     "current_inputs_match",
     "freeze_launch",
     "launch_attempt_in_flight",
+    "manual_recovery_phase",
     "preflight_failed",
     "preflight_failure_text",
+    "reconciliation_resume_ready",
     "runtime_obligations",
     "session_active",
     "strategy_launch_fact",

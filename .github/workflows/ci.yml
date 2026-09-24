@@ -16,8 +16,23 @@ jobs:
     runs-on: windows-latest
     strategy:
       fail-fast: false
+      # Python 3.14 is the **primary** interpreter: it is what the project is
+      # developed and verified on, and it is the only version this workflow gates
+      # per pull request.  A change has to survive it before it can merge.
+      #
+      # The matrix shape is kept with a single entry on purpose.  The job name
+      # still says which interpreter ran it, and adding a version back later is a
+      # one-line diff instead of a rewrite of this file.
+      #
+      # What changed, and what each version is now:
+      #   * 3.14 -- required, every pull request, the complete suite;
+      #   * 3.13 -- **transitional compatibility**: supported, no longer gated on
+      #     every pull request.  Removing it from the matrix is a deliberate
+      #     retirement, not a report that it broke;
+      #   * 3.12 -- retired from routine CI.  It remains the declared floor in
+      #     ``pyproject.toml``; see the note on ``requires-python`` below.
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.14"]
 
     env:
       QT_QPA_PLATFORM: offscreen
@@ -29,10 +44,17 @@ jobs:
     # says *which* gate took the time.  Before the split, a 7-13 minute run
     # reported one number and there was no way to see that pytest was ~99% of it.
     #
-    # Both Python versions still run the **complete** pytest suite.  Dropping
-    # 3.13 to a smoke subset would save little wall-clock -- the two jobs run in
-    # parallel -- while removing the compatibility gate that exists to catch a
-    # 3.13-only behaviour change.
+    # The single-version matrix runs the **complete** pytest suite, because a
+    # smoke subset would buy nothing here -- there is no second job left to
+    # parallelise with -- while removing the gate that catches a behaviour change
+    # in the interpreter the project actually runs on.
+    #
+    # **The interpreter CI gates and the interpreter the package claims to
+    # support are two different numbers, and this workflow only moves the
+    # first.**  ``requires-python`` stays ``>=3.12``: support metadata is retired
+    # separately and one step at a time (3.12 -> 3.13 -> 3.14 as the floor), so a
+    # support claim is only ever narrowed after the version it drops has been out
+    # of the gate long enough for that to be evidence rather than an intention.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,7 +78,7 @@ jobs:
         # and temp trees, so an unbounded worker count is how a runner runs out
         # of CPU and RAM.  ``loadscope`` keeps a module's tests on one worker,
         # which is what keeps module fixtures and Qt global state intact.
-        # Measured locally: ~70% off sequential wall time on both versions.
+        # Measured locally: ~70% off sequential wall time on the primary version.
         # ``--durations=30`` is capped deliberately -- ``0`` would print every
         # test and bury the signal in the log.
         run: python -m pytest -q -n 4 --dist=loadscope --durations=30

@@ -5,6 +5,14 @@ migrated reads really go through it, that order-service **ownership** now lives
 in the service rather than on the window, and that the close path still refuses
 to tear Paper down before the session is finalized.  No broker is started; the
 window is constructed offscreen and its collaborators are replaced.
+
+v2O-E1 moved the *launch* sequence -- connect, stale-callback decision, arm,
+publish, promote -- out of ``MainWindow`` and into ``PaperOrchestrator``.  The
+structural assertions below therefore read the capability rather than the window.
+Their safety meaning is unchanged and deliberately not weakened: the same call
+must exist, in the same order, on the new owner.  Only the object being inspected
+moved, which is exactly what the extraction claims and what these guards exist to
+verify.
 """
 
 from __future__ import annotations
@@ -18,6 +26,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from us_quant.desktop import MainWindow
+from us_quant.desktop_v2.orchestration.paper import PaperOrchestrator
 from us_quant.trading.application.paper import PaperTradingService
 from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
@@ -67,6 +76,17 @@ def _window() -> MainWindow:
 
 def _source(name: str) -> str:
     return inspect.getsource(getattr(MainWindow, name))
+
+
+def _orchestrator_source(name: str) -> str:
+    """The source of one method on the launch capability, its owner since v2O-E1.
+
+    The assertions that read this used to read ``MainWindow``.  The move is the
+    point of the round, so the guards follow the owner instead of being dropped --
+    a deleted assertion would be a silently weakened safety check.
+    """
+
+    return inspect.getsource(getattr(PaperOrchestrator, name))
 
 
 def _install_fake_service(window: MainWindow, *, connected: bool = False):
@@ -232,26 +252,32 @@ def test_migrated_reads_no_longer_touch_the_workflow_directly() -> None:
 
 
 def test_starting_a_launch_connects_a_candidate_not_the_active_slot() -> None:
-    """A connected broker is not yet the session: it must stay a candidate."""
+    """A connected broker is not yet the session: it must stay a candidate.
 
-    source = _source("_start_auto_quant")
+    Read on ``PaperOrchestrator.start`` since v2O-E1 -- the launch sequence is the
+    capability's now.  The claim is unchanged: the connect creates a *candidate*,
+    and never promotes it in the same breath.
+    """
 
-    assert "self.paper_trading.connect_candidate(" in source
+    source = _orchestrator_source("start")
+
+    assert "self._paper_trading.connect_candidate(" in source
     assert "IBKRPaperOrderService(" not in source
-    assert "self.paper_trading.promote_candidate(" not in source
+    assert "self._paper_trading.promote_candidate(" not in source
 
 
 def test_promotion_happens_only_after_the_launch_is_published() -> None:
     """Order of the irreversible steps: check, publish, then promote.
 
     A promotion that happened first would leave the session owned by the window
-    while the workflow still believes it is only connecting.
+    while the workflow still believes it is only connecting.  Pinned on
+    ``PaperOrchestrator._arm_and_publish`` since v2O-E1.
     """
 
-    source = _source("_auto_order_service_connected")
-    check = source.index("self.paper_trading.ensure_candidate_can_promote(")
-    publish = source.index("self.paper_workflow.publish_armed(")
-    promote = source.index("self.paper_trading.promote_candidate(")
+    source = _orchestrator_source("_arm_and_publish")
+    check = source.index("self._paper_trading.ensure_candidate_can_promote(")
+    publish = source.index("self._workflow.publish_armed(")
+    promote = source.index("self._paper_trading.promote_candidate(")
 
     assert check < publish < promote
 
@@ -259,15 +285,15 @@ def test_promotion_happens_only_after_the_launch_is_published() -> None:
 def test_a_late_callback_disposes_only_its_own_candidate() -> None:
     """The stale path must never touch the active slot."""
 
-    source = _source("_reject_unpublished_auto_candidate")
+    source = _orchestrator_source("_discard_candidate")
 
-    assert "self.paper_trading.has_candidate(" in source
-    assert "self.paper_trading.discard_candidate(" in source
-    assert "self.paper_trading.disconnect()" not in source
-    assert "self.paper_trading.clear_active(" not in source
+    assert "self._paper_trading.has_candidate(" in source
+    assert "self._paper_trading.discard_candidate(" in source
+    assert "self._paper_trading.disconnect()" not in source
+    assert "self._paper_trading.clear_active(" not in source
     # The rejection must run even when the disconnect fails.
     assert source.index("finally:") < source.index(
-        "self.paper_workflow.reject_connecting(plan)"
+        "self._workflow.reject_connecting(request.plan)"
     )
 
 
@@ -316,10 +342,21 @@ def test_manual_reconciliation_reconnects_the_owned_service_only() -> None:
 
 
 def test_high_risk_calls_stay_in_the_desktop_on_purpose() -> None:
-    """submit/cancel/lease and manual recovery are NOT migrated in this step."""
+    """submit/cancel/lease and manual recovery are NOT migrated in this step.
 
-    assert "paper_workflow.begin_connecting(plan)" in _source("_start_auto_quant")
-    assert "paper_workflow.publish_armed(" in _source("_auto_order_service_connected")
+    v2O-E1 moved the *launch* only.  ``begin_connecting``, ``publish_armed`` and
+    ``reject_connecting`` now live on the orchestrator, but every manual-recovery
+    and finalization call is still the window's and must stay so until v2O-E3 --
+    which is why the assertions below split by owner rather than by feature.
+    """
+
+    assert "self._workflow.begin_connecting(" in _orchestrator_source("start")
+    assert "self._paper_trading.promote_candidate(" in _orchestrator_source(
+        "_arm_and_publish"
+    )
+    assert "self._workflow.publish_armed(" in _orchestrator_source(
+        "_arm_and_publish"
+    )
     assert "paper_workflow.confirm_manual_resume" in _source(
         "_resume_auto_quant_from_reconciliation"
     )
@@ -353,25 +390,43 @@ def test_no_path_hands_the_order_service_back_to_the_window(name: str) -> None:
 def test_the_raw_candidate_bridge_is_confined_to_one_critical_wiring_point() -> None:
     """``candidate_service()`` is a borrowed reference, not a second owner.
 
-    It exists only so the current arm/publish wiring can hand the workflow an
-    order port.  Every other call site would be a new direct dependency on the
-    broker adapter, so the allowlist is pinned structurally.
+    It exists only so the arm/publish wiring can hand the workflow an order port.
+    Every other call site would be a new direct dependency on the broker adapter, so
+    the allowlist is pinned structurally.
+
+    v2O-E1 moved that one call from ``MainWindow._auto_order_service_connected`` to
+    ``PaperOrchestrator._arm_and_publish``.  Both halves of the guard survive the
+    move: the window may no longer call it *at all*, and the capability may call it
+    in exactly one place, into a local.
     """
 
-    allowed = {"_auto_order_service_connected"}
-    used_in = set()
+    # The window lost the call with the launch sequence.
+    window_used_in = set()
     for name, member in inspect.getmembers(MainWindow, inspect.isfunction):
+        if "candidate_service(" in inspect.getsource(member):
+            window_used_in.add(name)
+    assert window_used_in == set(), window_used_in
+
+    # And the capability has exactly one call site.
+    allowed = {"_arm_and_publish"}
+    used_in = set()
+    for name, member in inspect.getmembers(
+        PaperOrchestrator, inspect.isfunction
+    ):
         if "candidate_service(" in inspect.getsource(member):
             used_in.add(name)
 
     assert used_in == allowed
 
-    # And the window must never store the borrowed reference.
-    source = _source("_auto_order_service_connected")
-    assert "self.paper_order_service" not in source
+    # And the borrowed reference is never stored.
+    source = _orchestrator_source("_arm_and_publish")
     for line in source.splitlines():
         if "candidate_service(" in line:
             assert line.lstrip().startswith("service = "), line
+    for name, member in inspect.getmembers(
+        PaperOrchestrator, inspect.isfunction
+    ):
+        assert "self._candidate_service" not in inspect.getsource(member), name
 
 
 def test_a_failed_finalization_keeps_the_active_ownership() -> None:

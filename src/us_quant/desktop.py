@@ -135,11 +135,6 @@ from us_quant.trading.composition.session_config import (
     build_auto_rotation_config,
     resolve_paper_session_capital,
 )
-from us_quant.auto_launch import (
-    AutoLaunchPlan,
-    auto_launch_plan_matches,
-    build_auto_launch_plan,
-)
 from us_quant.trading.application.risk import RiskApplication
 from us_quant.trading.composition.execution import (
     build_execution_application,
@@ -174,6 +169,16 @@ from us_quant.trading.runtime.workflow_state import (
 from us_quant.desktop_v2.orchestration.account import (
     AccountOrchestrator,
     AccountPresentationInputs,
+)
+from us_quant.desktop_v2.orchestration.paper import PaperOrchestrator
+from us_quant.desktop_v2.orchestration.paper.models import (
+    DUPLICATE_CONFIRM_MESSAGE,
+    DUPLICATE_TITLE,
+    PaperAccountReading,
+    PaperLaunchPublication,
+    PaperLaunchRequest,
+    PaperOrderChannel,
+    PaperSessionBuildResult,
 )
 from us_quant.desktop_v2.orchestration.market import (
     MarketOrchestrator,
@@ -512,8 +517,43 @@ class MainWindow(QMainWindow):
         self.auto_quant_candidates: tuple[
             AutoQuantCandidate, ...
         ] = ()
-        self._next_auto_launch_attempt = 0
-        self._active_auto_launch_plan: AutoLaunchPlan | None = None
+        # The Paper *launch* sequence -- the preflight, the frozen attempt, the
+        # asynchronous candidate connect, the stale-callback decision and the
+        # arm/publish/promote order -- belongs to ``paper_orchestrator``, built
+        # below.  Note what is *not* stored here any more: no
+        # ``_active_auto_launch_plan`` and no ``_next_auto_launch_attempt``, and no
+        # compatibility property either.  The canonical owner of the active attempt
+        # is ``PaperWorkflowController``: "an attempt is in flight" is its
+        # ``CONNECTING`` phase, and the candidate sequence number is the
+        # orchestrator's own bookkeeping.
+        self.paper_orchestrator = PaperOrchestrator(
+            workflow_getter=lambda: self.paper_workflow,
+            paper_trading_getter=lambda: self.paper_trading,
+            build_session=self._build_paper_session,
+            submit_task=self._start_task,
+            health_evaluator=self._paper_execution_health_adapter,
+            preflight_provider=self._auto_quant_preflight,
+            strategy_provider=self._selected_auto_strategy_record,
+            candidates_provider=lambda: self.auto_quant_candidates,
+            capital_limit_provider=lambda: self.execution_page.capital_limit(),
+            order_channel_provider=self._auto_quant_order_channel,
+            shadow_is_active=lambda: self.shadow_orchestrator.is_active,
+            clear_arm_confirmation=lambda: self.execution_page.set_arm_confirmed(
+                False
+            ),
+            render_launch_state=self._apply_paper_workflow_button_state,
+            render_launch_context=lambda summary: (
+                self.execution_page.render_context(summary=summary)
+            ),
+        )
+        self.paper_orchestrator.refused.connect(self._report_paper_launch_refusal)
+        self.paper_orchestrator.log_requested.connect(self._log)
+        self.paper_orchestrator.session_published.connect(
+            self._on_paper_session_published
+        )
+        self.paper_orchestrator.runtime_event_requested.connect(
+            self._record_paper_launch_event
+        )
         # Research Scenario Capital: the initial-equity figure historical
         # research, replay, scan affordability and cross-sectional portfolio
         # research run at.  It is *research-only* -- never broker equity, never
@@ -2420,11 +2460,20 @@ class MainWindow(QMainWindow):
             )
 
     def _confirm_and_start_auto_quant(self) -> None:
-        if self._active_auto_launch_plan is not None:
+        """Ask the operator, then hand the launch to the orchestrator.
+
+        This is the one launch step that stays on the window, and deliberately so:
+        it is *presentation* -- a modal confirmation and the arm flag it sets -- and
+        ``PaperOrchestrator`` may not import ``QMessageBox``.  Every decision about
+        whether the launch may proceed is the orchestrator's; this method only
+        collects consent and forwards the request.
+        """
+
+        if self.paper_trading.phase() is PaperWorkflowPhase.CONNECTING:
             QMessageBox.information(
                 self,
-                "Paper 会话正在连接",
-                "当前启动检查仍在进行中，请等待本次连接完成或失败后再试。",
+                DUPLICATE_TITLE,
+                DUPLICATE_CONFIRM_MESSAGE,
             )
             return
         reply = QMessageBox.question(
@@ -2441,73 +2490,154 @@ class MainWindow(QMainWindow):
             self.execution_page.set_arm_confirmed(False)
             return
         self.execution_page.set_arm_confirmed(True)
-        self._start_auto_quant()
+        self.paper_orchestrator.start()
 
-    def _reset_auto_launch_controls(
-        self, plan: AutoLaunchPlan
-    ) -> bool:
-        """Reset only the controls owned by a completed launch attempt."""
+    def _report_paper_launch_refusal(self, title: str, message: str) -> None:
+        """Surface one launch refusal the orchestrator published."""
 
-        active = self._active_auto_launch_plan
-        if active is None or active.attempt_id != plan.attempt_id:
-            return False
-        self._active_auto_launch_plan = None
-        self.execution_page.set_arm_confirmed(False)
-        self._apply_paper_workflow_button_state()
-        return True
+        QMessageBox.warning(self, title, message)
 
-    def _current_auto_launch_matches(
-        self, plan: AutoLaunchPlan
-    ) -> bool:
-        strategy = self._selected_auto_strategy_record()
-        return strategy is not None and auto_launch_plan_matches(
-            plan,
-            strategy_version_id=strategy.version_id,
-            parameter_hash=strategy.parameter_hash,
-            candidate_symbols=(
-                row.symbol for row in self.auto_quant_candidates
-            ),
-            requested_capital_limit=self.execution_page.capital_limit(),
+    def _record_paper_launch_event(self, event: object) -> None:
+        """Record one launch runtime event; the store is the window's."""
+
+        self._record_runtime_event(
+            severity=event.severity,
+            component=event.component,
+            code=event.code,
+            message=event.message,
         )
 
-    def _reject_unpublished_auto_candidate(
-        self,
-        candidate_id: object,
-        plan: AutoLaunchPlan,
-        message: str,
-        *,
-        show_message: bool,
+    def _on_paper_session_published(
+        self, publication: PaperLaunchPublication
     ) -> None:
-        """Dispose a late/pre-arm candidate without touching a newer attempt.
+        """Adopt one published session and render it.
 
-        Only this candidate is discarded -- the active order service and every
-        other candidate are untouched.  The workflow rejection runs in a
-        ``finally`` so a failing broker disconnect can never leave the session
-        stuck in ``CONNECTING``; the disconnect error itself still propagates.
+        The two assignments are the *active-session* state this window still owns
+        until v2O-E2 moves it: the session's runtime handle and the snapshot the
+        execution route draws.  They are set here, in response to the capability's
+        publication, rather than by the launch sequence itself.
         """
 
-        try:
-            if self.paper_trading.has_candidate(candidate_id):
-                self.paper_trading.discard_candidate(candidate_id)
-        finally:
-            self.paper_workflow.reject_connecting(plan)
-            reset = self._reset_auto_launch_controls(plan)
-            self._log(message)
-            if reset and show_message:
-                QMessageBox.warning(self, "Paper 会话未启动", message)
+        self.trading_runtime = publication.runtime
+        self.auto_quant_snapshot = publication.result.engine_snapshot
+        self._apply_paper_workflow_result(publication.result)
 
-    def _reject_auto_launch_without_service(
+    def _auto_quant_order_channel(self) -> PaperOrderChannel:
+        """The order channel an attempt connects, composed from current settings.
+
+        Read once per attempt by the orchestrator and frozen into its request, so a
+        settings change mid-connect cannot redirect a launch the operator already
+        confirmed.  The config is built here -- not in the capability -- because
+        naming it reaches the IBKR connection module, which is this root's business.
+
+        The order channel must always use a client id distinct from the read-only
+        connection (P1-6), including when the configured id sits near the 999999 cap;
+        the modulo keeps it in ``[0, 999999]``.
+        """
+
+        return PaperOrderChannel(
+            config=IBKRConnectionConfig(
+                host=self.preferences.ibkr_host,
+                port=4002,
+                client_id=(
+                    (self.preferences.ibkr_client_id + 100) % 1_000_000
+                ),
+                api_read_only=False,
+                paper_order_submission_enabled=True,
+                connection_timeout_seconds=(
+                    self.preferences.connection_timeout_seconds
+                ),
+            ),
+            repository=self.order_repository,
+            extended_hours_enabled=(
+                self.preferences.extended_hours_paper_enabled
+            ),
+        )
+
+    def _build_paper_session(
         self,
-        plan: AutoLaunchPlan,
-        message: str,
-    ) -> None:
-        """Finish a failed connection without affecting another launch."""
+        request: PaperLaunchRequest,
+        service: object,
+        reading: PaperAccountReading,
+    ) -> PaperSessionBuildResult:
+        """The narrow session-build seam: build the runtime, then arm the channel.
 
-        self.paper_workflow.reject_connecting(plan)
-        reset = self._reset_auto_launch_controls(plan)
-        self._log(message)
-        if reset:
-            QMessageBox.warning(self, "Paper 会话未启动", message)
+        The composition root keeps every construction that names a concrete type --
+        the auto-rotation config, the risk authority, the execution application, the
+        trading runtime -- so ``PaperOrchestrator`` imports no adapter, no risk
+        implementation and no execution implementation.  It receives an already
+        validated reading and a *borrowed* candidate, and hands back the two ports
+        publication binds plus the runtime the desktop keeps.
+
+        Two properties are load-bearing here and must not be relaxed:
+
+        * **the capital chain stays ``Decimal``.**  ``resolve_paper_session_capital``
+          bounds the session by *cash*, never by buying power, so no margin
+          borrowing can enter through a float conversion;
+        * **the execution application is bound to the same channel being armed.**  It
+          is built over the borrowed candidate, so the engine cannot be handed an
+          application talking to a different broker session than the coordinator
+          reads.
+        """
+
+        strategy = request.strategy_version
+        paper_capital = resolve_paper_session_capital(
+            net_liquidation=reading.net_liquidation,
+            cash=reading.cash,
+            requested_limit=request.plan.requested_capital_limit,
+        )
+        config = build_auto_rotation_config(
+            strategy.parameters,
+            initial_cash=Decimal(paper_capital),
+            capital_source=(
+                f"IBKR Paper {reading.account_alias} "
+                f"现金约束；会话上限 {paper_capital}"
+            ),
+            daily_loss_limit=Decimal(paper_capital) * Decimal("0.01"),
+        )
+        # One risk authority, built from the configuration this window is actually
+        # running with, and injected.  It used to be split: the account limits went
+        # into ``ShadowConfig.layered_risk_limits`` while the engine read a separate
+        # constructor argument that was never passed here, so the configured
+        # ``risk_limits`` reached a field nobody read.
+        risk = self._build_auto_quant_risk()
+        execution = build_execution_application(
+            repository=self.order_repository,
+            broker=service,
+        )
+        runtime = build_trading_runtime(
+            config=config,
+            candidates=request.candidates,
+            identity=strategy.identity,
+            risk=risk,
+            execution=execution,
+            market_reference_symbols=tuple(
+                dict.fromkeys(
+                    str(symbol).strip().upper()
+                    for symbol in strategy.parameters.get(
+                        "market_reference_symbols", []
+                    )
+                    if str(symbol).strip()
+                )
+            ),
+        )
+        snapshot = runtime.start()
+        assert snapshot.session_id is not None
+        service.arm(
+            session_id=snapshot.session_id,
+            allowed_symbols=request.candidate_symbols,
+            max_order_notional=(
+                Decimal(paper_capital) * config.max_position_fraction
+            ),
+            sellable_quantities={},
+        )
+        return PaperSessionBuildResult(
+            engine=runtime,
+            orders=service,
+            session_id=snapshot.session_id,
+            candidate_count=snapshot.candidate_count,
+            runtime=runtime,
+        )
 
     def _populate_auto_quant_candidates(self) -> None:
         """Re-render the candidate and context surfaces from current facts.
@@ -2520,280 +2650,6 @@ class MainWindow(QMainWindow):
         self._render_auto_quant_snapshot()
         self._refresh_auto_quant_preflight()
         self._refresh_extended_hours_status()
-
-    def _start_auto_quant(self) -> None:
-        if self._active_auto_launch_plan is not None:
-            QMessageBox.information(
-                self,
-                "Paper 会话正在连接",
-                "当前启动检查仍在进行中，请不要重复启动。",
-            )
-            return
-        if self.shadow_orchestrator.is_active:
-            self.execution_page.set_arm_confirmed(False)
-            QMessageBox.warning(
-                self,
-                "内部仿真仍在运行",
-                "同一资金真值不能同时运行内部仿真和 IBKR Paper 自动量化。",
-            )
-            return
-        preflight = self._auto_quant_preflight()
-        if not preflight.ready:
-            self.execution_page.set_arm_confirmed(False)
-            failures = "\n".join(
-                f"• {row.name}：{row.detail}"
-                for row in preflight.checks
-                if not row.passed
-            )
-            QMessageBox.warning(
-                self,
-                "启动前检查未通过",
-                "请先处理以下项目：\n" + failures,
-            )
-            return
-        strategy = self._selected_auto_strategy_record()
-        assert strategy is not None
-        requested_capital_limit = self.execution_page.capital_limit()
-        self._next_auto_launch_attempt += 1
-        plan = build_auto_launch_plan(
-            attempt_id=self._next_auto_launch_attempt,
-            strategy_version_id=strategy.version_id,
-            parameter_hash=strategy.parameter_hash,
-            candidate_symbols=(
-                row.symbol for row in self.auto_quant_candidates
-            ),
-            requested_capital_limit=requested_capital_limit,
-        )
-        self._active_auto_launch_plan = plan
-        try:
-            self.paper_workflow.begin_connecting(plan)
-        except WorkflowStateError as error:
-            self._active_auto_launch_plan = None
-            QMessageBox.information(self, "Paper 会话不可启动", str(error))
-            return
-        self._apply_paper_workflow_button_state()
-        self.execution_page.render_context(
-            summary="正在连接独立 IBKR Paper 订单会话并核验唯一 DU 账户…"
-        )
-        order_config = IBKRConnectionConfig(
-            host=self.preferences.ibkr_host,
-            port=4002,
-            # P1-6: the order channel must always use a client id distinct
-            # from the read-only connection, including when the configured id
-            # sits near the 999999 cap (modulo keeps it in [0, 999999]).
-            client_id=(
-                (self.preferences.ibkr_client_id + 100) % 1_000_000
-            ),
-            api_read_only=False,
-            paper_order_submission_enabled=True,
-            connection_timeout_seconds=(
-                self.preferences.connection_timeout_seconds
-            ),
-        )
-
-        candidate_id = str(plan.attempt_id)
-
-        def task(progress: Callable[[str], None]):
-            progress("连接 IBKR Paper 订单通道…")
-            try:
-                connection = self.paper_trading.connect_candidate(
-                    candidate_id,
-                    config=order_config,
-                    repository=self.order_repository,
-                    extended_hours_enabled=(
-                        self.preferences.extended_hours_paper_enabled
-                    ),
-                )
-            except Exception as error:
-                return candidate_id, plan, str(error)
-            progress(
-                f"已核验 {connection.account_alias}；准备逐会话武装…"
-            )
-            return candidate_id, plan, None
-
-        started = self._start_task(
-            task,
-            on_success=self._auto_order_service_connected,
-            start_message="IBKR Paper 自动量化连接中…",
-            resource_group="broker",
-        )
-        if not started:
-            self.paper_workflow.reject_connecting(plan)
-            self._reset_auto_launch_controls(plan)
-
-    def _auto_order_service_connected(self, result: object) -> None:
-        try:
-            candidate_id, plan, connection_error = result  # type: ignore[misc]
-        except (TypeError, ValueError) as error:
-            raise TypeError(
-                "unexpected auto order connection result"
-            ) from error
-        if not isinstance(plan, AutoLaunchPlan):
-            raise TypeError("unexpected Paper launch plan")
-        if connection_error is not None:
-            self._reject_auto_launch_without_service(
-                plan,
-                "IBKR Paper 连接失败，未启动会话："
-                f"{connection_error}",
-            )
-            return
-        if self._active_auto_launch_plan != plan:
-            self._reject_unpublished_auto_candidate(
-                candidate_id,
-                plan,
-                "已忽略过期的 Paper 连接结果；不会武装订单会话。",
-                show_message=False,
-            )
-            return
-        preflight = self._auto_quant_preflight()
-        if not preflight.ready:
-            self._reject_unpublished_auto_candidate(
-                candidate_id,
-                plan,
-                "连接期间启动条件发生变化，已断开未武装的 Paper 会话。",
-                show_message=True,
-            )
-            return
-        if not self._current_auto_launch_matches(plan):
-            self._reject_unpublished_auto_candidate(
-                candidate_id,
-                plan,
-                "连接期间策略、候选或资金上限已变化；已断开未武装的 Paper 会话。",
-                show_message=True,
-            )
-            return
-        try:
-            # Borrowed for this call stack only: the window never stores it,
-            # never assigns it to a member, and never keeps it past promotion.
-            service = self.paper_trading.candidate_service(candidate_id)
-            broker_state = service.broker_state()
-            if (
-                broker_state.net_liquidation is None
-                or broker_state.net_liquidation <= 0
-            ):
-                raise ExecutionRefused(
-                    "IBKR Paper 订单会话未返回有效净值"
-                )
-            if broker_state.positions:
-                symbols = ", ".join(
-                    row.symbol for row in broker_state.positions
-                )
-                raise ExecutionRefused(
-                    "首期自动量化要求 Paper 账户启动时空仓；"
-                    f"当前持仓：{symbols}"
-                )
-            if broker_state.cash is None:
-                raise ExecutionRefused(
-                    "IBKR Paper 订单会话未返回现金；"
-                    "禁止使用保证金借款代替现金"
-                )
-            paper_capital = resolve_paper_session_capital(
-                net_liquidation=broker_state.net_liquidation,
-                cash=broker_state.cash,
-                requested_limit=plan.requested_capital_limit,
-            )
-            strategy = self.strategies.get_version(
-                plan.strategy_version_id
-            )
-            config = build_auto_rotation_config(
-                strategy.parameters,
-                initial_cash=Decimal(paper_capital),
-                capital_source=(
-                    "IBKR Paper "
-                    f"{service.connection_snapshot().account_alias} "
-                    f"现金约束；会话上限 {paper_capital}"
-                ),
-                daily_loss_limit=(
-                    Decimal(paper_capital) * Decimal("0.01")
-                ),
-            )
-            # One risk authority, built from the configuration this window is
-            # actually running with, and injected.  It used to be split: the
-            # account limits went into ``ShadowConfig.layered_risk_limits``
-            # while the engine read a separate constructor argument that was
-            # never passed here, so the configured ``risk_limits`` reached a
-            # field nobody read.
-            risk = self._build_auto_quant_risk()
-            # The execution application is bound to the *same* channel this
-            # session is arming and will publish, and to the one order store
-            # the window opened at construction.  Binding it from the borrowed
-            # candidate means the engine cannot be handed an application that
-            # talks to a different broker session than the coordinator reads.
-            execution = build_execution_application(
-                repository=self.order_repository,
-                broker=service,
-            )
-            # The runtime is assembled through the composition root, from the
-            # risk and execution services this window built, so the session
-            # dispatches through the same authorities it renders.
-            runtime = build_trading_runtime(
-                config=config,
-                candidates=self.auto_quant_candidates,
-                identity=strategy.identity,
-                risk=risk,
-                execution=execution,
-                market_reference_symbols=tuple(
-                    dict.fromkeys(
-                        str(symbol).strip().upper()
-                        for symbol in strategy.parameters.get(
-                            "market_reference_symbols", []
-                        )
-                        if str(symbol).strip()
-                    )
-                ),
-            )
-            snapshot = runtime.start()
-            assert snapshot.session_id is not None
-            service.arm(
-                session_id=snapshot.session_id,
-                allowed_symbols=tuple(
-                    row.symbol
-                    for row in self.auto_quant_candidates
-                ),
-                max_order_notional=(
-                    Decimal(paper_capital)
-                    * config.max_position_fraction
-                ),
-                sellable_quantities={},
-            )
-            # Pure check, no mutation: promotion after ``publish_armed`` must not
-            # be able to fail for a reason that was already knowable here, so
-            # the published session can never end up without an owner.
-            self.paper_trading.ensure_candidate_can_promote(candidate_id)
-            workflow_result = self.paper_workflow.publish_armed(
-                plan,
-                engine=runtime,
-                orders=service,
-                health_evaluator=self._paper_execution_health_adapter,
-                candidate_symbols=frozenset(
-                    row.symbol for row in self.auto_quant_candidates
-                ),
-            )
-            self.paper_trading.promote_candidate(candidate_id)
-        except Exception as error:
-            # Discards the candidate only -- once promotion succeeded there is
-            # no candidate left, so the live owner is never torn down here.
-            self._reject_unpublished_auto_candidate(
-                candidate_id,
-                plan,
-                "Paper 会话校验或武装失败，未提交自动订单："
-                f"{error}",
-                show_message=True,
-            )
-            return
-        self.trading_runtime = runtime
-        self.auto_quant_snapshot = workflow_result.engine_snapshot
-        self._active_auto_launch_plan = None
-        self._apply_paper_workflow_result(workflow_result)
-        self._record_runtime_event(
-            severity="warning",
-            component="auto_quant",
-            code="PAPER_SESSION_ARMED",
-            message=(
-                f"IBKR Paper 自动量化会话 {snapshot.session_id[:8]} "
-                f"已武装；候选 {snapshot.candidate_count}；Live 永久阻断"
-            ),
-        )
 
     def _paper_execution_health_adapter(self, **kwargs: object) -> PaperExecutionHealth:
         """Normalize journal dictionaries at the desktop/broker boundary."""
@@ -3219,12 +3075,17 @@ class MainWindow(QMainWindow):
         ``_launch_busy``: it is released by the probe's own worker, so an
         unrelated task failing cannot reopen the route while the broker is still
         being probed.
+
+        "A connection attempt is pending" is read off the workflow's phase now
+        rather than a mirrored plan: ``CONNECTING`` is exactly the state the
+        retired ``_active_auto_launch_plan is not None`` described, and it is the
+        workflow's to answer.
         """
 
         return bool(
             self._launch_busy
             or self._channel_check_inflight
-            or self._active_auto_launch_plan is not None
+            or self.paper_trading.phase() is PaperWorkflowPhase.CONNECTING
             or self.paper_trading.has_order_service()
             or self.trading_runtime is not None
         )

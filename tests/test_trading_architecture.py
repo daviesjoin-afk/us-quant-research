@@ -707,6 +707,10 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "orchestration/shadow/models.py",
         "orchestration/shadow/queries.py",
         "orchestration/shadow/orchestrator.py",
+        "orchestration/paper/__init__.py",
+        "orchestration/paper/models.py",
+        "orchestration/paper/queries.py",
+        "orchestration/paper/orchestrator.py",
         "orchestration/tasking.py",
         "pages/__init__.py",
         "pages/account.py",
@@ -2576,6 +2580,12 @@ PAPER_RECOVERY = RUNTIME_DIR / "recovery.py"
 PAPER_COORDINATOR = RUNTIME_DIR / "coordinator.py"
 PAPER_WORKFLOW_STATE = RUNTIME_DIR / "workflow_state.py"
 PAPER_WORKFLOW = RUNTIME_DIR / "workflow.py"
+#: The v2O-E1 launch capability.  Guard N reads it because the launch transitions
+#: moved there from ``desktop.py``; the recovery half is still asserted on the
+#: window, where it will stay until v2O-E3.
+PAPER_ORCHESTRATOR = (
+    _SRC / "desktop_v2" / "orchestration" / "paper" / "orchestrator.py"
+)
 
 #: Every production module of the runtime package.  ``__init__`` is excluded:
 #: it is a package marker, not a module with a responsibility.
@@ -3197,7 +3207,15 @@ def test_the_paper_workflow_owns_lifecycle_and_no_broker() -> None:
 
 
 def test_the_desktop_does_not_drive_the_paper_lifecycle_by_hand() -> None:
-    """Guard N: the window asks the workflow; it does not become one."""
+    """Guard N: the window asks the workflow; it does not become one.
+
+    v2O-E1 split this guard's *required* half by owner.  The launch transitions --
+    ``begin_connecting`` and ``publish_armed`` -- are now driven by
+    ``PaperOrchestrator``, while the manual-reconciliation and finalization paths are
+    still the window's until v2O-E3.  Both halves are asserted, on the object that
+    owns each, so the guard cannot pass by the launch having simply stopped
+    happening.
+    """
 
     desktop = _SRC / "desktop.py"
     constructed: list[str] = []
@@ -3221,11 +3239,27 @@ def test_the_desktop_does_not_drive_the_paper_lifecycle_by_hand() -> None:
     ):
         assert forbidden not in source, forbidden
 
-    # It still drives the workflow by its documented surface, so the guard
-    # cannot pass by the window having stopped launching Paper sessions.
+    # The launch half moved to the capability, and is driven there through the same
+    # documented surface; the recovery half is still the window's.
+    orchestrator = PAPER_ORCHESTRATOR.read_text(encoding="utf-8")
     for required in (
-        "paper_workflow.begin_connecting(",
-        "paper_workflow.publish_armed(",
+        "begin_connecting(",
+        "publish_armed(",
+        "reject_connecting(",
+    ):
+        assert required in orchestrator, required
+    # Neither owner may reach for the lease or the coordinator directly.
+    for forbidden in (
+        "CoordinatorReconciliationEvidence(",
+        "CoordinatorFinalizationEvidence(",
+        "validate_paper_transition(",
+        "ExecutionLeaseManager(",
+        "release_paper(",
+        "PaperSessionCoordinator(",
+    ):
+        assert forbidden not in orchestrator, forbidden
+
+    for required in (
         "paper_workflow.begin_manual_reconciliation()",
         "paper_workflow.finalize_if_safe()",
     ):

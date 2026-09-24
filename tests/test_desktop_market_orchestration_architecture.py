@@ -773,6 +773,11 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
     subpackage instead.  That structure is asserted in
     ``tests/test_desktop_research_foundations_architecture.py``; what matters
     here is that ``research/`` did not become a fourth kind of thing.
+
+    ``paper/`` arrived with v2O-E1: the Paper *launch* sequence moved off
+    ``MainWindow``.  It is a capability directory like ``market`` and ``account``,
+    and it owns no second truth -- the workflow still owns the phase, the plan and
+    the lease, and ``PaperTradingService`` still owns the connections.
     """
 
     children = {
@@ -780,7 +785,13 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
         for path in (_SRC / "desktop_v2" / "orchestration").iterdir()
         if path.is_dir() and path.name != "__pycache__"
     }
-    assert children == {"market", "account", "research", "shadow"}, children
+    assert children == {
+        "market",
+        "account",
+        "research",
+        "shadow",
+        "paper",
+    }, children
 
     # The route aggregate must stay an aggregate: a capability-level
     # orchestrator at its root is the God object in a new costume.

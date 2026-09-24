@@ -5,10 +5,22 @@ from __future__ import annotations
 import inspect
 
 from us_quant.desktop import MainWindow
+from us_quant.desktop_v2.orchestration.paper import PaperOrchestrator
 
 
 def _source(name: str) -> str:
     return inspect.getsource(getattr(MainWindow, name))
+
+
+def _orchestrator_source(name: str) -> str:
+    """One launch method on its owner since v2O-E1.
+
+    The launch assertions below used to read ``MainWindow``; the sequence is the
+    capability's now, so they read it there.  Deleting them instead would have
+    silently dropped the safety claim they encode.
+    """
+
+    return inspect.getsource(getattr(PaperOrchestrator, name))
 
 
 def test_normal_paper_ingress_delegates_once_to_workflow_controller() -> None:
@@ -82,11 +94,23 @@ def test_close_blocks_unfinalized_paper_before_any_disconnect() -> None:
 
 
 def test_unarmed_launch_rejection_is_controller_scoped() -> None:
-    source = _source("_start_auto_quant")
-    assert "paper_workflow.begin_connecting(plan)" in source
-    assert "paper_workflow.reject_connecting(plan)" in source
-    assert "paper_workflow.reject_connecting(plan)" in _source(
-        "_reject_unpublished_auto_candidate"
+    """The rejection is scoped to the attempt it belongs to, on its new owner.
+
+    v2O-E1 moved the launch sequence into ``PaperOrchestrator``, so these read the
+    capability.  The guarantee is the one that was asserted of the window all
+    along: binding goes through ``begin_connecting`` (which is what takes PAPER),
+    and an unarmed attempt is unwound through ``reject_connecting`` -- never by
+    touching the lease or the active service directly.
+    """
+
+    start = _orchestrator_source("start")
+    assert "self._workflow.begin_connecting(request.plan)" in start
+    assert "self._workflow.reject_connecting(request.plan)" in start
+    assert "self._workflow.reject_connecting(request.plan)" in _orchestrator_source(
+        "_discard_candidate"
+    )
+    assert "self._workflow.reject_connecting(request.plan)" in _orchestrator_source(
+        "_reject_without_candidate"
     )
 
 

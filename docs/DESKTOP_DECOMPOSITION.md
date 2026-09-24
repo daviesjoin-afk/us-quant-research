@@ -3626,4 +3626,51 @@ closeEvent 任由被拒的 clear 抛出                  → RED（1 failed + 2 
 `test_a_refused_clear_cannot_be_reached_between_the_reserve_and_the_commit` /
 `test_a_stuck_launch_is_not_closed_over_silently`；guard
 `test_the_rollback_stops_when_the_promotion_cannot_be_released` /
-`test_the_reservation_gates_the_clear_of_the_active_slot`。
+`test_the_reservation_gates_the_clear_of_the_active_slot`（第六轮扩写为
+`test_every_other_way_into_the_slot_honours_the_reservation`）。
+
+**（7）第六轮 review：占用没有锁住 id 本身，于是同 id 复用会让回滚覆盖并制造孤儿连接。**
+
+`reserve` 把候选移入 active，于是该 id 离开候选表；而 `connect_candidate` 查重只看
+`_candidates`，看不到占用。于是这条 public API 序列成立：
+
+```text
+connect_candidate("attempt-1")        → A
+reserve_candidate_promotion("attempt-1")
+    active = A；候选表里已没有 attempt-1
+connect_candidate("attempt-1")        → B（当时会成功）
+publication 失败
+cancel_candidate_promotion(R)
+    _candidates["attempt-1"] = A     ← 直接覆盖 B
+```
+
+实测（服务层，无任何私有 poke）：`connect_candidate` 成功、factory 被调用两次；`cancel`
+返回 `True` 却把候选从 `B` 覆盖成 `A`；而 **B 连接过一次、从未 disconnect、且不再出现在任何
+ownership map 里**——一个真正不可达的 broker 连接孤儿。
+
+修法两半，都在 `PaperTradingService` 内：`connect_candidate` **在 factory 之前**拒绝被占用的
+id（必须在建连之前拒绝，否则会建出一条谁也够不到的连接）；`cancel_candidate_promotion` 在改动
+任何状态**之前**检查该 id 是否已被占住，是则返回 `False` 且整调用 no-op——active、占用、既有
+候选三者原样保留，orchestrator 既有的 `False → _fail_to_release_promotion()` 自动接住，不需要
+新机制。占用锁的是**槽位与 id 两者**。
+
+**这一轮还暴露了一个文档问题：** `PAPER_TRADING_DECOMPOSITION.md` §3.2 在上一轮就已经写了
+「任何其他…同 id 的 connect 都被拒绝」，而代码当时并没有实现它。也就是说那张表记录的是一个
+未落地的承诺——正是"docstring 当愿望用"的失败模式。现在代码与该行一致了，但值得记下来：
+**断言写进文档之前，要能指到实现它的那几行。**
+
+本轮 mutation（均为 RED，实测）：
+
+```text
+connect_candidate 不再拒绝被占用的 id            → RED（2 failed）
+cancel 不再拒绝覆盖一个无法交代的候选            → RED（2 failed）
+```
+
+两项各自被对应 regression 与 guard
+`test_every_other_way_into_the_slot_honours_the_reservation` 抓住。新增 regression：
+`test_the_reserved_id_cannot_be_registered_again` /
+`test_cancel_refuses_to_overwrite_an_unaccountable_candidate`。
+
+顺带一处非 blocker 的文案修正：`closeEvent` 那句提示改成与事实一致——`disconnect()` 已经先跑过
+了，所以现在说的是「Paper 订单连接已停止，但所有权占用无法确认；客户端不会释放该所有权或正常
+退出」，而不是原先的「不会断开或退出」。整块 shutdown ownership closure 仍归 E4。

@@ -96,11 +96,11 @@ self.paper_trading = PaperTradingService(
 
 | 方法 | 语义 |
 | --- | --- |
-| `connect_candidate(id, config=, journal=, extended_hours_enabled=)` | 建并连一个候选；**只有成功才登记**。失败时 best-effort 断开；若连断开都失败，则**保留登记**（丢掉引用=丢掉对一个可能还活着的连接的控制） |
+| `connect_candidate(id, config=, journal=, extended_hours_enabled=)` | 建并连一个候选；**只有成功才登记**。失败时 best-effort 断开；若连断开都失败，则**保留登记**（丢掉引用=丢掉对一个可能还活着的连接的控制）。**该 id 正被一次飞行中的 promotion 占用时直接拒绝**（拒绝发生在 factory 之前）——占用期间该 id 已不在候选表里，只查重复是查不到的 |
 | `candidate_service(id)` | **借出**已登记的候选，供 promotion 前的 arm/submit/publish 接线使用；调用方不得存为成员变量 |
-| `reserve_candidate_promotion(id)` | **装入 active 并锁槽**（两阶段的第一阶段）：候选人必须存在、槽位必须为空且无人占用；成功后该 service 即成为 active，且在 commit/cancel 之前，任何其他晋升、同 id 的 connect 都被拒绝 |
-| `commit_candidate_promotion(reservation)` | 结束本次启动的占用（第二阶段）。ownership 已在 reserve 时取得，所以这里**结构上没有可失败的残余**；唯一拒绝是「不是当前那张 reservation」——编程错误，按名字 loud 拒。**不是流水账**：占用不结束，该 service 将永远无法再被 reserve |
-| `cancel_candidate_promotion(reservation)` | 回滚：把 service 放回**候选槽位**、释放占用。**刻意不抛异常**——它跑在 rollback 里，抛出会跳过 rejection 并把 `CONNECTING` 永久卡住持有 PAPER；是否释放用返回值报告 |
+| `reserve_candidate_promotion(id)` | **装入 active 并锁槽**（两阶段的第一阶段）：候选人必须存在、槽位必须为空且无人占用；成功后该 service 即成为 active，且在 commit/cancel 之前，任何其他晋升、同 id 的 connect、`clear_active()` 都被拒绝。它同时锁**槽位**和**id** |
+| `commit_candidate_promotion(reservation)` | 结束本次启动的占用（第二阶段）。ownership 已在 reserve 时取得，所以这里**结构上没有可失败的残余**；拒绝有两种，都是 misuse/corruption 而非竞态：「不是当前那张 reservation」，以及「槽位已不再持有该 service」。两者都**不释放占用**——owner 交代不清时把槽位交回复用是唯一绝不能做的事。**不是流水账**：占用不结束，该 service 将永远无法再被 reserve |
+| `cancel_candidate_promotion(reservation)` | 回滚：把 service 放回**候选槽位**、释放占用。**刻意不抛异常**——它跑在 rollback 里，抛出会跳过 rejection 并把 `CONNECTING` 永久卡住持有 PAPER；是否释放用返回值报告。若该 id 已被别的候选占住（corruption），**返回 `False` 且整调用 no-op**：覆盖会丢掉一个本方法无法交代来源的候选，而它的 broker 连接会就此成为孤儿 |
 | `discard_candidate(id)` | 只断开并遗忘**指定的那一个**候选；active 与其他候选一字不动。断开成功后才移除登记，失败则保留登记并记录错误 |
 | `has_candidate(id)` | 该 id 是否已登记（含飞行中的占位） |
 

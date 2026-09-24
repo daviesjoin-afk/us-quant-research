@@ -2032,10 +2032,13 @@ orchestrator 必须**把它当控制信号**而不是日志：返回 `False` 时
 code `PAPER_LAUNCH_ROLLBACK_FAILED` 报出。已发布 LIVE 会话与卡住的启动是两个不同的处境，
 所以 code 也分开。
 
-占用同样**约束 `clear_active()`**：仍有一次 promotion 在飞时它直接拒绝。否则 reservation
-只是"打算"锁住槽位——finalization / recovery 调用方可以在 reserve 与 commit 之间把 owner
-清掉，启动便发布一个 owner 已被丢弃的会话。这是 `RUNNING ⇒ has_order_service()` 成为结构性
-推论的另一半，而 `commit` 还会独立确认槽位仍持有该 service。相应地 `closeEvent` 里那次
+占用锁的是**槽位与 id 两者**：`clear_active()` 在占用期间直接拒绝，否则 reservation 只是
+"打算"锁住槽位——finalization / recovery 调用方可以在 reserve 与 commit 之间把 owner 清掉，
+启动便发布一个 owner 已被丢弃的会话；而 `connect_candidate()` 拒绝重新登记被占用的 id，因为
+占用期间该 id 已不在候选表里、只查重复是查不到的，一旦重新登记，回滚的 `cancel` 就会覆盖掉新
+候选，使其 broker 连接成为孤儿。所以 `cancel` 自己也在改动任何状态之前确认该 id 未被占住，是则
+返回 `False` 让启动 fail closed。`commit` 另有独立确认：槽位仍持有该 service。
+这是 `RUNNING ⇒ has_order_service()` 成为结构性推论的另一半。相应地 `closeEvent` 里那次
 `clear_active()` 按名字捕获这个拒绝（否则异常会从该 Qt override 逃出去，并跳过
 shadow / 心跳 / 行情 / worker 的收尾），弹窗并 `event.ignore()` 交还给操作员。
 

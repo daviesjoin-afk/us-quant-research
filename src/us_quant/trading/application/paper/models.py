@@ -62,8 +62,8 @@ class PaperPromotionReservation:
     So a reservation is not a promise to promote later.  By the time a caller holds
     one, the named candidate is already installed as the active service; the
     reservation is the token saying the installation belongs to this launch, plus the
-    exclusivity that stops any other promotion, discard or connection from touching
-    the slot until this launch declares which of the two endings it was.
+    exclusivity that stops any other promotion, discard, connection *or clearing* of
+    the active slot until this launch declares which of the two endings it was.
 
     ``eq=False`` on purpose: identity *is* the meaning of a reservation, so equality
     must not be a second, quietly weaker notion of it.

@@ -18,9 +18,10 @@ Three rules matter more than the rest:
   active service *and* locks the slot in one call, so the workflow cannot reach
   ``RUNNING`` without an owner: there is no longer an ordering in which a published
   session could be left ownerless.  Publication still splits the failure handling -- a
-  raise at or before ``publish_armed`` is a rollback (cancel the reservation, dispose
-  the candidate, reject the plan, release PAPER), and after it only the launch's own
-  claim is left to end;
+  raise at or before ``publish_armed`` is a rollback (cancel the reservation, dispose the
+  candidate, reject the plan, release PAPER), and it proceeds only if the cancel confirms
+  it gave the slot back; after ``publish_armed`` returns only the launch's own claim is
+  left to end, and neither side unwinds what it cannot account for;
 * **the candidate is borrowed, never stored.**  It lives in one callback's local, never
   an attribute -- a stored handle would be a second owner of the connection.
 
@@ -55,6 +56,9 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     LAUNCH_FAILED_TITLE,
     PAPER_ARMED_CODE,
     PAPER_LAUNCH_COMPONENT,
+    PAPER_LAUNCH_ROLLBACK_CODE,
+    PAPER_LAUNCH_ROLLBACK_MESSAGE,
+    PAPER_LAUNCH_ROLLBACK_TITLE,
     PAPER_PROMOTION_INVARIANT_CODE,
     PAPER_PROMOTION_INVARIANT_MESSAGE,
     PAPER_PROMOTION_INVARIANT_TITLE,
@@ -378,9 +382,11 @@ class PaperOrchestrator(QObject):
                 # Always first: the slot is this launch's to give back, and the
                 # discard below cannot even see a candidate that is still installed.
                 # ``cancel`` is the one call in this sequence that must not raise --
-                # see its own note -- because an exception here would skip the
-                # rejection and strand ``CONNECTING`` holding PAPER for good.
-                self._paper_trading.cancel_candidate_promotion(reservation)
+                # see its own note -- so its answer arrives as a return value, and a
+                # `False` has to stop the rollback rather than merely be discarded.
+                if not self._paper_trading.cancel_candidate_promotion(reservation):
+                    self._fail_to_release_promotion(error)
+                    return
             self._discard_candidate(
                 candidate_id,
                 request,
@@ -449,6 +455,41 @@ class PaperOrchestrator(QObject):
             )
         )
         self.refused.emit(PAPER_PROMOTION_INVARIANT_TITLE, message)
+
+    def _fail_to_release_promotion(self, error: Exception) -> None:
+        """Fail closed when a refused publication could not give the promotion back.
+
+        The mirror of :meth:`_fail_after_publication`, on the other side of publication.
+        There, the session was live and owned so nothing could be unwound; here nothing
+        was published at all, so the attempt simply **stays in flight**.
+
+        ``cancel_candidate_promotion`` answering that it released nothing means the
+        ownership cannot be shown to have returned to the candidate slot.  Completing
+        the rollback anyway would dispose of a service that may still hold the slot,
+        reject the plan and release PAPER -- the shared lease with Shadow -- so an armed
+        channel could survive while the workflow reports ``READY`` and nothing excludes
+        Shadow.  Measured on the real wiring before this guard existed: ``READY``,
+        ``lease NONE``, the active owner still held, the armed channel still alive, and
+        the only operator-visible line was an ordinary "launch failed".
+
+        So nothing is rolled back here either: the plan stays bound, the candidate stays
+        registered, PAPER stays held, and the operator is told under a code of its own --
+        distinct from the published-session invariant, because a stuck launch is a
+        different situation from an ownerless live session.  A stuck launch is visible
+        and actionable; a silently free lease protecting nothing is not.
+        """
+
+        message = PAPER_LAUNCH_ROLLBACK_MESSAGE.format(error=error)
+        self.log_requested.emit(message)
+        self.runtime_event_requested.emit(
+            PaperLaunchEvent(
+                severity="error",
+                component=PAPER_LAUNCH_COMPONENT,
+                code=PAPER_LAUNCH_ROLLBACK_CODE,
+                message=message,
+            )
+        )
+        self.refused.emit(PAPER_LAUNCH_ROLLBACK_TITLE, message)
 
     # -- rejection -------------------------------------------------------
 

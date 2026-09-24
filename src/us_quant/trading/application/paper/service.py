@@ -205,9 +205,11 @@ class PaperTradingService:
         state of the slot -- after publication the workflow cannot be ownerless,
         because there is no longer an ordering in which it could be.
 
-        Exclusive while it lasts: a second reservation, and a slot that already holds
-        a service, are both refused.  So the ending is deterministic rather than a
-        race -- and the rollback below has exactly one thing to undo.
+        Exclusive while it lasts.  A second reservation and a slot that already holds
+        a service are both refused, and :meth:`clear_active` refuses while this one
+        stands -- so the slot cannot be emptied out from under the claim.  That is what
+        makes the ending deterministic rather than a race, and it leaves the rollback
+        below exactly one thing to undo.
         """
 
         key = self._candidate_key(candidate_id)
@@ -249,9 +251,9 @@ class PaperTradingService:
 
         Total by construction, which is what reserving bought: ownership was taken
         before publication, so a successful publication leaves nothing left to decide
-        and nothing left that can fail.  The single refusal is a reservation that is
-        not the outstanding one -- a programming error rather than a race, and
-        refused loudly instead of silently claiming a slot.
+        and nothing left that can fail.  Its two refusals are misuse and corruption
+        rather than races -- a reservation that is not the outstanding one, and a slot
+        that no longer holds the service the reservation was taken for.
 
         Not bookkeeping, either.  While a reservation stands every other promotion is
         refused, so a launch that never ended its claim would leave the service
@@ -263,6 +265,20 @@ class PaperTradingService:
             if self._promotion_reservation is not reservation:
                 raise PaperTradingLifecycleError(
                     "stale or foreign Paper promotion reservation;"
+                    " refusing to commit it"
+                )
+            if self._order_service is None:
+                # Unreachable while ``clear_active`` refuses a reserved slot, and kept
+                # anyway because this is the check that makes "a reservation locks the
+                # slot" true rather than merely intended: a commit that reported success
+                # over an empty slot would declare an ownerless session owned, which is
+                # exactly the state this pair of methods exists to make unreachable.
+                #
+                # The claim is deliberately *left standing*.  If the owner cannot be
+                # accounted for, handing the slot back for reuse is the one thing that
+                # must not happen, so the failure is loud and the service stays claimed.
+                raise PaperTradingLifecycleError(
+                    "the reserved Paper promotion no longer holds the active slot;"
                     " refusing to commit it"
                 )
             self._promotion_reservation = None
@@ -348,12 +364,27 @@ class PaperTradingService:
     def clear_active(self, *, expected_service: object | None = None) -> None:
         """Release ownership -- only ever after the session is truly finalized.
 
-        Fail-closed both ways: a service still reporting a live connection is
-        refused (dropping it would abandon a socket nobody can reach), and
-        ``expected_service`` lets a late caller prove which service it means.
+        Fail-closed three ways: a service still reporting a live connection is
+        refused (dropping it would abandon a socket nobody can reach),
+        ``expected_service`` lets a late caller prove which service it means, and a
+        slot with a promotion in flight is refused outright.
+
+        That last refusal is what makes a reservation *lock the slot* rather than
+        merely say so.  Without it a finalization or recovery caller could empty the
+        slot between ``reserve_candidate_promotion`` and
+        ``commit_candidate_promotion``, and the launch would publish a session whose
+        owner had already been dropped -- the ownerless ``RUNNING`` state the
+        two-phase promotion exists to make unreachable, re-enterable through a
+        different public method.
         """
 
         with self._lock:
+            if self._promotion_reservation is not None:
+                raise PaperTradingLifecycleError(
+                    f"Paper candidate {self._promotion_reservation.candidate_id!r} holds"
+                    " the promotion reservation; refusing to clear the slot it is"
+                    " reserved to"
+                )
             service = self._order_service
             if service is None:
                 raise PaperTradingLifecycleError(

@@ -62,6 +62,20 @@ PAPER_PROMOTION_INVARIANT_MESSAGE = (
     "在重启客户端前，新的 Paper 启动会被拒绝：{error}"
 )
 
+#: The *rollback*'s invariant: publication was refused, and the promotion could not be
+#: shown to have been given back.  Nothing published here, so the attempt stays in
+#: flight -- finishing the rollback would dispose of a service that may still own the
+#: slot and release PAPER while Shadow is no longer excluded.  Reported at error
+#: severity under its own code, distinct from the published-session one above because
+#: the operator's situation is different: that one is a live session, this is a stuck
+#: launch.
+PAPER_LAUNCH_ROLLBACK_TITLE = "Paper 启动回滚未能确认"
+PAPER_LAUNCH_ROLLBACK_CODE = "PAPER_LAUNCH_ROLLBACK_FAILED"
+PAPER_LAUNCH_ROLLBACK_MESSAGE = (
+    "Paper 启动失败，且 promotion 回滚报告未释放任何占用；"
+    "已保持 CONNECTING 与执行租约，不做进一步回滚，需人工处理：{error}"
+)
+
 #: The catalogue-fault message.  Raised when a governed version's declared hash does not
 #: describe its own parameters; the launch never proceeds, so the operator must be told
 #: why rather than left with a confirmed-but-never-started attempt.
@@ -218,6 +232,8 @@ __all__ = [
     "CONNECT_VERIFIED_PROGRESS", "DUPLICATE_CONFIRM_MESSAGE", "DUPLICATE_MESSAGE",
     "DUPLICATE_TITLE", "IDENTITY_CHANGED_MESSAGE", "LAUNCH_FAILED_TITLE",
     "NET_LIQUIDATION_MESSAGE", "PAPER_ARMED_CODE", "PAPER_LAUNCH_COMPONENT",
+    "PAPER_LAUNCH_ROLLBACK_CODE", "PAPER_LAUNCH_ROLLBACK_MESSAGE",
+    "PAPER_LAUNCH_ROLLBACK_TITLE",
     "PAPER_PROMOTION_INVARIANT_CODE", "PAPER_PROMOTION_INVARIANT_MESSAGE",
     "PAPER_PROMOTION_INVARIANT_TITLE", "PAPER_STRATEGY_INTEGRITY_CODE",
     "PAPER_STRATEGY_INTEGRITY_TITLE", "POSITIONS_MESSAGE",

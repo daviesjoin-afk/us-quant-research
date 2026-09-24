@@ -144,7 +144,6 @@ from us_quant.trading.composition.execution import (
 from us_quant.trading.composition.risk import build_risk_application
 from us_quant.trading.composition.runtime import build_trading_runtime
 from us_quant.trading.domain.risk import LayeredRiskLimits
-from us_quant.trading.runtime.artifacts import AutoQuantSnapshot
 from us_quant.trading.runtime.models import AutoQuantCandidate
 from us_quant.trading.runtime.preflight import (
     AutoQuantPreflight,
@@ -179,6 +178,7 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     PaperSessionBuildResult,
     PaperShutdownDisposition,
 )
+from us_quant.desktop_v2.orchestration.paper.queries import launch_attempt_in_flight
 from us_quant.desktop_v2.orchestration.market import (
     MarketOrchestrator,
     MarketReadinessInputs,
@@ -201,8 +201,13 @@ from us_quant.desktop_v2.orchestration.research.backtest import (
 from us_quant.desktop_v2.pages.execution import ExecutionPage
 from us_quant.desktop_v2.pages.execution.presenter import (
     build_candidates_view,
-    build_runtime_view,
     control_state,
+)
+from us_quant.desktop_v2.pages.execution.projector import (
+    AUDIT_ROW_LIMIT,
+    LATENCY_ROW_LIMIT,
+    RECONCILIATION_ROW_LIMIT,
+    build_session_view,
 )
 from us_quant.desktop_v2.pages.market import MarketPage
 from us_quant.desktop_v2.pages.research.targeted import TargetedValidationPage
@@ -511,12 +516,17 @@ class MainWindow(QMainWindow):
         # kept here was a second owner of a live session, which is why the Shadow
         # and candidate gates now ask the orchestrator instead.
         #
-        # What remains is *presentation only*: the last snapshot the execution route
-        # drew, kept so a page opened after a session ended still shows the session it
-        # is reporting on.  ``_paper_render_snapshot`` may be read by render paths and
-        # by nothing else -- no launch gate, no market or Shadow interlock, no broker,
-        # no stop and no lifecycle decision may consult it.
-        self._paper_render_snapshot: AutoQuantSnapshot | None = None
+        # v2O-E4 took the last presentation cache out of the window too.  The execution
+        # route needs to keep drawing the session that just ended -- ``finalize_if_safe``
+        # clears the workflow's canonical result as part of releasing PAPER -- so the
+        # fact that survives is
+        # ``paper_orchestrator.presentation``, an immutable projection the *capability*
+        # owns and publishes from the one result path.  There is deliberately no
+        # ``_paper_render_snapshot`` here, no alias and no forwarding property: a second
+        # cache on the window is how the window becomes a second truth owner about a
+        # Paper session.  The route reads it for drawing and for nothing else -- no
+        # launch gate, no market or Shadow interlock, no broker read and no lifecycle
+        # decision may consult it.
         # Paper and internal Shadow simulation share one explicit execution
         # lease.  The desktop renders controller results but never owns the
         # normal Paper event ordering itself.  The Shadow *handle* stays here
@@ -2693,18 +2703,24 @@ class MainWindow(QMainWindow):
         """Render one Paper result; the events were requested upstream.
 
         The window's one result handler, and deliberately thin: presentation only.  It
-        keeps the snapshot the execution route draws, repaints from it, and republishes
-        the route's control state.
+        repaints the route from the capability's retained snapshot and republishes the
+        route's control state.
 
-        Nothing here decides anything about the session.  Since v2O-E3 the *consequences*
-        of a result -- whether a zero-state proof is due, and whether a finished session's
-        ownership can be released -- are ``PaperOrchestrator._after_result``'s, so this
-        handler no longer contains a second copy of either decision.  It must never reach
-        the workflow: no ``on_stream``, no ``poll``, no ``set_entries_paused``, no
-        ``request_stop``, and no risk, execution or broker mutation.  A guard pins that.
+        Nothing here decides anything about the session, and since v2O-E4 nothing here
+        *stores* anything about it either: the snapshot this route draws is
+        ``paper_orchestrator.presentation``, which the capability refreshes from the same
+        result just before it published it.  A second cache taken here is how the window
+        becomes a second truth owner about a Paper session -- and how a page blanks out
+        when the canonical result is cleared.
+
+        Since v2O-E3 the *consequences* of a result -- whether a zero-state proof is due,
+        and whether a finished session's ownership can be released -- are
+        ``PaperOrchestrator._after_result``'s, so this handler no longer contains a second
+        copy of either decision.  It must never reach the workflow: no ``on_stream``, no
+        ``poll``, no ``set_entries_paused``, no ``request_stop``, and no risk, execution or
+        broker mutation.  A guard pins that.
         """
 
-        self._paper_render_snapshot = result.engine_snapshot  # type: ignore[assignment]
         self._render_auto_quant_snapshot()
         self._apply_paper_workflow_button_state()
 
@@ -2777,18 +2793,27 @@ class MainWindow(QMainWindow):
         self._publish_execution_controls()
 
     def _render_auto_quant_snapshot(self) -> None:
-        """Gather the session facts and hand them to the page as one view.
+        """Hand the execution route the view it draws, and assemble none of it.
 
-        This is the whole of the window's part in the execution route's
-        rendering: fetch, project, draw.  The projection lives in the page
-        package's presenter, which is Qt-free, and the drawing lives in the page,
-        so neither of them can reach a service and neither of them is reached
-        into by name from here.
+        What is left of the window's part in this render is *fetching*: the ambient route
+        facts (quotes, the approved shortlist, the read-only account snapshot, the broker's
+        own account reading) and the journal rows the order tables read.  Everything that
+        used to make this method a read-model assembler moved in v2O-E4:
 
-        The candidate table is drawn first and on its own, because it has content
-        before any session does: the operator approves a shortlist and only then
-        arms it, so a route that waited for a snapshot would show an empty table
-        at exactly the moment the shortlist is the thing being approved.
+        * the session fact is ``paper_orchestrator.presentation`` -- the capability's
+          retained, immutable projection -- not a cache the window took from a result;
+        * which broker holdings belong to the session, how the pending orders are keyed,
+          and which journal rows are the session's are pure conversions, and they live in
+          ``pages/execution/projector.py`` beside the presenter that draws them.
+
+        So this method no longer knows what a Paper session looks like; it knows which
+        facts the route needs and where to ask for them.  A guard pins that it reads no
+        phase and assembles no session view of its own.
+
+        The candidate table is drawn first and on its own, because it has content before
+        any session does: the operator approves a shortlist and only then arms it, so a
+        route that waited for a session would show an empty table at exactly the moment
+        the shortlist is the thing being approved.
         """
 
         if not hasattr(self, "execution_page"):
@@ -2806,56 +2831,34 @@ class MainWindow(QMainWindow):
                 recently_ready=self.market_orchestrator.was_recently_ready,
             )
         )
-        snapshot = self._paper_render_snapshot
-        if snapshot is None:
+        session = self.paper_orchestrator.presentation
+        if session is None:
             return
-        candidate_symbols = {row.symbol for row in candidates}
-        broker_state = self.paper_trading.broker_state()
-        broker_positions = (
-            tuple(
-                row
-                for row in broker_state.positions
-                if row.symbol in candidate_symbols
-            )
-            if broker_state is not None
-            else ()
-        )
-        session_id = snapshot.session_id
-        reconciliations = (
-            self.order_repository.reconciliation_rows(
-                session_id=session_id,
-                limit=50,
-            )
-            if session_id
-            else ()
-        )
-        audit_by_intent = {
-            str(row["intent_id"]): row
-            for row in self.order_repository.audit_rows(limit=1000)
-            if row.get("session_id") == session_id
-        }
+        session_id = session.session_id
         self.execution_page.render(
-            build_runtime_view(
-                snapshot=snapshot,
+            build_session_view(
+                session=session,
                 account=(
                     self.account_orchestrator.portfolio.account
                     if self.account_orchestrator.portfolio is not None
                     else None
                 ),
-                broker_state=broker_state,
-                broker_positions=broker_positions,
+                broker_state=self.paper_trading.broker_state(),
                 quotes=quotes,
-                pending_by_symbol={
-                    intent.execution_symbol: intent
-                    for intent in snapshot.pending_orders
-                },
+                candidates=candidates,
+                reconciliations=(
+                    self.order_repository.reconciliation_rows(
+                        session_id=session_id,
+                        limit=RECONCILIATION_ROW_LIMIT,
+                    )
+                    if session_id
+                    else ()
+                ),
+                audit_rows=self.order_repository.audit_rows(limit=AUDIT_ROW_LIMIT),
                 latency=self.paper_trading.reconciliation_rows_with_latency(
                     session_id=session_id,
-                    limit=100,
+                    limit=LATENCY_ROW_LIMIT,
                 ),
-                reconciliations=reconciliations,
-                audit_by_intent=audit_by_intent,
-                candidates=candidates,
                 recently_ready=self.market_orchestrator.was_recently_ready,
             )
         )
@@ -2863,31 +2866,30 @@ class MainWindow(QMainWindow):
     def _publish_execution_controls(self) -> None:
         """Publish the route's control state from the workflow truth.
 
-        One writer, one source.  The phase decides the session controls, the
-        launch facts decide the launch controls, and the page is handed booleans
-        rather than a phase so it cannot act on a lifecycle vocabulary it does
-        not own.
+        One writer, one source, and since v2O-E4 the *interpretation* of the source is
+        the capability's: ``paper_orchestrator.session_control_facts`` answers which
+        session controls the canonical phase makes available, so the window no longer
+        compares phase values to decide what an operator may click.  The window still
+        reads the canonical truth (through the capability, which reads the workflow and
+        the order-service owner live) and still hands the page booleans rather than a
+        phase, so the page cannot act on a lifecycle vocabulary it does not own.
 
-        ``stop_stream_enabled`` is deliberately tied to the launch lock as well
-        as to the stream: stopping the feed under a live Paper session would
-        starve the strategy of the quotes its exit gates read, which is why the
-        legacy builder disabled it when a session was armed.
+        ``stop_stream_enabled`` is deliberately tied to the launch lock as well as to the
+        stream: stopping the feed under a live Paper session would starve the strategy of
+        the quotes its exit gates read, which is why the legacy builder disabled it when a
+        session was armed.
         """
 
         if not hasattr(self, "execution_page"):
             return
-        phase = self.paper_trading.phase()
-        launch_locked = self._launch_locked()
+        facts = self.paper_orchestrator.session_control_facts
         self.execution_page.set_control_state(
             control_state(
-                launch_locked=launch_locked,
-                session_running=phase is PaperWorkflowPhase.RUNNING,
-                session_paused=phase is PaperWorkflowPhase.PAUSED,
-                reconcile_available=phase is PaperWorkflowPhase.HALTED,
-                resume_ready=(
-                    phase is PaperWorkflowPhase.RECONCILING_READY
-                    and self.paper_trading.reconciliation_status().awaiting_confirmation
-                ),
+                launch_locked=self._launch_locked(),
+                session_running=facts.running,
+                session_paused=facts.paused,
+                reconcile_available=facts.reconcile_available,
+                resume_ready=facts.resume_ready,
                 stream_running=self.market_orchestrator.is_live,
             )
         )
@@ -2905,16 +2907,17 @@ class MainWindow(QMainWindow):
         unrelated task failing cannot reopen the route while the broker is still
         being probed.
 
-        "A connection attempt is pending" is read off the workflow's phase now
-        rather than a mirrored plan: ``CONNECTING`` is exactly the state the
-        retired ``_active_auto_launch_plan is not None`` described, and it is the
-        workflow's to answer.
+        "A connection attempt is pending" is read off the workflow's phase now --
+        canonically, and through the capability's own rule rather than by comparing the
+        phase here: ``queries.launch_attempt_in_flight`` is the one definition of "an
+        attempt owns the connect step", and it is equivalent to the retired
+        ``_active_auto_launch_plan is not None`` while staying correct after publication.
         """
 
         return bool(
             self._launch_busy
             or self._channel_check_inflight
-            or self.paper_trading.phase() is PaperWorkflowPhase.CONNECTING
+            or launch_attempt_in_flight(self.paper_trading.phase())
             or self.paper_trading.has_order_service()
             or self.paper_orchestrator.runtime_active
         )
@@ -3020,7 +3023,11 @@ class MainWindow(QMainWindow):
         """
 
         self._publish_dashboard_view()
-        if self._paper_render_snapshot is not None:
+        # The route is repainted only when there is a session to paint.  The question is
+        # "is there a retained presentation fact?", which is a *presentation* read and
+        # deliberately nothing more: no account fact may be turned into a statement about
+        # a Paper session by consulting a cache.
+        if self.paper_orchestrator.presentation is not None:
             self._render_auto_quant_snapshot()
         self.targeted_session_orchestrator.refresh_preflight()
         self._refresh_auto_quant_preflight()

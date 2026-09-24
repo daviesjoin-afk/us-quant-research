@@ -239,6 +239,30 @@ class PaperLaunchRefusal:
     message: str
 
 
+@dataclass(frozen=True, slots=True)
+class PaperControlFacts:
+    """Which session controls the canonical phase makes available, as plain booleans.
+
+    Booleans rather than a phase, for the same reason the execution page is handed
+    booleans: a page that cannot name ``HALTED`` cannot act on it.  v2O-E4 moved the
+    *production* of this mapping here from ``MainWindow._publish_execution_controls``,
+    which compared phase values itself -- Paper phase reasoning on a presentation path,
+    which §18 of the round's brief puts out of the window's scope.  The window still
+    reads the canonical phase and still asks the canonical questions; it no longer
+    interprets the answer.
+
+    ``reconcile_available`` and ``resume_ready`` are separate facts rather than one "is
+    the session halted" flag: starting a reconciliation is available while halted, and
+    confirming one only once the halted session has produced a proof and is waiting for
+    a human to look at it.
+    """
+
+    running: bool
+    paused: bool
+    reconcile_available: bool
+    resume_ready: bool
+
+
 class PaperLaunchIntegrityError(RuntimeError):
     """A governed version's declared hash does not describe its own parameters.
 
@@ -379,6 +403,7 @@ __all__ = [
     "PAPER_STRATEGY_INTEGRITY_TITLE", "PAUSE_SUCCEEDED_MESSAGE", "POSITIONS_MESSAGE",
     "PREFLIGHT_CHANGED_MESSAGE", "PREFLIGHT_PREFIX", "PREFLIGHT_TITLE",
     "PaperAccountReading", "PaperCandidateOrder",
+    "PaperControlFacts",
     "PaperLaunchIntegrityError", "PaperLaunchRefusal",
     "PaperLaunchRequest", "PaperOrderChannel", "PaperRuntimeEventRequest",
     "PaperSessionBuildResult",

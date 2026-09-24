@@ -239,7 +239,10 @@ def test_the_candidates_are_visible_before_a_session_is_armed() -> None:
 
     window = _window()
     try:
-        assert window._paper_render_snapshot is None
+        # No session has been published, so the capability retains no presentation view
+        # for the route to draw.  Since v2O-E4 that is the capability's fact, not a cache
+        # the window keeps.
+        assert window.paper_orchestrator.presentation is None
 
         window.auto_quant_candidates = (
             _candidate("AAA"),
@@ -320,12 +323,14 @@ def test_the_window_no_longer_owns_the_execution_widgets() -> None:
             "auto_execution_health_label",
         ):
             assert not hasattr(window, retired), retired
-        # The two pieces of state the window legitimately keeps: the prepared
-        # shortlist, and the presentation-only snapshot the route draws.  The second
-        # one is named for what it is since v2O-E2 -- the session's own truth lives in
-        # the Paper capability, and this may be read by render paths and nothing else.
+        # What the window legitimately keeps is the prepared shortlist.  The session fact
+        # the route draws is *not* one of them: since v2O-E4 it is
+        # ``paper_orchestrator.presentation`` -- one immutable projection the capability
+        # retains and the window only reads -- so there is no window-side snapshot cache
+        # left to be a second owner of a session fact.
         assert hasattr(window, "auto_quant_candidates")
-        assert hasattr(window, "_paper_render_snapshot")
+        assert not hasattr(window, "_paper_render_snapshot")
+        assert hasattr(window.paper_orchestrator, "presentation")
         assert not hasattr(window, "trading_runtime")
         assert window.execution_page is not None
     finally:

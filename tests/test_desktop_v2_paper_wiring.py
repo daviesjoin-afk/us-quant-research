@@ -364,10 +364,13 @@ def test_the_session_reaches_the_window_through_the_result(
 
     assert window.paper_orchestrator.result is not None
     assert window.paper_orchestrator.runtime_active is True
-    # Presentation: the render snapshot is kept so the route can still draw the
-    # session it is reporting on.
-    assert window._paper_render_snapshot is not None
-    assert window._paper_render_snapshot.session_id is not None
+    # Presentation: the capability retains the immutable view the route draws, so the
+    # route can still show the session it is reporting on.  Since v2O-E4 that fact lives
+    # on the capability -- the window keeps no copy, which is what stops it becoming a
+    # second owner of a session fact.
+    presentation = window.paper_orchestrator.presentation
+    assert presentation is not None
+    assert presentation.session_id
     # And the window holds no runtime handle of its own -- the second owner is gone.
     assert not hasattr(window, "trading_runtime")
 
@@ -620,7 +623,9 @@ def test_every_pre_publication_failure_rolls_back_and_leaves_no_owner(
     )
     assert window.paper_orchestrator.result is None
     assert window.paper_orchestrator.runtime_active is False
-    assert window._paper_render_snapshot is None
+    # And nothing was published *for display* either: a refused launch has no session to
+    # retain, and ``presentation`` is built from published results only.
+    assert window.paper_orchestrator.presentation is None
 
 
 def test_a_commit_failure_after_publication_cannot_orphan_the_session(

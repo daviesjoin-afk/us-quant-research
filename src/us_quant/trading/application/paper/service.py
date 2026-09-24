@@ -152,6 +152,21 @@ class PaperTradingService:
 
         key = self._candidate_key(candidate_id)
         with self._lock:
+            if (
+                self._promotion_reservation is not None
+                and self._promotion_reservation.candidate_id == key
+            ):
+                # Reserving moves the candidate into the active slot, so the id is no
+                # longer in the candidate map and the duplicate check below would not
+                # see it.  Registering a second service under that id then lets the
+                # reservation's own rollback cancel *into* the map it was already
+                # replaced in: the rollback overwrites the newer service, which
+                # disappears from every ownership map while its broker connection stays
+                # open and untracked.  The claim owns the id until it ends, either way.
+                raise PaperTradingLifecycleError(
+                    f"Paper candidate {key!r} is reserved by an in-flight promotion;"
+                    " refusing to register it again"
+                )
             if key in self._candidates:
                 raise PaperTradingLifecycleError(
                     f"Paper candidate {key!r} is already registered;"
@@ -205,11 +220,14 @@ class PaperTradingService:
         state of the slot -- after publication the workflow cannot be ownerless,
         because there is no longer an ordering in which it could be.
 
-        Exclusive while it lasts.  A second reservation and a slot that already holds
-        a service are both refused, and :meth:`clear_active` refuses while this one
-        stands -- so the slot cannot be emptied out from under the claim.  That is what
-        makes the ending deterministic rather than a race, and it leaves the rollback
-        below exactly one thing to undo.
+        Exclusive while it lasts, over the *id* as well as the slot.  A second
+        reservation and a slot that already holds a service are both refused,
+        :meth:`clear_active` refuses while this one stands, and
+        :meth:`connect_candidate` refuses to register the reserved id again -- so the
+        slot cannot be emptied out from under the claim, and the claim cannot be made to
+        overwrite a candidate that replaced it.  That is what makes the ending
+        deterministic rather than a race, and it leaves the rollback below exactly one
+        thing to undo.
         """
 
         key = self._candidate_key(candidate_id)
@@ -302,6 +320,17 @@ class PaperTradingService:
 
         with self._lock:
             if self._promotion_reservation is not reservation:
+                return False
+            if reservation.candidate_id in self._candidates:
+                # Unreachable while ``connect_candidate`` refuses a reserved id, and kept
+                # as a corruption defence: putting the reserved service back would
+                # overwrite a candidate this method cannot account for, and the
+                # overwritten one would vanish from every ownership map while its broker
+                # connection stayed open -- an orphan nobody could reach or close.
+                #
+                # So this is reported as "released nothing", with the active slot, the
+                # claim and the existing candidate all left exactly as they are.  The
+                # launch treats that as a rollback it cannot complete and fails closed.
                 return False
             service = self._order_service
             if service is None:

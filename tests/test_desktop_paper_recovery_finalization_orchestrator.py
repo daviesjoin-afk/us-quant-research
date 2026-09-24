@@ -33,16 +33,23 @@ distinguishable -- a distinction the logs alone cannot make.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
+from us_quant.auto_launch import build_auto_launch_plan
 from us_quant.desktop_v2.orchestration.paper.models import (
+    PAPER_RELEASE_INVARIANT_CODE,
     RECONCILIATION_NO_SERVICE_MESSAGE,
     RESUME_EVIDENCE_MISSING_MESSAGE,
     RESUME_NOT_READY_MESSAGE,
     SHUTDOWN_FINALIZATION_PENDING_MESSAGE,
+    SHUTDOWN_LAUNCH_IN_FLIGHT_REASON,
     SHUTDOWN_MANUAL_RECOVERY_MESSAGE,
     SHUTDOWN_OWNERSHIP_BLOCKED_MESSAGE,
+    SHUTDOWN_STOP_REFUSED_REASON,
     SHUTDOWN_STOP_REQUESTED_MESSAGE,
+    SHUTDOWN_UNPROVABLE_SESSION_REASON,
     PaperShutdownDisposition,
 )
 from us_quant.desktop_v2.orchestration.paper.orchestrator import (
@@ -50,7 +57,9 @@ from us_quant.desktop_v2.orchestration.paper.orchestrator import (
     PaperOrchestrator,
 )
 from us_quant.trading.application.paper.models import PaperTradingLifecycleError
+from us_quant.trading.runtime.workflow import PaperWorkflowController
 from us_quant.trading.runtime.workflow_state import (
+    ExecutionLease,
     PaperWorkflowPhase,
     WorkflowStateError,
 )
@@ -166,6 +175,7 @@ class _Workflow:
         resume_outcome: str = "running",
         finalization_outcome: str = "finalized",
         finalize_returns: bool = True,
+        stop_outcome: str = "stopping",
     ) -> None:
         self._phase = phase
         self._result: _Result | None = (
@@ -178,6 +188,7 @@ class _Workflow:
         self.resume_outcome = resume_outcome
         self.finalization_outcome = finalization_outcome
         self.finalize_returns = finalize_returns
+        self.stop_outcome = stop_outcome
         self.calls: list[object] = []
         self.stop_requests = 0
         self.lease_released = False
@@ -204,11 +215,13 @@ class _Workflow:
     # -- the ordinary stop ---------------------------------------------
 
     def request_stop(self, stream_snapshot: object | None = None) -> _Result:
-        """Model the real automatic route: ``RUNNING``/``PAUSED`` -> ``STOPPING``.
+        """Model the real automatic route, including its two non-``STOPPING`` endings.
 
-        An operator-only phase has no automatic stop, so asking for one there is a test
-        bug and must be loud rather than silently accepted -- that is exactly the failure
-        ``prepare_shutdown`` is there to prevent.
+        A stop is not a phase edit: the same call can halt the session (a stale BUY that
+        cannot be cancelled, an aged protective SELL, unsafe health) or finalize it
+        outright.  An operator-only phase has no automatic stop at all, so asking for one
+        there is a test bug and must be loud rather than silently accepted -- that is
+        exactly the failure ``prepare_shutdown`` is there to prevent.
         """
 
         self.calls.append("request_stop")
@@ -218,6 +231,18 @@ class _Workflow:
         }:
             raise WorkflowStateError("A Paper stop requires a RUNNING or PAUSED session.")
         self.stop_requests += 1
+        if self.stop_outcome == "refused":
+            raise WorkflowStateError("No active Paper runtime is available.")
+        if self.stop_outcome == "halt":
+            self._phase = PaperWorkflowPhase.HALTED
+            self._result = _Result(halted=True)
+            return self._result
+        if self.stop_outcome == "finalized":
+            self._phase = PaperWorkflowPhase.FINALIZED
+            self._result = _Result(
+                finalized=True, events=(_Event(PAPER_FINALIZED_EVENT),)
+            )
+            return self._result
         self._phase = PaperWorkflowPhase.STOPPING
         return self._result  # type: ignore[return-value]
 
@@ -352,7 +377,13 @@ class _Workflow:
 
 
 class _Trading:
-    """A recording ``PaperTradingService`` over one owned slot."""
+    """A recording ``PaperTradingService`` over one owned slot.
+
+    The release is two-phase here exactly as it is in the service: ``reserve_active_release``
+    proves and locks, ``commit_active_release`` drops, ``cancel_active_release`` gives the
+    lock back.  A fake that offered a single ``clear_active`` would make the transaction
+    boundary invisible, which is the one thing the tests below are about.
+    """
 
     def __init__(
         self,
@@ -361,18 +392,20 @@ class _Trading:
         connected: bool = True,
         broker_positions: tuple[object, ...] = (),
         disconnect_fails: bool = False,
-        clear_refusal: str | None = None,
+        release_refusal: str | None = None,
+        commit_fails: bool = False,
+        cancel_refused: bool = False,
     ) -> None:
         self.owned = owned
         self.connected = connected
         self.broker_positions = broker_positions
         self.disconnect_fails = disconnect_fails
-        self.clear_refusal = clear_refusal
+        self.release_refusal = release_refusal
+        self.commit_fails = commit_fails
+        self.cancel_refused = cancel_refused
         self.calls: list[str] = []
         self.trace: list[str] = []
-        # Bound by ``_build``: ``is_finalized`` is a read *through* the workflow, and a
-        # fake that answered it from its own flag would let a test pass while the
-        # capability asked the wrong question.
+        self._release_reservation: object | None = None
         self._workflow = None
 
     def has_order_service(self) -> bool:
@@ -405,11 +438,29 @@ class _Trading:
             raise RuntimeError("the broker socket refused to close")
         self.connected = False
 
-    def clear_active(self) -> None:
-        self.calls.append("clear_active")
-        if self.clear_refusal is not None:
-            raise PaperTradingLifecycleError(self.clear_refusal)
+    def reserve_active_release(self) -> object:
+        self.calls.append("reserve_active_release")
+        if self.release_refusal is not None:
+            raise PaperTradingLifecycleError(self.release_refusal)
+        self._release_reservation = object()
+        return self._release_reservation
+
+    def commit_active_release(self, reservation: object) -> None:
+        self.calls.append("commit_active_release")
+        if self.commit_fails:
+            raise PaperTradingLifecycleError(
+                "stale or foreign Paper active-release reservation;"
+                " refusing to commit it"
+            )
+        self._release_reservation = None
         self.owned = False
+
+    def cancel_active_release(self, reservation: object) -> bool:
+        self.calls.append("cancel_active_release")
+        if self.cancel_refused or self._release_reservation is not reservation:
+            return False
+        self._release_reservation = None
+        return True
 
     def broker_state(self) -> _BrokerState:
         self.calls.append("broker_state")
@@ -531,8 +582,10 @@ def _build(
     trading = trading if trading is not None else _Trading()
     trading._workflow = workflow
     # One trace, two owners: the finalization order is a claim about how the workflow
-    # calls and the broker calls interleave, which neither list alone can show.
-    trading.trace = workflow.trace
+    # calls and the broker calls interleave, which neither list alone can show.  A real
+    # controller has no trace, so a test driving one simply gets its own list back.
+    trace = getattr(workflow, "trace", [])
+    trading.trace = trace
     submitter = submitter or _Submitter()
     clock = clock or _Clock()
     events = _Events()
@@ -581,7 +634,7 @@ def _build(
         events=events,
         clock=clock,
         rows_seen=seen_sessions,
-        trace=workflow.trace,
+        trace=trace,
     )
 
 
@@ -1177,15 +1230,18 @@ def test_every_proof_passing_releases_the_slot_after_the_workflow_agrees() -> No
 
     assert "disconnect" in harness.trading.calls
     assert "finalize_if_safe" in harness.workflow.calls
-    assert "clear_active" in harness.trading.calls
+    assert "commit_active_release" in harness.trading.calls
     assert harness.workflow.lease_released is True
     assert harness.trading.owned is False
     assert harness.events.finalized == 1
-    # The release is ordered, not merely all present: disconnect, then the workflow's own
-    # gate, then the slot.
-    assert harness.trading.calls.index("disconnect") < harness.trading.calls.index(
-        "clear_active"
-    )
+    # The release is ordered, not merely all present: disconnect, then the reservation
+    # that proves and locks the slot, then the workflow's own gate, then the commit.
+    assert harness.trading.calls == [
+        "broker_state",
+        "disconnect",
+        "reserve_active_release",
+        "commit_active_release",
+    ]
     assert harness.workflow.calls == ["finalize_if_safe"]
 
 
@@ -1219,31 +1275,100 @@ def test_the_journal_is_read_for_the_finished_session_only() -> None:
     assert harness.rows_seen == ["session-1"]
 
 
-def test_a_workflow_refusal_stops_the_release_before_the_slot_is_cleared() -> None:
-    """``finalize_if_safe`` is the gate, and a refusal keeps the ownership."""
+def test_a_workflow_refusal_gives_the_reservation_back_and_keeps_the_slot() -> None:
+    """``finalize_if_safe`` is the gate, and a refusal costs only the reservation.
+
+    Nothing was dropped: the slot is held and *unlocked* exactly as it was found, so an
+    operator who fixes the cause can try again.
+    """
 
     harness = _finalized(finalize_returns=False)
 
     harness.orchestrator._publish_result(_Result(finalized=True))
 
     assert "disconnect" in harness.trading.calls
+    assert "reserve_active_release" in harness.trading.calls
     assert "finalize_if_safe" in harness.workflow.calls
-    assert "clear_active" not in harness.trading.calls
+    assert "cancel_active_release" in harness.trading.calls
+    assert "commit_active_release" not in harness.trading.calls
     assert harness.trading.owned is True
     assert harness.workflow.lease_released is False
     assert harness.events.finalized == 0
 
 
-def test_an_unaccountable_slot_is_reported_and_never_forced() -> None:
-    """The service refuses a slot it cannot account for; the refusal is not swallowed."""
+def test_a_release_the_slot_refuses_never_reaches_the_workflow() -> None:
+    """The transaction boundary, asserted as the thing that cannot happen.
+
+    This is the failure the two-phase release exists for.  ``finalize_if_safe`` is a
+    check-and-commit call on a canonical owner: once it answers ``True`` the PAPER lease
+    is gone.  So the slot's releasability is *proved and locked first* -- and when it
+    cannot be (a promotion claim still holds it, the service still reports connected,
+    the slot changed) the workflow is never asked at all.
+
+    Asserting "``finalize_if_safe`` was not called" is the strongest available evidence,
+    and it is stronger than asserting a flag: the lease, the workflow's result, its
+    coordinator and both evidence records are all released or dropped *inside* that call,
+    so a workflow the capability never reached has been left completely untouched.  An
+    earlier shape asked the workflow first and cleaned up afterwards whose only cleanup
+    was a return value, which left PAPER released with the ownership still held.
+    """
 
     harness = _finalized(
-        trading=_Trading(clear_refusal="a promotion reservation holds the slot")
+        trading=_Trading(
+            release_refusal="Paper candidate '1' holds the promotion reservation;"
+            " refusing to reserve the slot it is reserved to"
+        )
     )
 
     harness.orchestrator._publish_result(_Result(finalized=True))
 
+    assert harness.workflow.calls == []
+    assert harness.workflow.lease_released is False
+    assert harness.workflow.result is not None
+    assert harness.trading.calls == ["broker_state", "disconnect", "reserve_active_release"]
     assert harness.trading.owned is True
+    assert harness.events.finalized == 0
+    # And the failure is a plain refusal, not an invariant report: nothing was corrupted.
+    assert harness.events.runtime_events == []
+
+
+def test_a_release_that_cannot_be_committed_is_reported_as_an_invariant() -> None:
+    """Unreachable while the reservation locks the slot -- and not described as ordinary.
+
+    What it would leave behind is PAPER released with the ownership still held, which is
+    a different situation for the operator from a claim that never finished, so it is
+    filed under its own code and never reported as a clean ``READY``.
+    """
+
+    harness = _finalized(trading=_Trading(commit_fails=True))
+
+    harness.orchestrator._publish_result(_Result(finalized=True))
+
+    assert harness.workflow.lease_released is True
+    assert harness.trading.owned is True
+    assert harness.events.finalized == 0
+    assert [event.code for event in harness.events.runtime_events] == [
+        PAPER_RELEASE_INVARIANT_CODE
+    ]
+
+
+def test_a_reservation_that_cannot_be_given_back_stops_the_release() -> None:
+    """A lock that cannot be released is reported rather than treated as a clean refusal.
+
+    Nothing was dropped in this branch -- the workflow refused, so the lease is intact --
+    so the outcome is still fail-closed rather than corrupted; what it must not do is
+    proceed as if the slot had been given back.
+    """
+
+    harness = _finalized(
+        finalize_returns=False, trading=_Trading(cancel_refused=True)
+    )
+
+    harness.orchestrator._publish_result(_Result(finalized=True))
+
+    assert "commit_active_release" not in harness.trading.calls
+    assert harness.trading.owned is True
+    assert harness.workflow.lease_released is False
     assert harness.events.finalized == 0
 
 
@@ -1255,7 +1380,7 @@ def test_a_finalized_result_is_released_exactly_once() -> None:
     harness.orchestrator._publish_result(_Result(finalized=True))
     harness.orchestrator._publish_result(_Result(finalized=True))
 
-    assert harness.trading.calls.count("clear_active") == 1
+    assert harness.trading.calls.count("commit_active_release") == 1
     assert harness.events.finalized == 1
 
 
@@ -1475,19 +1600,69 @@ def test_shutdown_releases_a_finalized_session_that_still_owns_its_slot() -> Non
 
 
 def test_shutdown_blocks_when_an_ownership_cannot_be_released() -> None:
-    """Fail closed: the refusal is reported and nothing is forced to let the process exit."""
+    """Fail closed: the refusal is reported and nothing is forced to let the process exit.
+
+    And crucially the *diagnosis* survives into the dialog, so the operator is told which
+    of the blocked situations they are in rather than one catch-all sentence.
+    """
 
     harness = _finalized(
-        trading=_Trading(clear_refusal="a promotion reservation holds the slot")
+        trading=_Trading(
+            release_refusal="Paper candidate '1' holds the promotion reservation"
+        )
     )
 
     verdict = harness.orchestrator.prepare_shutdown()
 
     assert verdict.disposition is PaperShutdownDisposition.OWNERSHIP_BLOCKED
     assert SHUTDOWN_OWNERSHIP_BLOCKED_MESSAGE in verdict.message
-    assert "a promotion reservation holds the slot" in verdict.message
+    assert "holds the promotion reservation" in verdict.message
     assert harness.trading.owned is True
     assert harness.events.finalized == 0
+    # The workflow was never asked, so the lease is untouched.
+    assert harness.workflow.calls == []
+    assert harness.workflow.lease_released is False
+
+
+def test_shutdown_of_a_connecting_attempt_is_never_ready() -> None:
+    """The canonical phase decides, not "the workflow holds no result yet".
+
+    Driven on the **real** controller, because the shape being guarded is one this service
+    and the workflow disagree about: ``CONNECTING`` legitimately has no result, so
+    ``is_finalized()`` -- which reads ``result is None`` as "nothing awaits finalization" --
+    answers ``True`` while the launch is holding the PAPER lease and may already have a
+    connected candidate.  Classifying from that answer would let a close walk straight
+    past an owned session into the generic teardown.
+    """
+
+    workflow = PaperWorkflowController()
+    # Driven through the controller's own API rather than by poking the phase, so the
+    # state is one production can really reach: IDLE -> PREPARING -> READY -> CONNECTING.
+    workflow.begin_preparing()
+    workflow.mark_ready()
+    workflow.begin_connecting(
+        build_auto_launch_plan(
+            attempt_id=1,
+            strategy_version_id="version-1",
+            parameter_hash="hash-1",
+            candidate_symbols=("AAPL",),
+            requested_capital_limit=Decimal("1000"),
+        )
+    )
+    assert workflow.phase is PaperWorkflowPhase.CONNECTING
+    assert workflow.result is None
+    assert workflow.lease is ExecutionLease.PAPER
+
+    harness = _build(workflow=workflow, trading=_Trading(owned=False))
+
+    verdict = harness.orchestrator.prepare_shutdown()
+
+    assert verdict.disposition is not PaperShutdownDisposition.READY
+    assert verdict.disposition is PaperShutdownDisposition.OWNERSHIP_BLOCKED
+    assert SHUTDOWN_OWNERSHIP_BLOCKED_MESSAGE in verdict.message
+    # Nothing was released on the way to that verdict.
+    assert workflow.lease is ExecutionLease.PAPER
+    assert harness.trading.calls == []
 
 
 def test_shutdown_blocks_a_promotion_claim_with_no_result_at_all() -> None:
@@ -1502,10 +1677,123 @@ def test_shutdown_blocks_a_promotion_claim_with_no_result_at_all() -> None:
 
     assert verdict.disposition is PaperShutdownDisposition.OWNERSHIP_BLOCKED
     assert SHUTDOWN_OWNERSHIP_BLOCKED_MESSAGE in verdict.message
-    # Nothing was disconnected, cleared or released on the way to that verdict.
+    assert SHUTDOWN_LAUNCH_IN_FLIGHT_REASON in verdict.message
+    # Nothing was disconnected, released or reserved on the way to that verdict.
     assert harness.trading.calls == []
     assert harness.workflow.calls == []
     assert harness.trading.owned is True
+
+
+@pytest.mark.parametrize("owned", [True, False])
+def test_shutdown_of_a_connecting_attempt_blocks_either_way(owned: bool) -> None:
+    """Whether or not a slot is held, a launch in flight is not closable.
+
+    A ``CONNECTING`` workflow owns the PAPER lease and a candidate that may be connected
+    without being promoted, so "no active service" is not the same as "nothing owned" --
+    and the disposition must not depend on which of the two the service happens to report.
+    """
+
+    harness = _build(
+        workflow=_Workflow(phase=PaperWorkflowPhase.CONNECTING, result=None),
+        trading=_Trading(owned=owned, connected=False),
+    )
+
+    verdict = harness.orchestrator.prepare_shutdown()
+
+    assert verdict.disposition is PaperShutdownDisposition.OWNERSHIP_BLOCKED
+    assert harness.trading.calls == []
+
+
+def test_shutdown_reports_the_halt_an_orderly_stop_produced() -> None:
+    """A stop that halts is not "waiting for finalization".
+
+    The same ``request_stop`` call can land the session in ``HALTED`` -- a stale BUY that
+    cannot be cancelled, an aged protective SELL, unsafe health -- and after that there is
+    no automatic route left.  Telling the operator to wait would leave them waiting for a
+    proof nothing will run.
+    """
+
+    harness = _build(
+        workflow=_Workflow(
+            phase=PaperWorkflowPhase.RUNNING,
+            result=_Result(active=True),
+            stop_outcome="halt",
+        )
+    )
+
+    verdict = harness.orchestrator.prepare_shutdown()
+
+    assert verdict.disposition is PaperShutdownDisposition.MANUAL_RECOVERY_REQUIRED
+    assert verdict.message == SHUTDOWN_MANUAL_RECOVERY_MESSAGE
+    assert harness.workflow.stop_requests == 1
+    assert harness.workflow.phase is PaperWorkflowPhase.HALTED
+
+
+def test_shutdown_of_a_fast_finalizing_stop_is_ready() -> None:
+    """A clean stop can finalize in the same call, and then the close may proceed.
+
+    The stop publishes its finalized result, the ordinary result path releases the
+    ownership, and the re-classification finds nothing left to settle -- so the verdict is
+    ``READY`` rather than a "wait" for a proof that already ran.
+    """
+
+    harness = _build(
+        workflow=_Workflow(
+            phase=PaperWorkflowPhase.RUNNING,
+            result=_Result(active=True),
+            stop_outcome="finalized",
+        )
+    )
+
+    verdict = harness.orchestrator.prepare_shutdown()
+
+    assert verdict.disposition is PaperShutdownDisposition.READY
+    assert harness.workflow.phase is PaperWorkflowPhase.FINALIZED
+    assert harness.trading.owned is False
+    assert harness.workflow.lease_released is True
+    assert harness.events.finalized == 1
+
+
+def test_shutdown_blocks_when_the_orderly_stop_was_refused() -> None:
+    """A stop that could not even be requested leaves a live session: nothing is released."""
+
+    harness = _build(
+        workflow=_Workflow(
+            phase=PaperWorkflowPhase.RUNNING,
+            result=_Result(active=True),
+            stop_outcome="refused",
+        )
+    )
+
+    verdict = harness.orchestrator.prepare_shutdown()
+
+    assert verdict.disposition is PaperShutdownDisposition.OWNERSHIP_BLOCKED
+    assert SHUTDOWN_STOP_REFUSED_REASON in verdict.message
+    assert harness.workflow.phase is PaperWorkflowPhase.RUNNING
+    assert harness.trading.calls == []
+    assert harness.trading.owned is True
+
+
+def test_shutdown_blocks_an_owned_slot_with_no_session_at_all() -> None:
+    """An owned slot and no result: nothing can be proved, so nothing is released.
+
+    ``CONNECTING`` is refused before this branch is reached, so getting here means a slot
+    came to exist with no session behind it -- a launch fault.  Defence in depth, and the
+    assertion is the same one every other blocked outcome makes: no ``READY`` while
+    something is still held, and nothing released on the way to saying so.
+    """
+
+    harness = _build(
+        workflow=_Workflow(phase=PaperWorkflowPhase.READY, result=None),
+        trading=_Trading(owned=True, connected=False),
+    )
+
+    verdict = harness.orchestrator.prepare_shutdown()
+
+    assert verdict.disposition is PaperShutdownDisposition.OWNERSHIP_BLOCKED
+    assert SHUTDOWN_UNPROVABLE_SESSION_REASON in verdict.message
+    assert harness.trading.calls == []
+    assert harness.workflow.calls == []
 
 
 def test_shutdown_blocks_when_the_broker_still_reports_positions() -> None:
@@ -1535,7 +1823,7 @@ def test_shutdown_is_idempotent_after_a_release() -> None:
 
     assert first.disposition is PaperShutdownDisposition.READY
     assert second.disposition is PaperShutdownDisposition.READY
-    assert harness.trading.calls.count("clear_active") == 1
+    assert harness.trading.calls.count("commit_active_release") == 1
     # The second call found nothing to release, and said READY without asking anything.
     assert harness.workflow.calls == ["finalize_if_safe"]
 

@@ -85,6 +85,17 @@ PAPER_LAUNCH_ROLLBACK_MESSAGE = (
     "已保持 CONNECTING 与执行租约，不做进一步回滚，需人工处理：{error}"
 )
 
+#: The *release*'s invariant, v2O-E3's counterpart of the two above.  The active slot's
+#: release is reserved before the workflow's lease gate is asked, so this is unreachable;
+#: what it would leave behind -- PAPER released while an ownership is still held -- is the
+#: one state the two-phase release exists to prevent, so it gets its own code rather than
+#: being folded into the ordinary "ownership cannot be proved" refusal.
+PAPER_RELEASE_INVARIANT_CODE = "PAPER_RELEASE_INVARIANT"
+PAPER_RELEASE_INVARIANT_MESSAGE = (
+    "Paper 会话的 active slot 释放未能提交，而执行租约已释放；"
+    "在重启客户端前不要重新启动 Paper 会话：{error}"
+)
+
 #: The catalogue-fault message.  Raised when a governed version's declared hash does not
 #: describe its own parameters; the launch never proceeds, so the operator must be told
 #: why rather than left with a confirmed-but-never-started attempt.
@@ -161,6 +172,21 @@ SHUTDOWN_OWNERSHIP_BLOCKED_MESSAGE = (
 )
 SHUTDOWN_OWNERSHIP_BLOCKED_WITH_REASON_MESSAGE = (
     SHUTDOWN_OWNERSHIP_BLOCKED_MESSAGE + "\n\n{reason}"
+)
+
+#: The three *reasons* a shutdown can be blocked for, each a different situation for the
+#: operator.  They are appended to the blocked message rather than replacing it, so the
+#: standing instruction ("this process will not release it or exit normally") is always
+#: the same sentence and only the diagnosis moves.
+SHUTDOWN_LAUNCH_IN_FLIGHT_REASON = (
+    "the launch attempt is still in flight: the workflow holds the Paper execution lease"
+    " and a connected order candidate may already exist"
+)
+SHUTDOWN_UNPROVABLE_SESSION_REASON = (
+    "an order service is owned but the workflow holds no session to prove anything about"
+)
+SHUTDOWN_STOP_REFUSED_REASON = (
+    "the orderly stop could not be requested and the session is still live"
 )
 
 
@@ -344,7 +370,8 @@ __all__ = [
     "PAPER_LAUNCH_ROLLBACK_CODE", "PAPER_LAUNCH_ROLLBACK_MESSAGE",
     "PAPER_LAUNCH_ROLLBACK_TITLE",
     "PAPER_PROMOTION_INVARIANT_CODE", "PAPER_PROMOTION_INVARIANT_MESSAGE",
-    "PAPER_PROMOTION_INVARIANT_TITLE", "PAPER_STRATEGY_INTEGRITY_CODE",
+    "PAPER_PROMOTION_INVARIANT_TITLE", "PAPER_RELEASE_INVARIANT_CODE",
+    "PAPER_RELEASE_INVARIANT_MESSAGE", "PAPER_STRATEGY_INTEGRITY_CODE",
     "PAPER_STRATEGY_INTEGRITY_TITLE", "PAUSE_SUCCEEDED_MESSAGE", "POSITIONS_MESSAGE",
     "PREFLIGHT_CHANGED_MESSAGE", "PREFLIGHT_PREFIX", "PREFLIGHT_TITLE",
     "PaperAccountReading", "PaperCandidateOrder",
@@ -359,8 +386,10 @@ __all__ = [
     "RESUME_PROGRESS", "RESUME_START_MESSAGE", "RESUME_SUCCEEDED_MESSAGE",
     "SHADOW_ACTIVE_MESSAGE",
     "SHADOW_ACTIVE_TITLE", "SHUTDOWN_FINALIZATION_PENDING_MESSAGE",
-    "SHUTDOWN_MANUAL_RECOVERY_MESSAGE", "SHUTDOWN_OWNERSHIP_BLOCKED_MESSAGE",
+    "SHUTDOWN_LAUNCH_IN_FLIGHT_REASON", "SHUTDOWN_MANUAL_RECOVERY_MESSAGE",
+    "SHUTDOWN_OWNERSHIP_BLOCKED_MESSAGE",
     "SHUTDOWN_OWNERSHIP_BLOCKED_WITH_REASON_MESSAGE",
-    "SHUTDOWN_STOP_REQUESTED_MESSAGE",
+    "SHUTDOWN_STOP_REFUSED_REASON", "SHUTDOWN_STOP_REQUESTED_MESSAGE",
+    "SHUTDOWN_UNPROVABLE_SESSION_REASON",
     "STALE_PLAN_MESSAGE", "WorkflowStateError",
 ]

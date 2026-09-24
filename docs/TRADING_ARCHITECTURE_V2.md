@@ -2240,18 +2240,40 @@ result 会从 stop、stream tick 和 poll 三处到达，三份"该不该开始�
 Sequence[object]]`（composition root 里是 `order_repository.reconciliation_rows` 的
 lambda），而不是把 repository 交进 capability。
 
+**release 在 slot 侧是两阶段的**（本轮唯一一处 canonical-owner 改动，单独披露）：
+`reserve_active_release()` → `finalize_if_safe()` → `commit_active_release()`，拒绝时
+`cancel_active_release()` 把锁还回去。理由是 `finalize_if_safe` 是 check-and-commit 且**不是
+本轮的**：它一旦返回 `True` 就已经 `release_paper()` 并清掉 workflow 的
+coordinator / result / evidence。原来的顺序是 `disconnect → finalize_if_safe() →
+clear_active()`，于是 `clear_active()` 因 E1 的 promotion reservation 拒绝时，状态会变成
+"ownership 还在、PAPER lease 已经 NONE"——E1 的 ownerless invariant 被反向打破。反过来先
+clear 又会在 workflow 拒绝时丢失 ownership，所以 slot 必须可锁。新增
+`src/us_quant/trading/application/paper/active_release.py`（`PaperActiveRelease` mixin，
+按仓库既有 `trading/runtime/recovery.py` 的模式拆出，`service.py` 仍在既有的 thin-boundary
+结构守卫内），`models.py` 新增 `PaperActiveReleaseReservation`，`service.py` 的
+`connect_active` / `clear_active` / `reserve_candidate_promotion` 各加一处 release 守卫
+（只有一处定义：`_refuse_if_release_in_flight`）。协议不连接、不断开、不提交、不取消，
+也不碰 execution lease。
+
 **`TaskSubmitter` 返回 `False` != task 失败**：`False` 只是 broker resource group busy、
 什么都没发生，因此不 `fail_finalization_refresh`、不 HALT，下一次合法 result 按 backoff
 重试；只有真正跑过并失败的 task 才把 `STOPPING` 推到 `HALTED`。把"忙"当"失败"会把一次排程
 冲突升级成一次 HALT。
 
-本轮 **29 项 mutation 全部 RED**（`scripts/mutation_e3.ps1`，可复跑），脚本比 E2 版多一道
+**shutdown 从 canonical phase 分类**：`CONNECTING` 明确拒绝（它合法地没有 result 且持有
+PAPER lease，一个未发布的 launch 可能已经连上 candidate）；`RUNNING`/`PAUSED` 复用
+`self.stop()` 之后**重新读取**相位与结果再分类——同一次 `request_stop` 可能直接落到
+`HALTED`，也可能 fast-stop 到 `FINALIZED`；只有 `_ownership_verdict()` 会返回 `READY`，
+且只在 `has_order_service()` 为假时。
+
+本轮 **34 项 mutation 全部 RED**（`scripts/mutation_e3.ps1`，可复跑），脚本比 E2 版多一道
 **语法闸门**：篡改后先 `ast.parse`，语法不合法判 `HARNESS-ERROR` 而不是"抓住"——一个丢掉
 缩进的 `repl` 会让 pytest 报 collection error，那次运行对被测属性什么都没说。
 
-本轮**未触碰**任何 frozen core：`trading/runtime/*`（`workflow.py` / `recovery.py` /
-`reconciliation.py` / `coordinator.py` / `trading.py`）、`trading/application/*`、broker
-adapter、execution lease、Shadow core 全部零 diff。
+本轮 canonical-owner 改动只有上文的 active-release reservation 一处；
+`trading/runtime/*`（`workflow.py` / `recovery.py` / `reconciliation.py` / `coordinator.py` /
+`trading.py`）、RiskApplication / ExecutionApplication、broker adapter、execution lease 与
+Shadow core 仍然零 diff。
 
 设计依据见 `DESKTOP_DECOMPOSITION.md` §29。
 

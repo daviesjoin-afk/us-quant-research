@@ -87,6 +87,8 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     PAPER_PROMOTION_INVARIANT_CODE,
     PAPER_PROMOTION_INVARIANT_MESSAGE,
     PAPER_PROMOTION_INVARIANT_TITLE,
+    PAPER_RELEASE_INVARIANT_CODE,
+    PAPER_RELEASE_INVARIANT_MESSAGE,
     PAPER_STRATEGY_INTEGRITY_CODE,
     PAPER_STRATEGY_INTEGRITY_TITLE,
     PAUSE_SUCCEEDED_MESSAGE,
@@ -105,10 +107,12 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     SHADOW_ACTIVE_MESSAGE,
     SHADOW_ACTIVE_TITLE,
     SHUTDOWN_FINALIZATION_PENDING_MESSAGE,
+    SHUTDOWN_LAUNCH_IN_FLIGHT_REASON,
     SHUTDOWN_MANUAL_RECOVERY_MESSAGE,
-    SHUTDOWN_OWNERSHIP_BLOCKED_MESSAGE,
     SHUTDOWN_OWNERSHIP_BLOCKED_WITH_REASON_MESSAGE,
+    SHUTDOWN_STOP_REFUSED_REASON,
     SHUTDOWN_STOP_REQUESTED_MESSAGE,
+    SHUTDOWN_UNPROVABLE_SESSION_REASON,
     STALE_PLAN_MESSAGE,
     PaperLaunchIntegrityError,
     PaperLaunchRequest,
@@ -914,7 +918,8 @@ class PaperOrchestrator(QObject):
         """Release the service slot and the lease, or say why neither was released.
 
         ``None`` means ownership was provably given up; a string is the reason it was not,
-        for the shutdown dialog.  The order is the constraint:
+        for the shutdown dialog.  The order is the constraint, and it is *two-phase on the
+        slot* because the workflow's side cannot be undone:
 
         1. the result must exist and must report itself finalized -- a disconnect alone
            proves nothing about whether the session finished;
@@ -922,84 +927,173 @@ class PaperOrchestrator(QObject):
            *before* the disconnect, because those are the facts that make giving up the
            session context safe.  A position or an unreconciled order means the operator
            still needs the session and the ownership survives;
-        3. only then the disconnect, so nothing holds a socket the proof just certified;
-        4. ``finalize_if_safe`` -- the workflow's own gate, and the only thing allowed to
-           release the PAPER lease.  A refusal there stops the sequence: the ownership is
-           kept, because releasing it would leave a live session's context gone;
-        5. ``clear_active`` last, and its refusal is *answerable* rather than swallowed:
-           the service refuses a slot it cannot account for (a promotion still in flight),
-           which is E1's ownership invariant and must stay fail-closed.
+        3. the disconnect, so nothing holds a socket the proof just certified;
+        4. **``reserve_active_release``** -- prove the slot can be released and lock it,
+           *before* the workflow is asked anything.  This is the step that makes the
+           release safe in the one direction that matters: ``finalize_if_safe`` is a
+           check-and-commit call on a canonical owner that may not be changed, so by the
+           time it answers ``True`` the PAPER lease is already gone.  Asking it first
+           would leave a slot that can still refuse to be dropped as the only thing
+           between the operator and a session holding no lease at all -- E1's
+           ownerless-session failure, reached from the other end;
+        5. ``finalize_if_safe`` -- the workflow's own gate, and the only thing allowed to
+           release the PAPER lease.  A refusal there cancels the reservation, which drops
+           nothing, so the slot ends up exactly as it was found;
+        6. ``commit_active_release`` last, and total: everything that could have
+           invalidated it was refused while the reservation stood.
         """
 
         if not result.state.finalized:
             return "the session does not report itself finalized"
         session_id = getattr(result.engine_snapshot, "session_id", None)
-        if self._paper_trading.has_order_service():
-            broker_state = self._paper_trading.broker_state()
-            if getattr(broker_state, "positions", ()):
-                return "the broker still reports positions"
-            if any(
-                not getattr(row, "reconciled", False)
-                for row in self._reconciliation_rows_provider(str(session_id))
-            ):
-                return "the order journal still has unreconciled rows"
-            self._paper_trading.disconnect()
+        if not self._paper_trading.has_order_service():
+            # Nothing is held here, so there is no slot to reserve -- but the workflow's
+            # own gate still has to agree, because it is the only thing that may release
+            # PAPER.
+            if not self._workflow.finalize_if_safe():
+                return "the workflow refused to release the Paper lease"
+            return None
+        broker_state = self._paper_trading.broker_state()
+        if getattr(broker_state, "positions", ()):
+            return "the broker still reports positions"
+        if any(
+            not getattr(row, "reconciled", False)
+            for row in self._reconciliation_rows_provider(str(session_id))
+        ):
+            return "the order journal still has unreconciled rows"
+        self._paper_trading.disconnect()
+        try:
+            reservation = self._paper_trading.reserve_active_release()
+        except PaperTradingLifecycleError as error:
+            # The slot cannot be accounted for, so the lease must not be touched either.
+            # This is the whole point of reserving first: a promotion claim that still
+            # holds the slot refuses *here*, while nothing has happened yet.
+            return str(error)
         if not self._workflow.finalize_if_safe():
+            # Give the lock back: nothing was dropped, so the slot is held and unlocked
+            # exactly as it was found.
+            if not self._paper_trading.cancel_active_release(reservation):
+                return "the reserved release could not be given back"
             return "the workflow refused to release the Paper lease"
         try:
-            self._paper_trading.clear_active()
+            self._paper_trading.commit_active_release(reservation)
         except PaperTradingLifecycleError as error:
+            # Unreachable while the reservation locks the slot, and reported rather than
+            # swallowed: what it would leave behind is the single state this ordering
+            # exists to prevent, and an ordinary "ownership cannot be proved" refusal
+            # would describe it as the wrong kind of problem.
+            self._report_release_invariant(error)
             return str(error)
         return None
+
+    def _report_release_invariant(self, error: Exception) -> None:
+        """Report a release that could not be committed after the lease was already gone.
+
+        A **bug report, not a state report**, like E1's published-session invariant: the
+        two-phase release makes this unreachable, and the situation it describes -- PAPER
+        released while an ownership is still held -- is different for the operator from an
+        unfinished claim, so it is filed under its own code instead of being folded into
+        the ordinary refusal.
+        """
+
+        message = PAPER_RELEASE_INVARIANT_MESSAGE.format(error=error)
+        self.log_requested.emit(message)
+        self.runtime_event_requested.emit(
+            PaperRuntimeEventRequest(
+                severity="error",
+                component=PAPER_EXECUTION_COMPONENT,
+                code=PAPER_RELEASE_INVARIANT_CODE,
+                message=message,
+            )
+        )
 
     # -- shutdown ----------------------------------------------------------
 
     def prepare_shutdown(self) -> PaperShutdownResult:
-        """Decide what a close must do about the session, without doing it twice.
+        """Decide what a close must do about the session, from the canonical phase.
 
-        The three questions a close asks, in the order that keeps each answer cheap and
-        safe:
+        The classification starts from the **workflow's phase**, never from
+        "``result is None`` means nothing is owned".  That inference is the trap the
+        previous shape fell into: ``CONNECTING`` legitimately has no result and a held
+        PAPER lease, and a launch that published nothing has left a slot that may already
+        hold a connected candidate -- so reading "no result" as "nothing to settle" would
+        let a close walk straight past an owned session.
+
+        Three questions, in the order that keeps each answer cheap and safe:
 
         * **is the session still going?**  ``RUNNING``/``PAUSED`` have an automatic route,
           and it is this capability's own :meth:`stop` -- asking the workflow for a second
-          stop here would be a second sequencing of the same request.  ``STOPPING`` is
-          already on that route and is deliberately *not* disconnected early: the exits
-          are still working and the zero-state proof is what observes them.  Either way the
-          answer is ``WAITING_FOR_FINALIZATION`` and the admission gate stays down;
+          stop here would be a second sequencing of the same request.  What the stop
+          produced is then *re-read* rather than assumed: the same call can halt the
+          session outright, and "waiting for finalization" would be a lie about a session
+          that has no automatic route left;
         * **can only the operator leave it?**  ``HALTED``, ``RECONCILING`` and
           ``RECONCILING_READY`` are the three phases no automatic route reaches, and every
           step out of them is a task.  Nothing here confirms a recovery on the operator's
-          behalf: the answer is ``MANUAL_RECOVERY_REQUIRED``;
-        * **is any ownership left?**  With the workflow reporting the session finished, the
-          remaining question is whether this capability still holds something.  The release
-          sequencing answers it -- and a refusal is reported as ``OWNERSHIP_BLOCKED`` rather
-          than forced, because the only ways to "fix" it would each drop an ownership that
-          cannot be accounted for.
+          behalf;
+        * **is an attempt or an ownership still outstanding?**  ``CONNECTING`` is refused
+          outright, and everything else is settled by asking whether a slot is held and
+          whether it can be proved releasable.
 
         Fail-closed throughout: no ownership is forced, no lease is released and no
         ``PaperTradingLifecycleError`` is swallowed to let the process exit.
         """
 
-        if not self._paper_trading.is_finalized():
-            phase = self._workflow.phase
-            if phase in {PaperWorkflowPhase.RUNNING, PaperWorkflowPhase.PAUSED}:
-                self.stop()
-                return PaperShutdownResult(
-                    PaperShutdownDisposition.WAITING_FOR_FINALIZATION,
-                    SHUTDOWN_STOP_REQUESTED_MESSAGE,
-                )
-            if phase is PaperWorkflowPhase.STOPPING:
-                return PaperShutdownResult(
-                    PaperShutdownDisposition.WAITING_FOR_FINALIZATION,
-                    SHUTDOWN_FINALIZATION_PENDING_MESSAGE,
-                )
-            # Everything else here can only be left by the operator: the three
-            # manual-recovery phases, and -- defensively -- any other phase holding a
-            # result that is not finalized, which no automatic route reaches either.
+        phase = self._workflow.phase
+        if phase in {PaperWorkflowPhase.RUNNING, PaperWorkflowPhase.PAUSED}:
+            self.stop()
+            return self._shutdown_verdict_after_the_stop()
+        if phase is PaperWorkflowPhase.STOPPING:
+            return PaperShutdownResult(
+                PaperShutdownDisposition.WAITING_FOR_FINALIZATION,
+                SHUTDOWN_FINALIZATION_PENDING_MESSAGE,
+            )
+        if queries.manual_recovery_phase(phase):
             return PaperShutdownResult(
                 PaperShutdownDisposition.MANUAL_RECOVERY_REQUIRED,
                 SHUTDOWN_MANUAL_RECOVERY_MESSAGE,
             )
+        if phase is PaperWorkflowPhase.CONNECTING:
+            # A launch attempt owns the PAPER lease and may already hold a connected
+            # candidate, so this is not a state a close may pass through -- and the fact
+            # that the workflow holds no *result* yet says nothing about what is owned.
+            return self._ownership_blocked(SHUTDOWN_LAUNCH_IN_FLIGHT_REASON)
+        # ``IDLE`` / ``PREPARING`` / ``READY`` / ``FINALIZED``: no session is being
+        # started and none is waiting on a human, so what is left to settle is ownership.
+        return self._ownership_verdict()
+
+    def _shutdown_verdict_after_the_stop(self) -> PaperShutdownResult:
+        """Classify the close again from what the stop actually produced.
+
+        An orderly stop is not a phase edit.  The same call can halt the session -- a
+        stale BUY that cannot be cancelled, an aged protective SELL, unsafe health -- or
+        finalize it outright, and the operator has to be told which of those happened
+        rather than "waiting for finalization" for a session nothing will finalize.
+        """
+
+        phase = self._workflow.phase
+        if queries.manual_recovery_phase(phase):
+            return PaperShutdownResult(
+                PaperShutdownDisposition.MANUAL_RECOVERY_REQUIRED,
+                SHUTDOWN_MANUAL_RECOVERY_MESSAGE,
+            )
+        if phase is PaperWorkflowPhase.STOPPING:
+            return PaperShutdownResult(
+                PaperShutdownDisposition.WAITING_FOR_FINALIZATION,
+                SHUTDOWN_STOP_REQUESTED_MESSAGE,
+            )
+        if phase in {PaperWorkflowPhase.RUNNING, PaperWorkflowPhase.PAUSED}:
+            # The stop was refused and the session is still trading: nothing may be
+            # released, and the close must not proceed past it either.
+            return self._ownership_blocked(SHUTDOWN_STOP_REFUSED_REASON)
+        # A fast, clean stop can reach ``FINALIZED`` in the same call, having already
+        # released the ownership through the ordinary result path -- so decide from
+        # ownership, exactly as a close that arrived in that phase would.
+        return self._ownership_verdict()
+
+    def _ownership_verdict(self) -> PaperShutdownResult:
+        """``READY`` only once every ownership has been provably given up."""
+
         if not self._paper_trading.has_order_service():
             # The workflow holds no unfinished session and this capability owns no order
             # service: there is nothing left to release or to wait for.
@@ -1009,18 +1103,19 @@ class PaperOrchestrator(QObject):
             # An owned slot with no result at all: a launch fault left a promotion claim
             # standing, so the ownership cannot be shown to be releasable.  E1's
             # invariant, reported rather than unwound.
-            return PaperShutdownResult(
-                PaperShutdownDisposition.OWNERSHIP_BLOCKED,
-                SHUTDOWN_OWNERSHIP_BLOCKED_MESSAGE,
-            )
+            return self._ownership_blocked(SHUTDOWN_UNPROVABLE_SESSION_REASON)
         reason = self._release_paper_ownership_if_proven(result)
         if reason is not None:
-            return PaperShutdownResult(
-                PaperShutdownDisposition.OWNERSHIP_BLOCKED,
-                SHUTDOWN_OWNERSHIP_BLOCKED_WITH_REASON_MESSAGE.format(reason=reason),
-            )
+            return self._ownership_blocked(reason)
         self.session_finalized.emit()
         return PaperShutdownResult(PaperShutdownDisposition.READY)
+
+    @staticmethod
+    def _ownership_blocked(reason: str) -> PaperShutdownResult:
+        return PaperShutdownResult(
+            PaperShutdownDisposition.OWNERSHIP_BLOCKED,
+            SHUTDOWN_OWNERSHIP_BLOCKED_WITH_REASON_MESSAGE.format(reason=reason),
+        )
 
     def _announce_manual_recovery_if_required(self) -> None:
         """Say plainly when the session has no automatic route left.

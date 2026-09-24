@@ -28,11 +28,13 @@ $py = ".\.venv\Scripts\python.exe"
 
 $orchestrator = "src\us_quant\desktop_v2\orchestration\paper\orchestrator.py"
 $queriesPath = "src\us_quant\desktop_v2\orchestration\paper\queries.py"
+$activeRelease = "src\us_quant\trading\application\paper\active_release.py"
 $desktopPath = "src\us_quant\desktop.py"
 
 $behavior = "tests/test_desktop_paper_recovery_finalization_orchestrator.py"
 $architecture = "tests/test_desktop_paper_orchestration_architecture.py"
 $paperWiring = "tests/test_desktop_v2_paper_wiring.py"
+$serviceTests = "tests/test_paper_trading_service.py"
 $teardown = "tests/test_desktop_runtime_teardown.py"
 
 function Get-Text([string]$path) { [System.IO.File]::ReadAllText($path) }
@@ -125,7 +127,7 @@ $mutations = @(
     @{
         name = "M10 broker positions no longer stop the release"
         file = $orchestrator
-        find = "            if getattr\(broker_state, ""positions"", \(\)\):\r?\n                return ""the broker still reports positions""\r?\n"
+        find = "        if getattr\(broker_state, ""positions"", \(\)\):\r?\n            return ""the broker still reports positions""\r?\n"
         repl = ""
         tests = @($behavior)
         select = @("-k", "broker_position_stops_the_release or shutdown_blocks_when_the_broker")
@@ -133,7 +135,7 @@ $mutations = @(
     @{
         name = "M11 unreconciled rows no longer stop the release"
         file = $orchestrator
-        find = "            if any\(\r?\n                not getattr\(row, ""reconciled"", False\)\r?\n                for row in self\._reconciliation_rows_provider\(str\(session_id\)\)\r?\n            \):\r?\n                return ""the order journal still has unreconciled rows""\r?\n"
+        find = "        if any\(\r?\n            not getattr\(row, ""reconciled"", False\)\r?\n            for row in self\._reconciliation_rows_provider\(str\(session_id\)\)\r?\n        \):\r?\n            return ""the order journal still has unreconciled rows""\r?\n"
         repl = ""
         tests = @($behavior)
         select = @("-k", "unreconciled_row_stops_the_release or shutdown_blocks_when_the_journal")
@@ -141,16 +143,16 @@ $mutations = @(
     @{
         name = "M12 the workflow's own release gate is ignored"
         file = $orchestrator
-        find = "        if not self\._workflow\.finalize_if_safe\(\):\r?\n            return ""the workflow refused to release the Paper lease""\r?\n"
-        repl = "        self._workflow.finalize_if_safe()`n"
+        find = "            if not self\._paper_trading\.cancel_active_release\(reservation\):\r?\n                return ""the reserved release could not be given back""\r?\n            return ""the workflow refused to release the Paper lease"""
+        repl = "            self._paper_trading.commit_active_release(reservation)`n            return ""the workflow refused to release the Paper lease"""
         tests = @($behavior)
-        select = @("-k", "workflow_refusal_stops_the_release")
+        select = @("-k", "workflow_refusal_gives_the_reservation_back")
     },
     @{
-        name = "M13 a finalization failure still clears the active slot"
+        name = "M13 a failed finalization no longer halts the session"
         file = $orchestrator
         find = "        self\._finalization_inflight = False\r?\n        self\._workflow\.fail_finalization_refresh\(\)\r?\n"
-        repl = "        self._finalization_inflight = False`n        self._workflow.fail_finalization_refresh()`n        self._paper_trading.clear_active()`n"
+        repl = "        self._finalization_inflight = False`n"
         tests = @($behavior)
         select = @("-k", "proof_that_really_fails or proof_task_that_raises")
     },
@@ -209,26 +211,26 @@ $mutations = @(
     @{
         name = "M20 prepare_shutdown disconnects a STOPPING session"
         file = $orchestrator
-        find = "            if phase is PaperWorkflowPhase\.STOPPING:\r?\n                return PaperShutdownResult\("
-        repl = "            if phase is PaperWorkflowPhase.STOPPING:`n                self._paper_trading.disconnect()`n                return PaperShutdownResult("
+        find = "        if phase is PaperWorkflowPhase\.STOPPING:\r?\n            return PaperShutdownResult\("
+        repl = "        if phase is PaperWorkflowPhase.STOPPING:`n            self._paper_trading.disconnect()`n            return PaperShutdownResult("
         tests = @($behavior)
         select = @("-k", "stopping_session_does_not_disconnect")
     },
     @{
-        name = "M21 an unaccountable claim is reported as READY"
+        name = "M21 an owned slot with no session to prove anything about is READY"
         file = $orchestrator
-        find = "                PaperShutdownDisposition\.OWNERSHIP_BLOCKED,\r?\n                SHUTDOWN_OWNERSHIP_BLOCKED_MESSAGE,"
-        repl = "                PaperShutdownDisposition.READY,"
+        find = "        if result is None:\r?\n(?:            #[^\r\n]*\r?\n)*            return self\._ownership_blocked\(SHUTDOWN_UNPROVABLE_SESSION_REASON\)\r?\n"
+        repl = "        if result is None:`n            return PaperShutdownResult(PaperShutdownDisposition.READY)`n"
         tests = @($behavior)
-        select = @("-k", "promotion_claim_with_no_result_at_all")
+        select = @("-k", "owned_slot_with_no_session_at_all or promotion_claim_with_no_result_at_all")
     },
     @{
-        name = "M22 an unreleasable ownership is reported as READY"
+        name = "M22 every blocked ownership is reported as READY"
         file = $orchestrator
-        find = "                PaperShutdownDisposition\.OWNERSHIP_BLOCKED,\r?\n                SHUTDOWN_OWNERSHIP_BLOCKED_WITH_REASON_MESSAGE\.format\(reason=reason\),"
-        repl = "                PaperShutdownDisposition.READY,"
+        find = "        return PaperShutdownResult\(\r?\n            PaperShutdownDisposition\.OWNERSHIP_BLOCKED,\r?\n            SHUTDOWN_OWNERSHIP_BLOCKED_WITH_REASON_MESSAGE\.format\(reason=reason\),\r?\n        \)"
+        repl = "        return PaperShutdownResult(`n            PaperShutdownDisposition.READY,`n            SHUTDOWN_OWNERSHIP_BLOCKED_WITH_REASON_MESSAGE.format(reason=reason),`n        )"
         tests = @($behavior)
-        select = @("-k", "ownership_cannot_be_released or broker_still_reports_positions or journal_still_has")
+        select = @("-k", "ownership_cannot_be_released or broker_still_reports_positions or journal_still_has or orderly_stop_was_refused")
     },
     @{
         name = "M23 READY is returned without the slot having been given up"
@@ -241,8 +243,8 @@ $mutations = @(
     @{
         name = "M24 prepare_shutdown stops a running session twice"
         file = $orchestrator
-        find = "                self\.stop\(\)\r?\n                return PaperShutdownResult\("
-        repl = "                self.stop()`n                self.stop()`n                return PaperShutdownResult("
+        find = "            self\.stop\(\)\r?\n            return self\._shutdown_verdict_after_the_stop\(\)"
+        repl = "            self.stop()`n            self.stop()`n            return self._shutdown_verdict_after_the_stop()"
         tests = @($behavior)
         select = @("-k", "reuses_the_capabilitys_own_stop or stops_a_running_session_exactly_once")
     },
@@ -287,6 +289,53 @@ $mutations = @(
         repl = "        self.result_changed.emit(result)  # type: ignore[arg-type]`n`n    def _reconciliation_failed"
         tests = @($behavior, $architecture)
         select = @("-k", "one_result_path or publishes_its_result_once or is_the_only_emitter")
+    },
+
+    # -- the release's transaction boundary, and the shutdown classification --
+    #
+    # These five are the review's blockers, pinned as mutations rather than only as tests:
+    # each one is a plausible edit that reintroduces a state the round exists to make
+    # unreachable, and each has to be RED for the guard to be worth anything.
+
+    @{
+        name = "M30 the slot is reserved even while a promotion claim holds it"
+        file = $activeRelease
+        find = "            if self\._promotion_reservation is not None:\r?\n                raise PaperTradingLifecycleError\(\r?\n                    f""Paper candidate \{self\._promotion_reservation\.candidate_id!r\} holds""\r?\n                    "" the promotion reservation; refusing to reserve the slot it is""\r?\n                    "" reserved to""\r?\n                \)\r?\n"
+        repl = ""
+        tests = @($serviceTests, $behavior)
+        select = @("-k", "promotion_holds_the_slot or ownership_cannot_be_released")
+    },
+    @{
+        name = "M31 a reserved release no longer locks the other transitions"
+        file = $activeRelease
+        find = "        if self\._active_release_reservation is None:\r?\n            return\r?\n        raise PaperTradingLifecycleError\(\r?\n            f""an active Paper release is in flight; refusing to \{action\}""\r?\n        \)"
+        repl = "        return"
+        tests = @($serviceTests)
+        select = @("-k", "locks_every_other_slot_transition or refuses_a_promotion_into_the_slot")
+    },
+    @{
+        name = "M32 a reserved release cannot be given back"
+        file = $activeRelease
+        find = "            if self\._active_release_reservation is not reservation:\r?\n                return False\r?\n            self\._active_release_reservation = None\r?\n        return True"
+        repl = "            return False"
+        tests = @($serviceTests)
+        select = @("-k", "gives_the_lock_back_and_drops_nothing")
+    },
+    @{
+        name = "M33 CONNECTING is classified from 'the workflow holds no result'"
+        file = $orchestrator
+        find = "        if phase is PaperWorkflowPhase\.CONNECTING:\r?\n(?:            #[^\r\n]*\r?\n)*            return self\._ownership_blocked\(SHUTDOWN_LAUNCH_IN_FLIGHT_REASON\)\r?\n"
+        repl = ""
+        tests = @($behavior)
+        select = @("-k", "connecting_attempt")
+    },
+    @{
+        name = "M34 the shutdown verdict after a stop is hard-coded to waiting"
+        file = $orchestrator
+        find = "            self\.stop\(\)\r?\n            return self\._shutdown_verdict_after_the_stop\(\)"
+        repl = "            self.stop()`n            return PaperShutdownResult(`n                PaperShutdownDisposition.WAITING_FOR_FINALIZATION,`n                SHUTDOWN_STOP_REQUESTED_MESSAGE,`n            )"
+        tests = @($behavior)
+        select = @("-k", "halt_an_orderly_stop_produced or fast_finalizing_stop or orderly_stop_was_refused")
     }
 )
 

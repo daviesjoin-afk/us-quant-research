@@ -1830,26 +1830,62 @@ def test_the_finalization_gate_is_locked() -> None:
     assert "and last_started is not None" in source
 
 
-def test_the_release_gate_is_the_workflows_and_only_the_workflows() -> None:
-    """``finalize_if_safe`` precedes the slot release, and blocks it when it refuses.
+def test_the_release_is_two_phase_and_the_gate_is_the_workflows() -> None:
+    """Reserve the slot, *then* ask the workflow, then commit -- in that order.
 
-    The invariant the whole round turns on: a successful disconnect is not a
-    finalization.  Asserted as an ordering *and* as a guard, because the ordering alone
-    would still be satisfied by a version that ignored the answer.
+    The invariant the whole round turns on: a successful disconnect is not a finalization.
+    Asserted as an ordering *and* as a guard, because the ordering alone would still be
+    satisfied by a version that ignored the answer.
+
+    And the order is not a preference.  ``finalize_if_safe`` is a check-and-commit call on
+    a canonical owner that releases PAPER, its result, its coordinator and both evidence
+    records when it answers ``True`` -- so the slot's releasability has to be proved and
+    locked *before* it is asked.  Asking first leaves a refusal from the service arriving
+    after the lease is already gone, which is E1's ownerless-session state from the other
+    end.
     """
 
     source = _function_source(_ORCHESTRATOR_PATH, "_release_paper_ownership_if_proven")
-    assert "if not self._workflow.finalize_if_safe():" in source
-    guard = source.index("if not self._workflow.finalize_if_safe():")
-    clear = source.index("self._paper_trading.clear_active()")
-    assert guard < clear
+    reserve = source.index("reservation = self._paper_trading.reserve_active_release()")
+    gate = source.index("if not self._workflow.finalize_if_safe():", reserve)
+    commit = source.index(
+        "self._paper_trading.commit_active_release(reservation)", reserve
+    )
+    cancel = source.index(
+        "self._paper_trading.cancel_active_release(reservation)", reserve
+    )
+    assert reserve < gate < cancel < commit
+    # The one shortcut is the branch where nothing is held, and it is gated on exactly
+    # that: with no slot there is no lock to take, so the workflow's own gate is asked
+    # directly.  A direct gate *outside* that branch would be the bug this round fixes.
+    shortcut = source.index("if not self._workflow.finalize_if_safe():")
+    assert source.index("if not self._paper_trading.has_order_service():") < shortcut
+    assert shortcut < reserve
     # And an unaccountable slot is reported rather than swallowed: the platform's own
-    # "lifecycle refused" type is caught by name and turned into a reason.
+    # "lifecycle refused" type is caught by name and turned into a reason -- for the
+    # reservation, before the workflow is asked, and for the commit, as an invariant.
     assert "except PaperTradingLifecycleError as error:" in source
     assert "return str(error)" in source
+    assert "self._report_release_invariant(error)" in source
     # Nothing here forces anything: no bare except, no lease access, no retry.
     for forbidden in ("except Exception", "_leases", "release_paper("):
         assert forbidden not in source, forbidden
+
+
+def test_the_reservation_refusal_comes_before_the_workflow_is_asked() -> None:
+    """The transaction boundary, pinned as source order rather than only as behaviour.
+
+    Behaviour covers it too (the release tests assert the workflow was never reached), and
+    this is the structural half: a future edit that moved the reservation after the gate --
+    the "obvious" tidy-up, since the gate is what decides whether anything happens -- would
+    have to change this ordering, and that is exactly when a reviewer should be reading it.
+    """
+
+    source = _function_source(_ORCHESTRATOR_PATH, "_release_paper_ownership_if_proven")
+    reserved = source.index("reservation = self._paper_trading.reserve_active_release()")
+    refused = source.index("return str(error)", reserved)
+    gate = source.index("if not self._workflow.finalize_if_safe():", reserved)
+    assert reserved < refused < gate
 
 
 def test_the_proof_captures_before_it_disconnects_and_confirms_after() -> None:
@@ -1906,29 +1942,41 @@ def test_the_completed_proof_clears_its_flag_after_publishing() -> None:
 
 
 def test_shutdown_reads_the_phase_and_never_moves_it_by_hand() -> None:
-    """``prepare_shutdown`` asks the capability's own operations and the workflow.
+    """``prepare_shutdown`` classifies from the canonical phase, and delegates everything.
 
-    Two properties.  It must reuse ``self.stop()`` rather than call ``request_stop``
-    itself -- a second stop request would be a second sequencing of the same intent --
-    and it must not force a disconnect for ``STOPPING``, because the exits are still
-    working and the proof is what observes them.
+    Three properties.  The **phase is read first** and every branch is a phase branch, so
+    nothing is inferred from "the workflow holds no result yet" -- ``CONNECTING`` legitimately
+    has no result and a held PAPER lease.  It must reuse ``self.stop()`` rather than call
+    ``request_stop`` itself, because a second stop request would be a second sequencing of
+    the same intent.  And the post-stop verdict has to be *re-derived*: the same
+    ``request_stop`` can halt the session or finalize it outright, so a hard-coded
+    "waiting" would describe a session that has no automatic route left.
     """
 
     source = _function_source(_ORCHESTRATOR_PATH, "prepare_shutdown")
     assert "self.stop()" in source
     assert "request_stop" not in source
     assert "capture_finalization_evidence" not in source
+    # The phase is the first thing read, and it is read from the workflow.
+    assert source.index("self._workflow.phase") < source.index("self.stop()")
     # Only RUNNING/PAUSED are stopped; STOPPING and the manual-recovery three are not.
     stopped = source.index("PaperWorkflowPhase.RUNNING, PaperWorkflowPhase.PAUSED")
-    stopping = source.index("PaperWorkflowPhase.STOPPING")
-    assert stopped < stopping
-    for disposition in (
-        "WAITING_FOR_FINALIZATION",
-        "MANUAL_RECOVERY_REQUIRED",
-        "OWNERSHIP_BLOCKED",
-        "READY",
+    assert stopped < source.index("PaperWorkflowPhase.STOPPING")
+    # And a stop is never assumed to have worked: its outcome is re-classified.
+    assert "self._shutdown_verdict_after_the_stop()" in source
+    # ``CONNECTING`` is refused explicitly rather than falling through to ownership.
+    assert "PaperWorkflowPhase.CONNECTING" in source
+    assert "SHUTDOWN_LAUNCH_IN_FLIGHT_REASON" in source
+
+    after_stop = _function_source(
+        _ORCHESTRATOR_PATH, "_shutdown_verdict_after_the_stop"
+    )
+    for ending in (
+        "queries.manual_recovery_phase(phase)",
+        "PaperWorkflowPhase.STOPPING",
+        "SHUTDOWN_STOP_REFUSED_REASON",
     ):
-        assert disposition in source, disposition
+        assert ending in after_stop, ending
 
 
 def test_the_manual_recovery_rule_has_one_definition() -> None:
@@ -1967,7 +2015,7 @@ def test_the_ownership_block_is_never_downgraded_to_ready() -> None:
     """
 
     code = _code_only(
-        _ORCHESTRATOR_PATH, "prepare_shutdown", class_name="PaperOrchestrator"
+        _ORCHESTRATOR_PATH, "_ownership_verdict", class_name="PaperOrchestrator"
     )
     compact = re.sub(r"\s+", "", code)
     # READY is only reachable when nothing is held...
@@ -1976,7 +2024,16 @@ def test_the_ownership_block_is_never_downgraded_to_ready() -> None:
         "returnPaperShutdownResult(PaperShutdownDisposition.READY)"
     ) in compact
     # ...and every other outcome for a held slot is a refusal, never a silent release.
-    assert "OWNERSHIP_BLOCKED" in code
+    assert "self._ownership_blocked(" in code
     assert "clear_active" not in code, "the decision must not force a release"
     for forbidden in ("except Exception", "release_paper("):
         assert forbidden not in code, forbidden
+
+    # And the one phase that has no result *and* a held lease is refused outright, so a
+    # close cannot walk past a launch that is still in flight.
+    shutdown_code = _code_only(
+        _ORCHESTRATOR_PATH, "prepare_shutdown", class_name="PaperOrchestrator"
+    )
+    assert shutdown_code.index("PaperWorkflowPhase.CONNECTING") < shutdown_code.index(
+        "self._ownership_verdict()"
+    )

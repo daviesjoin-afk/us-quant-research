@@ -13,12 +13,14 @@ from __future__ import annotations
 import threading
 from typing import Sequence
 
+from us_quant.trading.application.paper.active_release import PaperActiveRelease
 from us_quant.trading.application.paper.contracts import (
     PaperOrderServiceFactory,
     PaperOrderServicePort,
     WorkflowGetter,
 )
 from us_quant.trading.application.paper.models import (
+    PaperActiveReleaseReservation,
     PaperPromotionReservation,
     PaperReconciliationStatus,
     PaperTradingLifecycleError,
@@ -27,7 +29,7 @@ from us_quant.trading.application.paper.models import (
 from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
 
-class PaperTradingService:
+class PaperTradingService(PaperActiveRelease):
     """Owner of the Paper order-service lifecycle, plus the window's reads.
 
     Two ownership slots, never one.  ``_candidates`` holds services that are
@@ -43,6 +45,12 @@ class PaperTradingService:
     installs the owner **and** locks the slot, and ``commit``/``cancel`` end the
     launch's claim.  Those two methods carry the argument for why the
     installation cannot wait until after publication.
+
+    Its mirror -- releasing a finished session -- is two-phase here too, and is
+    mixed in from :mod:`active_release` for the reason ``recovery`` mixes in the
+    runtime's two protocols: the state is one object's, so neither half should have
+    to be read through the other.  See that module for why the slot has to be
+    proved releasable *before* the execution lease is handed back.
     """
 
     def __init__(
@@ -63,6 +71,11 @@ class PaperTradingService:
         # of the owner -- the owner is ``_order_service``; this only records that
         # the slot is spoken for and by whom.
         self._promotion_reservation: PaperPromotionReservation | None = None
+        # The release that currently has the active slot locked for it.  The mirror of
+        # the reservation above and the same kind of fact: not a copy of the owner, a
+        # statement that the slot's *ending* belongs to one caller until it says which
+        # of the two endings it was.  See ``reserve_active_release``.
+        self._active_release_reservation: PaperActiveReleaseReservation | None = None
         self._last_error: str | None = None
 
     # -- reads ---------------------------------------------------------
@@ -233,9 +246,10 @@ class PaperTradingService:
         key = self._candidate_key(candidate_id)
         service = self._candidate_or_raise(key)
         with self._lock:
-            # The claim is checked first because it is the more specific refusal: an
-            # occupied slot *is* one of these two, and "a promotion is in flight" says
-            # far more than "a service is already active" when one is.
+            self._refuse_if_release_in_flight(action="promote into that slot")
+            # The claim is checked before the occupied-slot check because it is the more
+            # specific refusal: an occupied slot *is* one of these two, and "a promotion
+            # is in flight" says far more than "a service is already active" when one is.
             if self._promotion_reservation is not None:
                 raise PaperTradingLifecycleError(
                     f"Paper candidate {self._promotion_reservation.candidate_id!r}"
@@ -368,8 +382,10 @@ class PaperTradingService:
     # -- active lifecycle ----------------------------------------------
 
     def connect_active(self) -> object:
-        """Reconnect the active service; never creates one."""
+        """Re-open the active service; never creates one."""
 
+        with self._lock:
+            self._refuse_if_release_in_flight(action="re-open the slot it has reserved")
         service = self._active_service()
         if service is None:
             raise PaperTradingLifecycleError(
@@ -393,21 +409,27 @@ class PaperTradingService:
     def clear_active(self, *, expected_service: object | None = None) -> None:
         """Release ownership -- only ever after the session is truly finalized.
 
-        Fail-closed three ways: a service still reporting a live connection is
-        refused (dropping it would abandon a socket nobody can reach),
-        ``expected_service`` lets a late caller prove which service it means, and a
-        slot with a promotion in flight is refused outright.
+        Fail-closed four ways: a promotion still in flight, or an active *release* in
+        flight, is refused outright; a service still reporting a live connection is
+        refused (dropping it would abandon a socket nobody can reach); and
+        ``expected_service`` lets a late caller prove which service it means.
 
-        That last refusal is what makes a reservation *lock the slot* rather than
+        The promotion refusal is what makes a reservation *lock the slot* rather than
         merely say so.  Without it a finalization or recovery caller could empty the
         slot between ``reserve_candidate_promotion`` and
         ``commit_candidate_promotion``, and the launch would publish a session whose
         owner had already been dropped -- the ownerless ``RUNNING`` state the
         two-phase promotion exists to make unreachable, re-enterable through a
         different public method.
+
+        The release refusal is its mirror: while a release has reserved the slot, the
+        only thing allowed to empty it is that release's own commit, so a second clearer
+        cannot drop the ownership out from under a caller that has already released the
+        execution lease.
         """
 
         with self._lock:
+            self._refuse_if_release_in_flight(action="clear the slot it has reserved")
             if self._promotion_reservation is not None:
                 raise PaperTradingLifecycleError(
                     f"Paper candidate {self._promotion_reservation.candidate_id!r} holds"

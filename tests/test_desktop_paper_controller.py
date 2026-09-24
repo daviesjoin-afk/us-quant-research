@@ -121,12 +121,15 @@ def test_close_blocks_unfinalized_paper_before_any_disconnect() -> None:
     assert "self.paper_trading.disconnect()" not in close
     assert "self.paper_trading.clear_active()" not in close
 
-    # And the release it delegates to is gated on the workflow's own verdict.
+    # And the release it delegates to is gated on the workflow's own verdict, with the
+    # slot reserved *before* the gate so a slot that cannot be accounted for refuses
+    # while the lease is still held.
     release = _orchestrator_source("_release_paper_ownership_if_proven")
+    reserve = release.index("self._paper_trading.reserve_active_release()")
     disconnect = release.index("self._paper_trading.disconnect()")
-    finalize = release.index("self._workflow.finalize_if_safe()")
-    clear = release.index("self._paper_trading.clear_active()")
-    assert disconnect < finalize < clear
+    finalize = release.index("if not self._workflow.finalize_if_safe():", reserve)
+    clear = release.index("self._paper_trading.commit_active_release(reservation)")
+    assert disconnect < reserve < finalize < clear
 
 
 def test_unarmed_launch_rejection_is_controller_scoped() -> None:

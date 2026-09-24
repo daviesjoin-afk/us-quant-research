@@ -22,6 +22,7 @@ import pytest
 
 from us_quant.trading.application.paper import service as module
 from us_quant.trading.application.paper import (
+    PaperActiveReleaseReservation,
     PaperPromotionReservation,
     PaperReconciliationStatus,
     PaperTradingLifecycleError,
@@ -193,6 +194,7 @@ def _owned_disconnected(
     service: _FakeService,
     *,
     candidate_id: str = "attempt-1",
+    factory: _FakeFactory | None = None,
 ) -> PaperTradingService:
     """An owned service whose broker connection has been closed.
 
@@ -201,7 +203,7 @@ def _owned_disconnected(
     finalization path leaves it.
     """
 
-    boundary = _owned(service, candidate_id=candidate_id)
+    boundary = _owned(service, factory=factory, candidate_id=candidate_id)
     boundary.disconnect()
     return boundary
 
@@ -886,6 +888,193 @@ def test_commit_refuses_when_the_reserved_slot_was_lost() -> None:
         PaperTradingLifecycleError, match="already holds the promotion reservation"
     ):
         boundary.reserve_candidate_promotion("attempt-2")
+
+
+# -- the two-phase active release ----------------------------------------
+#
+# The mirror of promotion, and the same shape for the same reason: the two transitions
+# involved have to be ordered and only one of them can be taken back.  What cannot be taken
+# back is the execution lease -- ``finalize_if_safe`` is a check-and-commit call on a
+# controller this service does not get to change -- so the slot's releasability is proved
+# and locked *first*, and the workflow is asked second.  These tests pin the lock, the
+# proof and the totality of the commit.
+
+
+def _releasable(
+    service: _FakeService,
+) -> tuple[PaperTradingService, PaperActiveReleaseReservation]:
+    """An owned session whose broker connection has been closed: the release's precondition."""
+
+    boundary = _owned_disconnected(service)
+    return boundary, boundary.reserve_active_release()
+
+
+def test_reserving_a_release_locks_the_slot_without_dropping_it() -> None:
+    """Reserving is a claim on the ending, not the ending itself."""
+
+    service = _FakeService()
+    boundary, _reservation = _releasable(service)
+
+    assert boundary.has_order_service() is True
+
+
+def test_reserving_a_release_is_refused_while_a_promotion_holds_the_slot() -> None:
+    """E1's invariant path, refused *before* the caller has released anything.
+
+    This is the whole point of the transaction boundary: a promotion claim that still holds
+    the slot cannot be accounted for, so the refusal must arrive here -- while the caller
+    can still walk away -- rather than after the execution lease has already been handed
+    back, which would leave PAPER released with the ownership still held.
+    """
+
+    service = _FakeService()
+    boundary, _reservation = _reserved(service)
+    boundary.disconnect()
+
+    with pytest.raises(
+        PaperTradingLifecycleError, match="holds the promotion reservation"
+    ):
+        boundary.reserve_active_release()
+
+    assert boundary.has_order_service() is True
+
+
+def test_reserving_a_release_is_refused_without_an_active_service() -> None:
+    boundary = _service()
+
+    with pytest.raises(
+        PaperTradingLifecycleError, match="no active Paper order service to release"
+    ):
+        boundary.reserve_active_release()
+
+
+def test_reserving_a_release_is_refused_while_the_service_is_still_connected() -> None:
+    """Dropping a live socket is the one thing this must never do."""
+
+    service = _FakeService()
+    boundary = _owned(service)
+
+    with pytest.raises(
+        PaperTradingLifecycleError, match="still reports a live connection"
+    ):
+        boundary.reserve_active_release()
+
+    assert boundary.has_order_service() is True
+
+
+def test_a_second_release_reservation_cannot_overlap_the_first() -> None:
+    service = _FakeService()
+    boundary, _reservation = _releasable(service)
+
+    with pytest.raises(PaperTradingLifecycleError, match="already in flight"):
+        boundary.reserve_active_release()
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        lambda boundary: boundary.clear_active(),
+        lambda boundary: boundary.connect_active(),
+    ],
+)
+def test_a_reserved_release_locks_every_other_slot_transition(action) -> None:
+    """Clearing and re-opening are both refused while the release stands.
+
+    Enumerated rather than sampled because the commit's totality is exactly this list: any
+    one transition that could still slip through is enough to invalidate a commit the
+    caller has already paid for with an execution lease.
+    """
+
+    service = _FakeService()
+    boundary, _reservation = _releasable(service)
+
+    with pytest.raises(PaperTradingLifecycleError, match="release is in flight"):
+        action(boundary)
+
+    assert boundary.has_order_service() is True
+
+
+def test_a_reserved_release_refuses_a_promotion_into_the_slot() -> None:
+    """The third transition of the same list, and the one that installs a new owner."""
+
+    first, second = _FakeService(), _FakeService()
+    boundary = _owned_disconnected(first, factory=_FakeFactory(first, second))
+    boundary.connect_candidate(
+        "attempt-2", config=object(), repository=object(), extended_hours_enabled=False
+    )
+    boundary.reserve_active_release()
+
+    with pytest.raises(PaperTradingLifecycleError, match="release is in flight"):
+        boundary.reserve_candidate_promotion("attempt-2")
+
+    assert boundary.has_order_service() is True
+    assert boundary.has_candidate("attempt-2") is True
+
+
+def test_committing_a_release_drops_the_slot_and_is_total() -> None:
+    """``commit`` re-checks nothing it locked: that is what makes it total.
+
+    A commit that re-validated the connection would be a commit that can fail *after* the
+    caller has already released the execution lease -- which is the single failure the
+    reservation exists to make impossible.
+    """
+
+    service = _FakeService()
+    boundary, reservation = _releasable(service)
+
+    boundary.commit_active_release(reservation)
+
+    assert boundary.has_order_service() is False
+    assert boundary.is_connected() is False
+
+
+def test_cancelling_a_release_gives_the_lock_back_and_drops_nothing() -> None:
+    """The workflow refused, so the slot ends up exactly as it was found."""
+
+    service = _FakeService()
+    boundary, reservation = _releasable(service)
+
+    assert boundary.cancel_active_release(reservation) is True
+    assert boundary.has_order_service() is True
+    # And the lock is genuinely gone: the slot can be reserved again.
+    boundary.reserve_active_release()
+    assert boundary.has_order_service() is True
+
+
+def test_a_foreign_release_reservation_releases_nothing() -> None:
+    """A reservation that is not the outstanding one is told it released nothing."""
+
+    service = _FakeService()
+    boundary, _reservation = _releasable(service)
+
+    assert boundary.cancel_active_release(PaperActiveReleaseReservation()) is False
+    assert boundary.has_order_service() is True
+
+
+def test_committing_a_foreign_release_reservation_is_refused() -> None:
+    service = _FakeService()
+    boundary, _reservation = _releasable(service)
+
+    with pytest.raises(
+        PaperTradingLifecycleError, match="stale or foreign Paper active-release"
+    ):
+        boundary.commit_active_release(PaperActiveReleaseReservation())
+
+    assert boundary.has_order_service() is True
+
+
+def test_a_release_commit_refuses_an_active_slot_that_was_lost() -> None:
+    """The second half of the lock, exercised although nothing can reach it."""
+
+    service = _FakeService()
+    boundary, reservation = _releasable(service)
+    # Unreachable through the public API; constructed to exercise the guard.
+    boundary._order_service = None
+
+    with pytest.raises(
+        PaperTradingLifecycleError, match="no longer holds the active slot"
+    ):
+        boundary.commit_active_release(reservation)
 
 
 # -- active lifecycle ----------------------------------------------------

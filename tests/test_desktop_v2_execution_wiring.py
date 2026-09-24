@@ -17,8 +17,9 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from us_quant.desktop import MainWindow
 from us_quant.desktop_v2.pages.execution.models import ExecutionControlState
@@ -26,6 +27,20 @@ from us_quant.trading.application.strategy_selection import StrategySelectionPur
 
 
 _APP = QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def _silence_dialogs(monkeypatch):
+    """A refused close is a modal dialog, and a modal dialog blocks a headless run.
+
+    One case below leaves the workflow in ``HALTED`` and then closes the window.  Since
+    v2O-E3 ``closeEvent`` asks the capability what to do about the session and shows the
+    verdict, so that session is refused with ``QMessageBox.information`` -- correctly, and
+    for ever if nothing answers it.
+    """
+
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
 
 #: Each page signal and the handler that must receive it, in the order the window's
 #: wiring table declares them.  A target is a *path*, not a name, because the session

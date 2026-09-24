@@ -337,23 +337,32 @@ def test_a_late_callback_disposes_only_its_own_candidate() -> None:
 
 
 def test_finalization_releases_ownership_only_after_the_workflow_agrees() -> None:
-    """Disconnect, then the workflow's gate, then the slot -- on the new owner.
+    """Disconnect, reserve the slot, ask the workflow, then commit -- on the new owner.
 
-    v2O-E3 moved the sequencing into ``PaperOrchestrator``, so the claim reads there.
-    It was never about *where* the three calls were written: it is that a successful
-    disconnect proves nothing, and ``finalize_if_safe`` is the only thing allowed to
-    release PAPER and, therefore, the only thing that may precede clearing the slot.
+    v2O-E3 moved the sequencing into ``PaperOrchestrator``, so the claim reads there.  It
+    was never about *where* the calls were written: it is that a successful disconnect
+    proves nothing, and ``finalize_if_safe`` is the only thing allowed to release PAPER
+    and, therefore, the only thing that may precede dropping the slot.
+
+    The order is now *disconnect, reserve, ask, commit* rather than
+    disconnect, ask, clear.  ``finalize_if_safe`` is a check-and-commit call on a
+    canonical owner whose ``True`` has already released the execution lease, so a slot
+    that could still refuse to be dropped after it would leave PAPER released with the
+    ownership held -- E1's ownerless-session state, reached from the other end.
     """
 
     source = _orchestrator_source("_release_paper_ownership_if_proven")
     disconnect = source.index("self._paper_trading.disconnect()")
-    finalize = source.index("self._workflow.finalize_if_safe()")
-    clear = source.index("self._paper_trading.clear_active()")
+    reserve = source.index("self._paper_trading.reserve_active_release()")
+    finalize = source.index("if not self._workflow.finalize_if_safe():", reserve)
+    commit = source.index("self._paper_trading.commit_active_release(reservation)")
 
-    assert disconnect < finalize < clear
-    # And a refusal from the gate returns before the slot is touched.
-    assert "if not self._workflow.finalize_if_safe():" in source
-    assert source.index("if not self._workflow.finalize_if_safe():") < clear
+    assert disconnect < reserve < finalize < commit
+    # And a refusal from the gate gives the lock back instead of dropping the slot.
+    assert (
+        source.index("self._paper_trading.cancel_active_release(reservation)")
+        < commit
+    )
 
 
 def test_close_still_blocks_an_unfinalized_session_before_any_disconnect() -> None:
@@ -374,7 +383,7 @@ def test_close_releases_ownership_only_after_a_successful_disconnect() -> None:
     source = _orchestrator_source("_release_paper_ownership_if_proven")
 
     assert source.index("self._paper_trading.disconnect()") < source.index(
-        "self._paper_trading.clear_active()"
+        "self._paper_trading.commit_active_release(reservation)"
     )
 
 

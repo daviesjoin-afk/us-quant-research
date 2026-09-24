@@ -39,10 +39,7 @@ from PySide6.QtWidgets import (
 
 
 from us_quant.config import load_config
-from us_quant.credential_store import (
-    CredentialStoreError,
-    WindowsCredentialStore,
-)
+from us_quant.credential_store import WindowsCredentialStore
 from us_quant.desktop_credentials import DesktopCredentialService
 from us_quant.artifact_state import (
     ArtifactCatalog,
@@ -76,13 +73,8 @@ from us_quant.trading.domain.market import (
     MarketDataMode,
     MarketSnapshot,
 )
-from us_quant.trading.ports.broker_account import (
-    BrokerAccountError,
-)
-from us_quant.trading.ports.market_data import (
-    MarketDataActiveError,
-)
 from us_quant.desktop_settings import (
+    DesktopSettingsCommit,
     DesktopSettingsService,
     ibkr_config_from_preferences,
 )
@@ -239,6 +231,13 @@ from us_quant.desktop_v2.orchestration.system.runtime_events import (
     RuntimeEventsEnvironment,
     RuntimeEventsOrchestrator,
 )
+from us_quant.desktop_v2.orchestration.system.settings import (
+    SettingsOrchestrator,
+)
+from us_quant.desktop_v2.orchestration.system.settings.queries import (
+    settings_draft_from_preferences,
+    settings_storage_view,
+)
 from us_quant.desktop_v2.pages.research import (
     ResearchPage,
     ResearchWorkspace,
@@ -252,10 +251,7 @@ from us_quant.desktop_v2.pages.system.runtime_events import (
 )
 from us_quant.desktop_v2.pages.system.settings import SettingsPage
 from us_quant.desktop_v2.pages.system.settings.models import (
-    CredentialDraft,
-    SettingsDraft,
-    SettingsPageView,
-    SettingsStorageView,
+    api_provider_for_market_provider,
 )
 from us_quant.desktop_tasks import DesktopTaskController
 from us_quant.desktop_workers import TaskThread
@@ -296,7 +292,6 @@ from us_quant.desktop_v2.shell import DesktopShellV2
 from us_quant.user_settings import (
     UserPreferences,
     UserPreferencesStore,
-    UserSettingsError,
 )
 
 
@@ -476,17 +471,17 @@ class MainWindow(QMainWindow):
         # be assigned here.  They are ``runtime_events_orchestrator``'s own
         # sequencing state now, and there is deliberately no forwarding property:
         # a property would keep every unmigrated caller working, so "who owns the
-        # Runtime Events sequence?" would stop being one grep.  The window still
-        # owns the settings presentation facts below -- Settings is v2O-F2.
+        # Runtime Events sequence?" would stop being one grep.
         #
-        # Settings presentation facts the window owns: the selected API
-        # provider and whether the Gateway controls are currently open.
-        self._settings_api_provider = (
-            "ibkr"
-            if self.preferences.market_provider == "ibkr_extended"
-            else self.preferences.market_provider
-        )
-        self._connection_settings_enabled = True
+        # v2O-F2: the same for ``_settings_api_provider`` and
+        # ``_connection_settings_enabled``.  They are ``settings_orchestrator``'s
+        # presentation state now -- the settings half of this window is
+        # composition, and there is no alias or property left to read them
+        # through.  ``self.preferences`` and ``self.config`` deliberately stay:
+        # they are the *application's* current configuration, shared with Market,
+        # Paper, Risk and Research, and moving them into Settings would force
+        # every one of those to depend on Settings for the current config.
+        #
         # Two local in-flight facts the execution route's control state reads.
         # They live here because only the window knows a local step is running;
         # the page is told the resulting booleans, never these flags.
@@ -1062,12 +1057,56 @@ class MainWindow(QMainWindow):
         # The first paint goes through the same entry point every later repaint
         # uses, so "never read" and "read" cannot diverge into two paths.
         self.runtime_events_orchestrator.refresh()
+        # Settings is the second System capability with its own owner (v2O-F2).
+        # The window keeps no selected-API-provider fact and no
+        # connection-control fact; it supplies the page's initial draft and
+        # storage view through two pure projections, hands the capability its
+        # services and narrow providers, and adopts the finished commit.
         self.settings_page = SettingsPage(
-            draft=self._settings_draft(),
-            storage=self._settings_storage_view(),
+            draft=settings_draft_from_preferences(self.preferences),
+            storage=settings_storage_view(
+                state_root=self.paths.state_root,
+                runtime_root=self.paths.runtime_root,
+                exports_root=self.paths.exports_root,
+            ),
+        )
+        self.settings_orchestrator = SettingsOrchestrator(
+            page=self.settings_page,
+            settings_service=self.settings_service,
+            credential_service=self.credential_service,
+            # The mapping is the page's own published pure function, so the
+            # initial credential provider and a later market-provider selection
+            # cannot drift into two rules.
+            initial_api_provider=api_provider_for_market_provider(
+                self.preferences.market_provider
+            ),
+            # Providers, not values: the transaction reads the config that is
+            # current when the operator saves, not the one that was live when
+            # the window was built.
+            current_config=lambda: self.config,
+            broker_config=lambda: self.broker_account,
+            # Read at commit time, and the empty tuple is deliberate: the
+            # retired adapter passed the market-data application only when it
+            # existed, and the service iterates this sequence calling
+            # ``ensure_reconfiguration_allowed()`` on each member, so a ``None``
+            # in it would be an uncaught ``AttributeError`` rather than a
+            # refusal the service reports.
+            runtime_guards=lambda: (
+                (self.market_data,)
+                if self.market_data is not None
+                else ()
+            ),
+            # Read on every repaint: whether a credential may be cleared depends
+            # on the stream that is running *now*.
+            active_market_source_id=(
+                lambda: self.market_orchestrator.active_source_id
+            ),
+            parent=self,
         )
         self._connect_settings_page()
-        self._publish_settings_view()
+        # The first paint goes through the same entry point every later repaint
+        # uses, so "never read" and "read" cannot diverge into two paths.
+        self.settings_orchestrator.render_current()
         self.system_page = SystemPage(
             {
                 SystemWorkspace.RUNTIME_EVENTS:
@@ -1188,109 +1227,71 @@ class MainWindow(QMainWindow):
         )
 
     def _connect_settings_page(self) -> None:
-        """Wire the settings page's nine intent signals to the window."""
+        """Wire the Settings page to its owner, and the owner to the workbench.
+
+        Two directions, and neither side reaches across.  The page's nine
+        intents are commands on ``settings_orchestrator``; the owner's published
+        facts are composition here -- the global theme fan-out, the market
+        route's provider selection and switch (both behind the existing
+        interlocks), the adoption of a finished commit, the dialogs, and the
+        status line.  The window no longer assembles a ``SettingsPageView`` and
+        no longer calls ``settings_page.render``.
+        """
 
         page = self.settings_page
-        page.theme_preview_requested.connect(self._preview_theme_changed)
+        orchestrator = self.settings_orchestrator
+        page.theme_preview_requested.connect(orchestrator.preview_theme)
         page.market_provider_selected.connect(
-            self._settings_provider_selected
+            orchestrator.select_market_provider
         )
         page.switch_provider_requested.connect(
-            self._switch_to_settings_provider
+            orchestrator.request_provider_switch
         )
-        page.api_provider_selected.connect(self._api_provider_changed)
+        page.api_provider_selected.connect(orchestrator.select_api_provider)
         page.save_credentials_requested.connect(
-            self._save_api_credentials
+            orchestrator.save_credentials
         )
         page.clear_credentials_requested.connect(
-            self._clear_selected_api_credentials
+            orchestrator.clear_credentials
         )
         page.paper_order_capability_toggled.connect(
-            self._paper_order_capability_toggled
+            orchestrator.request_paper_order_capability_toggle
         )
         page.extended_hours_paper_toggled.connect(
-            self._extended_hours_paper_toggled
+            orchestrator.request_extended_hours_toggle
         )
         page.save_preferences_requested.connect(
-            self._save_user_preferences
+            orchestrator.save_preferences
         )
 
-    def _settings_draft(self) -> SettingsDraft:
-        """The window's current preferences as the page's initial draft."""
-
-        preferences = self.preferences
-        return SettingsDraft(
-            theme=preferences.theme,
-            market_provider=preferences.market_provider,
-            ibkr_host=preferences.ibkr_host,
-            ibkr_port=preferences.ibkr_port,
-            ibkr_client_id=preferences.ibkr_client_id,
-            connection_timeout_seconds=(
-                preferences.connection_timeout_seconds
-            ),
-            paper_order_capability_enabled=(
-                preferences.paper_order_capability_enabled
-            ),
-            extended_hours_paper_enabled=(
-                preferences.extended_hours_paper_enabled
-            ),
+        # The market route publishes whether its connection controls may be
+        # edited; the Settings capability owns that presentation fact and the
+        # repaint that follows.  Wired here rather than with the market page
+        # because both objects exist by now.
+        self.market_orchestrator.connection_settings_enabled_changed.connect(
+            orchestrator.set_connection_settings_enabled
         )
-
-    def _settings_storage_view(self) -> SettingsStorageView:
-        """The four paths the storage section prints, already formatted."""
-
-        state_root = self.paths.state_root
-        return SettingsStorageView(
-            settings_path=str(state_root / "settings"),
-            credentials_path=str(state_root / "credentials"),
-            runtime_path=str(self.paths.runtime_root),
-            exports_path=str(self.paths.exports_root),
+        # The global theme fan-out is the window's: applying a palette reaches
+        # every page in the workbench, which Settings must not learn about.
+        orchestrator.theme_preview_requested.connect(self._apply_theme)
+        # Pointing the market route's combo is the market layer's, not Settings'.
+        orchestrator.market_provider_selection_requested.connect(
+            self.market_orchestrator.set_selected_provider
         )
-
-
-    def _publish_settings_view(self) -> None:
-        """Render one consistent settings view from the window's facts."""
-
-        if not hasattr(self, "settings_page"):
-            return
-        provider = self._settings_api_provider
-        has_credentials = provider in {"finnhub_trades", "alpaca_iex"}
-        self.settings_page.render(
-            SettingsPageView(
-                credential_status_text=self._credential_status_text(
-                    provider
-                ),
-                credential_save_enabled=has_credentials,
-                credential_clear_enabled=(
-                    has_credentials
-                    and provider != self.market_orchestrator.active_source_id
-                ),
-                connection_settings_enabled=(
-                    self._connection_settings_enabled
-                ),
-            )
+        orchestrator.market_switch_requested.connect(
+            self._on_market_switch_requested
         )
-
-    def _credential_status_text(self, provider: str) -> str:
-        """The frozen credential status line for the selected API provider."""
-
-        status = self.credential_service.status(provider)
-        if provider == "finnhub_trades":
-            return (
-                "Finnhub：已加密保存"
-                if status.api_key_saved
-                else "Finnhub：未保存"
-            )
-        if provider == "alpaca_iex":
-            return (
-                "Alpaca Key："
-                f"{'已加密保存' if status.api_key_saved else '未保存'}"
-                " · Alpaca Secret："
-                f"{'已加密保存' if status.api_secret_saved else '未保存'}"
-            )
-        return (
-            "IBKR Gateway：使用本机 Host / 端口 / Client ID，"
-            "无需 API Key"
+        orchestrator.settings_committed.connect(self._on_settings_committed)
+        orchestrator.information_requested.connect(
+            self._show_settings_information
+        )
+        orchestrator.warning_requested.connect(self._show_settings_warning)
+        orchestrator.log_requested.connect(self._log)
+        orchestrator.paper_order_capability_confirmation_requested.connect(
+            self._confirm_paper_order_capability
+        )
+        orchestrator.extended_hours_confirmation_requested.connect(
+            self._confirm_extended_hours_paper
         )
 
     def _connect_execution_page(self) -> None:
@@ -1337,7 +1338,7 @@ class MainWindow(QMainWindow):
 
         page = self.market_page
         orchestrator = self.market_orchestrator
-        page.provider_selected.connect(self._stream_provider_selected)
+        page.provider_selected.connect(self._on_market_provider_selected)
         page.start_requested.connect(self._request_market_start)
         page.stop_requested.connect(self._request_market_stop)
         page.load_scan_watchlist_requested.connect(self._apply_intraday_watchlist)
@@ -1350,9 +1351,9 @@ class MainWindow(QMainWindow):
             self._render_market_shell_health
         )
         orchestrator.controls_changed.connect(self._publish_execution_controls)
-        orchestrator.connection_settings_enabled_changed.connect(
-            self._set_connection_settings_enabled
-        )
+        # ``connection_settings_enabled_changed`` is connected with the Settings
+        # wiring rather than here: its only consumer is the Settings capability,
+        # which is built later in this same pass.
         orchestrator.log_requested.connect(self._log)
         orchestrator.runtime_event_requested.connect(
             self._route_runtime_event
@@ -3319,34 +3320,45 @@ class MainWindow(QMainWindow):
             badge.style().polish(badge)
 
 
-    def _settings_provider_selected(self, provider: str) -> None:
-        # Programmatic: the settings combo is not the operator choosing on this
-        # route, and the setter is silent so the two combos cannot drive each
-        # other.  The write goes through the orchestrator because pointing the
-        # route's combo is the market layer's, not the window's.
-        self.market_orchestrator.set_selected_provider(provider)
-        api_provider = (
-            "ibkr" if provider == "ibkr_extended" else provider
-        )
-        self.settings_page.set_api_provider(
-            api_provider, emit_change=False
-        )
-        self._api_provider_changed(api_provider)
+    # -- the Settings composition bridges ---------------------------------
+    #
+    # Three thin slots, and each one exists because the fact it reads or the
+    # action it takes belongs to another capability.  None of them decides
+    # anything about Settings: the capability has already sequenced the save,
+    # the transaction and the provider syncs by the time they run.
 
-    def _stream_provider_selected(self, *_args: object) -> None:
+    def _on_market_provider_selected(self, *_args: object) -> None:
+        """The market route's provider moved; mirror it into Settings, silently.
+
+        A sync, not an intent: the Settings control is pointed at the route's
+        provider without emitting, so the two combos cannot drive each other.
+        The selected *API* provider deliberately does not follow here — the
+        Settings combo is where the operator chooses which credential to edit —
+        which is the asymmetry the retired handler had.
+
+        The signal's payload is ignored and the route's own ``selected_provider()``
+        is read instead, exactly as the retired handler did.  Today the two are
+        the same string -- ``MarketControls`` emits ``selected_provider()``
+        itself -- so this is not a behavioural distinction; re-reading keeps the
+        sync tied to the route's finished value rather than to whatever a future
+        emitter of that signal happens to pass.
+        """
+
         provider = str(
             self.market_orchestrator.selected_provider() or "finnhub_trades"
         )
-        self.settings_page.set_market_provider(
-            provider, emit_change=False
-        )
+        self.settings_orchestrator.adopt_market_provider(provider)
 
-    def _switch_to_settings_provider(
-        self,
-        draft: SettingsDraft,
-    ) -> None:
-        provider = draft.market_provider
-        self._save_user_preferences(draft)
+    def _on_market_switch_requested(self, provider: str) -> None:
+        """Switch the feed after a *successful* settings save.
+
+        The market route owns the switch, the Paper/Shadow interlock owns
+        whether it may happen, and Settings owns neither -- it only says that
+        the operator asked for this provider and that the preference behind it
+        is now on disk.  A refusal never reaches here, which is the sequencing
+        defect this round fixed.
+        """
+
         if not self.market_orchestrator.subscription_symbols():
             self.market_orchestrator.set_selected_provider(provider)
             self._log(
@@ -3355,6 +3367,89 @@ class MainWindow(QMainWindow):
             )
             return
         self._request_market_switch(provider)
+
+    def _on_settings_committed(self, commit: DesktopSettingsCommit) -> None:
+        """Adopt one finished settings transaction, then fan it out.
+
+        Composition and nothing else: the commit is already validated,
+        persisted and applied by ``DesktopSettingsService``, so this method only
+        adopts the two finished facts and repaints what depends on them.  It
+        must not re-validate, re-commit, write a preference, touch a credential
+        or build a ``SettingsPageView`` — every one of those is a second owner.
+        """
+
+        saved = commit.preferences
+        self.config = commit.config
+        self.preferences = saved
+        self._apply_theme(saved.theme)
+        # Silent: restoring a saved preference is not an operator intent on the
+        # market route, so this must not re-publish a provider selection.  It
+        # goes through the orchestrator, not the page, so the route's render
+        # ownership stays intact.
+        self.market_orchestrator.set_selected_provider(
+            saved.market_provider
+        )
+        self._log(
+            "设置已保存；主题已生效，连接参数在下一次连接时使用"
+        )
+        if saved.paper_order_capability_enabled:
+            self.safety_badge.setText(
+                "Paper下单能力 · 未武装"
+            )
+        else:
+            self.safety_badge.setText(
+                "只读 · 自动下单关闭"
+            )
+        self._refresh_auto_quant_preflight()
+        self._refresh_extended_hours_status()
+
+    def _show_settings_information(self, title: str, message: str) -> None:
+        """Show one informational message the Settings owner published."""
+
+        QMessageBox.information(self, title, message)
+
+    def _show_settings_warning(self, title: str, message: str) -> None:
+        """Show one warning the Settings owner published."""
+
+        QMessageBox.warning(self, title, message)
+
+    def _confirm_paper_order_capability(
+        self, title: str, message: str
+    ) -> None:
+        """Ask the operator to confirm enabling the Paper order capability.
+
+        The wording is the capability's -- it is the safety explanation of what
+        the flag does and does not authorise -- and the dialog is the window's,
+        because Settings may not import a widget.  The answer goes straight back
+        to the capability, which is the only thing that may revert the control.
+        """
+
+        answer = QMessageBox.warning(
+            self,
+            title,
+            message,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        self.settings_orchestrator.confirm_paper_order_capability(
+            answer == QMessageBox.Yes
+        )
+
+    def _confirm_extended_hours_paper(
+        self, title: str, message: str
+    ) -> None:
+        """Ask the operator to confirm enabling the extended-hours Paper mode."""
+
+        answer = QMessageBox.warning(
+            self,
+            title,
+            message,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        self.settings_orchestrator.confirm_extended_hours(
+            answer == QMessageBox.Yes
+        )
 
     def _maybe_rotate_extended_ibkr_session(self) -> None:
         """Refresh the session context, then let the market layer decide.
@@ -3937,220 +4032,6 @@ class MainWindow(QMainWindow):
 
     def _log(self, message: str) -> None:
         self.status_label.setText(message)
-
-    def _preview_theme_changed(self, theme_name: str) -> None:
-        self._apply_theme(theme_name)
-
-    def _paper_order_capability_toggled(self, checked: bool) -> None:
-        if not checked:
-            return
-        answer = QMessageBox.warning(
-            self,
-            "开启 IBKR Paper 模拟下单能力",
-            "这只打开客户端的 Paper 能力标志，不会立即下单，也不会"
-            "自动武装策略。\n\n实际提交前仍必须满足：本机端口 4002、"
-            "唯一 DU 模拟账户、fresh 实时行情、合格候选、单笔上限、"
-            "会话内再次确认与武装。自动量化页武装后，策略信号可能"
-            "自动向 IBKR Paper 提交 DAY 限价单。\n\nLive 账户、"
-            "市场单、碎股、做空、借款和"
-            "期权仍被禁止。是否保留开启状态？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if answer != QMessageBox.Yes:
-            self.settings_page.set_paper_order_capability(
-                False, emit_change=False
-            )
-
-    def _extended_hours_paper_toggled(self, checked: bool) -> None:
-        if not checked:
-            return
-        answer = QMessageBox.warning(
-            self,
-            "开启 IBKR Paper 5×24 扩展时段",
-            "这会让 Paper 自动量化按当前美东时段路由整股限价单："
-            "盘前/盘后为 SMART + OutsideRth，隔夜为 OVERNIGHT。\n\n"
-            "它不会立即下单，不会连接 Live，也不会绕过实时行情、"
-            "策略、风控、DU 账户和逐会话确认。周末、休市和美东 "
-            "03:50–04:00 维护窗口仍会拒绝订单。是否保留开启状态？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if answer != QMessageBox.Yes:
-            self.settings_page.set_extended_hours_paper(
-                False, emit_change=False
-            )
-
-    def _save_user_preferences(self, draft: SettingsDraft) -> None:
-        """UI adapter around :meth:`DesktopSettingsService.commit`.
-
-        Turns the page's immutable draft into a ``UserPreferences`` and reports
-        failures; the transaction itself -- validate, preflight, persist, apply
-        -- belongs to the service.  The widget work below runs only after the
-        commit succeeded, and in the order it always has.
-        """
-
-        try:
-            preferences = UserPreferences(
-                theme=draft.theme,
-                market_provider=draft.market_provider,
-                ibkr_host=draft.ibkr_host,
-                ibkr_port=draft.ibkr_port,
-                ibkr_client_id=draft.ibkr_client_id,
-                connection_timeout_seconds=(
-                    draft.connection_timeout_seconds
-                ),
-                paper_order_capability_enabled=(
-                    draft.paper_order_capability_enabled
-                ),
-                extended_hours_paper_enabled=(
-                    draft.extended_hours_paper_enabled
-                ),
-            )
-            commit = self.settings_service.commit(
-                preferences,
-                current_config=self.config,
-                broker_config=getattr(
-                    self, "broker_account", None
-                ),
-                # Both runtimes that must be quiescent before the IBKR
-                # endpoint changes.  The account application owns the config
-                # and is asked directly; the market data application only
-                # reports whether a stream is live.
-                runtime_guards=(
-                    (getattr(self, "market_data", None),)
-                    if getattr(self, "market_data", None) is not None
-                    else ()
-                ),
-            )
-        except UserSettingsError as error:
-            QMessageBox.warning(self, "设置未保存", str(error))
-            return
-        except MarketDataActiveError as error:
-            QMessageBox.warning(self, "设置未保存", str(error))
-            return
-        except BrokerAccountError as error:
-            QMessageBox.warning(self, "设置未保存", str(error))
-            return
-        saved = commit.preferences
-        self.config = commit.config
-        self.preferences = saved
-        self._apply_theme(saved.theme)
-        # Silent: restoring a saved preference is not an operator intent on the
-        # market route, so this must not re-publish a provider selection.
-        self.market_page.set_selected_provider(saved.market_provider)
-        self._log(
-            "设置已保存；主题已生效，连接参数在下一次连接时使用"
-        )
-        if saved.paper_order_capability_enabled:
-            self.safety_badge.setText(
-                "Paper下单能力 · 未武装"
-            )
-        else:
-            self.safety_badge.setText(
-                "只读 · 自动下单关闭"
-            )
-        self._refresh_auto_quant_preflight()
-        self._refresh_extended_hours_status()
-
-    def _save_api_credentials(self, draft: CredentialDraft) -> None:
-        provider = draft.provider
-        if provider == "finnhub_trades":
-            supplied = {"finnhub_api_key": draft.api_key.strip()}
-        elif provider == "alpaca_iex":
-            supplied = {
-                "alpaca_api_key": draft.api_key.strip(),
-                "alpaca_api_secret": draft.api_secret.strip(),
-            }
-        else:
-            QMessageBox.information(
-                self,
-                "无需 API Key",
-                "IBKR Gateway 使用本机 Host、端口和 Client ID，"
-                "不在这里保存 API Key。",
-            )
-            return
-        supplied = {
-            name: value for name, value in supplied.items() if value
-        }
-        if not supplied:
-            QMessageBox.information(
-                self,
-                "没有变化",
-                "所选数据源的输入框为空，没有修改已保存凭据。",
-            )
-            return
-        if provider == "alpaca_iex" and len(supplied) != 2:
-            QMessageBox.warning(
-                self,
-                "凭据不完整",
-                "Alpaca 需要同时填写 API Key 和 API Secret。",
-            )
-            return
-        if provider == "finnhub_trades":
-            api_key = supplied.get("finnhub_api_key", "")
-            api_secret = ""
-        else:
-            api_key = supplied.get("alpaca_api_key", "")
-            api_secret = supplied.get("alpaca_api_secret", "")
-        try:
-            self.credential_service.save_provider(
-                provider, api_key=api_key, api_secret=api_secret
-            )
-        except (CredentialStoreError, OSError, ValueError) as error:
-            QMessageBox.warning(self, "凭据保存失败", str(error))
-            return
-        self.settings_page.clear_credential_inputs()
-        self._publish_settings_view()
-        self._log("API 凭据已使用 Windows 当前用户 DPAPI 加密保存")
-
-    def _clear_selected_api_credentials(self, provider: str) -> None:
-        if self.market_orchestrator.active_source_id == provider:
-            QMessageBox.warning(
-                self,
-                "行情运行中",
-                "当前数据源正在使用这组凭据；请先切换或停止行情，"
-                "再清除凭据。",
-            )
-            return
-        if provider == "finnhub_trades":
-            label = "Finnhub"
-        elif provider == "alpaca_iex":
-            label = "Alpaca"
-        else:
-            QMessageBox.information(
-                self,
-                "无需清除",
-                "IBKR Gateway 没有保存在此处的 API Key。",
-            )
-            return
-        try:
-            self.credential_service.clear_provider(provider)
-        except (CredentialStoreError, OSError, ValueError) as error:
-            QMessageBox.warning(self, "凭据清除失败", str(error))
-            return
-        self.settings_page.clear_credential_inputs()
-        self._publish_settings_view()
-        self._log(
-            f"已清除当前 Windows 用户保存的 {label} 行情凭据"
-        )
-
-    def _clear_saved_finnhub_key(self) -> None:
-        try:
-            self.credential_service.clear_provider("finnhub_trades")
-        except (CredentialStoreError, OSError, ValueError) as error:
-            QMessageBox.warning(self, "Finnhub Key 清除失败", str(error))
-            return
-        self._publish_settings_view()
-        self._log("已清除当前 Windows 用户保存的 Finnhub Key")
-
-    def _api_provider_changed(self, provider: str) -> None:
-        self._settings_api_provider = provider
-        self._publish_settings_view()
-
-    def _set_connection_settings_enabled(self, enabled: bool) -> None:
-        self._connection_settings_enabled = enabled
-        self._publish_settings_view()
 
     def _apply_theme(self, theme_name: str) -> None:
         self.current_theme_name = (

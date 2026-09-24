@@ -34,18 +34,13 @@ from .models import (
     SettingsDraft,
     SettingsPageView,
     SettingsStorageView,
+    api_provider_for_market_provider,
 )
 
 STORAGE_BOUNDARY_NOTE = (
     "整股限制与 Paper 环境为锁定边界；模拟下单能力默认关闭，"
     "且不能绕过 DU 账户、演练上限、策略晋级和会话武装。"
 )
-
-
-def _api_provider_for(market_provider: str) -> str:
-    """Map a market provider to the API provider shown."""
-
-    return "ibkr" if market_provider == "ibkr_extended" else market_provider
 
 
 class SettingsPage(QScrollArea):
@@ -77,7 +72,9 @@ class SettingsPage(QScrollArea):
         self.appearance = AppearanceSection(draft)
         self.credentials = CredentialsSection(
             CredentialDraft(
-                provider=_api_provider_for(draft.market_provider),
+                provider=api_provider_for_market_provider(
+                    draft.market_provider
+                ),
                 api_key="",
                 api_secret="",
             )

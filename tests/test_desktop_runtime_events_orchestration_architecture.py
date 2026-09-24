@@ -154,8 +154,11 @@ _GOD_OBJECTS = {
     "RuntimeManager",
 }
 
-#: Settings orchestration: v2O-F2 owns these, and F1 must not have touched one.
-_SETTINGS_WINDOW_METHODS = (
+#: Settings orchestration: v2O-F1 left it on the window and v2O-F2 moved it to
+#: ``orchestration/system/settings/``.  Both halves of the guard are kept: the
+#: retired handlers must be gone, and the composition-only remainder must be
+#: exactly what the composition root still needs.
+_RETIRED_SETTINGS_WINDOW_METHODS = (
     "_preview_theme_changed",
     "_settings_provider_selected",
     "_stream_provider_selected",
@@ -171,6 +174,18 @@ _SETTINGS_WINDOW_METHODS = (
     "_settings_draft",
     "_settings_storage_view",
     "_set_connection_settings_enabled",
+)
+
+#: What the window still does for Settings after v2O-F2: composition only.
+_SETTINGS_COMPOSITION_METHODS = (
+    "_connect_settings_page",
+    "_on_market_provider_selected",
+    "_on_market_switch_requested",
+    "_on_settings_committed",
+    "_show_settings_information",
+    "_show_settings_warning",
+    "_confirm_paper_order_capability",
+    "_confirm_extended_hours_paper",
 )
 
 #: The per-capability adapters v2O-F1 retired, plus the one it replaced.
@@ -471,8 +486,19 @@ def test_no_god_object_was_created_for_the_system_route() -> None:
         for node in ast.walk(_tree(path)):
             if isinstance(node, ast.ClassDef):
                 assert node.name not in forbidden, (path, node.name)
-    assert not (_ORCH_DIR / "settings").exists()
+    # Two sibling capability packages and no aggregate owner above them: a
+    # ``system/orchestrator.py`` would be the god object in a new costume, and
+    # neither capability is allowed to own the other.
+    assert (_ORCH_DIR / "runtime_events").is_dir()
+    assert (_ORCH_DIR / "settings").is_dir()
     assert not (_ORCH_DIR / "orchestrator.py").exists()
+    # Each sibling has its own owner and its own pure rules; neither grows the
+    # other's module.
+    assert (_ORCH_DIR / "runtime_events" / "orchestrator.py").is_file()
+    assert (_ORCH_DIR / "settings" / "orchestrator.py").is_file()
+    assert (_ORCH_DIR / "settings" / "queries.py").is_file()
+    assert not (_ORCH_DIR / "settings" / "runtime_events.py").exists()
+    assert not (_ORCH_DIR / "runtime_events" / "settings.py").exists()
 
 
 # -- 7 / 8: the page and the aggregate are unchanged --------------------
@@ -570,12 +596,21 @@ def test_the_export_provider_is_composition_only() -> None:
     assert "self.targeted_results" not in body
 
 
-# -- 10 / 11: Settings and the Gateway probe are untouched --------------
+# -- 10 / 11: Settings moved in F2, and the Gateway probe is untouched ---
+#
+# v2O-F1 asserted the settings half was *still* the window's, because that round
+# was not allowed to touch it.  v2O-F2 moved it, so the assertion inverts rather
+# than disappearing: the retired handlers must be absent and the composition
+# remainder must be exactly the composition root's.  The stronger F2 guards --
+# ownership, live reads, signal loops, the transaction -- live in
+# ``tests/test_desktop_settings_orchestration_architecture.py``.
 
 
-def test_settings_orchestration_is_still_the_windows() -> None:
+def test_settings_orchestration_has_left_the_window() -> None:
     methods = set(_methods(_main_window()))
-    for name in _SETTINGS_WINDOW_METHODS:
+    for name in _RETIRED_SETTINGS_WINDOW_METHODS:
+        assert name not in methods, name
+    for name in _SETTINGS_COMPOSITION_METHODS:
         assert name in methods, name
 
     classes: set[str] = set()
@@ -583,7 +618,8 @@ def test_settings_orchestration_is_still_the_windows() -> None:
         for node in ast.walk(_tree(path)):
             if isinstance(node, ast.ClassDef):
                 classes.add(node.name)
-    assert "SettingsOrchestrator" not in classes
+    assert "SettingsOrchestrator" in classes
+    assert "SettingsManager" not in classes
     assert "DesktopSettingsOrchestrator" not in classes
 
 

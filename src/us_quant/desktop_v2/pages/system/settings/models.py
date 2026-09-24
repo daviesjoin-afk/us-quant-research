@@ -68,9 +68,26 @@ class SettingsPageView:
     connection_settings_enabled: bool
 
 
+def api_provider_for_market_provider(market_provider: str) -> str:
+    """The API provider a market provider's credentials belong to.
+
+    Defined *once* because two callers need the same answer for different
+    reasons: the page uses it to point its credential inputs when it is built,
+    and ``SettingsOrchestrator`` uses it to keep its own selected-API-provider
+    fact in step when the operator picks a market provider.  Two copies would be
+    two rules, and the first one edited would be the one that is wrong.
+
+    ``ibkr_extended`` is the 5x24 Paper route over the same IBKR Gateway, so it
+    shares IBKR's (empty) API credential set rather than inventing a provider.
+    """
+
+    return "ibkr" if market_provider == "ibkr_extended" else market_provider
+
+
 __all__ = [
     "CredentialDraft",
     "SettingsDraft",
     "SettingsPageView",
     "SettingsStorageView",
+    "api_provider_for_market_provider",
 ]

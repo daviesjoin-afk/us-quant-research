@@ -102,8 +102,17 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 > capability 已迁出窗口——`RuntimeEventsOrchestrator` 成为 Runtime Events 的唯一
 > sequencing owner（store 写入、合并重画、resolve、terminal export 成败与 last-export
 > fact、页面 render），`RuntimeEventStore` 仍是唯一 persisted truth，
-> `RuntimeEventsPage` 仍只 render / emit。Settings **未迁**（v2O-F2），Gateway probe
-> **未迁**。见 §8.22；顶层路线现为 **v2O-F1 ✅ / v2O-F2 ⏭**。
+> `RuntimeEventsPage` 仍只 render / emit。见 §8.22。
+
+> **进度更新（v2O-F2 Settings orchestration）**：第二个 workspace 也已迁出——
+> `SettingsOrchestrator` 成为 Settings 的唯一 sequencing owner（视图组装与 render、
+> 凭据 save/clear 排序、偏好事务适配与 commit fan-out、provider 双向同步、两个
+> capability 确认、以及两个 presentation fact）。`UserPreferencesStore` /
+> `DesktopSettingsService`（事务顺序）/ `DesktopCredentialService`（存储语义）三个
+> canonical owner **逐字未动**，`SettingsPage` 仍只 render / emit，窗口只剩 composition。
+> 本轮同时修掉一个真实的 provider 切换顺序 bug：保存被拒时窗口仍会切换行情源（§8.23）。
+> Gateway probe **仍未迁**，是否独立 F3 需重新扫描；顶层路线现为
+> **v2O-F1 ✅ / v2O-F2 ✅**，且**不**声称 System orchestration complete。
 
 ## 迁移状态一览
 
@@ -128,7 +137,7 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Desktop CrossSectionResearchPage | MIGRATED |
 | Desktop Dashboard | TRANSITIONAL |
 | Desktop Research aggregate | MIGRATED |
-| Desktop System | TRANSITIONAL（页面 native v2；Runtime Events orchestration 已迁 v2O-F1 §8.22，Settings 仍暂留 → v2O-F2） |
+| Desktop System | TRANSITIONAL（页面 native v2；Runtime Events orchestration 已迁 v2O-F1 §8.22，Settings orchestration 已迁 v2O-F2 §8.23；Gateway probe 仍暂留） |
 | AutoQuant Risk Integration | MIGRATED |
 | Execution Domain | MIGRATED |
 | Execution Application | MIGRATED |
@@ -153,7 +162,7 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Shadow Orchestration | MIGRATED（v2O-D，`desktop_v2/orchestration/shadow/`） |
 | Paper Orchestration | MIGRATED（v2O-E1 启动链 + v2O-E2 active runtime + v2O-E3 recovery/finalization/shutdown + v2O-E4 presentation / render closure，`desktop_v2/orchestration/paper/`）；Paper 的 presentation fact 也由 capability 持有（`PaperOrchestrator.presentation`），`MainWindow` 不再持有任何 Paper session 缓存 |
 | Runtime Events Orchestration | MIGRATED（v2O-F1，`desktop_v2/orchestration/system/runtime_events/`）；store 仍是唯一 truth，页面仍只 render / emit，窗口只剩 composition（事件路由 / 跨 capability 导出事实 / task-count provider / dialog） |
-| Settings Orchestration | 仍暂留 `MainWindow`（v2O-F2）——`DesktopSettingsService` 的 validate→derive→preflight→guard→persist→apply 顺序冻结 |
+| Settings Orchestration | MIGRATED（v2O-F2，`desktop_v2/orchestration/system/settings/`）；`UserPreferencesStore` / `DesktopSettingsService`（validate→derive→preflight→guard→persist→apply 顺序冻结）/ `DesktopCredentialService`（存储语义冻结）仍是各自 canonical owner，`SettingsPage` 仍只 render / emit，窗口只剩 composition（九项 intent 转发、commit 采纳与 fan-out、主题、market selection/switch bridge、dialog） |
 
 Shadow 子系统：
 
@@ -642,8 +651,8 @@ system     → desktop_v2/pages/system/             ✅ native v2 aggregate
 
 前端进度：**7 / 8 native v2**。Research 与 System 一级 route 均已由原生 aggregate
 承接；只剩 Dashboard 仍是 transitional。Research orchestration 已全部抽出；System
-orchestration 已抽出 Runtime Events 一半（v2O-F1，§8.22），Settings 一半仍暂留
-MainWindow（v2O-F2）。
+orchestration 两个 workspace 都已抽出（Runtime Events = v2O-F1 §8.22，
+Settings = v2O-F2 §8.23），只剩 Gateway probe 仍在窗口。
 
 ### 8.2 execution 页已完成（Desktop Execution v2）
 
@@ -1210,9 +1219,11 @@ settings view       SettingsPageView → SettingsPage.render()
 - **编排仍暂留 MainWindow。** System UI ownership = migrated；System orchestration
   = still MainWindow transitional。MainWindow 仍持有 store、settings service、
   credential service 与全部 handler。
-  **（前向引用）** 其中 Runtime Events 一半已由 v2O-F1 迁出（§8.22）：窗口不再持有
-  store alias、refresh stamp / pending 标志与 last-export fact，也不再组装 info text
-  或 render 该页面；本文 §8.10 描述的状态只对 **Settings** 一半仍然成立。**（前向引用结束）**
+  **（前向引用）** 其中 Runtime Events 一半已由 v2O-F1 迁出（§8.22），Settings 一半已由
+  v2O-F2 迁出（§8.23）：窗口不再持有 store alias、refresh stamp / pending 标志、
+  last-export fact、`_settings_api_provider` / `_connection_settings_enabled`，也不再
+  组装任一页面的 view 或 render 它们。本文 §8.10 描述的状态现在只对**已经不存在**的
+  窗口内编排成立，保留为历史记录。**（前向引用结束）**
 
 新增守卫位于 `tests/test_desktop_v2_system_page.py`、
 `tests/test_desktop_v2_system_architecture.py`、`tests/test_desktop_v2_settings_*.py`
@@ -1826,17 +1837,21 @@ service、admission 被拒后 busy 保持 True、failure 清空 last-good runs�
 **v2O-C5B Targeted Session + Preflight ✅**；**v2O-D Shadow orchestration ✅**；
 **v2O-E1 Paper launch orchestration ✅**；**v2O-E2 active Paper runtime orchestration ✅**；
 **v2O-E3 recovery / finalization orchestration ✅**；**v2O-E4 presentation / render closure ✅**；
-**v2O-F1 Runtime Events orchestration ✅** —— 顶层路线现在是 **v2O-E Paper COMPLETE +
-v2O-F1 ✅**。Paper 能力分四刀：启动链（§8.18）、active runtime（§8.19）、
-recovery/finalization/shutdown（§8.20）与 presentation/render closure（§8.21）全部完成，
-`MainWindow` 不再决定 active session 何时 poll / 何时吃行情 / 何时 pause/resume/stop，
-不再持有 runtime handle，不再决定 HALT 之后如何对账、zero-state 证明何时开始、ownership
-何时可以释放，也不再持有任何 Paper session 的展示缓存——它保留的 presentation fact 是
-capability 发布的 immutable 投影，且不参与任何业务判断。v2O-F1 把 System 的 Runtime
-Events 一半收进 `RuntimeEventsOrchestrator`（写入 / 合并重画 / resolve / 导出成败 /
-last-export / render，§8.22）；下一刀是 **v2O-F2 Settings orchestration**，之后才重新
-扫描 System 剩余职责（Gateway probe 是否需要独立 F3），随后是 MainWindow composition
-closure 与 Final Architecture Closure。
+**v2O-F1 Runtime Events orchestration ✅**；**v2O-F2 Settings orchestration ✅** ——
+顶层路线现在是 **v2O-E Paper COMPLETE + v2O-F1 ✅ + v2O-F2 ✅**。Paper 能力分四刀：启动链
+（§8.18）、active runtime（§8.19）、recovery/finalization/shutdown（§8.20）与
+presentation/render closure（§8.21）全部完成，`MainWindow` 不再决定 active session 何时
+poll / 何时吃行情 / 何时 pause/resume/stop，不再持有 runtime handle，不再决定 HALT 之后
+如何对账、zero-state 证明何时开始、ownership 何时可以释放，也不再持有任何 Paper session
+的展示缓存——它保留的 presentation fact 是 capability 发布的 immutable 投影，且不参与任何
+业务判断。v2O-F1 把 System 的 Runtime Events 一半收进 `RuntimeEventsOrchestrator`（写入 /
+合并重画 / resolve / 导出成败 / last-export / render，§8.22）；v2O-F2 把 Settings 一半收进
+`SettingsOrchestrator`（视图组装与 render、凭据 save/clear、偏好事务适配、provider 双向
+同步、两个 capability 确认、两个 presentation fact，§8.23），并修掉一个保存被拒仍切换
+行情源的顺序 bug。**没有** `SystemOrchestrator`：两个 workspace 除共用页面外互不相关。
+接下来要**重新扫描** System 剩余职责（Gateway probe 是否需要独立 F3），随后是 MainWindow
+composition closure 与 Final Architecture Closure；本轮不声称 System orchestration
+complete。
 
 维护导航见 `docs/DESKTOP_CAPABILITY_MAP.md`；C5B 的设计依据见
 `DESKTOP_DECOMPOSITION.md` §25，本文的 §8.16 只记该轮改变了哪些 boundary。
@@ -2488,18 +2503,30 @@ guard 精确断言）；不 import 任何其它 capability、trading、sqlite；
 窗口；`RuntimeEventsPage` 仍只 render / emit；`SystemPage` 仍 containment only，且不认识
 orchestrator；Settings 15 项职责与 Gateway probe 原样冻结。
 
+> **前向引用（v2O-F2）**：最后一句中"Settings 15 项职责原样冻结"只对 v2O-F1 那一轮成立；
+> 它们已在 v2O-F2 迁入 `orchestration/system/settings/`（§8.23），Gateway probe 仍留在
+> 窗口、是否独立 F3 待重新扫描。**（前向引用结束）**
+
 **没有 SystemOrchestrator。** System 是 containment route：一个同时持有 event store、
 settings service 与 credential service 的对象正是本轮点名禁止的 god object。
-`orchestration/system/orchestrator.py`、`orchestration/system/settings/` 与
-`SystemOrchestrator` / `SystemManager` / `DesktopSystemManager` / `SystemContext` /
-`ApplicationContext` / `ServiceBag` / `RuntimeManager` 的**不存在**由 guard 断言。
+`orchestration/system/orchestrator.py` 与 `SystemOrchestrator` / `SystemManager` /
+`DesktopSystemManager` / `SystemContext` / `ApplicationContext` / `ServiceBag` /
+`RuntimeManager` 的**不存在**由 guard 断言。
+
+> **前向引用（v2O-F2）**：`orchestration/system/settings/` 当时"必须不存在"，是 v2O-F2 的
+> 交付物；现在它存在（§8.23），而 `orchestration/system/orchestrator.py` 与那七个 god
+> object 名字仍然**不存在**，guard 相应改为"两个 sibling 各有 owner、且没有聚合 owner"。
+> **（前向引用结束）**
 
 **新增 guards**：`tests/test_desktop_runtime_events_orchestration_architecture.py` 14 条
 （无 store alias / 无 refresh 与 last-export state / 不调 store 方法 / 不 render 页面 /
 view 投影唯一调用者 / orchestrator 无 capability import / page 与 table 不碰 store /
-SystemPage 仍 containment / export provider 只做 composition / Settings 仍在窗口 /
+SystemPage 仍 containment / export provider 只做 composition / Settings 当时仍在窗口 /
 Gateway probe 未动 / 不缓存 event list / 不 import task lifecycle / 只剩一个纯转发
-adapter），加上 capability map 的 System 行断言。
+adapter），加上 capability map 的 System 行断言。**（v2O-F2 更新）** 其中"Settings 仍在
+窗口"那一条已按其自身惯例反转为 `test_settings_orchestration_has_left_the_window`，
+"settings 目录必须不存在"也改为"两个 sibling 各有 owner"；新增 Settings 侧的 23 条守卫
+见 §8.23 与 `DESKTOP_DECOMPOSITION.md` §32.12。
 
 **行为测试**：`tests/test_desktop_runtime_events_orchestrator.py` 22 项（record 单写、
 refused write 上抛、每次 paint 重新读 store、burst 只 arm 一次、flush 读当前 truth、
@@ -2525,6 +2552,12 @@ M13 真实 Qt timer 只存 callback 不 arm / M14 被取代的迟到 flush 仍�
 `mutation_e3.ps1` 全部 RED、exit 0。`mutation_e2.ps1` / `mutation_e4.ps1` 的同类退出码弱点
 留给后续。
 
+> **前向引用（v2O-F2）**：M27 的那个"仍存在的 `__init__` 行"正是 F2 删掉的
+> `self._connection_settings_enabled = True`，因此它**第二次**静默失效；F2 已改锚到
+> `self.preferences = self.preferences_store.load(defaults)`，并实跑 e2/e3/e4 三个脚本，
+> 顺带把 e2 里两个更早的死锚点（M4 / M9）一并修复。`mutation_e2.ps1` / `mutation_e4.ps1`
+> 的非零退出码尾巴**仍然**没有补（F2 未做，避免超范围）。**（前向引用结束）**
+
 **零 diff**：`trading/runtime/**`、`trading/domain/**`、RiskApplication /
 ExecutionApplication、`PaperTradingService`、`PaperActiveRelease`、`ExecutionLease`、
 broker adapter、Shadow、Paper orchestration、Market / Account / Research business
@@ -2534,6 +2567,118 @@ schema 全部未改。本轮没有发现需要在 canonical owner 修的业务 b
 canonical-owner exception。
 
 设计依据见 `DESKTOP_DECOMPOSITION.md` §31。
+
+### 8.23 Settings orchestration 已抽出（v2O-F2）
+
+System route 的第二个 workspace。页面早已是 native v2（§8.10），但它的**运行时**——视图
+组装、凭据 save/clear 排序、偏好事务适配、provider 双向同步、两个 capability 确认，以及
+两个 presentation fact——全在窗口。这一刀把它们收进
+`desktop_v2/orchestration/system/settings/`，与 §8.22 的 Runtime Events 成为 sibling。
+
+**新 home**：
+
+```text
+desktop_v2/orchestration/system/settings/
+  __init__.py           export SettingsOrchestrator + CredentialSavePlan + CredentialSaveOutcome
+  models.py             Qt-free：CredentialSaveOutcome（NOT_REQUIRED / NO_CHANGE /
+                        INCOMPLETE / SAVE）+ frozen CredentialSavePlan（provider + 两个值）
+  queries.py            Qt-free / service-free 纯规则：credential_save_plan、
+                        credential_status_text、preferences_from_draft、
+                        settings_draft_from_preferences、settings_storage_view、
+                        provider_requires_api_key、provider_label
+  orchestrator.py       render_current / select_api_provider / select_market_provider /
+                        adopt_market_provider / set_connection_settings_enabled /
+                        preview_theme / save_credentials / clear_credentials /
+                        save_preferences / request_provider_switch / 两个 toggle 与 confirm
+                        + 九个信号
+```
+
+**数据流**：
+
+```text
+SettingsPage ──九个 intent──▶ SettingsOrchestrator（直连）
+                                render_current(): credential_service.status + 活动行情源 + 两个 fact
+                                save/clear credentials → DesktopCredentialService
+                                save_preferences / request_provider_switch → DesktopSettingsService.commit
+                                发布 settings_committed / market_switch_requested /
+                                     theme_preview_requested / market_provider_selection_requested /
+                                     两个 confirmation_requested / information / warning / log
+
+MainWindow（composition only）
+  提交采纳（self.config / self.preferences）→ 主题、market provider、safety badge、preflight、状态行
+  theme_preview_requested → _apply_theme（全工作台）
+  market_provider_selected → 读 selected_provider() → adopt_market_provider（静默同步）
+  market_switch_requested  → 无订阅直设 + 日志 / 有订阅 _request_market_switch（Paper interlock）
+  information / warning → QMessageBox；log → _log
+  connection_settings_enabled_changed（Market 发布）→ capability.set_connection_settings_enabled
+```
+
+**窗口退出的东西**：`self._settings_api_provider`、`self._connection_settings_enabled`、
+`_settings_draft`、`_settings_storage_view`、`_publish_settings_view`、`_credential_status_text`、
+`_settings_provider_selected`、`_stream_provider_selected`、`_switch_to_settings_provider`、
+`_api_provider_changed`、`_set_connection_settings_enabled`、`_save_user_preferences`、
+`_save_api_credentials`、`_clear_selected_api_credentials`、`_clear_saved_finnhub_key`（全仓
+零 caller 的死 handler，直接退休、无 shim）、`_preview_theme_changed`、
+`_paper_order_capability_toggled`、`_extended_hours_paper_toggled` —— 全部无 alias / 无
+property / 无 forwarding shim。
+
+**窗口留下的东西**：`self.config` / `self.preferences`（全局 composition fact，被 Market /
+Paper / Risk / Research / Gateway 共用，搬进 Settings 会造成反向依赖）、`settings_page`、
+`settings_orchestrator`、三个窄 provider（`current_config` / `broker_config` /
+`runtime_guards`）、两个 bridge（`_on_market_provider_selected` /
+`_on_market_switch_requested`）、`_on_settings_committed`（采纳 + fan-out）、两个 confirm、
+两个 message、`_connect_settings_page`、`_apply_theme` 与 Gateway probe。
+
+**三个 canonical owner 逐字未变**：`UserPreferencesStore`（persisted preferences truth，
+schema / validate / 原子写）、`DesktopSettingsService`（validate→derive→preflight→guard→
+persist→apply 顺序，仍无 rollback / two-phase）、`DesktopCredentialService`（provider→字段
+映射、DPAPI、status/save/clear 语义）。`settings_service.commit` 的调用点全仓仍然只有一处，
+只是从窗口移到 `SettingsOrchestrator._commit`。
+
+**单一 render owner 与三次现读**：`SettingsPage.render(SettingsPageView)` 只有 capability
+一个调用者；每次重画都现读凭据状态与活动行情源——缓存状态会让"保存成功后状态行仍显示未
+保存"，构造时捕获行情源会让之后启动的行情绕过清除门禁（mutation M3 / M4 / M5 都 RED）。
+
+**凭据排序（语义冻结，含一个刻意保留的顺序）**：`credential_save_plan` 是唯一决策点
+（NOT_REQUIRED / NO_CHANGE / INCOMPLETE / SAVE，trim 只做一次，写的就是 plan 里的值），
+失败只报 warning 且不清输入；Clear **先**比较 `provider == 活动行情源`、**再**走"是否
+需要 key"分支——若反过来，`provider == 活动源 == "ibkr"` 时会从"行情运行中"变成"无需清除"，
+那是行为变化。
+
+**provider 双向同步的非对称（刻意保留）**：Settings 侧选 provider 会带动 selected API
+provider（操作者选它就是为了配置它）；Market 侧变化**不带动**。所有 programmatic setter
+都是 `emit_change=False`（guard 要求字面 `False`），否则两个 combo 会互相驱动成环。
+
+**本轮修的 provider 切换顺序 bug（§8.23 的核心）**：退休前窗口在一个**没有返回值**的
+`_save_user_preferences(draft)` 之后直接进入行情分支，所以保存被**拒绝**时仍会
+`request_switch` / `set_selected_provider`，并打出"默认行情源已切换"——磁盘上的偏好却还是
+旧值。canonical fix 在 Settings：`request_provider_switch` 只在 commit 返回后发布
+`settings_committed`（窗口采纳）→ `market_switch_requested`（用落盘后的 provider）。回归
+测试 `tests/test_desktop_settings_provider_switch_regression.py` 4 项（含"在切换回调内部采样
+`window.preferences`"以真正测顺序），mutation M10 / M11 RED。
+
+**guards 与 mutation**：新增
+`tests/test_desktop_settings_orchestration_architecture.py` 23 条（presentation fact 唯一
+owner、render 唯一调用者、窗口不调 service、`except` 集合精确、无 capability import、state
+精确九项、公开 API 精确、页面 nine signals 未变、活动源不缓存、程序化 setter 静默、主题与
+market interlock 不入 Settings、SystemPage 仍 containment、F1 边界未回退、Gateway probe 未
+动、无 god object、死 handler 无 shim、18 个退休方法缺席、真实窗口无残余状态），并按其自身
+惯例更新 F1 的两条 guard（反转 + 从"settings 目录不存在"改为"两个 sibling 各有 owner"）。
+`scripts/mutation_system_settings_f2.ps1`：**21 个 mutant 全部 RED**，0 survived，
+0 harness-error（M11 首次存活——断言只测"两个信号各自发生过"、对顺序不敏感——测试加强后
+RED，这是"测试必须真的测它声称的属性"的现场例子）。
+
+**零 diff**：`trading/runtime/**`、`trading/domain/**`、RiskApplication /
+ExecutionApplication、`PaperTradingService`、`PaperActiveRelease`、`ExecutionLease`、
+broker adapter、Shadow、Paper orchestration、Market / Account / Research business logic、
+`RuntimeEventsOrchestrator`、`RuntimeEventStore`、`export_service.py`、
+`DesktopSettingsService` 事务顺序、`DesktopCredentialService` 存储语义、
+`UserPreferences` 校验与 schema、IBKR 只读默认、Paper 安全门全部未改。
+
+**未做**：Gateway probe 未迁（是否独立 F3 待重新扫描）、MainWindow composition closure、
+Dashboard、trading/live/AI 全部未开始。本轮**不**声称 "v2O-F System COMPLETE"。
+
+设计依据见 `DESKTOP_DECOMPOSITION.md` §32。
 
 ## 9. 已删除的旧架构
 
@@ -3314,7 +3459,8 @@ v2O-E Paper orchestration       ✅ COMPLETE：E1 启动链（§8.18）+ E2 acti
                                     + E3 recovery/finalization/shutdown（§8.20）
                                     + E4 presentation/render closure（§8.21）
 v2O-F1 Runtime Events orchestration  ✅ 已完成（§8.22）
-v2O-F2 Settings orchestration        ⏭ 下一轮
+v2O-F2 Settings orchestration        ✅ 已完成（§8.23）
+Gateway probe（是否独立 F3）           ⏭ 重新扫描后再定
 MainWindow composition closure  ⏭ 后续
 ```
 
@@ -3396,9 +3542,9 @@ v2。**Desktop Research v2C 已完成**（§8.6），ScannerPage 已 native v2�
 v2。**Desktop Research v2E 已完成**（§8.8），CrossSectionResearchPage 已 native v2；
 **Desktop Research v2R-F 已完成**（§8.9），Research aggregate 已 native v2，
 但 Research orchestration 仍暂留在 MainWindow。**Desktop System v2 已完成**（§8.10），
-System aggregate 已 native v2 且两类大 UI 耦合已清零；System orchestration 仍暂留在
-MainWindow——**其中 Runtime Events 一半已由 v2O-F1 迁出（§8.22），Settings 一半仍暂留
-（v2O-F2）**。**v2O-A Market orchestration 已完成**（§8.11），Market runtime truth 已
+System aggregate 已 native v2 且两类大 UI 耦合已清零；System orchestration 两个
+workspace **都已迁出 MainWindow**（Runtime Events = v2O-F1 §8.22，Settings = v2O-F2
+§8.23），Gateway probe 仍留在窗口。**v2O-A Market orchestration 已完成**（§8.11），Market runtime truth 已
 从 `MainWindow` 迁入 `desktop_v2/orchestration/market/`，窗口只保留跨 workflow
 safety bridge 与 snapshot fan-out。**v2O-B Account orchestration 已完成**（§8.12），
 Account 的 refresh / ledger / page render / shell 事实已迁入
@@ -3454,7 +3600,8 @@ v2O-E2 active Paper runtime     ✅ 已完成（§8.19）
 v2O-E3 HALT / reconciliation / finalization / shutdown   ✅ 已完成（§8.20）
 v2O-E4 presentation / render closure + MainWindow guards  ✅ 已完成（§8.21）
 v2O-F1 Runtime Events orchestration                      ✅ 已完成（§8.22）
-v2O-F2 Settings orchestration                            ⏭ 下一轮
+v2O-F2 Settings orchestration                            ✅ 已完成（§8.23）
+Gateway probe 是否独立 F3                                ⏭ 重新扫描 System 剩余职责
 MainWindow composition closure
 Final Architecture Closure
 ```
@@ -3566,6 +3713,8 @@ v2O-F1 刻意没有做的事，留给更后面：
 
 - 只抽 Runtime Events，没有 Settings orchestration（v2O-F2），也没有搬 Gateway
   probe（`_probe_gateway` / `probe_ibkr_socket` / `gateway_badge`）；
+  **（v2O-F2 更新）** Settings 那一半已由 v2O-F2 迁出（§8.23）；Gateway probe 仍留在
+  窗口，"是否独立 F3"需要重新扫描 System 剩余职责后再定；
 - 没有创建 `SystemOrchestrator` / `SystemManager` / `DesktopSystemManager` /
   `SystemContext` / `ApplicationContext` / `ServiceBag` / `RuntimeManager`：System 是
   containment route，Runtime Events 与 Settings 是两个不相关的 capability，共用一个
@@ -3585,6 +3734,33 @@ v2O-F1 刻意没有做的事，留给更后面：
   lifecycle；
 - 没有统一 Market / Account / Shadow / Paper / Research 各自的 runtime event model：
   窗口的一个纯转发 adapter 就是它们唯一需要的公共点。
+
+v2O-F2 刻意没有做的事，留给更后面：
+
+- 只抽 Settings orchestration，没有搬 Gateway probe
+  （`_probe_gateway` / `probe_ibkr_socket` / `gateway_badge`），也没有做
+  MainWindow composition closure、Dashboard 或 trading/live/AI；
+- 没有创建 `SystemOrchestrator` / `SystemManager` / `SettingsManager` /
+  `DesktopManager` / `ApplicationContext` / `ServiceBag` / `GlobalController`：
+  Runtime Events 与 Settings 是两个互不相关的 capability，只共用一个页面，
+  没有共同 state 与共同生命周期，聚合它们等于把 event store、settings service 与
+  credential service 塞进同一个对象；
+- 没有把 `self.config` / `self.preferences` 搬进 `SettingsOrchestrator`：它们是全局
+  应用 composition fact，Market / Paper / Risk / Research / Gateway 都在用，搬进去会
+  让所有 capability 反向依赖 Settings；
+- 没有改三个 canonical owner 的任何语义：`UserPreferencesStore` 的 schema / validate /
+  原子写、`DesktopSettingsService` 的事务顺序（仍无 rollback / two-phase）、
+  `DesktopCredentialService` 的存储与 status / save / clear 语义；
+- 没有把 market switch / Paper / Shadow 的 interlock 搬进 capability：无订阅直设与
+  `_request_market_switch` 都留在窗口；
+- 没有把全局主题 fan-out（`_apply_theme`）搬进 capability：它要给整个 workbench 换
+  palette，不是 Settings 的行为；
+- 没有改 `SettingsPage` 的九个 intent 与 `SettingsPageView` 契约，也没有给它加
+  service 依赖：页面仍只 render / emit；
+- 没有"顺手修" provider 同步的非对称（Settings→Market 带动 selected API provider，
+  Market→Settings 不带动）：那是既有行为，本轮原样保留并写进文档；
+- 没有给 capability 加 `status` / `credentials` / `config` / `preferences` 之类的
+  accessor 或缓存：每次重画都现读服务与活动行情源。
 
 Framework v2C 刻意没有做的事，留给更后面：
 

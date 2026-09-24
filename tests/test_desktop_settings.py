@@ -1093,27 +1093,31 @@ def test_startup_uses_the_same_mapping_as_a_later_save() -> None:
 def test_the_save_adapter_does_not_run_the_transaction_itself(
     call: str,
 ) -> None:
-    """``_save_user_preferences`` is a UI adapter now.
+    """The save adapter is a sequencing adapter, not the transaction.
 
-    It reads widgets and reports failures; the three transaction calls
-    live in ``desktop_settings.py`` and nowhere else.  Scoped to this
-    method so the module's own import and construction of the store are
-    not flagged.
+    It turns a draft into preferences and reports failures; the three
+    transaction calls live in ``desktop_settings.py`` and nowhere else.
+    v2O-F2 moved the adapter from ``MainWindow`` to ``SettingsOrchestrator``
+    (``_commit``); the property is the one this test always asserted.
     """
 
-    from us_quant.desktop import MainWindow
+    from us_quant.desktop_v2.orchestration.system.settings.orchestrator import (
+        SettingsOrchestrator,
+    )
 
-    source = inspect.getsource(MainWindow._save_user_preferences)
-    assert call not in source, f"_save_user_preferences still calls {call}"
+    source = inspect.getsource(SettingsOrchestrator._commit)
+    assert call not in source, f"SettingsOrchestrator._commit calls {call}"
 
 
 def test_the_save_adapter_does_go_through_the_service() -> None:
     """Belt and braces: the absence above is not achieved by deleting the
     save path."""
 
-    from us_quant.desktop import MainWindow
+    from us_quant.desktop_v2.orchestration.system.settings.orchestrator import (
+        SettingsOrchestrator,
+    )
 
-    source = inspect.getsource(MainWindow._save_user_preferences)
+    source = inspect.getsource(SettingsOrchestrator._commit)
     assert "settings_service.commit(" in source
 
 

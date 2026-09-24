@@ -666,14 +666,23 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
     than ``system/`` itself because System is a *containment* route: Runtime
     Events and Settings are two unrelated capabilities that share a page, so a
     ``system/orchestrator.py`` owning both would be the god object the round's
-    brief forbids by name.  Settings is v2O-F2, and the absence of
-    ``orchestration/system/settings/`` is itself asserted by
-    ``tests/test_desktop_runtime_events_orchestration_architecture.py``.
-    ``models.py`` holds one immutable value -- the environment facts the info
-    panel prints -- and ``orchestrator.py`` the single store write, the
-    immediate-or-coalesced repaint, the scheduler seam that makes the coalescing
-    testable without a real timer, and the three presentation signals the window
-    turns into dialogs.
+    brief forbids by name.  ``models.py`` holds one immutable value -- the
+    environment facts the info panel prints -- and ``orchestrator.py`` the single
+    store write, the immediate-or-coalesced repaint, the scheduler seam that makes
+    the coalescing testable without a real timer, and the three presentation
+    signals the window turns into dialogs.
+
+    ``orchestration/system/settings/`` arrived with v2O-F2 as the sibling of the
+    first: the settings view render, the credential save/clear sequencing, the
+    preference transaction adapter, the provider syncs, the capability-toggle
+    confirmations and the two presentation facts (selected API provider,
+    connection-control enable) moved out of ``MainWindow``.  It stays a sibling
+    rather than sharing an owner with ``runtime_events/`` for exactly the reason
+    above, and the absence of ``orchestration/system/orchestrator.py`` is
+    asserted by ``tests/test_desktop_settings_orchestration_architecture.py``.
+    ``models.py`` holds the immutable credential-action contract, ``queries.py``
+    the pure rules (the save decision, the status line, the draft/preferences
+    mappings, the storage view) and ``orchestrator.py`` the sequencing.
     """
 
     desktop_v2 = _SRC / "desktop_v2"
@@ -733,6 +742,10 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "orchestration/system/runtime_events/__init__.py",
         "orchestration/system/runtime_events/models.py",
         "orchestration/system/runtime_events/orchestrator.py",
+        "orchestration/system/settings/__init__.py",
+        "orchestration/system/settings/models.py",
+        "orchestration/system/settings/orchestrator.py",
+        "orchestration/system/settings/queries.py",
         "orchestration/tasking.py",
         "pages/__init__.py",
         "pages/account.py",

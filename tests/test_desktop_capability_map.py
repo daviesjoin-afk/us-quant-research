@@ -240,14 +240,15 @@ def test_the_shadow_row_names_its_capability_owner() -> None:
     assert "v2O-D next" not in row
 
 
-def test_the_system_row_names_the_half_that_moved_and_the_half_that_did_not() -> None:
-    """v2O-F1 landed for Runtime Events, and Settings has not moved.
+def test_the_system_row_names_both_capabilities_and_overclaims_nothing() -> None:
+    """v2O-F1 moved Runtime Events; v2O-F2 moved Settings.
 
-    Two failures are guarded, in opposite directions.  A row that still sends the
-    maintainer to ``desktop.py`` for the event store write, the coalescing or the
-    export sequence would describe owners that no longer exist; a row claiming
-    "System orchestration complete" would be the false claim this round's brief
-    forbids, because the settings half is v2O-F2.
+    Two failures are guarded, in opposite directions.  A row that still sent the
+    maintainer to ``desktop.py`` for the event store write, the coalescing, the
+    settings render or the credential sequencing would describe owners that no
+    longer exist; a row claiming "System orchestration complete" would be a claim
+    neither round may make, because the Gateway/connection probe is still the
+    window's and is re-audited before ``v2O-F`` can be closed.
     """
 
     text = _MAP.read_text(encoding="utf-8")
@@ -255,8 +256,10 @@ def test_the_system_row_names_the_half_that_moved_and_the_half_that_did_not() ->
         line for line in text.splitlines() if line.startswith("| **System**")
     )
     assert "RuntimeEventsOrchestrator" in row
+    assert "SettingsOrchestrator" in row
     assert "v2O-F1 complete" in row
-    assert "v2O-F2 next" in row
+    assert "v2O-F2 complete" in row
+    assert "v2O-F2 next" not in row
     for retired in (
         "MainWindow._record_runtime_event",
         "MainWindow._refresh_runtime_events",
@@ -264,6 +267,10 @@ def test_the_system_row_names_the_half_that_moved_and_the_half_that_did_not() ->
         "MainWindow._resolve_runtime_event",
         "MainWindow._export_terminal_state",
         "MainWindow._last_runtime_export",
+        "MainWindow._publish_settings_view",
+        "MainWindow._settings_api_provider",
+        "MainWindow._connection_settings_enabled",
+        "MainWindow._save_user_preferences",
     ):
         assert retired not in row, retired
     assert "System orchestration complete" not in row

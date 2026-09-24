@@ -40,7 +40,7 @@ _APP = QApplication.instance() or QApplication([])
 #: methods: the gates that decide whether a stop or switch is allowed live on
 #: the window, so the page signals land there first.
 EXPECTED_WIRING = (
-    ("provider_selected", "_stream_provider_selected"),
+    ("provider_selected", "_on_market_provider_selected"),
     ("start_requested", "_request_market_start"),
     ("stop_requested", "_request_market_stop"),
     ("load_scan_watchlist_requested", "_apply_intraday_watchlist"),
@@ -114,7 +114,7 @@ def test_a_real_click_reaches_the_window_handler(monkeypatch) -> None:
             "_request_market_start",
             "_apply_intraday_watchlist",
             "_request_market_stop",
-            "_stream_provider_selected",
+            "_on_market_provider_selected",
         ]
     finally:
         window.close()
@@ -202,7 +202,7 @@ def test_a_saved_settings_preference_lands_on_the_page(
         index = combo.findData("alpaca_iex")
         assert index >= 0
         combo.setCurrentIndex(index)
-        window._save_user_preferences(
+        window.settings_orchestrator.save_preferences(
             window.settings_page.current_draft()
         )
 

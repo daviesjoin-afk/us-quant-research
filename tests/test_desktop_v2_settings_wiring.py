@@ -68,7 +68,7 @@ def test_settings_provider_maps_to_the_api_provider(
         _APP.processEvents()
 
         assert window.market_page.selected_provider() == "ibkr_extended"
-        assert window._settings_api_provider == "ibkr"
+        assert window.settings_orchestrator.selected_api_provider == "ibkr"
         assert page.current_credentials_draft().provider == "ibkr"
     finally:
         window.close()
@@ -270,9 +270,9 @@ def test_ibkr_needs_no_api_key(monkeypatch, tmp_path) -> None:
         messages = _capture(monkeypatch, "information")
         _select_api_provider(window, "ibkr")
 
-        # IBKR has no API key, so the save button is disabled; the window's
+        # IBKR has no API key, so the save button is disabled; the capability's
         # handler must still explain why when it is asked directly.
-        window._save_api_credentials(
+        window.settings_orchestrator.save_credentials(
             window.settings_page.current_credentials_draft()
         )
 
@@ -329,5 +329,209 @@ def test_inactive_provider_credentials_can_be_cleared(
         assert cleared == ["alpaca_iex"]
     finally:
         window.market_orchestrator._worker = None
+        window.close()
+        window.deleteLater()
+
+
+# -- v2O-F2: the capability owns the view, the window owns the fan-out ----
+
+
+def test_the_credential_status_line_is_reprojected_by_the_capability(
+    monkeypatch, tmp_path
+) -> None:
+    """The page's label follows the service on every capability repaint.
+
+    The status service is stubbed *after* the window is built, so the label must
+    change without any window-side call: pointing the provider combo is a page
+    intent, the capability repaints from the live status, and the new text
+    appears.  The provider is moved away and back because the combo's silent
+    setter only reports a real change, and the round trip is what makes the
+    second repaint happen.
+    """
+
+    window = _window(monkeypatch, tmp_path)
+    try:
+        from us_quant.desktop_credentials import CredentialStatus
+
+        _select_api_provider(window, "finnhub_trades")
+        monkeypatch.setattr(
+            window.credential_service,
+            "status",
+            lambda provider: CredentialStatus(
+                provider=provider,
+                requires_api_key=True,
+                api_key_saved=True,
+                api_secret_saved=False,
+            ),
+        )
+
+        # No window call at all: pointing the provider combo is a page intent
+        # that reaches the capability, which repaints from the live status.
+        _select_api_provider(window, "alpaca_iex")
+        _select_api_provider(window, "finnhub_trades")
+
+        assert (
+            window.settings_page.credentials.status_label.text()
+            == "Finnhub：已加密保存"
+        )
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_the_market_route_closes_the_connection_controls_through_the_capability(
+    monkeypatch, tmp_path
+) -> None:
+    """A published market fact, not a window reach-through."""
+
+    window = _window(monkeypatch, tmp_path)
+    try:
+        host = window.settings_page.connection.host_input
+        assert host.isEnabled() is True
+
+        window.market_orchestrator.connection_settings_enabled_changed.emit(False)
+
+        assert window.settings_orchestrator.connection_settings_enabled is False
+        assert host.isEnabled() is False
+
+        window.market_orchestrator.connection_settings_enabled_changed.emit(True)
+
+        assert window.settings_orchestrator.connection_settings_enabled is True
+        assert host.isEnabled() is True
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_a_successful_save_fans_out_through_the_routes_public_api(
+    monkeypatch, tmp_path
+) -> None:
+    """The window restores a saved provider through the market *capability*.
+
+    The route's own renderer is what points the page's combo; the window must
+    not reach into the page, which is why the fan-out goes through
+    ``market_orchestrator.set_selected_provider`` and is counted here.
+    """
+
+    window = _window(monkeypatch, tmp_path)
+    try:
+        calls: list[str] = []
+        real = window.market_orchestrator.set_selected_provider
+
+        def spy(provider: str) -> None:
+            calls.append(provider)
+            real(provider)
+
+        monkeypatch.setattr(
+            window.market_orchestrator, "set_selected_provider", spy
+        )
+        page = window.settings_page
+        combo = page.appearance.provider_combo
+        combo.setCurrentIndex(combo.findData("alpaca_iex"))
+        before = len(calls)
+
+        page.save_button.click()
+
+        assert len(calls) == before + 1, "the save fanned out exactly once"
+        assert calls[-1] == "alpaca_iex"
+        assert window.market_page.selected_provider() == "alpaca_iex"
+        assert window.preferences.market_provider == "alpaca_iex"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_an_accepted_capability_toggle_stays_a_draft(
+    monkeypatch, tmp_path
+) -> None:
+    """Yes keeps the control checked and persists nothing until Save."""
+
+    window = _window(monkeypatch, tmp_path)
+    try:
+        monkeypatch.setattr(
+            "us_quant.desktop.QMessageBox.warning",
+            lambda *args, **kwargs: QMessageBox.Yes,
+        )
+        assert window.preferences.paper_order_capability_enabled is False
+        box = window.settings_page.connection.paper_order_capability
+
+        box.click()
+
+        assert box.isChecked() is True
+        assert window.preferences.paper_order_capability_enabled is False
+        assert window.safety_badge.text() == "只读 · 自动下单关闭"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_an_accepted_extended_hours_toggle_stays_a_draft(
+    monkeypatch, tmp_path
+) -> None:
+    window = _window(monkeypatch, tmp_path)
+    try:
+        monkeypatch.setattr(
+            "us_quant.desktop.QMessageBox.warning",
+            lambda *args, **kwargs: QMessageBox.Yes,
+        )
+        assert window.preferences.extended_hours_paper_enabled is False
+        box = window.settings_page.connection.extended_hours_paper
+
+        box.click()
+
+        assert box.isChecked() is True
+        assert window.preferences.extended_hours_paper_enabled is False
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_a_failed_credential_save_keeps_the_operator_input(
+    monkeypatch, tmp_path
+) -> None:
+    window = _window(monkeypatch, tmp_path)
+    try:
+        warnings = _capture(monkeypatch, "warning")
+
+        def explode(*_args, **_kwargs):
+            raise OSError("dpapi refused")
+
+        monkeypatch.setattr(
+            window.credential_service, "save_provider", explode
+        )
+        _select_api_provider(window, "finnhub_trades")
+        window.settings_page.credentials.finnhub_key.setText("key")
+
+        window.settings_page.credentials.save_button.click()
+
+        assert len(warnings) == 1
+        assert "凭据保存失败" in warnings[0][0][1]
+        # Not cleared and not reported as saved: the input is still there to fix.
+        assert window.settings_page.credentials.finnhub_key.text() == "key"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_the_application_configuration_stays_on_the_composition_root(
+    monkeypatch, tmp_path
+) -> None:
+    """``self.config`` / ``self.preferences`` are not the capability's."""
+
+    window = _window(monkeypatch, tmp_path)
+    try:
+        orchestrator = window.settings_orchestrator
+        assert not hasattr(orchestrator, "config")
+        assert not hasattr(orchestrator, "preferences")
+
+        window.settings_page.connection.host_input.setText("localhost")
+        window.settings_page.save_button.click()
+
+        assert window.preferences.ibkr_host == "localhost"
+        assert window.config.ibkr.host == "localhost"
+        # The capability still has no copy of either.
+        assert not hasattr(orchestrator, "config")
+        assert not hasattr(orchestrator, "preferences")
+    finally:
         window.close()
         window.deleteLater()

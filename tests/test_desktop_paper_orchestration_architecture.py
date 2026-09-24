@@ -1005,6 +1005,51 @@ def test_the_rollback_gives_the_reservation_back_before_disposing() -> None:
     assert not _raises(_SERVICE_PATH, "cancel_candidate_promotion")
 
 
+def test_the_rollback_stops_when_the_promotion_cannot_be_released() -> None:
+    """The cancel's answer is a control signal, not a log line.
+
+    ``cancel_candidate_promotion`` reports whether it gave the slot back, and the
+    orchestrator has to act on a ``False``.  Completing the rollback on an unproven
+    cancel would dispose of a service that may still own the slot, reject the plan and
+    release PAPER -- the lease shared with Shadow -- so an armed channel could survive
+    while the workflow reports ``READY`` and nothing excludes Shadow.
+    """
+
+    source = _function_source(_ORCHESTRATOR_PATH, "_arm_and_publish")
+    assert "if not self._paper_trading.cancel_candidate_promotion(reservation):" in source
+    # The gate must precede the disposal, or the completion it forbids has already run.
+    gate = source.index("if not self._paper_trading.cancel_candidate_promotion(")
+    discard = source.index("self._discard_candidate(")
+    assert gate < discard
+
+    # And the handler it routes to unwinds nothing.
+    handler = _called_and_attributed(_ORCHESTRATOR_PATH, "_fail_to_release_promotion")
+    for forbidden in (
+        "discard_candidate",
+        "reject_connecting",
+        "clear_active",
+        "disconnect",
+    ):
+        assert forbidden not in handler, (forbidden, sorted(handler))
+
+
+def test_the_reservation_gates_the_clear_of_the_active_slot() -> None:
+    """``clear_active`` is the other way to empty the slot, so it must honour the claim.
+
+    Asserted on the service module, because this is the invariant that makes a
+    reservation a *lock* rather than a comment: the clear has to consult the
+    outstanding promotion before it removes the owner.  Without it a finalization or
+    recovery caller could empty the slot between the reserve and the commit, and the
+    launch would publish a session whose owner had already been dropped.
+    """
+
+    source = _SERVICE_PATH.read_text(encoding="utf-8")
+    body = source[source.index("def clear_active(") :]
+    body = body[: body.index("\n    def ", 1)]
+    assert "_promotion_reservation" in body
+    assert body.index("_promotion_reservation") < body.index("self._order_service = None")
+
+
 def test_nothing_between_publication_and_the_commit_can_yield_control() -> None:
     """The published-but-unclaimed instant must not contain an observer.
 

@@ -251,6 +251,8 @@ class _Trading:
         self.discard_error: Exception | None = None
         self.reserve_error: Exception | None = None
         self.commit_error: Exception | None = None
+        # Models ``cancel_candidate_promotion`` answering "I released nothing".
+        self.would_refuse_cancel = False
 
     def connect_candidate(self, candidate_id: str, **kwargs: object) -> object:
         if self.connect_error is not None:
@@ -305,7 +307,7 @@ class _Trading:
         self.promoted.append(reservation.candidate_id)
 
     def cancel_candidate_promotion(self, reservation: _Reservation) -> bool:
-        if self._promotion is not reservation:
+        if self.would_refuse_cancel or self._promotion is not reservation:
             return False
         service = self._active
         self._active = None
@@ -1128,6 +1130,46 @@ def test_a_publish_failure_gives_the_reservation_back_and_rolls_back() -> None:
     assert harness.workflow.published == []
     assert harness.events.publications == []
     assert harness.events.refusals[-1][0] == messages.LAUNCH_FAILED_TITLE
+
+
+def test_a_rollback_that_cannot_give_the_slot_back_stays_in_flight() -> None:
+    """If the ownership cannot be shown to have returned, nothing else runs.
+
+    Finishing the rollback on an unproven ``cancel`` would dispose of a service that
+    may still own the slot, reject the plan and release PAPER -- the lease shared with
+    Shadow -- leaving an armed channel alive while the workflow reports ``READY`` and
+    nothing excludes Shadow.  Measured on the real wiring before this guard existed:
+    exactly that, with an ordinary "launch failed" as the only operator-visible line.
+
+    So the attempt stays in flight.  A stuck launch is visible and actionable; a
+    silently free lease protecting nothing is not.
+    """
+
+    workflow = _Workflow()
+    workflow.publish_error = WorkflowStateError("Stale or invalid publication.")
+    trading = _Trading()
+    trading.would_refuse_cancel = True
+    harness = _build(workflow=workflow, trading=trading)
+
+    _launch(harness)
+
+    # Nothing was unwound, and the attempt is still the attempt.
+    assert harness.workflow.phase is PaperWorkflowPhase.CONNECTING
+    assert harness.workflow.active_plan is not None
+    assert harness.workflow.lease.active is True
+    assert harness.workflow.lease.released == 0
+    # Not disposed, not rejected, not re-armed by a newer attempt's controls.
+    assert harness.trading.discarded == []
+    assert harness.trading.active is not None
+    assert harness.trading.cancelled == []
+    assert harness.arm_clears == []
+    assert harness.events.publications == []
+    # And it is loud, under a code of its own rather than the published-session one.
+    assert harness.events.refusals[-1][0] == messages.PAPER_LAUNCH_ROLLBACK_TITLE
+    event = harness.events.runtime_events[-1]
+    assert event.code == messages.PAPER_LAUNCH_ROLLBACK_CODE
+    assert event.severity == "error"
+    assert "Stale or invalid publication." in harness.events.refusals[-1][1]
 
 
 def test_a_runtime_build_failure_discards_the_candidate() -> None:

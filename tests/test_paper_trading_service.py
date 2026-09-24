@@ -734,6 +734,90 @@ def test_a_cancelled_reservation_leaves_the_slot_reservable_again() -> None:
     assert boundary.reserve_candidate_promotion("attempt-1") is not None
 
 
+# -- a reservation locks the slot -----------------------------------------
+
+
+def test_clearing_is_refused_while_a_promotion_is_reserved() -> None:
+    """``clear_active`` is the other public way to empty the slot, so it must refuse.
+
+    Without this refusal the reservation merely *intends* to lock the slot: a
+    finalization or recovery caller could empty it between the reserve and the commit,
+    and the launch would publish a session whose owner had already been dropped --
+    the ownerless ``RUNNING`` state the two-phase promotion exists to prevent,
+    reachable again through a different public method.
+    """
+
+    service = _FakeService()
+    boundary, reservation = _reserved(service)
+    boundary.disconnect()  # not a finalization: the socket goes, the session does not
+
+    with pytest.raises(
+        PaperTradingLifecycleError, match="holds the promotion reservation"
+    ):
+        boundary.clear_active()
+
+    # Nothing moved: still owned, and still the same live claim.
+    assert boundary.has_order_service() is True
+    boundary.commit_candidate_promotion(reservation)
+    assert boundary.has_order_service() is True
+
+
+def test_clearing_is_refused_before_it_even_reads_the_connection() -> None:
+    """The refusal is a whole-call no-op, not something that happens late.
+
+    A live connection is refused too, but for a different reason and by a different
+    check; the reservation refusal must come first so a caller cannot learn anything
+    about the connection state from a slot that is not theirs to inspect.
+    """
+
+    service = _FakeService()
+    boundary, _reservation = _reserved(service)
+    assert boundary.is_connected() is True
+
+    with pytest.raises(
+        PaperTradingLifecycleError, match="holds the promotion reservation"
+    ):
+        boundary.clear_active()
+
+    assert service.disconnect_calls == 0
+    assert boundary.has_order_service() is True
+
+
+def test_commit_refuses_when_the_reserved_slot_was_lost() -> None:
+    """The second half of the lock: a commit must not declare an empty slot owned.
+
+    ``clear_active`` refusing a reserved slot is what makes this unreachable, so the
+    state is built directly -- this guard is the reason "a reservation locks the slot"
+    is a property rather than a comment, and it has to be exercised even though nothing
+    can reach it.
+    """
+
+    first, second = _FakeService(), _FakeService()
+    boundary = _service(factory=_FakeFactory(first, second))
+    boundary.connect_candidate(
+        "attempt-1", config=object(), repository=object(), extended_hours_enabled=False
+    )
+    reservation = boundary.reserve_candidate_promotion("attempt-1")
+    # Unreachable through the public API; constructed to exercise the guard.
+    boundary._order_service = None
+
+    with pytest.raises(
+        PaperTradingLifecycleError, match="no longer holds the active slot"
+    ):
+        boundary.commit_candidate_promotion(reservation)
+
+    assert boundary.has_order_service() is False
+    # The claim is deliberately left standing: the owner cannot be accounted for, so
+    # nothing here may hand the slot back for reuse.
+    boundary.connect_candidate(
+        "attempt-2", config=object(), repository=object(), extended_hours_enabled=False
+    )
+    with pytest.raises(
+        PaperTradingLifecycleError, match="already holds the promotion reservation"
+    ):
+        boundary.reserve_candidate_promotion("attempt-2")
+
+
 # -- active lifecycle ----------------------------------------------------
 
 

@@ -35,6 +35,8 @@ from us_quant.desktop import MainWindow
 from us_quant.desktop_v2.orchestration.paper.models import (
     DUPLICATE_MESSAGE,
     DUPLICATE_TITLE,
+    PAPER_LAUNCH_ROLLBACK_CODE,
+    PAPER_LAUNCH_ROLLBACK_TITLE,
     PAPER_PROMOTION_INVARIANT_CODE,
     PAPER_STRATEGY_INTEGRITY_CODE,
     PAPER_STRATEGY_INTEGRITY_TITLE,
@@ -669,3 +671,111 @@ def test_a_publication_failure_releases_the_promotion_for_the_next_launch(
     assert window.paper_trading.has_order_service() is True
     assert window.paper_workflow.lease is ExecutionLease.PAPER
     _assert_never_ownerless_while_running(window)
+
+
+# -- the rollback's own invariant ---------------------------------------
+
+
+def _assert_rollback_refused(window: MainWindow) -> None:
+    """A rollback that cannot prove the ownership returned unwinds nothing."""
+
+    assert window.paper_trading.phase() is PaperWorkflowPhase.CONNECTING
+    assert window.paper_workflow.active_plan is not None
+    assert window.paper_workflow.lease is ExecutionLease.PAPER
+    assert window.paper_trading.has_order_service() is True
+    assert window.execution_page.arm_confirmed() is True
+
+
+def test_a_rollback_that_cannot_give_the_slot_back_keeps_the_lease(
+    window: MainWindow,
+) -> None:
+    """Publication refused *and* the promotion not shown to have returned.
+
+    The dangerous completion is the one this forbids: dispose the candidate, reject the
+    plan and release PAPER, while an armed channel may still hold the slot and nothing
+    excludes Shadow.  Measured on this wiring before the guard existed: ``READY``,
+    ``lease NONE``, the active owner still held, the armed channel still alive, and an
+    ordinary "launch failed" as the only operator-visible line.
+
+    Since the lease is shared with Shadow, releasing it here would be the one
+    unforgivable move -- so the fault is reported and the attempt stays in flight.
+    """
+
+    window.paper_workflow.publish_armed = _raising(
+        "Stale or invalid Paper launch publication.",
+        error=WorkflowStateError,
+    )
+    window.paper_trading.cancel_candidate_promotion = lambda _reservation: False
+
+    _launch(window)  # must not raise out of the Qt slot
+
+    _assert_rollback_refused(window)
+    assert window._test_refusals[-1][0] == PAPER_LAUNCH_ROLLBACK_TITLE
+    assert window._test_events[-1].code == PAPER_LAUNCH_ROLLBACK_CODE
+    assert window._test_events[-1].severity == "error"
+    # And it is its own code: an ownerless *live* session and a stuck launch are
+    # different situations for whoever is on call.
+    assert window._test_events[-1].code != PAPER_PROMOTION_INVARIANT_CODE
+    # The operator's own words are the launch error plus what could not be undone.
+    assert "Stale or invalid Paper launch publication." in window._test_refusals[-1][1]
+
+
+def test_a_refused_clear_cannot_be_reached_between_the_reserve_and_the_commit(
+    window: MainWindow,
+) -> None:
+    """``clear_active`` refuses a reserved slot, so the launch keeps its owner.
+
+    The other public way to empty the active slot, driven at the one instant it would
+    matter: after the reserve, before publication.  Without the refusal the launch
+    publishes a session whose owner has already been dropped -- the ownerless
+    ``RUNNING`` state, re-entered through a different method.
+    """
+
+    real_publish = window.paper_workflow.publish_armed
+
+    def steal_then_publish(*args, **kwargs):
+        window.paper_trading.disconnect()
+        window.paper_trading.clear_active()  # must refuse
+        return real_publish(*args, **kwargs)
+
+    window.paper_workflow.publish_armed = steal_then_publish
+    window._test_refusals.clear()
+
+    _launch(window)
+
+    # The theft was refused, so publication never ran and the attempt rolled back
+    # the ordinary way: nothing owned, nothing published, nothing leased.
+    _assert_rolled_back(window)
+    assert window.trading_runtime is None
+    _assert_never_ownerless_while_running(window)
+
+
+def test_a_stuck_launch_is_not_closed_over_silently(window: MainWindow) -> None:
+    """``clear_active``'s refusal must not escape ``closeEvent``.
+
+    The close path calls ``clear_active`` unguarded, so a slot the service refuses to
+    release turned into an exception thrown out of the Qt override -- and because
+    ``runtime_supervisor.begin_shutdown()`` runs first, everything after the Paper gate
+    (shadow shutdown, heartbeats, the market stream, the worker joins) was skipped
+    while the window still went away.
+    """
+
+    window.paper_workflow.publish_armed = _raising(
+        "Stale or invalid Paper launch publication.",
+        error=WorkflowStateError,
+    )
+    window.paper_trading.cancel_candidate_promotion = lambda _reservation: False
+    _launch(window)
+    _assert_rollback_refused(window)
+
+    torn_down: list[str] = []
+    window.shadow_orchestrator.shutdown = lambda *a, **k: torn_down.append("shadow")
+    window.runtime_supervisor.shutdown = lambda *a, **k: torn_down.append("supervisor")
+
+    closed = window.close()  # must not raise
+
+    # Refused, so nothing was torn down and the ownership is still on the books.
+    assert closed is False
+    assert torn_down == []
+    assert window.paper_trading.has_order_service() is True
+    assert window.paper_workflow.lease is ExecutionLease.PAPER

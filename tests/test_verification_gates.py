@@ -22,8 +22,8 @@ not fail here, but a *semantic* edit must.  So each check names the property it
 protects (which invocation, under which condition) instead of pinning a line.
 
 What this file deliberately does not do: run ``verify.ps1`` end to end.  That is
-what CI does, on both Python versions, and a nested full suite inside the suite
-would double the runtime this round exists to reduce.
+what CI does, on the primary Python version, and a nested full suite inside the
+suite would double the runtime this round exists to reduce.
 """
 
 from __future__ import annotations
@@ -358,16 +358,32 @@ def test_parallel_uses_loadscope() -> None:
 # -- CI -----------------------------------------------------------------
 
 
-def test_ci_still_covers_both_python_versions() -> None:
-    """Dropping 3.13 to a smoke subset would save little and remove the gate."""
+def test_ci_gates_the_primary_python_version_and_nothing_else() -> None:
+    """Exactly one interpreter gates a pull request, and it is the primary one.
+
+    This guard is the **inverse** of the one it replaces, deliberately.  It used to
+    require ``["3.12", "3.13"]``, because the point then was "every supported version runs
+    the complete suite".  The point now is "one interpreter is the gate, and it is the one
+    the project is developed on" -- so the same assertion, still stated literally, had to
+    be inverted rather than dropped: re-adding a retired version is a policy change and
+    should be a deliberate edit *here*, not a quiet append to a list.
+
+    ``requires-python`` is deliberately not checked.  Which interpreter CI gates and which
+    interpreters the package claims to support are two different numbers; support metadata
+    is retired in its own staged round, and coupling them here would force them to move
+    together.
+    """
 
     text = _ci_text()
-    assert 'python-version: ["3.12", "3.13"]' in text
+    assert 'python-version: ["3.14"]' in text
     assert "fail-fast: false" in text
+    # Neither retired version is gated any more -- as a matrix entry or as a second job.
+    assert '"3.12"' not in text
+    assert '"3.13"' not in text
 
 
-def test_ci_runs_the_full_suite_on_both_versions() -> None:
-    """Same command for both: no ``-k``, no path subsetting, no marker filter."""
+def test_ci_runs_the_complete_suite_in_the_gated_job() -> None:
+    """No ``-k``, no path subsetting, no marker filter: the whole suite, once."""
 
     text = _ci_text()
     pytest_steps = re.findall(r"run: python -m pytest[^\n]*", text)

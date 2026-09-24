@@ -711,6 +711,7 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "orchestration/paper/models.py",
         "orchestration/paper/queries.py",
         "orchestration/paper/orchestrator.py",
+        "orchestration/paper/presentation.py",
         "orchestration/tasking.py",
         "pages/__init__.py",
         "pages/account.py",
@@ -726,6 +727,7 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "pages/execution/models.py",
         "pages/execution/page.py",
         "pages/execution/presenter.py",
+        "pages/execution/projector.py",
         "pages/execution/rows.py",
         "pages/execution/tables.py",
         "pages/market/__init__.py",
@@ -2580,9 +2582,9 @@ PAPER_RECOVERY = RUNTIME_DIR / "recovery.py"
 PAPER_COORDINATOR = RUNTIME_DIR / "coordinator.py"
 PAPER_WORKFLOW_STATE = RUNTIME_DIR / "workflow_state.py"
 PAPER_WORKFLOW = RUNTIME_DIR / "workflow.py"
-#: The v2O-E1 launch capability.  Guard N reads it because the launch transitions
-#: moved there from ``desktop.py``; the recovery half is still asserted on the
-#: window, where it will stay until v2O-E3.
+#: The v2O-E launch capability.  Guard N reads it because the launch transitions
+#: moved there from ``desktop.py``; the recovery/finalization half joined it in v2O-E3,
+#: and v2O-E4 added the presentation projection (``presentation.py``) beside it.
 PAPER_ORCHESTRATOR = (
     _SRC / "desktop_v2" / "orchestration" / "paper" / "orchestrator.py"
 )
@@ -3406,6 +3408,7 @@ EXECUTION_PAGE = EXECUTION_PAGE_DIR / "page.py"
 EXECUTION_CONTROLS = EXECUTION_PAGE_DIR / "controls.py"
 EXECUTION_MODELS = EXECUTION_PAGE_DIR / "models.py"
 EXECUTION_PRESENTER = EXECUTION_PAGE_DIR / "presenter.py"
+EXECUTION_PROJECTOR = EXECUTION_PAGE_DIR / "projector.py"
 EXECUTION_ROWS = EXECUTION_PAGE_DIR / "rows.py"
 EXECUTION_TABLES = EXECUTION_PAGE_DIR / "tables.py"
 
@@ -3413,6 +3416,7 @@ EXECUTION_PAGE_MODULES = (
     EXECUTION_PAGE_DIR / "__init__.py",
     EXECUTION_MODELS,
     EXECUTION_PRESENTER,
+    EXECUTION_PROJECTOR,
     EXECUTION_ROWS,
     EXECUTION_TABLES,
     EXECUTION_CONTROLS,
@@ -3421,11 +3425,14 @@ EXECUTION_PAGE_MODULES = (
 
 #: Line budgets.  A page that only bites at the shared 500-line ceiling would
 #: not have caught the 416-line builder this round replaced, so each file has
-#: its own, well under it.
+#: its own, well under it.  ``projector.py`` joined the package in v2O-E4 with
+#: the session read model the window used to assemble, and its budget is sized
+#: for that one job: the scoping, the two journal joins and one entry point.
 EXECUTION_MODULE_LINE_LIMITS = {
     "__init__.py": 40,
     "models.py": 220,
     "presenter.py": 320,
+    "projector.py": 240,
     "rows.py": 350,
     "tables.py": 320,
     "controls.py": 360,

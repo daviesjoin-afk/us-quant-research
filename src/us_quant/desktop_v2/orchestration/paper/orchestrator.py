@@ -9,8 +9,14 @@ Recovery and finalization: ``HALTED`` -> manual reconciliation -> one-shot evide
 an explicit operator confirmation -> the existing session resumed; ``STOPPING`` -> the
 zero-state proof (captured *before* the disconnect, confirmed *after* it) -> the
 workflow's own ``finalize_if_safe`` gate -> the active Paper ownership released -> PAPER
-released.  What is left for v2O-E4 is presentation: the final execution render
-ownership and ``MainWindow``'s overall closure.
+released.
+
+Presentation: every published result is projected into the one immutable
+:class:`~us_quant.desktop_v2.orchestration.paper.presentation.PaperPresentationSnapshot`
+the execution route draws, and that projection is retained here -- because
+``finalize_if_safe`` clears the canonical result, and a route reading it would blank out
+at the moment a session ends.  The projection itself is a pure function in its own
+module, so this class sequences and does not assemble views.
 
 Three rules matter more than the rest:
 
@@ -62,6 +68,7 @@ from typing import TYPE_CHECKING, Any
 from PySide6.QtCore import QObject, Signal
 
 from us_quant.desktop_v2.orchestration.paper import queries
+from us_quant.desktop_v2.orchestration.paper import presentation as paper_presentation
 from us_quant.desktop_v2.orchestration.paper.models import (
     ARMED_EVENT_MESSAGE,
     ARMING_FAILED_MESSAGE,
@@ -131,6 +138,10 @@ from us_quant.trading.runtime.workflow_state import (
 )
 
 if TYPE_CHECKING:
+    from us_quant.desktop_v2.orchestration.paper.models import PaperControlFacts
+    from us_quant.desktop_v2.orchestration.paper.presentation import (
+        PaperPresentationSnapshot,
+    )
     from us_quant.trading.application.paper.models import PaperPromotionReservation
     from us_quant.trading.application.paper.service import PaperTradingService
     from us_quant.trading.runtime.models import AutoQuantCandidate
@@ -163,10 +174,14 @@ class PaperOrchestrator(QObject):
 
     It is a **sequencing owner**, not a second state owner.  What it keeps is only what
     nothing else can: the next attempt's sequence number, the monotonic stamp of the
-    last stream ingress the poll suppression reads, and the two flags that decide whether
-    *this object* already has a zero-state proof in flight.  All four are bookkeeping
-    about this object's own calls; none is a fact about the session, and every question
-    about the session is answered by reading the workflow.
+    last stream ingress the poll suppression reads, the two flags that decide whether
+    *this object* already has a zero-state proof in flight, and -- since v2O-E4 -- the
+    last published presentation projection.  The first four are bookkeeping about this
+    object's own calls; the fifth is the one retained *presentation* fact, and it is
+    retained precisely because the canonical result it projects is cleared when PAPER is
+    released.  Neither is a fact about the session: every question about the session is
+    still answered by reading the workflow, the order-service owner or the broker, and
+    no business path may read the presentation projection at all.
     """
 
     #: A start was refused before anything was built; the window shows the dialog.
@@ -288,6 +303,18 @@ class PaperOrchestrator(QObject):
         # suppresses the first proof -- which is the one the close needs.
         self._finalization_inflight = False
         self._last_finalization_started: float | None = None
+        # v2O-E4's one retained presentation fact, and not session truth: it is the last
+        # result this object published, projected into the immutable view the execution
+        # route draws.  It exists because ``finalize_if_safe`` clears the canonical
+        # result as part of releasing PAPER, so reading the workflow after that would
+        # blank a page the operator is still reading.
+        #
+        # What keeps it honest is the shape rather than a rule: there is no method that
+        # clears it, and its only writer is the one result publication path.  So no
+        # transition -- PREPARING, CONNECTING, a failed connect, a finalized session --
+        # can blank the route by hand, and nothing can fabricate a transition by patching
+        # a field.  No business path may read it; see :attr:`presentation`.
+        self._presentation: PaperPresentationSnapshot | None = None
 
     # -- lifecycle -------------------------------------------------------
 
@@ -338,6 +365,47 @@ class PaperOrchestrator(QObject):
         result = self._workflow.result
         return queries.runtime_obligations(
             result.engine_snapshot if result is not None else None
+        )
+
+    @property
+    def presentation(self) -> PaperPresentationSnapshot | None:
+        """The last published presentation fact: what the execution route should draw.
+
+        Deliberately **not** the workflow's result.  ``finalize_if_safe`` clears the
+        canonical result as part of releasing PAPER, so a route that read it would blank
+        out at the moment a session ends -- exactly when the operator wants to read what
+        just happened.  This is the retained projection instead, and the two are
+        different kinds of fact: one is the current session truth, the other is the last
+        fact this capability published *for display*.
+
+        It is a presentation read and nothing else.  No launch gate, no stop, no
+        reconciliation, no finalization, no ownership or lease decision and no risk or
+        execution path may consult it; every one of those reads the canonical phase,
+        the order-service owner or the broker, never this.
+        """
+
+        return self._presentation
+
+    @property
+    def session_control_facts(self) -> PaperControlFacts:
+        """Which session controls the *canonical* phase makes available, as booleans.
+
+        One of the delegated questions other capabilities ask, and the reason the window
+        no longer compares phase values to publish the route's controls: which phase
+        enables which button is a Paper rule, and it belongs beside the phase machine
+        rather than on a presentation path in the window.
+
+        Read from the workflow and the order-service owner *now*, never from
+        :attr:`presentation`: a retained view of the last session may legitimately show
+        ``active=False`` while a launch is in flight, and enabling controls from it would
+        be the "retained presentation decides a launch" failure this round forbids.
+        """
+
+        return queries.control_facts(
+            self._workflow.phase,
+            awaiting_confirmation=(
+                self._paper_trading.reconciliation_status().awaiting_confirmation
+            ),
         )
 
     def start(self) -> None:
@@ -754,6 +822,7 @@ class PaperOrchestrator(QObject):
         ever recorded twice for one operation.
         """
 
+        self._retain_presentation(result)
         self.result_changed.emit(result)
         for event in result.events:
             self.runtime_event_requested.emit(
@@ -765,6 +834,29 @@ class PaperOrchestrator(QObject):
                 )
             )
         self._after_result(result)
+
+    def _retain_presentation(self, result: PaperSessionResult) -> None:
+        """Replace the retained presentation fact -- from a real result, and only so.
+
+        The one writer, and it runs *before* the result is published so a handler
+        rendering on ``result_changed`` sees the new view rather than the previous one.
+
+        Two properties are structural here rather than enforced elsewhere:
+
+        * **there is no clear.**  No method, signal or branch takes the retained fact
+          away, so a transition with no result -- PREPARING, CONNECTING, a refused
+          launch, a failed connect -- cannot blank the route.  That is exactly the rule
+          the round requires: the last displayable session survives until a *new*
+          displayable session replaces it;
+        * **a publication with nothing to draw keeps the previous fact.**  A result that
+          carries no engine snapshot has nothing to show, and showing "nothing" would be
+          the same blanking failure reached the other way.
+        """
+
+        projection = paper_presentation.project_presentation(result)
+        if projection is None:
+            return
+        self._presentation = projection
 
     def _after_result(self, result: PaperSessionResult) -> None:
         """The one place a published result's consequences are decided.

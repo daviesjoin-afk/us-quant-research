@@ -72,15 +72,19 @@ def test_the_declared_columns_are_present() -> None:
         assert column in text, column
 
 
-def test_the_paper_row_names_the_launch_capability_and_stays_partial() -> None:
-    """v2O-E1 landed the *launch*, v2O-E2 the active run, and the row says exactly that.
+def test_the_paper_row_names_the_capability_and_claims_the_whole_round() -> None:
+    """v2O-E is complete, and the row says exactly what moved.
 
-    Two failures are guarded, in opposite directions.  A row that still said the
-    session's polling, ingress or controls were the window's would send the next
-    maintainer to ``desktop.py`` for sequences that are no longer there; a row that said
-    "v2O-E complete" would claim the recovery, finalization and render ownership had
-    moved when they have not -- v2O-E3 and v2O-E4 are still ahead.  These rounds are
-    deliberately partial, so the status must stay partial too.
+    Two failures are guarded, in opposite directions, and the pair is why this test
+    exists rather than a one-line status check.  A row that still said the session's
+    polling, ingress, controls, recovery, finalization or *presentation cache* were the
+    window's would send the next maintainer to ``desktop.py`` for facts and sequences that
+    are no longer there; a row claiming "v2O-E complete" while any of those was still the
+    window's would be the false claim the round exists to retire.
+
+    Since v2O-E4 all four halves have moved -- launch (E1), active run (E2),
+    recovery/finalization/shutdown (E3) and presentation/render (E4) -- so the status is
+    complete and every retired owner has to be absent from the row.
     """
 
     text = _MAP.read_text(encoding="utf-8")
@@ -88,11 +92,10 @@ def test_the_paper_row_names_the_launch_capability_and_stays_partial() -> None:
         line for line in text.splitlines() if line.startswith("| **Paper**")
     )
     assert "PaperOrchestrator" in row
-    assert "v2O-E1 launch orchestration complete" in row
-    assert "v2O-E2 active runtime orchestration complete" in row
-    assert "v2O-E partial" in row
-    # The window must no longer be described as the owner of the launch *or* of the
-    # active session's run...
+    assert "v2O-E complete" in row
+    assert "v2O-E partial" not in row
+    # The window must no longer be described as the owner of the launch, of the active
+    # session's run, or of the presentation fact the route draws.
     for retired in (
         "MainWindow._start_auto_quant",
         "MainWindow._auto_order_service_connected",
@@ -100,10 +103,14 @@ def test_the_paper_row_names_the_launch_capability_and_stays_partial() -> None:
         "MainWindow._pause_auto_quant_entries",
         "MainWindow._resume_auto_quant_entries",
         "MainWindow._stop_auto_quant",
+        "MainWindow._paper_render_snapshot",
     ):
         assert retired not in row, retired
-    # ...and the round must not claim the whole capability is done.
-    assert "v2O-E complete" not in row
+    # And the retained presentation fact is named as the capability's, with the reason it
+    # exists beside it -- a reader who finds only "the orchestrator owns presentation"
+    # cannot tell why the window may not cache it.
+    assert "paper_orchestrator.presentation" in row
+    assert "finalize_if_safe" in row
     assert "not started" not in row
 
 

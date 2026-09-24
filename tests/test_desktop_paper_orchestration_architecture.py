@@ -61,6 +61,9 @@ _PAPER_DIR = _SRC / "desktop_v2" / "orchestration" / "paper"
 _ORCHESTRATOR_PATH = _PAPER_DIR / "orchestrator.py"
 _QUERIES_PATH = _PAPER_DIR / "queries.py"
 _MODELS_PATH = _PAPER_DIR / "models.py"
+_PRESENTATION_PATH = _PAPER_DIR / "presentation.py"
+_EXECUTION_DIR = _SRC / "desktop_v2" / "pages" / "execution"
+_PROJECTOR_PATH = _EXECUTION_DIR / "projector.py"
 _SERVICE_PATH = _SRC / "trading" / "application" / "paper" / "service.py"
 
 #: The launch state and helpers the extraction deleted rather than shimmed.
@@ -129,6 +132,19 @@ RETIRED_WINDOW_E3_STATE = (
     "_paper_finalization_inflight",
     "_last_paper_finalization_started",
 )
+
+#: The window state v2O-E4 deleted, and the round's whole point.  ``_paper_render_snapshot``
+#: was the presentation-only cache the window kept so a page opened after a session ended
+#: still showed the session it was reporting on.  It was *presentation* and it was
+#: documented as such -- and it was still a second place that owned a Paper session fact,
+#: with ``finalize_if_safe`` clearing the canonical result underneath it.
+#:
+#: The retained view now belongs to the capability (``PaperOrchestrator.presentation``,
+#: built only by ``presentation.project_presentation``), so the name may not reappear here
+#: as an attribute, as a property, as an alias or as a compatibility shim.  Checked as
+#: *declared* names rather than as text, because this file's own comments legitimately name
+#: the retired cache while explaining why it is gone.
+RETIRED_WINDOW_E4_STATE = ("_paper_render_snapshot",)
 
 #: The workflow calls the window may no longer make on the recovery or finalization
 #: paths' behalf.  Each is a *decision* about a session rather than a presentation step,
@@ -310,7 +326,11 @@ FORBIDDEN_QT_NAMES = (
 #: The orchestrator's public surface, asserted exactly in both directions.  Methods
 #: and properties are both *intents or delegated questions*: the five operations a
 #: session's run is driven by, the three recovery/finalization operations v2O-E3 added,
-#: and the three questions other capabilities ask about it.
+#: and the questions other capabilities ask about it.
+#:
+#: v2O-E4 added ``presentation`` -- the retained immutable view the execution route
+#: draws -- and ``session_control_facts``, which answers "which session controls may be
+#: offered?" so the window no longer compares phase values to publish them.
 PUBLIC_SURFACE = (
     "start",
     "on_market_snapshot",
@@ -324,6 +344,8 @@ PUBLIC_SURFACE = (
     "result",
     "runtime_active",
     "has_runtime_obligations",
+    "presentation",
+    "session_control_facts",
 )
 
 #: The Qt signals the window relies on.  ``result_changed`` carries the workflow's own
@@ -504,6 +526,24 @@ def _function_source(path: pathlib.Path, name: str) -> str:
     """The source of one ``PaperOrchestrator`` method, for ordering assertions."""
 
     return _method_source(path, name, class_name="PaperOrchestrator")
+
+
+def _module_function_source(path: pathlib.Path, name: str) -> str:
+    """The source of one *module-level* function.
+
+    ``queries`` is a module of rules rather than a class: ``freeze_launch``,
+    ``launch_attempt_in_flight`` and ``control_facts`` are plain functions there, so a
+    class-scoped lookup cannot find them.
+    """
+
+    source = path.read_text(encoding="utf-8")
+    for node in _tree(path).body:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name
+        ):
+            return ast.get_source_segment(source, node) or ""
+    raise AssertionError(f"{name} not found in {path.name}")
 
 
 def _method_source(
@@ -701,13 +741,27 @@ def test_the_window_no_longer_decides_staleness() -> None:
 
 
 def test_the_launch_gate_reads_the_workflow_phase() -> None:
-    """``_launch_locked`` reads the canonical phase, not a mirrored plan."""
+    """``_launch_locked`` reads the canonical phase, through the capability's own rule.
 
-    source = _DESKTOP_PATH.read_text(encoding="utf-8")
-    start = source.index("def _launch_locked")
-    end = source.index("def ", start + 10)
-    gate = source[start:end]
-    assert "self.paper_trading.phase() is PaperWorkflowPhase.CONNECTING" in gate
+    The window must still read the *canonical* phase -- a launch gate may not be decided
+    from a retained presentation fact -- but v2O-E4 stopped it from interpreting the phase
+    value itself: ``queries.launch_attempt_in_flight`` is the one definition of "an attempt
+    owns the connect step", and it is equivalent to the retired
+    ``_active_auto_launch_plan is not None`` while staying correct after publication.
+
+    Asserted in both directions: the canonical read is present, and no phase *value* is
+    named here.  A window that compared ``PaperWorkflowPhase.CONNECTING`` again would be
+    re-implementing a Paper rule, and one that stopped reading the phase at all would let
+    a second launch through during a connect.
+    """
+
+    gate = _method_source(_DESKTOP_PATH, "_launch_locked")
+    assert "launch_attempt_in_flight(self.paper_trading.phase())" in gate
+    assert "PaperWorkflowPhase" not in gate
+    # And the rule has exactly one definition, in the capability.
+    assert "return phase is PaperWorkflowPhase.CONNECTING" in _module_function_source(
+        _QUERIES_PATH, "launch_attempt_in_flight"
+    )
 
 
 # -- Guard A2: the window left the active session ------------------------
@@ -1061,9 +1115,14 @@ def test_the_orchestrator_imports_only_qtcore() -> None:
 
 
 def test_the_queries_and_models_modules_are_qt_free() -> None:
-    """These two carry rules, facts and wording; neither has business importing Qt."""
+    """These three carry rules, facts, wording and one projection; none wants Qt.
 
-    for path in (_QUERIES_PATH, _MODELS_PATH):
+    ``presentation`` joined them in v2O-E4: it holds the retained immutable view and the
+    pure projection that builds it, so it must be loadable -- and testable -- without a
+    widget toolkit, exactly like the rules beside it.
+    """
+
+    for path in (_QUERIES_PATH, _MODELS_PATH, _PRESENTATION_PATH):
         modules = _imports(path)
         assert not any(
             module == "PySide6" or module.startswith("PySide6.")
@@ -1071,7 +1130,7 @@ def test_the_queries_and_models_modules_are_qt_free() -> None:
         ), path.name
 
 
-@pytest.mark.parametrize("name", ("queries.py", "models.py"))
+@pytest.mark.parametrize("name", ("queries.py", "models.py", "presentation.py"))
 def test_the_qt_free_modules_load_in_a_fresh_interpreter(name: str) -> None:
     """Loaded in a fresh interpreter with the package's ``__init__`` bypassed.
 
@@ -1157,11 +1216,15 @@ def test_the_orchestrator_stores_no_second_truth() -> None:
 def test_the_orchestrator_stores_only_its_injected_collaborators() -> None:
     """What it *does* store is the injected providers plus its own bookkeeping.
 
-    Four entries are not providers and are named deliberately: the attempt sequence,
+    Five entries are not providers and are named deliberately: the attempt sequence,
     which gives each attempt a distinct identity; the last-ingress stamp, which only
-    decides whether the next poll would repeat work this object just did; and v2O-E3's
-    two zero-state-proof flags, which decide whether *this object* should start another
-    proof.  All four are about this object's own calls; none is a fact about the session.
+    decides whether the next poll would repeat work this object just did; v2O-E3's two
+    zero-state-proof flags, which decide whether *this object* should start another proof;
+    and v2O-E4's ``_presentation``, the one retained *presentation* fact -- the immutable
+    projection of the last result this object published, kept because
+    ``finalize_if_safe`` clears the canonical result it was projected from.  The first four
+    are about this object's own calls; the fifth is about what a route draws, and none of
+    them is a fact about the session.
     """
 
     stored = _stored_self_attrs(_ORCHESTRATOR_PATH)
@@ -1169,6 +1232,7 @@ def test_the_orchestrator_stores_only_its_injected_collaborators() -> None:
     assert "_last_stream_ingress_monotonic" in stored
     assert "_finalization_inflight" in stored
     assert "_last_finalization_started" in stored
+    assert "_presentation" in stored
     assert stored <= {
         "_workflow_getter",
         "_paper_trading_getter",
@@ -1191,6 +1255,7 @@ def test_the_orchestrator_stores_only_its_injected_collaborators() -> None:
         "_last_stream_ingress_monotonic",
         "_finalization_inflight",
         "_last_finalization_started",
+        "_presentation",
     }, sorted(stored)
 
 
@@ -2067,3 +2132,135 @@ def test_the_ownership_block_is_never_downgraded_to_ready() -> None:
     assert shutdown_code.index("PaperWorkflowPhase.CONNECTING") < shutdown_code.index(
         "self._ownership_verdict()"
     )
+
+
+# -- Guard H2: the window left the presentation cache ---------------------
+#
+# v2O-E4's half of the same property, and the round's whole point.  The window used to
+# keep the last engine snapshot it drew so a page opened after a session ended still had
+# something to show; it was presentation-only and it was still a second place that owned
+# a Paper session fact.  The retained view is the capability's now, and these guards pin
+# both directions: the cache is gone from the window, and the route still reads the
+# capability's view rather than falling back to the canonical result.
+
+
+@pytest.mark.parametrize("attribute", RETIRED_WINDOW_E4_STATE)
+def test_the_window_keeps_no_paper_presentation_cache(attribute: str) -> None:
+    """No attribute, property, alias or shim under the retired cache's name."""
+
+    assert attribute not in _assigned_self_attrs(_DESKTOP_PATH), attribute
+    assert attribute not in _declared_names(_DESKTOP_PATH), attribute
+
+
+def test_the_view_is_retained_before_the_result_is_published() -> None:
+    """The ordering the whole render path depends on, pinned as source order.
+
+    ``result_changed`` reaches the window's handler synchronously, and that handler
+    repaints from ``presentation``.  So the projection has to be installed *before* the
+    emission -- put after it, every render would draw the previous session one event
+    behind, which looks like a stale UI rather than like a bug in a one-line move.
+    """
+
+    publish = _function_source(_ORCHESTRATOR_PATH, "_publish_result")
+    assert publish.index("self._retain_presentation(result)") < publish.index(
+        "self.result_changed.emit(result)"
+    )
+    # And the projection happens before either, so a handler sees the new fact under every
+    # connection type rather than only under a direct one.
+    retain = _function_source(_ORCHESTRATOR_PATH, "_retain_presentation")
+    assert retain.index("paper_presentation.project_presentation(result)") < retain.index(
+        "self._presentation = projection"
+    )
+
+
+def test_the_route_draws_the_capabilitys_retained_presentation() -> None:
+    """The render path reads ``paper_orchestrator.presentation``, not the workflow.
+
+    Both halves matter.  Reading the canonical ``paper_workflow.result`` would blank the
+    route the instant ``finalize_if_safe`` releases PAPER -- the regression this round
+    exists to prevent -- and building the view from a window-side cache is the ownership
+    the round removed.  So the reader is named, and it is the capability's property.
+    """
+
+    render = _method_source(_DESKTOP_PATH, "_render_auto_quant_snapshot")
+    assert "self.paper_orchestrator.presentation" in render
+    for forbidden in ("paper_workflow.result", "_paper_render_snapshot", "engine_snapshot"):
+        assert forbidden not in render, forbidden
+
+
+def test_the_window_does_not_interpret_the_paper_phase_to_publish_controls() -> None:
+    """Which control a phase enables is a Paper rule, and it lives in the capability.
+
+    ``_publish_execution_controls`` used to compare phase values itself, which is Paper
+    phase reasoning on a presentation path.  It now asks the capability and hands the page
+    booleans; the canonical read still happens (a launch or a close may not be decided
+    from a retained view), it just is not interpreted here.
+    """
+
+    publish = _method_source(_DESKTOP_PATH, "_publish_execution_controls")
+    assert "self.paper_orchestrator.session_control_facts" in publish
+    assert "PaperWorkflowPhase" not in publish
+    # The one definition of the mapping, and it is a pure rule over the canonical phase.
+    rule = _module_function_source(_QUERIES_PATH, "control_facts")
+    assert "PaperWorkflowPhase.RUNNING" in rule
+    assert "PaperWorkflowPhase.HALTED" in rule
+    assert "PaperWorkflowPhase.RECONCILING_READY" in rule
+
+
+def test_the_render_path_fetches_and_delegates_rather_than_assembling() -> None:
+    """Guard 2: the window may not build a Paper session view out of raw facts.
+
+    Assembling the read model is what made this method a second place that knew what a
+    Paper session looks like -- which holdings belong to it, how its orders are keyed,
+    which journal rows are its own.  That assembly is ``build_session_view`` now, and the
+    window's remaining part is the fetch.  So: it delegates, it does not scope, it joins
+    nothing and it names no phase.
+    """
+
+    render = _method_source(_DESKTOP_PATH, "_render_auto_quant_snapshot")
+    assert "build_session_view(" in render
+    assert "build_runtime_view(" not in render
+    for inlined in (
+        "session_positions(",
+        "pending_by_symbol(",
+        "audit_by_intent(",
+        "PaperWorkflowPhase",
+    ):
+        assert inlined not in render, inlined
+
+
+def test_the_window_declares_no_presentation_cache_under_another_name() -> None:
+    """§12's other half: the cache may not simply be renamed.
+
+    A guard on the retired name alone would pass on a ``_paper_view`` or a
+    ``_last_session_view`` that owned exactly the same fact.  The window may hold the
+    session truth's *inputs* (the shortlist it prepared, the local in-flight flags), but
+    nothing whose name claims to be the route's rendered session fact.
+    """
+
+    declared = _declared_names(_DESKTOP_PATH) | _assigned_self_attrs(_DESKTOP_PATH)
+    suspicious = {
+        name
+        for name in declared
+        if "render_snapshot" in name
+        or name.endswith("_presentation")
+        or name.endswith("_session_view")
+    }
+    assert not suspicious, sorted(suspicious)
+
+
+def test_the_control_facts_answer_is_read_live_not_from_the_retained_view() -> None:
+    """``session_control_facts`` may not be derived from ``presentation``.
+
+    The failure it guards is concrete: a retained view legitimately shows the *previous*
+    session (``active=False``, session over) while a new launch is already in flight, so
+    deciding what an operator may click from it is the "retained presentation decides a
+    launch" bug this round forbids.  The answer is read from the workflow and the
+    order-service owner on every call.
+    """
+
+    source = _function_source(_ORCHESTRATOR_PATH, "session_control_facts")
+    assert "self._workflow.phase" in source
+    assert "reconciliation_status()" in source
+    assert "self._presentation" not in source
+    assert "_presentation" not in source

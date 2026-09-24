@@ -30,6 +30,10 @@ from us_quant.trading.domain.account import (
 )
 from us_quant.trading.domain.common import Environment
 from us_quant.trading.runtime.artifacts import AutoQuantSnapshot
+from us_quant.trading.runtime.paper_models import (
+    PaperSessionResult,
+    PaperSessionState,
+)
 
 
 _APP = QApplication.instance() or QApplication([])
@@ -369,6 +373,38 @@ def _session_snapshot() -> AutoQuantSnapshot:
     )
 
 
+def _retain_a_session(window: MainWindow) -> None:
+    """Give the route a session to draw, through the capability's publication path.
+
+    The execution route repaints only when there is a session to paint, and since v2O-E4
+    that fact is ``paper_orchestrator.presentation``: an immutable projection produced from
+    a *published result* and by nothing else.  Driving the publication path -- rather than
+    planting the projection on the orchestrator -- keeps this fixture honest about how a
+    presentation comes to exist, and about the fact that only a real result may create one.
+    """
+
+    window.paper_orchestrator._publish_result(
+        PaperSessionResult(
+            state=PaperSessionState(
+                active=True,
+                entries_paused=False,
+                stop_requested=False,
+                halted=False,
+                finalized=False,
+                local_position_count=0,
+                pending_order_count=0,
+                broker_open_order_count=0,
+                broker_position_count=0,
+                unreconciled_order_count=0,
+                health_status=None,
+            ),
+            engine_snapshot=_session_snapshot(),
+            health=None,
+            events=(),
+        )
+    )
+
+
 def test_a_successful_refresh_moves_the_execution_route_equity_card(
     window, monkeypatch
 ) -> None:
@@ -389,7 +425,7 @@ def test_a_successful_refresh_moves_the_execution_route_equity_card(
     )
     monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
 
-    window._paper_render_snapshot = _session_snapshot()
+    _retain_a_session(window)
     window.broker_account._portfolio = None
     window._render_auto_quant_snapshot()
     before = window.execution_page.equity_card.value_label.text()

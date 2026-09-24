@@ -44,6 +44,7 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     NET_LIQUIDATION_MESSAGE,
     POSITIONS_MESSAGE,
     PaperAccountReading,
+    PaperControlFacts,
     PaperLaunchIntegrityError,
     PaperLaunchRequest,
     PaperOrderChannel,
@@ -135,6 +136,34 @@ def reconciliation_resume_ready(
     """
 
     return phase is PaperWorkflowPhase.RECONCILING_READY and evidence is not None
+
+
+def control_facts(
+    phase: PaperWorkflowPhase, *, awaiting_confirmation: bool
+) -> PaperControlFacts:
+    """Translate the canonical phase into which session controls may be offered.
+
+    The one place "which phase enables which button" is written down.  It used to live in
+    ``MainWindow._publish_execution_controls``, which compared phase values itself: that
+    is Paper phase reasoning on a presentation path, and v2O-E4 moved it into the
+    capability that owns the phase.  The window still *reads* the canonical phase (a
+    launch or a close may not be decided from anything else) and still hands the page
+    booleans; it no longer interprets what the phase means.
+
+    ``reconcile_available`` and ``resume_ready`` are deliberately separate facts rather
+    than one "is the session halted" flag: starting a reconciliation is available while
+    halted, and confirming one only once the halted session has produced a proof and is
+    waiting for a human to look at it.
+    """
+
+    return PaperControlFacts(
+        running=phase is PaperWorkflowPhase.RUNNING,
+        paused=phase is PaperWorkflowPhase.PAUSED,
+        reconcile_available=phase is PaperWorkflowPhase.HALTED,
+        resume_ready=(
+            phase is PaperWorkflowPhase.RECONCILING_READY and awaiting_confirmation
+        ),
+    )
 
 
 def session_active(snapshot: object | None) -> bool:
@@ -345,6 +374,7 @@ def account_reading(state: PaperBrokerState, *, account_alias: str) -> PaperAcco
 __all__ = [
     "account_reading",
     "active_session_phase",
+    "control_facts",
     "current_inputs_match",
     "freeze_launch",
     "launch_attempt_in_flight",

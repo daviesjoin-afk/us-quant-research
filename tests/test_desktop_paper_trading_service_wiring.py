@@ -253,17 +253,22 @@ def test_migrated_reads_no_longer_touch_the_workflow_directly() -> None:
     more such handlers: the close, the recovery announcement and the finished-session
     render.  For all of them the claim is the stronger one: they read neither the
     workflow's phase nor the service's.
+
+    ``_publish_execution_controls`` joined that stronger group in v2O-E4, and the claim
+    there is stronger still: it still publishes from the canonical truth, but it no
+    longer *interprets* the phase -- which phase enables which control is a Paper rule,
+    and it now arrives as ``paper_orchestrator.session_control_facts``.  So the window
+    reads neither the workflow's phase nor the service's phase, and the control mapping
+    has one definition again.
     """
 
-    for name in (
-        "_publish_execution_controls",
-        "_auto_candidate_preparation_failed",
-    ):
+    for name in ("_auto_candidate_preparation_failed",):
         source = _source(name)
         assert "self.paper_workflow.phase" not in source, name
         assert "self.paper_trading.phase()" in source, name
 
     for name in (
+        "_publish_execution_controls",
         "_on_paper_result_changed",
         "_on_market_snapshot_changed",
         "closeEvent",
@@ -275,6 +280,12 @@ def test_migrated_reads_no_longer_touch_the_workflow_directly() -> None:
         source = _source(name)
         assert "self.paper_workflow.phase" not in source, name
         assert "self.paper_trading.phase()" not in source, name
+
+    # The publisher still publishes from canonical truth, it just asks the capability
+    # which controls that truth makes available.
+    assert "self.paper_orchestrator.session_control_facts" in _source(
+        "_publish_execution_controls"
+    )
 
     # And the render path still reaches the controls through the publisher
     # rather than by writing them itself.

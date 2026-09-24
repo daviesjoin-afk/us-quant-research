@@ -792,3 +792,59 @@ session 渲染（E4）。
 
 设计依据见 `docs/DESKTOP_DECOMPOSITION.md` §29 与 `docs/TRADING_ARCHITECTURE_V2.md`
 §8.20。
+
+## 38. presentation / render closure 迁入 `PaperOrchestrator`（v2O-E4）
+
+同样是前向引用，不重写上面的历史。§37 最后一段说"窗口仍负责 execution page 的 session
+渲染"——E4 改的不是"谁来画"，而是**被画的那份事实归谁**。
+
+窗口原先持有 `MainWindow._paper_render_snapshot`：一个 presentation-only cache。它是窗口
+拥有的最后一份 Paper session fact，而且它有存在的理由——`finalize_if_safe()` 在释放 PAPER
+时会清空 canonical result，UI 直读 `paper_workflow.result` 就会在会话结束的瞬间空白。
+
+```text
+desktop_v2/orchestration/paper/
+    presentation.py  新增：PaperPresentationSnapshot + project_presentation（纯投影）
+    models.py        新增 PaperControlFacts（phase → 控件可用性是布尔值，dumb 值类型）
+    queries.py       新增 control_facts(phase, awaiting_confirmation=…)（纯规则）
+    orchestrator.py  新增 _retain_presentation（唯一写入点）+ presentation /
+                     session_control_facts 两个 delegated property
+
+desktop_v2/pages/execution/
+    projector.py     新增：session_positions / pending_by_symbol / audit_by_intent /
+                     build_session_view + 三张表的行预算常量（纯 read model）
+```
+
+| 事实 | 唯一 owner | E4 之后由谁驱动 |
+| --- | --- | --- |
+| 当前会话的 canonical result | `PaperWorkflowController.result` | 不变；`finalize_if_safe()` 仍会清空它 |
+| 最后一次可展示的会话事实 | `PaperOrchestrator.presentation` | 只由 result publication path 写入，无 clear |
+| 会话 read model 如何组装 | `pages/execution/projector.build_session_view` | 纯函数，窗口只 fetch |
+| phase 使哪些控件可用 | `queries.control_facts` | 经 `session_control_facts` 取用，窗口不再解释 phase |
+| "启动尝试占用 connect" | `queries.launch_attempt_in_flight` | 窗口不再字面比较 `CONNECTING` |
+| 谁问操作员 | `MainWindow._confirm_*` | 不变：两个 `QMessageBox` 仍在窗口 |
+
+**关键不变量**：retained view 的边界是"画"而不是"判"。
+
+```text
+presentation ≠ canonical lifecycle state
+presentation 不参与 start / preflight / launch
+presentation 不参与 stop / reconcile / finalize
+presentation 不参与 ownership / lease / shutdown 判断
+presentation 不参与 risk / execution
+```
+
+窗口仍读 canonical phase 来决定启动与关闭（这是硬不变量），但不再解释它。
+
+本文档 §16–§34 描述的 `PaperTradingService` / gateway / journal 边界继续不受影响：E4 只改
+desktop 侧的 presentation ownership，**没有**改 service、没有改 coordinator、没有改
+`workflow.py` / `recovery.py` / `reconciliation.py`，也没有碰 E3 刚稳定的
+`reserve_active_release` / `commit_active_release` / `cancel_active_release` /
+`connect_active` / `clear_active` / `finalize_if_safe`。本轮没有发现需要在该 canonical
+owner 修的 bug。
+
+至此 **v2O-E Paper ✅ COMPLETE**（E1 启动链 / E2 active runtime / E3
+recovery-finalization / E4 presentation-render closure）。
+
+设计依据见 `docs/DESKTOP_DECOMPOSITION.md` §30 与 `docs/TRADING_ARCHITECTURE_V2.md`
+§8.21。

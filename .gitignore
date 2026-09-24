@@ -40,6 +40,15 @@ secrets/
 # on scratch rather than on real leaks.
 /.workbuddy/
 
+# Local OpenCodeReview output.  A review run writes a timestamped directory of
+# machine-specific artifacts -- absolute repository paths, the resolved rule
+# text, and the findings themselves.  None of it is a source artifact: the
+# review is advisory, it is reproducible from its command, and committing it
+# would make the *next* review's diff contain the previous review's findings.
+# Root-anchored for the same reason /runtime/ is: ``.ocr-output`` is a local
+# directory name and must never be able to shadow a real source path.
+/.ocr-output/
+
 # Editors and OS
 .idea/
 .vscode/

@@ -1,0 +1,76 @@
+{
+  "include": [
+    "tests/**/*.py"
+  ],
+  "exclude": [
+    ".ocr-output/**",
+    "**/.ocr-output/**"
+  ],
+  "rules": [
+    {
+      "path": "src/us_quant/trading/runtime/workflow_state.py",
+      "rule": "This module is the single source of truth for ExecutionLease (NONE/SHADOW/PAPER) and for PaperWorkflowPhase transitions.\n- Every lease comparison is an exact enum comparison (`is not ExecutionLease.NONE`) and never truthiness, a raw string, or `==` on `.value`. `ExecutionLease` subclasses `str` and NONE is a non-empty string, so `if lease:` is always true.\n- Acquire and release are a matched pair, and a release rejects a lease the caller does not own instead of silently no-op'ing.\n- `release_paper` cannot succeed without an explicit finalization; a defaulted or inferred `finalized` argument is a defect.\n- Every PaperWorkflowPhase member is a key in the transition table, and no entry permits HALTED -> RUNNING, READY, IDLE, or any automatic exit from HALTED.\n- `validate_paper_transition` stays pure: it must not mutate state or call a service.\n- A lease or phase has exactly one owner. Flag any second code path that writes the lease or the phase directly.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "src/us_quant/trading/application/risk.py",
+      "rule": "This module is the risk gate that must run before any execution side effect.\n- No submit, cancel, replace, or connect is reachable before the risk decision for that exact order returns.\n- A rejected or failed decision can never be recorded, cached, or returned as accepted. Flag default-allow on an exception, a `None` result, an empty rule set, or an unknown boolean.\n- Quantity, notional, capital, position, and exposure limits are compared in `Decimal`. No float conversion, rounding, or unit mix may let an over-limit order pass.\n- Risk is evaluated on the order that will actually be sent. A retry, resize, or re-priced order is re-checked, not validated from a stale snapshot.\n- A risk failure raises or returns an explicit rejection; it is never swallowed into a neutral or permissive value.\n- Flag any risk arithmetic re-implemented outside this module, in particular inside a broker adapter or a UI layer.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "src/us_quant/trading/application/execution.py",
+      "rule": "Order execution boundary.\n- This layer trusts only a risk decision produced in the current call. Flag any caller-supplied `validated`, `approved`, or `pre_checked` flag that skips it.\n- Broker uncertainty (timeout, disconnect, unknown or ambiguous status) is never mapped to success, filled, or confidently rejected. It becomes an explicit unknown that reconciliation resolves.\n- Retry after an ambiguous submit must not be able to produce a duplicate order. Require an idempotency key or a pre-submit broker lookup; flag a bare retry loop around submit.\n- A rejected execution never writes accepted or acknowledged state.\n- Partial success (A placed, B failed) is rolled back or recorded as partially applied, never reported as complete.\n- Every acquired connection, lease, reservation, task, and transaction is released on the exception path.\n- `Decimal` prices, quantities, and cash are never converted to float.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "src/us_quant/trading/application/paper/**",
+      "rule": "Paper session lifecycle. Hard rule: HALTED can only leave via manual reconciliation and an explicit human confirmation. Flag any automatic HALTED recovery, timer, poller, watcher, reconnect, or promotion that resumes a halted session.\n- `disconnect` is not `finalized`, and a successful disconnect never releases the lease on its own.\n- Zero-state proof (no broker open orders, no local pending orders, no unreconciled rows) is established BEFORE the lease, active slot, or candidate ownership is released, and a failed proof aborts the release instead of continuing.\n- A reservation that succeeds but whose next step fails is cancelled. No reservation survives an exception path.\n- Reconciliation evidence is never treated as equivalent to human confirmation.\n- Shutdown does not return READY or IDLE merely because the UI looks idle; active slot, candidate ownership, and the PAPER lease all participate in the shutdown decision.\n- Release, reconnect, and promotion are mutually exclusive, and `finalize_if_safe` failing must not be followed by a release.\n- The Paper presentation is not the canonical lifecycle truth.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "src/us_quant/trading/runtime/**",
+      "rule": "Workflow and runtime state.\n- Every phase, status, or lifecycle write validates the legal predecessor and the legal successor. Flag a state assignment with no validation and a status mutated from two owners.\n- Business truth is never read from presentation or UI state, and a stale snapshot is not used as canonical truth after an await, a callback, or a lock release.\n- Check-then-act on a lock, lease, slot, inflight flag, or reservation is a race unless the check and the write are guarded by the same lock.\n- A duplicate, late, or out-of-order broker callback cannot finalize, release, or complete the same session twice.\n- Shutdown during an inflight operation leaves a consistent state and releases locks, connections, reservations, tasks, and transactions on the exception path.\n- Partial commit (A applied, B failed, A not restored) is a defect.\n- No naive `datetime`; persisted or compared instants are timezone-aware.\n- A getter, query, or projection must not mutate state.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "src/us_quant/trading/adapters/**",
+      "rule": "Broker, market-data, and persistence adapters.\n- Retry of connect, submit, cancel, or replace must not duplicate a side effect. Prove idempotency (client order id, dedupe lookup on the broker side) or flag it. A duplicate order from a retry is the highest-severity finding in this file.\n- A broker callback cannot be applied twice. Duplicate, late, and out-of-order callbacks are rejected against the recorded order state.\n- A timeout or a dropped connection is reported as unknown, not as success and not as failure.\n- `cancel` or `replace` racing a fill must not resurrect a terminal order.\n- Every connection, socket, cursor, and transaction is closed on the exception path, and a failed write leaves no half-committed transaction.\n- Broker status strings are mapped exhaustively; an unmapped status raises instead of defaulting to a permissive value.\n- Money and quantities stay in `Decimal` across the adapter boundary; flag a float round-trip.\n- An adapter must not re-implement a risk or limit decision.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "src/us_quant/trading/**",
+      "rule": "Trading core.\n- Ownership: each mutable resource has exactly one owner, and a capability only mutates a resource it owns.\n- ExecutionLease NONE/SHADOW/PAPER is compared exactly, never by truthiness or a raw string. A Shadow capability never releases Paper's lease, and a Paper capability never releases Shadow's, and capability code only handles leases it owns.\n- A reservation has an explicit reserve / commit / cancel, and cannot survive an exception path permanently.\n- Check-then-act on a lease, slot, inflight flag, or reservation is a race unless the check and the write share one lock.\n- Cleanup, rollback, and `finally` cover the failure path, not only the happy path.\n- Partial commit (A succeeded, B failed, A not restored) is a defect.\n- No naive `datetime`. No `Decimal` money or quantity silently converted to float.\n- A getter, query, or projection must not mutate state.\n- `None`, `False`, and an empty collection are distinguished rather than treated as equivalent.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "src/us_quant/{desktop.py,desktop_v2/**}",
+      "rule": "Desktop composition. The only allowed direction is Page --emit intent--> Capability Orchestrator --> Application / Workflow --> Domain + Ports --> Adapters.\n- A Page never calls a broker, a repository, a workflow, or an application service directly, and never decides a business state transition.\n- A presenter or projector is pure: it never calls connect, disconnect, submit, cancel, commit, or release, and never writes to the database.\n- Retained presentation state never feeds launch, stop, shutdown, ownership, risk, or execution decisions.\n- `MainWindow` is not the orchestration owner for a business flow.\n- No new god object: flag `DesktopManager`, `ApplicationContext`, `ServiceBag`, `GlobalController`, or an equivalent aggregate holder.\n- Capabilities do not import each other's orchestrator (Paper importing Shadow, Research importing Paper), and System is not a service bag for every capability. Cross-capability wiring happens in the composition root.\n- Long-running work runs off the GUI thread, and a late worker or Qt callback cannot touch a torn-down page, a stale model, or double-complete a request.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "tests/**",
+      "rule": "Judge test effectiveness, not test style. Do not report naming, layout, formatting, duplication, or missing docstrings.\n- Does every assertion actually cover the invariant the test name claims, or only a trivial side effect?\n- Does the test assert an implementation detail (a private attribute, an exact call count) where the observable behaviour is what matters?\n- Is a `monkeypatch`, mock, or stub so complete that the test passes regardless of the production change it claims to guard?\n- Is a fake simpler than production in a way that hides the real defect: no concurrency, no failure path, no ordering, no partial commit?\n- A concurrency test that never opens a race window is not a concurrency test.\n- An integration test that exercises only mocks proves nothing about integration.\n- A mutation target that can only produce a `SyntaxError` or an import error does not prove a mutant was killed.\n- Flag a test weakened by a deleted assertion, a broadened `pytest.raises`, an added `skip`/`xfail`, a widened tolerance, or an `assert True`.\n- Flag a wall-clock, sleep, or scheduling dependency that can flake on a loaded runner.",
+      "merge_system_rule": false
+    },
+    {
+      "path": ".github/**",
+      "rule": "CI and repository automation.\n- The required CI gate runs the project's primary interpreter, Python 3.14. Flag a reintroduced 3.12 or 3.13 per-pull-request matrix entry.\n- Support metadata (`requires-python`) and the CI runtime policy are separate decisions; flag a change that silently couples them.\n- A workflow never executes untrusted pull-request-supplied code with secrets in scope.\n- `pull_request_target` is treated as hostile by default: it must not check out and run pull-request head code with secrets or a write token.\n- Credentials, tokens, and secrets are never echoed, written to logs, or uploaded as artifacts.\n- A gate is never made advisory, conditional, or `continue-on-error` without that being the stated intent of the change.\n- An AI reviewer or third-party action is not given a credential it does not demonstrably need, and no reviewer is wired as a required status check while it is still advisory.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "scripts/**",
+      "rule": "Local tooling and CI helpers.\n- A wrapper performs no business judgement: it must propagate the wrapped command's exit code and not decide pass/fail for a gate it merely invokes.\n- A script never narrows an existing verification gate by default (skipping a suite, filtering tests, dropping doctor or compileall). Any narrowing is explicit, opt-in, and documented.\n- No secret, token, or API key is hardcoded, read from a committed file, echoed, or written into an artifact.\n- Paths are quoted and repo-root anchored, so the script works from any working directory.\n- An external tool is detected explicitly and fails with an actionable message rather than silently no-op'ing.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "pyproject.toml",
+      "rule": "Packaging and test configuration.\n- `requires-python` is the declared support floor and is deliberately NOT required to match the CI-gated interpreter (currently Python 3.14). Flag a change that narrows the support claim as a side effect of a CI change, or that raises the gated interpreter as a side effect of a support change.\n- The `test` extra supplies everything CI invokes, including `pytest-xdist` while CI passes `-n`.\n- `testpaths` and `norecursedirs` do not silently exclude a real test tree or include a build or vendored tree.\n- No new runtime dependency is added for a tool that is only needed locally.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "src/us_quant/**/*.py",
+      "rule": "General correctness for this codebase. Report a defect only where you can point at the code, not a style preference.\n- An exception swallowed such that recorded state and reality diverge.\n- Check-then-act on shared state that is not atomic under one lock.\n- A mutable object leaking across an ownership boundary: returned by reference while the owner still mutates it, or accepted and stored without a copy.\n- Cleanup, rollback, or `finally` missing on the failure path.\n- Partial commit: A succeeded, B failed, A not restored.\n- A cached or stale snapshot used as canonical truth after a state change, an await, or a callback.\n- Naive `datetime` (`datetime.now()`, `utcnow()`, `strptime` without a timezone) in code that compares or persists instants.\n- A `Decimal` money or quantity chain silently converted to float.\n- A retry that can repeat a non-idempotent side effect.\n- A getter, query, or projection that mutates state.\n- `None`, `False`, and empty collections treated as interchangeable, or a falsy default used where the value carries meaning.\n- An exception path that leaks a lock, connection, lease, reservation, task, or database transaction.",
+      "merge_system_rule": true
+    }
+  ]
+}

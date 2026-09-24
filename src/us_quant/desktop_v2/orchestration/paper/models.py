@@ -1,10 +1,9 @@
 """The immutable facts and driven-port contracts of Paper launch orchestration.
 
 Frozen plain data and declared Protocols only -- Qt-free and adapter-free.  Every
-operator string is verbatim from the retired ``MainWindow`` handlers.  The workflow
-controller and the order-service owner are named for *typing only*, being this
-lifecycle's canonical owners; a broker adapter, a risk or execution application and a
-widget are never imported, because those arrive through the build seam.
+operator string is verbatim from the retired ``MainWindow`` handlers; a broker adapter,
+a risk or execution application and a widget are never imported here.  The design
+rationale lives in ``docs/DESKTOP_DECOMPOSITION.md`` §27.
 """
 
 from __future__ import annotations
@@ -12,10 +11,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Mapping, Protocol
 
 from us_quant.auto_launch import AutoLaunchPlan
 from us_quant.paper_order_models import PaperBrokerState
+from us_quant.trading.domain.strategy import StrategyIdentity
 from us_quant.trading.runtime.workflow_state import WorkflowStateError
 
 if TYPE_CHECKING:
@@ -27,14 +27,13 @@ if TYPE_CHECKING:
     from us_quant.trading.runtime.paper_models import PaperSessionResult
     from us_quant.trading.runtime.trading import TradingRuntime
 
-#: The component this launch's runtime event is filed under, and its code.
+#: The component one launch's runtime event is filed under, and its code.
 PAPER_LAUNCH_COMPONENT = "auto_quant"
 PAPER_ARMED_CODE = "PAPER_SESSION_ARMED"
 
-#: Why a start was refused, as the dialog the operator sees -- the exact title and
-#: message the retired handler showed.  ``BAD_CALLBACK_MESSAGE`` is the one
-#: *delegation* message: a malformed callback shape is a programming error rather than
-#: an operator condition, so it is raised loudly instead of shown in a dialog.
+#: Why a start was refused: the exact title and message the retired handler showed.
+#: ``BAD_CALLBACK_MESSAGE`` is the one *delegation* message -- a malformed callback
+#: shape is a programming error, so it is raised loudly instead of shown in a dialog.
 DUPLICATE_TITLE = "Paper 会话正在连接"
 DUPLICATE_MESSAGE = "当前启动检查仍在进行中，请不要重复启动。"
 DUPLICATE_CONFIRM_MESSAGE = "当前启动检查仍在进行中，请等待本次连接完成或失败后再试。"
@@ -50,13 +49,25 @@ PREFLIGHT_CHANGED_MESSAGE = "连接期间启动条件发生变化，已断开未
 IDENTITY_CHANGED_MESSAGE = "连接期间策略、候选或资金上限已变化；已断开未武装的 Paper 会话。"
 ARMING_FAILED_MESSAGE = "Paper 会话校验或武装失败，未提交自动订单：{error}"
 BAD_CALLBACK_MESSAGE = "unexpected auto order connection result"
+
+#: The one *invariant* message: ``publish_armed`` succeeded but the promotion that must
+#: follow it did not, so the session runs with no owner.  A broken safety invariant
+#: rather than a launch failure, reported at error severity under its own code.
+PAPER_PROMOTION_INVARIANT_TITLE = "Paper 会话已发布但未能接管"
+PAPER_PROMOTION_INVARIANT_CODE = "PAPER_PROMOTION_INVARIANT"
+PAPER_PROMOTION_INVARIANT_MESSAGE = (
+    "Paper 会话已发布但候选接管失败；会话处于已发布未接管状态，"
+    "需人工处理；已保留租约与候选原状，不做回滚：{error}"
+)
+
 #: Progress, status and event wording, verbatim from the retired chain.
 CONNECTING_SUMMARY = "正在连接独立 IBKR Paper 订单会话并核验唯一 DU 账户…"
 CONNECT_START_MESSAGE = "IBKR Paper 自动量化连接中…"
 CONNECT_PROGRESS = "连接 IBKR Paper 订单通道…"
 CONNECT_VERIFIED_PROGRESS = "已核验 {alias}；准备逐会话武装…"
 ARMED_EVENT_MESSAGE = "IBKR Paper 自动量化会话 {session} 已武装；候选 {candidates}；Live 永久阻断"
-#: The broker gates' refusal text -- the sentences naming the failed account fact.
+
+#: The broker gates' text -- the sentences naming the failed account fact.
 NET_LIQUIDATION_MESSAGE = "IBKR Paper 订单会话未返回有效净值"
 POSITIONS_MESSAGE = "首期自动量化要求 Paper 账户启动时空仓；当前持仓：{symbols}"
 CASH_MESSAGE = "IBKR Paper 订单会话未返回现金；禁止使用保证金借款代替现金"
@@ -69,12 +80,20 @@ class PaperLaunchRefusal:
     message: str
 
 
+class PaperLaunchIntegrityError(RuntimeError):
+    """A governed version's declared hash does not describe its own parameters.
+
+    A catalogue fault rather than an operator condition, so it is not a refusal shape:
+    the launch must not proceed under *either* hash, because running the declared one
+    would execute parameters it does not cover.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class PaperOrderChannel:
     """The order channel one attempt connects, read once at plan time.
 
-    ``config`` is opaque because building it names the IBKR connection module the
-    composition root owns.
+    ``config`` is opaque: building it names the IBKR module the composition root owns.
     """
 
     config: object
@@ -83,11 +102,29 @@ class PaperOrderChannel:
 
 
 @dataclass(frozen=True, slots=True)
+class PaperStrategyLaunchFact:
+    """The strategy identity one attempt runs, detached from the live version.
+
+    ``parameters`` is a **deep copy** taken at freeze time.  Holding the live version
+    would not freeze anything: it normalizes ``parameters`` to a plain mutable ``dict``
+    and reads ``parameter_hash`` off the governed identity rather than recomputing it,
+    so an in-place edit during the broker connect would let the attempt be *planned*
+    under hash A and *built* from parameters B.  Deep rather than a structural freeze
+    because the parameter validator requires real ``list`` values.
+    """
+
+    version_id: str
+    parameter_hash: str
+    identity: StrategyIdentity
+    parameters: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
 class PaperLaunchRequest:
     """The frozen inputs of one attempt, read exactly once."""
 
     plan: AutoLaunchPlan
-    strategy_version: Any
+    strategy: PaperStrategyLaunchFact
     candidates: tuple[AutoQuantCandidate, ...]
     order_channel: PaperOrderChannel
 
@@ -101,7 +138,6 @@ class PaperLaunchRequest:
 @dataclass(frozen=True, slots=True)
 class PaperAccountReading:
     """The Paper account facts the capital gates read: net liquidation, cash, alias."""
-
     net_liquidation: Decimal
     cash: Decimal
     account_alias: str
@@ -109,14 +145,18 @@ class PaperAccountReading:
 
 @dataclass(frozen=True, slots=True)
 class PaperSessionBuildResult:
-    """What the build seam returns: the ports ``publish_armed`` binds, the session id,
-    and the runtime the desktop keeps for the still-unmigrated active-session paths."""
+    """What the build seam returns: the built runtime and what arming it needs.
+
+    The seam composes and starts the runtime but deliberately does **not** arm, so
+    ``arm -> ensure -> publish -> promote`` is one sequence in the orchestrator.
+    """
 
     engine: PaperEngine
     orders: PaperOrderPort
     session_id: str
     candidate_count: int
     runtime: TradingRuntime
+    max_order_notional: Decimal
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,9 +182,9 @@ class PaperLaunchEvent:
 class PaperCandidateOrder(Protocol):
     """The *borrowed* candidate, as validation and the build seam read it.
 
-    Nothing here submits or cancels: that belongs to the runtime, through the execution
-    application the build seam injects.  ``candidate_service`` takes this reference for
-    one callback's stack, never stores it and never keeps it past promotion.
+    Nothing here submits or cancels -- that belongs to the runtime, through the
+    execution application the seam injects -- and ``candidate_service`` lends this for
+    one callback's stack only.
     """
 
     def connection_snapshot(self) -> Any: ...
@@ -165,15 +205,17 @@ PaperSessionBuilder = Callable[
 
 __all__ = [
     "ARMED_EVENT_MESSAGE", "ARMING_FAILED_MESSAGE", "BAD_CALLBACK_MESSAGE",
-    "BEGIN_REFUSED_TITLE", "CASH_MESSAGE", "CONNECTING_SUMMARY",
-    "CONNECT_FAILED_MESSAGE", "CONNECT_PROGRESS", "CONNECT_START_MESSAGE",
+    "BEGIN_REFUSED_TITLE", "CASH_MESSAGE", "CONNECT_FAILED_MESSAGE",
+    "CONNECTING_SUMMARY", "CONNECT_PROGRESS", "CONNECT_START_MESSAGE",
     "CONNECT_VERIFIED_PROGRESS", "DUPLICATE_CONFIRM_MESSAGE", "DUPLICATE_MESSAGE",
     "DUPLICATE_TITLE", "IDENTITY_CHANGED_MESSAGE", "LAUNCH_FAILED_TITLE",
     "NET_LIQUIDATION_MESSAGE", "PAPER_ARMED_CODE", "PAPER_LAUNCH_COMPONENT",
-    "POSITIONS_MESSAGE", "PREFLIGHT_CHANGED_MESSAGE", "PREFLIGHT_PREFIX",
-    "PREFLIGHT_TITLE", "PaperAccountReading", "PaperCandidateOrder",
-    "PaperLaunchEvent", "PaperLaunchPublication", "PaperLaunchRefusal",
+    "PAPER_PROMOTION_INVARIANT_CODE", "PAPER_PROMOTION_INVARIANT_MESSAGE",
+    "PAPER_PROMOTION_INVARIANT_TITLE", "POSITIONS_MESSAGE",
+    "PREFLIGHT_CHANGED_MESSAGE", "PREFLIGHT_PREFIX", "PREFLIGHT_TITLE",
+    "PaperAccountReading", "PaperCandidateOrder", "PaperLaunchEvent",
+    "PaperLaunchIntegrityError", "PaperLaunchPublication", "PaperLaunchRefusal",
     "PaperLaunchRequest", "PaperOrderChannel", "PaperSessionBuildResult",
-    "PaperSessionBuilder", "SHADOW_ACTIVE_MESSAGE", "SHADOW_ACTIVE_TITLE",
-    "STALE_PLAN_MESSAGE", "WorkflowStateError",
+    "PaperSessionBuilder", "PaperStrategyLaunchFact", "SHADOW_ACTIVE_MESSAGE",
+    "SHADOW_ACTIVE_TITLE", "STALE_PLAN_MESSAGE", "WorkflowStateError",
 ]

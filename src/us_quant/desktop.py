@@ -2560,14 +2560,14 @@ class MainWindow(QMainWindow):
         service: object,
         reading: PaperAccountReading,
     ) -> PaperSessionBuildResult:
-        """The narrow session-build seam: build the runtime, then arm the channel.
+        """The narrow session-build seam: compose the runtime over the borrowed channel.
 
         The composition root keeps every construction that names a concrete type --
         the auto-rotation config, the risk authority, the execution application, the
         trading runtime -- so ``PaperOrchestrator`` imports no adapter, no risk
         implementation and no execution implementation.  It receives an already
-        validated reading and a *borrowed* candidate, and hands back the two ports
-        publication binds plus the runtime the desktop keeps.
+        validated reading, the frozen request and a *borrowed* candidate, and returns
+        the ports publication binds plus the sizing ``arm`` needs.
 
         Two properties are load-bearing here and must not be relaxed:
 
@@ -2578,16 +2578,24 @@ class MainWindow(QMainWindow):
           is built over the borrowed candidate, so the engine cannot be handed an
           application talking to a different broker session than the coordinator
           reads.
+
+        **Arming is deliberately not done here.**  This seam starts the runtime and
+        reports the sizing it computed; ``PaperOrchestrator`` performs ``arm`` itself
+        so that ``arm -> ensure -> publish -> promote`` is one explicit sequence in
+        one place.  When the arm call lived inside this callable, the order was
+        asserted only as ``build < ensure < publish``, and the real constraint --
+        that arming precedes the promotability check and both precede publication --
+        could not be locked down by a guard.
         """
 
-        strategy = request.strategy_version
+        fact = request.strategy
         paper_capital = resolve_paper_session_capital(
             net_liquidation=reading.net_liquidation,
             cash=reading.cash,
             requested_limit=request.plan.requested_capital_limit,
         )
         config = build_auto_rotation_config(
-            strategy.parameters,
+            fact.parameters,
             initial_cash=Decimal(paper_capital),
             capital_source=(
                 f"IBKR Paper {reading.account_alias} "
@@ -2608,13 +2616,13 @@ class MainWindow(QMainWindow):
         runtime = build_trading_runtime(
             config=config,
             candidates=request.candidates,
-            identity=strategy.identity,
+            identity=fact.identity,
             risk=risk,
             execution=execution,
             market_reference_symbols=tuple(
                 dict.fromkeys(
                     str(symbol).strip().upper()
-                    for symbol in strategy.parameters.get(
+                    for symbol in fact.parameters.get(
                         "market_reference_symbols", []
                     )
                     if str(symbol).strip()
@@ -2623,20 +2631,15 @@ class MainWindow(QMainWindow):
         )
         snapshot = runtime.start()
         assert snapshot.session_id is not None
-        service.arm(
-            session_id=snapshot.session_id,
-            allowed_symbols=request.candidate_symbols,
-            max_order_notional=(
-                Decimal(paper_capital) * config.max_position_fraction
-            ),
-            sellable_quantities={},
-        )
         return PaperSessionBuildResult(
             engine=runtime,
             orders=service,
             session_id=snapshot.session_id,
             candidate_count=snapshot.candidate_count,
             runtime=runtime,
+            max_order_notional=(
+                Decimal(paper_capital) * config.max_position_fraction
+            ),
         )
 
     def _populate_auto_quant_candidates(self) -> None:

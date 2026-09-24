@@ -1,40 +1,29 @@
 """Paper launch orchestration: the one owner of starting a Paper AutoQuant session.
 
-Before this module the launch was two ``MainWindow`` handlers -- ``_start_auto_quant``
-and ``_auto_order_service_connected`` -- plus four helpers only they called.  The window
-read the preflight, froze a launch plan into ``self._active_auto_launch_plan``, acquired
-the PAPER lease through the workflow, submitted a broker-connect task, and then, in the
-callback, decided whether the result was stale, re-ran the preflight, re-checked the
-frozen identity, validated the broker reading, built the risk and execution authorities,
-armed the channel, published the workflow and promoted the candidate.
+Sequence: READY -> CONNECTING -> (2nd preflight + identity revalidation) -> broker gate
+-> build runtime -> arm -> ensure promotable -> publish_armed -> promote -> RUNNING.
+The active-session half -- polling, stream ingress, pause/resume, an orderly stop, halt
+recovery, manual reconciliation, finalization -- is v2O-E2/E3 and named nowhere here.
 
 Three rules matter more than the rest:
 
-* **there is no second truth.**  ``PaperWorkflowController`` owns the phase, the active
-  plan and the execution lease; ``PaperTradingService`` owns the candidate and active
-  broker connections; ``TradingRuntime`` owns the session.  This class mirrors none of
-  them -- it stores **no** ``_active_plan``.  The duplicate gate and every staleness
-  decision read ``workflow.phase`` through :mod:`.queries`, which is exactly equivalent
-  to the retired ``_active_auto_launch_plan is not None`` and stays correct after
-  publication, when the plan legitimately outlives the attempt;
-* **the arm/publish/promote order is a safety constraint.**  A successful broker connect
-  is not permission for the session to own execution, so the order is ``arm`` ->
-  ``ensure_candidate_can_promote`` -> ``publish_armed`` -> ``promote_candidate``, with the
-  pure check placed before publication because the published session must never be left
-  without an owner for a reason already knowable;
-* **the candidate is borrowed, never stored.**  ``candidate_service`` is called for one
-  callback's stack and its result lives in a local, never an attribute: a stored handle
-  would be a second owner of the broker connection and a way for a late callback to reach
-  a newer attempt.
+* **there is no second truth.**  The workflow owns the phase, the active plan and the
+  lease; the order-service owner owns the candidate and active connections; the runtime
+  owns the session.  This class mirrors none of them -- no ``_active_plan``, and the
+  duplicate and staleness gates read ``workflow.phase``, which is equivalent to the
+  retired ``_active_auto_launch_plan is not None`` and stays correct after publication,
+  when the plan legitimately outlives the attempt;
+* **the arm/ensure/publish/promote order is a safety constraint.**  The promotability
+  check is pure and precedes publication so a published session can never be left
+  without an owner for an already-knowable reason, and publication *splits the failure
+  handling*: ``publish_armed`` raising is still a rollback, promotion failing is not;
+* **the candidate is borrowed, never stored.**  It lives in one callback's local, never
+  an attribute -- a stored handle would be a second owner of the connection.
 
-What it does not own: the workflow transitions it merely *calls*; the generic task
-lifecycle (``TaskThread``, the controller, the closing gate and the busy dialog stay on
-the window, reached through an injected ``TaskSubmitter`` -- no ``asyncio``); widgets and
-dialogs, which is why the confirmation step stays on the window and a refusal is
-published as a payload; the session's composition, reached through the narrow build seam;
-and the armed session's runtime -- polling, stream ingress, pause/resume, an orderly stop,
-halt recovery, manual reconciliation and finalization are v2O-E2/E3 and named nowhere
-here.
+It does not own the workflow transitions it merely *calls*; the generic task lifecycle
+(``TaskThread``, the controller, the closing gate and the busy dialog stay on the window,
+reached through an injected ``TaskSubmitter`` -- no ``asyncio``); widgets and dialogs,
+which is why the confirmation step stays on the window; or the session's composition.
 """
 
 from __future__ import annotations
@@ -62,6 +51,9 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     LAUNCH_FAILED_TITLE,
     PAPER_ARMED_CODE,
     PAPER_LAUNCH_COMPONENT,
+    PAPER_PROMOTION_INVARIANT_CODE,
+    PAPER_PROMOTION_INVARIANT_MESSAGE,
+    PAPER_PROMOTION_INVARIANT_TITLE,
     PREFLIGHT_CHANGED_MESSAGE,
     PREFLIGHT_PREFIX,
     PREFLIGHT_TITLE,
@@ -88,11 +80,10 @@ if TYPE_CHECKING:
 class PaperOrchestrator(QObject):
     """Owns the Paper launch sequence and the facts it publishes about itself.
 
-    It is *not* the workflow and *not* the order-service owner: it asks the first for
-    transitions and the second for a candidate, and publishes what the outcome should
-    look like.  Everything that decides what a Paper session *is* -- the phase machine,
-    the lease, the arming rules, the risk verdict, order submission -- stays where it
-    already lived.
+    It is *not* the workflow and *not* the order-service owner: it asks each for the
+    step it owns and publishes what the outcome should look like.  Everything deciding
+    what a Paper session *is* -- the phase machine, the lease, the arming rules, the risk
+    verdict, order submission -- stays where it lived.
     """
 
     #: A start was refused before anything was built; the window shows the dialog.
@@ -129,9 +120,8 @@ class PaperOrchestrator(QObject):
         super().__init__(parent)
         # Getters rather than the objects themselves, for the reason
         # ``PaperTradingService`` takes a workflow getter: the composition root owns
-        # both and the safety tests replace each to drive the halted, refused-close
-        # and fake-broker paths, so every read here must resolve whichever is live
-        # *now* rather than one captured at construction.
+        # both and the safety tests replace each to drive the halted, refused-close and
+        # fake-broker paths, so every read must resolve whichever is live *now*.
         self._workflow_getter = workflow_getter
         self._paper_trading_getter = paper_trading_getter
         self._build_session = build_session
@@ -146,10 +136,9 @@ class PaperOrchestrator(QObject):
         self._clear_arm_confirmation = clear_arm_confirmation
         self._render_launch_state = render_launch_state
         self._render_launch_context = render_launch_context
-        # The attempt sequence.  Desktop orchestration bookkeeping, not trading or
-        # session truth: it is only here to give each attempt a distinct identity, and
-        # it deliberately keeps the retired integer-increment semantics.  A UUID would
-        # change what a candidate id looks like on the wire for no benefit.
+        # Desktop orchestration bookkeeping, not session truth: it only gives each
+        # attempt a distinct identity, and keeps the retired integer-increment
+        # semantics -- a UUID would change the candidate id on the wire for nothing.
         self._next_attempt = 0
 
     # -- lifecycle -------------------------------------------------------
@@ -157,37 +146,29 @@ class PaperOrchestrator(QObject):
     @property
     def _workflow(self) -> PaperWorkflowController:
         """Whichever controller is live -- see the getter's note in ``__init__``."""
-
         return self._workflow_getter()
 
     @property
     def _paper_trading(self) -> PaperTradingService:
         """Whichever order-service owner is live -- see the getter's note."""
-
         return self._paper_trading_getter()
 
     def start(self) -> None:
         """Run the launch gates, freeze the attempt, acquire PAPER and connect.
 
-        The gate order is the retired handler's and it matters.  The **duplicate gate
-        comes first**: a second attempt must be refused before anything is built, or
-        the operator ends up with two candidates, two broker tasks and a second
-        ``begin_connecting`` overwriting the live plan.  Then the Shadow/Paper mutex,
-        then the local preflight -- all three *before* the lease is taken, so a refused
-        start never holds PAPER and never creates a candidate.
-
-        Every input is read once, at the moment the last gate passes, and frozen into
-        the request.  The connect is submitted to the window's task infrastructure;
-        :meth:`_connect_finished` then continues on the callback's stack.
+        The **duplicate gate comes first**: a second attempt refused after the connect
+        would already have built two candidates, two broker tasks and a second
+        ``begin_connecting`` over the live plan.  All three gates run *before* the lease
+        is taken, so a refused start holds no PAPER and creates no candidate.
         """
 
         if queries.launch_attempt_in_flight(self._workflow.phase):
             self.refused.emit(DUPLICATE_TITLE, DUPLICATE_MESSAGE)
             return
         if self._shadow_is_active():
-            # The shared execution lease is what makes Shadow XOR Paper structural,
-            # so this is a courtesy refusal with the operator's sentence -- the lease
-            # would refuse the launch anyway, and would report it less clearly.
+            # The shared lease makes Shadow XOR Paper structural, so this is a
+            # courtesy refusal with the operator's sentence: the lease would refuse
+            # the launch anyway, and would report it less clearly.
             self._clear_arm_confirmation()
             self.refused.emit(SHADOW_ACTIVE_TITLE, SHADOW_ACTIVE_MESSAGE)
             return
@@ -201,9 +182,9 @@ class PaperOrchestrator(QObject):
             return
         strategy = self._strategy_provider()
         if strategy is None:
-            # The preflight already refuses a missing strategy, so reaching here with
-            # ``None`` means the selection changed between the two reads.  Refusing
-            # rather than asserting keeps a race an operator condition, not a crash.
+            # The preflight already refuses a missing strategy, so reaching here means
+            # the selection changed between the two reads.  Refusing rather than
+            # asserting keeps a race an operator condition, not a crash.
             self._clear_arm_confirmation()
             self.refused.emit(PREFLIGHT_TITLE, PREFLIGHT_PREFIX)
             return
@@ -216,9 +197,8 @@ class PaperOrchestrator(QObject):
             order_channel=self._order_channel_provider(),
         )
         try:
-            # The plan is bound and PAPER is acquired *before* the broker connect
-            # starts: Shadow and Paper share one execution lease, so this ordering is
-            # the structural mutex rather than a UI gate.
+            # Bound and acquired *before* the connect: Shadow and Paper share one
+            # lease, so this ordering is the structural mutex, not a UI gate.
             self._workflow.begin_connecting(request.plan)
         except WorkflowStateError as error:
             self.refused.emit(BEGIN_REFUSED_TITLE, str(error))
@@ -253,33 +233,22 @@ class PaperOrchestrator(QObject):
             resource_group="broker",
         )
         if not started:
-            # Not admitted -- the window is closing or the broker group is busy.  No
-            # task was created, so this attempt must be unwound here: reject the
-            # matching plan (which releases PAPER) and put the controls back.  Leaving
-            # it would be a CONNECTING zombie holding the lease forever.
+            # Not admitted -- closing, or the broker group is busy.  No task exists, so
+            # this attempt must be unwound here: reject the matching plan (releasing
+            # PAPER) and restore the controls.  Otherwise it is a CONNECTING zombie.
             self._workflow.reject_connecting(request.plan)
             self._render_launch_state()
 
     def _connect_finished(self, result: object) -> None:
         """Continue the launch after the async candidate connect returned.
 
-        The five decisions here are the retired callback's, in its order, and each is a
-        safety property rather than a convenience:
-
-        * **the shape is checked loudly.**  A malformed result is a programming error;
-          swallowing it with ``except Exception: return`` is how a launch silently stops
-          without either an armed session or a released lease;
-        * **a connect error ends only this attempt** -- no candidate, no active service
-          and no newer attempt is touched;
-        * **a stale plan disposes only its own candidate**, and cannot disconnect the
-          active service, clear ownership or alter a newer attempt's plan, lease or
-          phase.  ``reject_connecting`` returning ``False`` confirms the callback is
-          stale, and every mutation of the plan is inside it;
-        * **the preflight is re-run** -- market, account, strategy, candidate and capital
-          inputs can all have changed while the broker was connecting, so the first pass
-          is not evidence about the present;
-        * **the frozen identity is revalidated**, so the attempt proceeds only if the
-          plan still describes what the operator would confirm now.
+        Five safety properties, in order.  The **shape is checked loudly**: swallowing
+        a malformed result is how a launch stops silently with neither an armed session
+        nor a released lease.  A **connect error ends only this attempt**; a **stale plan
+        disposes only its own candidate** and cannot touch the active service or a newer
+        attempt's plan, lease or phase.  The **preflight is re-run** and the **identity
+        revalidated**: market, account, strategy, candidate and capital may all have
+        changed while connecting.
         """
 
         candidate_id, request, connection_error = _unpack(result)
@@ -315,25 +284,21 @@ class PaperOrchestrator(QObject):
     def _arm_and_publish(
         self, candidate_id: str, request: PaperLaunchRequest
     ) -> None:
-        """Validate the broker reading, build the session, arm it, publish, promote.
+        """Validate the reading, arm the channel, publish, and promote.
 
-        The order is fixed by safety.  A broker connect proves reachability, not
-        permission: the candidate becomes the active owner of execution only after
-        ``publish_armed`` succeeded, and ``ensure_candidate_can_promote`` runs *before*
-        publication because a failure there -- an occupied active slot -- must be
-        discovered while the session can still be cleanly abandoned.
+        One sequence, here rather than buried in the injected build seam: ``arm`` ->
+        ``ensure_candidate_can_promote`` -> ``publish_armed`` -> ``promote_candidate``.
 
-        One failure path, deliberately: anything raised before publication discards
-        this candidate and rejects the matching CONNECTING plan.  It cannot touch the
-        active service, because nothing here ever assigned it -- once promotion
-        succeeds there is no candidate left, so the ``except`` cannot tear down a live
-        session.
+        **Publication splits the failure handling in two.**  The boundary is exactly
+        "did ``publish_armed`` return": it raises *before* the workflow reaches
+        ``RUNNING``, so everything up to and including its raise is still a *rollback*
+        (candidate disposed, matching plan rejected, PAPER released).  Once it returns
+        there is nothing left to roll back -- see :meth:`_fail_after_publication`.
         """
 
         try:
-            # Borrowed for this call stack only.  Never assigned to an attribute,
-            # never kept past promotion, never handed to another capability: a stored
-            # handle would be a second owner of the broker connection.
+            # Borrowed for this call stack only: never assigned to an attribute, never
+            # kept past promotion.  A stored handle would be a second owner.
             service = self._paper_trading.candidate_service(candidate_id)
             broker_state = service.broker_state()
             refusal = queries.validate_broker_state(broker_state)
@@ -343,12 +308,16 @@ class PaperOrchestrator(QObject):
                 broker_state,
                 account_alias=service.connection_snapshot().account_alias,
             )
-            # The composition root builds the runtime, the risk authority and the
-            # execution application over the *same* borrowed channel, then arms it.
             built = self._build_session(request, service, reading)
-            # Pure check, no mutation: promotion after ``publish_armed`` must not be
-            # able to fail for a reason already knowable here, so a published session
-            # can never end up without an owner.
+            # Explicit, and this sequence's: a step hidden in the injected callable
+            # could not be ordered against publication by a guard.
+            service.arm(
+                session_id=built.session_id,
+                allowed_symbols=request.candidate_symbols,
+                max_order_notional=built.max_order_notional,
+                sellable_quantities={},
+            )
+            # Pure check, no mutation, and deliberately *before* publication.
             self._paper_trading.ensure_candidate_can_promote(candidate_id)
             result = self._workflow.publish_armed(
                 request.plan,
@@ -357,14 +326,18 @@ class PaperOrchestrator(QObject):
                 health_evaluator=self._health_evaluator,
                 candidate_symbols=frozenset(request.candidate_symbols),
             )
-            self._paper_trading.promote_candidate(candidate_id)
-        except Exception as error:  # noqa: BLE001 - every path rejects this attempt
+        except Exception as error:  # noqa: BLE001 - nothing is published yet
             self._discard_candidate(
                 candidate_id,
                 request,
                 ARMING_FAILED_MESSAGE.format(error=error),
                 show_message=True,
             )
+            return
+        try:
+            self._paper_trading.promote_candidate(candidate_id)
+        except Exception as error:  # noqa: BLE001 - published, so no rollback
+            self._fail_after_publication(request, error)
             return
         self.session_published.emit(
             PaperLaunchPublication(
@@ -386,6 +359,34 @@ class PaperOrchestrator(QObject):
             )
         )
 
+    def _fail_after_publication(
+        self, request: PaperLaunchRequest, error: Exception
+    ) -> None:
+        """Fail closed when the session was published but promotion did not land.
+
+        A **broken safety invariant, not a launch failure**.  ``publish_armed`` already
+        moved the workflow to ``RUNNING`` with a published coordinator, so nothing here
+        may unwind it: ``reject_connecting`` is a no-op outside ``CONNECTING``,
+        discarding the candidate would strand a running session with no owner, and
+        releasing PAPER would un-enforce the Shadow/Paper mutex while a session is live.
+        So nothing is rolled back -- the candidate, the lease and the published workflow
+        stay as they are, and the condition is reported at error severity under its own
+        code.  An ownerless session needs a human, and that is the honest state.  The
+        long-term fix is a promotion reservation/commit in the order-service owner.
+        """
+
+        message = PAPER_PROMOTION_INVARIANT_MESSAGE.format(error=error)
+        self.log_requested.emit(message)
+        self.runtime_event_requested.emit(
+            PaperLaunchEvent(
+                severity="error",
+                component=PAPER_LAUNCH_COMPONENT,
+                code=PAPER_PROMOTION_INVARIANT_CODE,
+                message=message,
+            )
+        )
+        self.refused.emit(PAPER_PROMOTION_INVARIANT_TITLE, message)
+
     # -- rejection -------------------------------------------------------
 
     def _discard_candidate(
@@ -398,17 +399,13 @@ class PaperOrchestrator(QObject):
     ) -> None:
         """Dispose one candidate and reject only the attempt it belongs to.
 
-        The rejection runs in a ``finally`` so a failing broker disconnect can never
-        leave the workflow stuck in ``CONNECTING`` holding the lease; the disconnect
-        error itself still propagates, and ``PaperTradingService`` keeps ownership of a
-        candidate it could not dispose rather than this layer forcing its map.
-
-        ``reject_connecting`` returning ``True`` is the workflow confirming this callback
-        was the *current* attempt -- exactly the retired ``_reset_auto_launch_controls``
-        predicate.  Presenting and repainting are both gated on it, so a stale callback
-        cannot clear a newer attempt's arm confirmation, repaint its controls, or raise a
-        dialog about a launch that already moved on.  The log line is deliberately *not*
-        gated: the operator should still see that a late result was ignored.
+        The rejection runs in a ``finally`` so a failing disconnect can never strand
+        ``CONNECTING`` holding the lease; the error still propagates and the service
+        keeps ownership of a candidate it could not dispose.  ``reject_connecting``
+        returning ``True`` is the retired ``_reset_auto_launch_controls`` predicate, so
+        presenting and repainting are gated on it: a stale callback must not clear a
+        newer attempt's arm confirmation or raise a dialog about a launch that moved on.
+        The log line is not gated, so the operator still sees the result was ignored.
         """
 
         try:
@@ -428,9 +425,8 @@ class PaperOrchestrator(QObject):
     ) -> None:
         """Finish a failed connect that produced no candidate at all.
 
-        ``reject_connecting`` reports whether this callback was the current attempt; a
-        stale one changes nothing, so it must neither reset the controls the newer
-        attempt owns nor raise a dialog about a launch that already moved on.
+        A stale one changes nothing: it must not reset the newer attempt's controls nor
+        raise a dialog about a launch that already moved on.
         """
 
         current = self._workflow.reject_connecting(request.plan)
@@ -443,7 +439,7 @@ class PaperOrchestrator(QObject):
 
 
 class _LaunchRefused(Exception):
-    """One broker gate failed; carried to the single rejection path above."""
+    """One broker gate failed; carried to the rejection path above."""
 
 
 def _unpack(result: object) -> tuple[str, PaperLaunchRequest, str | None]:

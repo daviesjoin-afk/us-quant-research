@@ -281,10 +281,28 @@ def test_a_launch_publishes_exactly_one_session_and_promotes_once(
     candidate = _FakeCandidateService.instances[0]
     assert window.paper_trading.has_order_service() is True
     assert window.paper_trading.has_candidate("1") is False
-    # And it was armed with the frozen shortlist.
+    # And the *orchestrator* armed it with the frozen shortlist -- through the real
+    # window seam, which composes the runtime but no longer arms it itself.
     assert candidate.armed is not None
     assert candidate.armed["session_id"] is not None
     assert candidate.armed["allowed_symbols"] == ("AAPL",)
+    # The notional is the seam's computed sizing, threaded through the build result.
+    assert candidate.armed["max_order_notional"] > 0
+
+
+def test_the_window_build_seam_does_not_arm_the_channel(window: MainWindow) -> None:
+    """Arming belongs to the orchestrator, not to the composition root's seam.
+
+    Asserted structurally as well as behaviourally: the seam's *body* must not call
+    ``arm``.  Otherwise the ordered trace in the capability's own tests would still
+    pass while the real constraint silently stopped being testable.
+    """
+
+    import inspect
+
+    seam = inspect.getsource(MainWindow._build_paper_session)
+    assert ".arm(" not in seam
+    assert "max_order_notional=" in seam  # it returns the sizing instead
 
 
 def test_the_session_reaches_the_window_through_the_publication(

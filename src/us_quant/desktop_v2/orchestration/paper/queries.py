@@ -30,6 +30,7 @@ Two rules are deliberate rather than accidental:
 
 from __future__ import annotations
 
+import copy
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -43,9 +44,12 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     NET_LIQUIDATION_MESSAGE,
     POSITIONS_MESSAGE,
     PaperAccountReading,
+    PaperLaunchIntegrityError,
     PaperLaunchRequest,
     PaperOrderChannel,
+    PaperStrategyLaunchFact,
 )
+from us_quant.trading.domain.strategy import parameter_hash_for
 from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
 if TYPE_CHECKING:
@@ -97,21 +101,58 @@ def freeze_launch(
     from a strategy the operator changed after confirming, nor from an order
     channel whose settings changed while the broker was connecting.  The plan is
     built through ``us_quant.auto_launch`` so the fingerprint has one definition.
+
+    **The strategy's parameters are deep-copied, and the copy is verified.**  Holding
+    the live ``StrategyVersion`` would not freeze anything: it is a frozen dataclass,
+    but its ``parameters`` is a plain mutable ``dict`` and ``parameter_hash`` is read
+    off the governed identity rather than recomputed, so an in-place edit during the
+    broker connect would leave the plan naming hash A while the session was built
+    from parameters B.  :func:`strategy_launch_fact` takes the copy and refuses a
+    version whose declared hash does not describe its own parameters.
     """
 
     rows = tuple(candidates)
+    fact = strategy_launch_fact(strategy)
     plan = build_auto_launch_plan(
         attempt_id=attempt_id,
-        strategy_version_id=strategy.version_id,
-        parameter_hash=strategy.parameter_hash,
+        strategy_version_id=fact.version_id,
+        parameter_hash=fact.parameter_hash,
         candidate_symbols=(row.symbol for row in rows),
         requested_capital_limit=requested_capital_limit,
     )
     return PaperLaunchRequest(
         plan=plan,
-        strategy_version=strategy,
+        strategy=fact,
         candidates=rows,
         order_channel=order_channel,
+    )
+
+
+def strategy_launch_fact(strategy: Any) -> PaperStrategyLaunchFact:
+    """Detach one strategy version from its live, mutable parameter mapping.
+
+    Two checks, and both are deliberate rather than defensive.  The **deep copy**
+    means a later ``strategy.parameters[...] = ...`` cannot reach the frozen
+    request.  The **hash re-computation** means a version whose declared
+    ``parameter_hash`` disagrees with its own parameters is refused outright: such a
+    version cannot be launched under either hash honestly, and quietly using either
+    one is the split-identity failure this whole shape exists to prevent.
+    """
+
+    parameters = copy.deepcopy(strategy.parameters)
+    recomputed = parameter_hash_for(parameters)
+    if recomputed != strategy.parameter_hash:
+        raise PaperLaunchIntegrityError(
+            "strategy version "
+            f"{strategy.version_id!r} declares parameter_hash "
+            f"{strategy.parameter_hash!r} but its parameters hash to "
+            f"{recomputed!r}; refusing to launch an inconsistent version"
+        )
+    return PaperStrategyLaunchFact(
+        version_id=strategy.version_id,
+        parameter_hash=strategy.parameter_hash,
+        identity=strategy.identity,
+        parameters=parameters,
     )
 
 
@@ -128,14 +169,25 @@ def current_inputs_match(
     matches" cannot drift from "was built".  A missing strategy is a mismatch for
     the same reason a changed one is: the plan names a version that must still be
     the selection this launch would arm.
+
+    A version whose declared hash does not describe its own parameters is also a
+    mismatch, **not** an exception.  This gate runs on the connect callback, where an
+    exception would escape the slot and strand the attempt in ``CONNECTING`` holding
+    the lease; answering "mismatch" routes it through the normal rejection, which
+    disposes the candidate and releases PAPER.  Either way the launch does not
+    proceed, which is the fail-closed outcome an inconsistent catalogue demands.
     """
 
     if strategy is None:
         return False
+    try:
+        fact = strategy_launch_fact(strategy)
+    except PaperLaunchIntegrityError:
+        return False
     return auto_launch_plan_matches(
         plan,
-        strategy_version_id=strategy.version_id,
-        parameter_hash=strategy.parameter_hash,
+        strategy_version_id=fact.version_id,
+        parameter_hash=fact.parameter_hash,
         candidate_symbols=(row.symbol for row in candidates),
         requested_capital_limit=requested_capital_limit,
     )
@@ -193,5 +245,6 @@ __all__ = [
     "launch_attempt_in_flight",
     "preflight_failed",
     "preflight_failure_text",
+    "strategy_launch_fact",
     "validate_broker_state",
 ]

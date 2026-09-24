@@ -36,13 +36,16 @@ import pytest
 from us_quant.auto_launch import AutoLaunchPlan, build_auto_launch_plan
 from us_quant.desktop_v2.orchestration.paper import models as messages
 from us_quant.desktop_v2.orchestration.paper import orchestrator as module
+from us_quant.desktop_v2.orchestration.paper import queries
 from us_quant.desktop_v2.orchestration.paper.models import (
     ARMING_FAILED_MESSAGE,
     CONNECT_FAILED_MESSAGE,
     IDENTITY_CHANGED_MESSAGE,
+    PAPER_PROMOTION_INVARIANT_CODE,
     PREFLIGHT_CHANGED_MESSAGE,
     STALE_PLAN_MESSAGE,
     PaperAccountReading,
+    PaperLaunchIntegrityError,
     PaperLaunchPublication,
     PaperLaunchRequest,
     PaperOrderChannel,
@@ -52,6 +55,7 @@ from us_quant.desktop_v2.orchestration.paper.orchestrator import (
     PaperOrchestrator,
 )
 from us_quant.paper_order_models import PaperBrokerPosition, PaperBrokerState
+from us_quant.trading.domain.strategy import parameter_hash_for
 from us_quant.trading.runtime.workflow_state import (
     PaperWorkflowPhase,
     WorkflowStateError,
@@ -301,13 +305,35 @@ class _Check:
 
 
 class _Strategy:
+    """A stand-in governed version whose hash really describes its parameters.
+
+    Built through the domain's own ``parameter_hash_for`` rather than with a literal
+    string, because ``freeze_launch`` re-computes the hash and refuses a version whose
+    declared hash disagrees.  A fake with a made-up hash would be refused by that
+    check, which is correct behaviour but not what most of these tests are about.
+    """
+
     def __init__(
-        self, *, version_id: str = "v-1", parameter_hash: str = "hash-1"
+        self,
+        *,
+        version_id: str = "v-1",
+        parameters: dict[str, object] | None = None,
+        parameter_hash: str | None = None,
     ) -> None:
         self.version_id = version_id
-        self.parameter_hash = parameter_hash
-        self.identity = "identity"
-        self.parameters: dict[str, object] = {}
+        self.identity = f"identity-for-{version_id}"
+        self.parameters: dict[str, object] = (
+            {"market_reference_symbols": ["SPY"], "max_position_fraction": "0.05"}
+            if parameters is None
+            else parameters
+        )
+        # An explicit hash models a *tampered* catalogue entry; otherwise the hash is
+        # derived so the version is internally consistent.
+        self.parameter_hash = (
+            parameter_hash
+            if parameter_hash is not None
+            else parameter_hash_for(self.parameters)
+        )
 
 
 class _Row:
@@ -347,9 +373,10 @@ class _Submitter:
 class _Builder:
     """The injected session-build seam.
 
-    Faithful to the real seam's shape: it builds the runtime over the *borrowed*
-    candidate and then arms that same channel, which is why an arm failure surfaces
-    from here exactly as it does in production.
+    Faithful to the real seam's shape in the way this round made load-bearing: it
+    composes and starts the runtime and returns what arming needs, but it does **not**
+    arm.  So an arm failure surfaces from the orchestrator's own call, which is
+    exactly where production raises it.
     """
 
     def __init__(self, *, error: Exception | None = None) -> None:
@@ -360,18 +387,13 @@ class _Builder:
         self.calls.append((request, service, reading))
         if self.error is not None:
             raise self.error
-        service.arm(
-            session_id="session-1",
-            allowed_symbols=request.candidate_symbols,
-            max_order_notional=Decimal("1000"),
-            sellable_quantities={},
-        )
         return PaperSessionBuildResult(
             engine="engine",
             orders=service,
             session_id="session-1",
             candidate_count=len(request.candidates),
             runtime="runtime",
+            max_order_notional=Decimal("1000"),
         )
 
 
@@ -736,7 +758,14 @@ def test_a_stale_callback_does_not_clear_the_newer_attempt_controls() -> None:
     "mutate",
     [
         pytest.param(lambda state: state.update(strategy=_Strategy(version_id="v-2")), id="strategy"),
-        pytest.param(lambda state: state.update(strategy=_Strategy(parameter_hash="hash-2")), id="parameter_hash"),
+        # A different *governed* parameter set: the hash differs because the content
+        # does, which is the honest way to model "the operator applied another version".
+        pytest.param(
+            lambda state: state.update(
+                strategy=_Strategy(parameters={"max_position_fraction": "0.02"})
+            ),
+            id="parameter_hash",
+        ),
         pytest.param(lambda state: state.update(candidates=(_Row("MSFT"),)), id="candidates"),
         pytest.param(lambda state: state.update(capital_limit=Decimal("1")), id="capital_limit"),
     ],
@@ -904,9 +933,15 @@ def test_the_capital_resolution_failure_refuses_the_launch() -> None:
 def test_arm_ensure_publish_promote_order_is_fixed() -> None:
     """The irreversible sequence, asserted positively as an ordered trace.
 
-    ``arm`` is traced from the build seam, because that is where the composition root
-    arms the channel -- so this test also pins that the arm happens *inside* the seam
-    and therefore before the ensure check, never after publication.
+    This is the whole constraint in one assertion, and v2O-E1's follow-up round is
+    what makes it assertable: ``arm`` is the *orchestrator's* call now, so the trace
+    covers all four steps instead of stopping at the build seam.  Before that, arming
+    happened inside the injected seam and the real ordering could only be approximated.
+
+    ``ensure`` before ``publish`` is the safety property: a publication that could
+    still fail for an already-knowable reason would leave a session with no owner.
+    ``promote`` last is the other one: a successful broker connect is not permission
+    for the session to own execution.
     """
 
     order: list[str] = []
@@ -943,27 +978,7 @@ def test_arm_ensure_publish_promote_order_is_fixed() -> None:
 
     workflow.publish_armed = publish  # type: ignore[method-assign]
 
-    # The seam arms the channel, exactly as the composition root's does.
-    class _ArmingBuilder(_Builder):
-        def __call__(self, request, service, reading):
-            self.calls.append((request, service, reading))
-            service.arm(
-                session_id="session-1",
-                allowed_symbols=request.candidate_symbols,
-                max_order_notional=Decimal("1000"),
-                sellable_quantities={},
-            )
-            return PaperSessionBuildResult(
-                engine="engine",
-                orders=service,
-                session_id="session-1",
-                candidate_count=len(request.candidates),
-                runtime="runtime",
-            )
-
-    harness = _build(
-        workflow=workflow, trading=trading, builder=_ArmingBuilder()
-    )
+    harness = _build(workflow=workflow, trading=trading)
     _launch(harness)
 
     assert order == [
@@ -1113,3 +1128,240 @@ def test_the_orchestrator_never_publishes_when_the_broker_gate_refuses() -> None
     assert harness.events.runtime_events == []
     assert harness.builder.calls == []
     assert harness.workflow.published == []
+
+
+# -- Blocker 1: the frozen request really is frozen ----------------------
+
+
+def test_freeze_launch_detaches_parameters_from_the_live_version() -> None:
+    """The frozen request must not alias the live, mutable parameter mapping.
+
+    This is the regression for the round's first blocker.  ``StrategyVersion`` is a
+    frozen dataclass, but its ``parameters`` is a plain mutable ``dict`` and
+    ``parameter_hash`` is read off the governed identity rather than recomputed -- so
+    a request holding the live version would let the attempt be *planned* under hash A
+    and *built* from parameters B.
+
+    The edit mutates a **nested list** as well as a top-level scalar, because a
+    shallow copy passes a scalar-only test while still aliasing the list the runtime
+    reads for its market reference symbols.
+    """
+
+    live = _Strategy(
+        parameters={
+            "market_reference_symbols": ["SPY", "QQQ"],
+            "max_position_fraction": "0.05",
+        }
+    )
+    request = queries.freeze_launch(
+        attempt_id=1,
+        strategy=live,
+        candidates=(_Row("AAPL"),),
+        requested_capital_limit=Decimal("20000"),
+        order_channel=PaperOrderChannel(
+            config="config", repository="repository", extended_hours_enabled=False
+        ),
+    )
+
+    live.parameters["max_position_fraction"] = "0.09"
+    live.parameters["market_reference_symbols"].append("IWM")
+
+    assert request.strategy.parameters["max_position_fraction"] == "0.05"
+    assert request.strategy.parameters["market_reference_symbols"] == ["SPY", "QQQ"]
+    # The plan's hash still describes exactly what the snapshot holds.
+    assert request.plan.parameter_hash == parameter_hash_for(
+        request.strategy.parameters
+    )
+
+
+def test_the_frozen_parameters_are_detached_from_the_source_object() -> None:
+    """Mutating the request's own mapping cannot reach back into the live version."""
+
+    live = _Strategy(parameters={"max_position_fraction": "0.05"})
+    harness = _build(strategy=live)
+    _launch(harness)
+
+    request = harness.builder.calls[0][0]
+    request.strategy.parameters["max_position_fraction"] = "0.01"
+
+    assert live.parameters["max_position_fraction"] == "0.05"
+
+
+def test_a_version_whose_hash_contradicts_its_parameters_is_refused() -> None:
+    """Fail closed: never launch an inconsistent version under either hash.
+
+    A version declaring a hash that does not describe its own parameters cannot be
+    launched honestly.  Running it under the declared hash would execute parameters
+    that hash does not cover -- the split-identity failure -- so the launch is
+    refused before any plan is bound, the lease is taken or a candidate exists.
+    """
+
+    tampered = _Strategy(parameter_hash="0" * 64)
+    harness = _build(strategy=tampered)
+
+    with pytest.raises(PaperLaunchIntegrityError):
+        harness.orchestrator.start()
+
+    assert harness.workflow.phase is PaperWorkflowPhase.READY
+    assert harness.workflow.lease.acquired == 0
+    assert harness.trading.connected == []
+    assert harness.submitter.calls == []
+
+
+def test_editing_the_live_parameters_during_the_connect_is_refused() -> None:
+    """An in-place edit during the connect refuses the attempt -- it never runs B.
+
+    This is the sharp end of blocker 1.  The governed identity still claims hash A
+    while the live mapping now holds B, so there is no honest way to proceed: running
+    A would ignore the edit, running B would execute parameters the plan does not
+    cover.  The attempt is refused instead, and -- because this gate runs inside the
+    connect callback's slot -- the refusal is a *mismatch*, not an exception, so the
+    normal rejection path disposes the candidate and releases PAPER rather than
+    stranding the attempt in ``CONNECTING``.
+
+    The critical assertion is ``builder.calls == []``: the session was never built,
+    so the edited parameters never reached the runtime.
+    """
+
+    live = _Strategy(
+        parameters={
+            "market_reference_symbols": ["SPY", "QQQ"],
+            "max_position_fraction": "0.05",
+        }
+    )
+    harness = _build(strategy=live)
+    harness.orchestrator.start()
+    result = harness.submitter.work()
+
+    # The live version is edited in place while the broker connects.
+    live.parameters["max_position_fraction"] = "0.09"
+    live.parameters["market_reference_symbols"].append("IWM")
+
+    harness.submitter.finish(result)
+
+    assert harness.builder.calls == []
+    assert harness.trading.promoted == []
+    assert harness.trading.discarded == ["1"]
+    assert harness.workflow.phase is PaperWorkflowPhase.READY
+    assert harness.workflow.lease.active is False
+    assert harness.events.refusals[-1][1] == IDENTITY_CHANGED_MESSAGE
+
+
+# -- Blocker 2: publication splits rollback from invariant failure -------
+
+
+def _publication_then_promotion_failure():
+    """A harness where ``publish_armed`` succeeds and promotion then raises.
+
+    Promotion failing *after* publication is the broken-invariant window: the
+    workflow has already reached ``RUNNING`` with a published coordinator, so there
+    is nothing left to roll back.
+    """
+
+    workflow = _Workflow()
+    trading = _Trading()
+    trading.promote_error = RuntimeError("promotion slot taken")
+    harness = _build(workflow=workflow, trading=trading)
+    _launch(harness)
+    return harness
+
+
+def test_a_promotion_failure_after_publication_is_not_rolled_back() -> None:
+    """The session, the lease and the candidate must all survive.
+
+    This is the regression for the round's second blocker.  Rolling back here is
+    actively harmful: ``reject_connecting`` is a no-op outside ``CONNECTING``,
+    discarding the candidate leaves a *published* session with no owner, and releasing
+    PAPER would un-enforce the Shadow/Paper mutex while the session is live.
+    """
+
+    harness = _publication_then_promotion_failure()
+
+    # The workflow was published and stays running.
+    assert harness.workflow.published == [harness.workflow.active_plan]
+    assert harness.workflow.phase is PaperWorkflowPhase.RUNNING
+    # The lease is still held -- not released.
+    assert harness.workflow.lease.active is True
+    assert harness.workflow.lease.released == 0
+    # The candidate is still owned and was NOT discarded or disconnected.
+    assert harness.trading.candidate_ids == {"1"}
+    assert harness.trading.discarded == []
+    # And no refusal was raised as though this were an ordinary launch failure.
+    assert all(
+        title != "Paper 会话未启动" for title, _ in harness.events.refusals
+    )
+    # The session was never published to the desktop either -- the window did not
+    # adopt a runtime it cannot own.
+    assert harness.events.publications == []
+
+
+def test_a_promotion_failure_after_publication_is_reported_as_an_invariant() -> None:
+    """It must be loud, with its own code, not disguised as a launch failure."""
+
+    harness = _publication_then_promotion_failure()
+
+    codes = [
+        event.code
+        for event in harness.events.runtime_events
+        if getattr(event, "code", None) == PAPER_PROMOTION_INVARIANT_CODE
+    ]
+    assert codes == [PAPER_PROMOTION_INVARIANT_CODE]
+    invariant = next(
+        event
+        for event in harness.events.runtime_events
+        if event.code == PAPER_PROMOTION_INVARIANT_CODE
+    )
+    assert invariant.severity == "error"
+    assert "promotion slot taken" in invariant.message
+    # The operator is told, and told what state the session is in.
+    assert harness.events.refusals[-1][0] == messages.PAPER_PROMOTION_INVARIANT_TITLE
+    assert "已发布未接管" in harness.events.refusals[-1][1]
+
+
+def test_a_publish_failure_before_publication_still_rolls_back() -> None:
+    """The other side of the boundary: ``publish_armed`` raising is still a rollback.
+
+    ``publish_armed`` raises *before* the workflow transitions to ``RUNNING``, so
+    nothing was published and the attempt must be unwound normally -- candidate
+    disposed, plan rejected, PAPER released.
+    """
+
+    workflow = _Workflow()
+    workflow.publish_error = WorkflowStateError("Stale or invalid publication.")
+    harness = _build(workflow=workflow)
+
+    _launch(harness)
+
+    assert harness.trading.discarded == ["1"]
+    assert harness.workflow.phase is PaperWorkflowPhase.READY
+    assert harness.workflow.lease.active is False
+    assert harness.events.refusals[-1][0] == messages.LAUNCH_FAILED_TITLE
+
+
+# -- Blocker 3: arming is the orchestrator's own step --------------------
+
+
+def test_the_orchestrator_arms_the_channel_itself() -> None:
+    """``arm`` must be called by the orchestrator, not hidden in the build seam.
+
+    The round is named "launch / arm orchestration", and the point of the change is
+    that ``arm -> ensure -> publish -> promote`` is one explicit sequence.  If arming
+    moved back inside the injected seam, the ordered-trace test above would still
+    pass while the real constraint became unassertable.
+    """
+
+    candidate = _Candidate()
+    trading = _Trading()
+    trading._candidate_for = lambda candidate_id: candidate  # type: ignore[method-assign]
+    harness = _build(trading=trading)
+
+    _launch(harness)
+
+    assert candidate.arm_calls, "the orchestrator must arm the channel"
+    armed = candidate.arm_calls[0]
+    assert armed["session_id"] == "session-1"
+    assert armed["allowed_symbols"] == ("AAPL",)
+    # The notional came from the build seam's sizing, not from a literal here.
+    assert armed["max_order_notional"] == Decimal("1000")
+    # And the build seam itself never arms.
+    assert harness.workflow.phase is PaperWorkflowPhase.RUNNING

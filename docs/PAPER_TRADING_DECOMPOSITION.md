@@ -675,4 +675,41 @@ callback，未来任何一处再丢字段都会在结构层被拦住，而不是
 | 突变 | 16/16 | **18/18**（新增丢参数与 sentinel 突变体） |
 | `verify.ps1` | exit 0 | **exit 0** |
 
+# 第六部分：forward reference —— 启动链的 ownership 演进（v2O-E1）
 
+本文档记录的历史阶段**不重写**。这一节只做前向引用，说明后续一轮把**启动链**的
+ownership 移动到了哪里，以免读者按本文档的旧描述去 `MainWindow` 找已经不在那里的代码。
+
+## 35. 启动链迁入 `PaperOrchestrator`（v2O-E1）
+
+本文档此前描述的边界是"`PaperTradingService` 拥有 order service 的候选/激活槽，
+`PaperWorkflowController` 拥有 phase / active plan / execution lease，窗口负责启动的
+sequencing"。v2O-E1 把最后那一半——**启动 sequencing**——也移出了窗口：
+
+```text
+desktop_v2/orchestration/paper/
+    models.py        冻结 request / 券商读数 / build 结果 / publication / event
+    queries.py       启动门、冻结 plan、identity 比对、券商门（纯规则）
+    orchestrator.py  READY → CONNECTING → 校验 → arm → publish → promote → RUNNING
+```
+
+所有权**没有变**，只是启动的 driver 换了：
+
+| 事实 | 唯一 owner | E1 之前由谁驱动 | E1 之后由谁驱动 |
+| --- | --- | --- | --- |
+| phase / active_plan / execution lease | `PaperWorkflowController` | `MainWindow` | `PaperOrchestrator`（仍只调它的公开面） |
+| candidate / active broker connection | `PaperTradingService` | `MainWindow` | `PaperOrchestrator`（`candidate_service` 仍是借用） |
+| 已武装 session 的 runtime sequencing | `PaperSessionCoordinator` | 未变 | 未变 |
+| session / book / positions / risk / execution dispatch | `TradingRuntime` | 未变 | 未变 |
+| **启动 sequencing** | — | `MainWindow._start_auto_quant` + `_auto_order_service_connected` | **`PaperOrchestrator`** |
+
+窗口仍是 composition root：它构造 orchestrator、构造 `IBKRConnectionConfig`、提供窄的
+session-build seam（`_build_paper_session`）、接 `session_published` 并沿用既有渲染。
+
+**仍未迁移**（属 v2O-E2/E3/E4）：RUNNING 之后的 pause / resume / stop、HALT recovery、
+manual reconciliation、finalization、`closeEvent` teardown、execution page 的 session
+渲染。本文档 §16–§34 描述的 `PaperTradingService` / gateway / journal 边界在这些阶段
+依然成立。
+
+设计依据见 `docs/DESKTOP_DECOMPOSITION.md` §27 与 `docs/TRADING_ARCHITECTURE_V2.md`
+§8.18。

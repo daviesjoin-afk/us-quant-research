@@ -3220,3 +3220,131 @@ Shadow never releases a lease it did not acquire
                        把 _release_lease 改回 if self._lease.active 必须 RED
                        （同时覆盖 stop() / shutdown() 在 Paper 持租约时的误释放）
 ```
+
+## 27. v2O-E1：Paper launch orchestration 提取
+
+### 27.1 这一刀移走什么
+
+v2O-D 之后，Paper 的**启动链**还是 `MainWindow` 上的一对 handler 加四个只服务它们的
+helper：`_start_auto_quant`（读 preflight、冻结 plan、`begin_connecting`、提交 broker
+task）、`_auto_order_service_connected`（过期判定、二次 preflight、identity 复验、校验
+券商读数、建 runtime、arm、ensure、publish、promote），以及
+`_reject_unpublished_auto_candidate` / `_reject_auto_launch_without_service` /
+`_current_auto_launch_matches` / `_reset_auto_launch_controls`。它们整体迁入
+`desktop_v2/orchestration/paper/`。
+
+**本轮不迁**（属 v2O-E2/E3/E4）：RUNNING 之后的 pause / resume / stop、HALT recovery、
+manual reconciliation、finalization、`closeEvent` teardown、execution page 的 session
+渲染。
+
+### 27.2 单一 truth：phase 取代 plan 镜像
+
+窗口曾同时持有 `_active_auto_launch_plan`，而 `PaperWorkflowController` 也有
+`active_plan`——两份 launch identity truth。本轮删掉窗口那一份，且**不留 compatibility
+property**：留 property 会让每个未迁移的调用点继续工作，于是"谁拥有 launch"就不再是
+一次 grep 能回答的问题。
+
+判据改为 workflow 自己的 phase。两者在启动期完全等价：
+
+```text
+_active_auto_launch_plan is not None
+    ==  phase is PaperWorkflowPhase.CONNECTING
+```
+
+因为 `begin_connecting` 是进入 `CONNECTING` 的唯一入口，两条退出路径（reject / publish）
+都会清掉 plan。差别在**publish 之后**：那时 plan 合法地跨越 attempt 存续进 `RUNNING`，
+而 attempt 已经结束——只有 phase 仍能正确回答"还有 attempt 在飞吗"。窗口的
+`_launch_locked` 与确认门因此都读 `paper_trading.phase()`。
+
+`_next_auto_launch_attempt` 是另一回事：attempt 序号属 desktop orchestration
+bookkeeping，不是交易或 session truth，所以它迁进 `PaperOrchestrator`，并**保持整数递增
+语义**，不改 UUID——那只会改变 candidate id 在线上的形状而没有任何收益。
+
+### 27.3 顺序即安全
+
+`start()` 的门序是退休 handler 的，且**重复门必须第一**：等 candidate 连上才发现重复，
+就会已经建了第二个 candidate、起了第二个 broker task、并用第二次 `begin_connecting`
+覆盖在飞的 plan。
+
+```text
+duplicate gate   →  phase is CONNECTING ⇒ 拒绝（且**不**清 arm_confirmed，attempt 仍在飞）
+shadow active    →  清 arm_confirmed + 拒绝
+first preflight  →  清 arm_confirmed + 拒绝（保留逐条 bullet 文案）
+freeze plan      →  读一次：attempt_id / strategy / candidates / capital limit / order channel
+begin_connecting →  workflow 取得 PAPER lease
+render + submit  →  resource_group="broker"；未被接纳则 reject_connecting + 还控件
+```
+
+`freeze plan` 必须在 `begin_connecting` **之前**、`begin_connecting` 必须在 broker
+connect **之前**：Shadow / Paper 共享一个执行租约，所以这个顺序**就是**结构性互斥，
+不是 UI gate。
+
+### 27.4 arm / publish / promote 的硬顺序
+
+```text
+candidate_service(candidate_id)    借用；只存在于本 callback 调用栈
+→ validate_broker_state            净值非空且 > 0；positions 为空；cash 非空（Decimal）
+→ build_session                    组合根建 config / risk / execution / runtime，start()，arm()
+→ ensure_candidate_can_promote     纯检查，无副作用
+→ publish_armed
+→ promote_candidate
+```
+
+`ensure_candidate_can_promote` 早于 `publish_armed` 是刻意的：这样"已发布的 session 因
+一个当时即可知的原因而没有 owner"不可能发生。promote 最后：**broker connect 成功 ≠
+session 已获信任**。
+
+### 27.5 stale callback 的完整保护
+
+异步 callback 到达后依次判断：结构合法性（非法则 **raise**，不吞）、connect error（只
+结束本方 attempt）、stale plan（只 discard 自己的 candidate、只 reject 自己的 plan）、
+二次 preflight、identity 复验。`reject_connecting` 返回 `False` 即"这是过期
+callback"，此时连 presentation 都不动：不清更新的 attempt 的 arm_confirmed、不重绘它
+的控件、不为它弹窗。log 行不 gate——操作员仍应看到"过期结果已忽略"。
+
+### 27.6 新增文件与预算
+
+```text
+__init__.py      20    只导出 PaperOrchestrator
+models.py        180   冻结 shape + 两个协作方 Protocol + 逐字 operator 文案
+queries.py       197   启动门 / 冻结 plan / identity 比对 / 券商门
+orchestrator.py  450   只做 sequencing
+```
+
+### 27.7 MainWindow 退休清单
+
+```text
+删除（无 shim、无 forwarding property）
+    _start_auto_quant
+    _auto_order_service_connected
+    _reject_unpublished_auto_candidate
+    _reject_auto_launch_without_service
+    _current_auto_launch_matches
+    _reset_auto_launch_controls
+    self._active_auto_launch_plan
+    self._next_auto_launch_attempt
+
+保留（composition + presentation）
+    _confirm_and_start_auto_quant     操作员确认（QMessageBox 不能进 capability）
+    _auto_quant_order_channel         构造 IBKRConnectionConfig（组合根的事）
+    _build_paper_session              窄 session-build seam
+    _on_paper_session_published       接 session_published，沿用既有渲染
+    _report_paper_launch_refusal      弹窗
+    _record_paper_launch_event        事件落库
+```
+
+### 27.8 冻结范围
+
+`trading/runtime/*`、`trading/application/*`、broker adapter、IBKR callback/gateway、
+Paper journal/schema、Shadow core **一行未改**，本轮没有发现可证明的安全 bug。
+
+### 27.9 mutation 必须 RED
+
+```text
+删掉 duplicate gate                              → RED
+把 stale plan 检查改成 if False                  → RED
+把 ensure_candidate_can_promote 移到 promote 之后 → RED
+删掉二次 preflight                               → RED
+```
+
+四条均已手工验证为 RED（单元 + wiring + 架构 guard 三层合计）。

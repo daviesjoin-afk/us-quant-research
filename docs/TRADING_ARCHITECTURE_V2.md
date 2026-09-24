@@ -144,7 +144,7 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Backtest Orchestration | MIGRATED（v2O-C3，`desktop_v2/orchestration/research/backtest/`） |
 | Research Orchestration | **COMPLETE**（v2O-C；Universe / History / Scanner / Backtest / Cross-Section / Targeted Evidence / Targeted Session 全部已迁） |
 | Shadow Orchestration | MIGRATED（v2O-D，`desktop_v2/orchestration/shadow/`） |
-| Paper Orchestration | MIGRATED（v2O-E1 启动链 + v2O-E2 active runtime + v2O-E3 recovery/finalization/shutdown，`desktop_v2/orchestration/paper/`）；render ownership 与 `closeEvent` 的整体收口仍在 `MainWindow`，属 v2O-E4 |
+| Paper Orchestration | MIGRATED（v2O-E1 启动链 + v2O-E2 active runtime + v2O-E3 recovery/finalization/shutdown + v2O-E4 presentation / render closure，`desktop_v2/orchestration/paper/`）；Paper 的 presentation fact 也由 capability 持有（`PaperOrchestrator.presentation`），`MainWindow` 不再持有任何 Paper session 缓存 |
 
 Shadow 子系统：
 
@@ -1812,12 +1812,15 @@ service、admission 被拒后 busy 保持 True、failure 清空 last-good runs�
 **v2O-C4 Cross Section ✅**；**v2O-C5A Targeted Evidence ✅**；
 **v2O-C5B Targeted Session + Preflight ✅**；**v2O-D Shadow orchestration ✅**；
 **v2O-E1 Paper launch orchestration ✅**；**v2O-E2 active Paper runtime orchestration ✅**；
-**v2O-E3 recovery / finalization orchestration ✅（v2O-E partial）** ——
-顶层路线现在是 **v2O-C Research COMPLETE**。Paper 能力分四刀：启动链（§8.18）、active
-runtime（§8.19）与 recovery/finalization/shutdown（§8.20）已完成，`MainWindow` 不再决定
-active session 何时 poll / 何时吃行情 / 何时 pause/resume/stop，不再持有 runtime handle，
-也不再决定 HALT 之后如何对账、zero-state 证明何时开始、ownership 何时可以释放；下一刀是
-**v2O-E4 render ownership + MainWindow closure guards**。
+**v2O-E3 recovery / finalization orchestration ✅**；**v2O-E4 presentation / render closure ✅** ——
+顶层路线现在是 **v2O-E Paper COMPLETE**。Paper 能力分四刀：启动链（§8.18）、active
+runtime（§8.19）、recovery/finalization/shutdown（§8.20）与 presentation/render closure
+（§8.21）全部完成，`MainWindow` 不再决定 active session 何时 poll / 何时吃行情 / 何时
+pause/resume/stop，不再持有 runtime handle，不再决定 HALT 之后如何对账、zero-state 证明
+何时开始、ownership 何时可以释放，也不再持有任何 Paper session 的展示缓存——它保留的
+presentation fact 是 capability 发布的 immutable 投影，且不参与任何业务判断；下一刀是
+**v2O-F System orchestration**，随后才是 MainWindow composition closure 与 Final
+Architecture Closure。
 
 维护导航见 `docs/DESKTOP_CAPABILITY_MAP.md`；C5B 的设计依据见
 `DESKTOP_DECOMPOSITION.md` §25，本文的 §8.16 只记该轮改变了哪些 boundary。
@@ -2103,7 +2106,7 @@ manual reconciliation、finalization refresh、`_finish_auto_quant_session_if_sa
 
 ```text
 v2O-E3  HALT / manual reconciliation / finalization / shutdown   ✅ 已完成（§8.20）
-v2O-E4  Paper render ownership + MainWindow closure guards
+v2O-E4  Paper presentation / render closure + MainWindow guards  ✅ 已完成（§8.21）
 ```
 
 本轮**未触碰**任何 frozen core：`trading/runtime/*`、`trading/application/*`、
@@ -2311,6 +2314,92 @@ PAPER lease，一个未发布的 launch 可能已经连上 candidate）；`RUNNI
 Shadow core 仍然零 diff。
 
 设计依据见 `DESKTOP_DECOMPOSITION.md` §29。
+
+### 8.21 Paper presentation / render closure 已抽出（v2O-E4）
+
+E1/E2/E3 迁走了 Paper 的 sequencing，窗口里剩下的最后一份 Paper 状态是
+`MainWindow._paper_render_snapshot`：一个 presentation-only cache。它不是业务 truth，但它
+**仍然是一个窗口拥有的 Paper session fact**，而且它有存在的理由——`finalize_if_safe()` 释放
+PAPER 时会一并清空 canonical result，UI 若直读 `paper_workflow.result`，会话结束的瞬间页面
+就空了。E4 解决这件事，做法不是把那个 attribute 改名搬进 orchestrator。
+
+**两个 truth 的边界**：
+
+```text
+PaperWorkflowController.result
+    当前业务生命周期的 canonical result；finalize_if_safe() 成功时清空它
+PaperPresentationSnapshot
+    最后一次被正式发布、可展示的 immutable presentation fact
+    只由 result publication path 写入，canonical result 被清空时故意保留
+```
+
+`presentation.py`（新）持有 `PaperPresentationSnapshot` 与纯函数
+`project_presentation(result)`。模型**不机械复制** `PaperSessionResult`：health、两组
+broker / reconciliation 计数、events 都不进去——一个逐字段镜像 result 的模型就是本轮要删掉
+的第二份 truth。字段按 execution page 真正的消费者（`presenter.py` / `rows.py`）选取，行事实
+（positions / pending orders / fills）以 plain value 复制出来，避免 view 里还能摸到 live
+runtime 与 order intent。
+
+**数据流**：
+
+```text
+PaperSessionResult
+   → PaperOrchestrator._retain_presentation(result)          （唯一写入点）
+   → presentation.project_presentation(result)               （纯投影，独立模块）
+   → PaperPresentationSnapshot  （保留为 _presentation）
+   → result_changed.emit(result)                              （先装 view，再发信号）
+   → MainWindow._on_paper_result_changed → _render_auto_quant_snapshot
+        fetch（quotes / account / broker reading / journal rows）
+   → pages/execution/projector.build_session_view(...)         （纯 read model，新）
+   → ExecutionRuntimeView → ExecutionPage.render(view)
+```
+
+`_presentation` 没有 clear / reset / invalidate，唯一写入点在 result publication path 上，
+所以"点 Start 就清空上一轮"、"连接失败后丢失上一轮记录"都写不出来：
+
+```text
+PREPARING / READY / CONNECTING / connect 失败 / 启动被拒   不发布 result → 保留上一轮
+新 session 发布第一个 result                              原子替换
+```
+
+**窗口退出的东西**：`_paper_render_snapshot`（不留 alias / property / shim）、
+`_render_auto_quant_snapshot` 里的 read model 组装（按候选过滤券商持仓、pending order 建表、
+journal audit row 按 session_id 过滤——都搬进 `projector.py`，连同三张表的行预算常量）、
+`_publish_execution_controls` 里的 phase → 控件判断、`_launch_locked` 里的 `CONNECTING`
+字面比较。窗口留下的只有 fetch + 委托，以及 composition / presentation（两个
+`QMessageBox`）/ generic teardown。
+
+**窗口仍然读 canonical**：§15 的硬不变量——启动与关闭不得从 retained view 推导。映射本身
+成为 capability 的纯规则 `queries.control_facts(phase, awaiting_confirmation=…)`，经
+`paper_orchestrator.session_control_facts` 取用；`CONNECTING` 改用 capability 已有的
+`queries.launch_attempt_in_flight`。窗口仍读 canonical phase，只是不再**解释**它。
+
+**新增 guards**：`_paper_render_snapshot` 不得出现（含换名：`*render_snapshot*` /
+`*_presentation` / `*_session_view`）；render 路径必须委托 `build_session_view` 且不得内联
+scoping、不得出现 phase 词；不得直读 `paper_workflow.result` / `engine_snapshot`；
+presentation 模块不得 import Qt widget / adapter / service；retained model 不得被
+`trading/**` 反向 import；projector 不得 import orchestrator 或 service；retained view 的
+写入者集合精确（唯一写入点 + 无 clear）；"先装 view 再 emit"的顺序。
+
+**不变量**：retained view 不参与 start / preflight / launch / stop / reconcile / finalize /
+ownership / lease / shutdown / risk / execution。20 个决策方法在**代码层**被断言不读
+`_presentation`（docstring 排除，因为移除本身要在注释里点名旧 cache）。对称面也测了：页面上
+摆着 `active=False` 的已结束会话时 `start()` 仍必须走到自己的 preflight gate。
+
+`tests/test_desktop_paper_presentation_closure.py` 新增 21 项；`scripts/mutation_e4.ps1`
+**11 项全部 RED**（M1 finalized 不保留 / M2 释放 canonical 时清空 / M3 窗口重新缓存 /
+M4 shutdown 读 view / M5 start gate 读 view / M6 active phase 之外丢弃 view /
+M7 新 session 不替换 / M8 改读 canonical result / M9 projector 调 broker mutation /
+M10 窗口重新拼 view / M11 先 emit 再保留）。
+
+**零 diff**：`trading/runtime/*`（`workflow.py` / `recovery.py` / `reconciliation.py` /
+`coordinator.py` / `trading.py`）、RiskApplication / ExecutionApplication、broker adapter、
+`ExecutionLeaseManager`、Shadow、`PaperTradingService` 的 ownership 协议（含 E3 刚稳定的
+`reserve_active_release` / `commit_active_release` / `cancel_active_release` /
+`connect_active` / `clear_active` / `finalize_if_safe`）全部未改。本轮**没有**发现需要在
+canonical owner 修的 bug，因此**没有** canonical-owner exception。
+
+设计依据见 `DESKTOP_DECOMPOSITION.md` §30。
 
 ## 9. 已删除的旧架构
 
@@ -3087,9 +3176,9 @@ v2O-A Market orchestration      ✅ 已完成（§8.11）
 v2O-B Account orchestration     ✅ 已完成（§8.12）
 v2O-C Research orchestration    ✅ COMPLETE（§8.13–§8.16）
 v2O-D Shadow orchestration      ✅ 已完成（§8.17）
-v2O-E Paper orchestration       🔶 部分完成：E1 启动链（§8.18）+ E2 active runtime（§8.19）
+v2O-E Paper orchestration       ✅ COMPLETE：E1 启动链（§8.18）+ E2 active runtime（§8.19）
                                     + E3 recovery/finalization/shutdown（§8.20）
-v2O-E4 Paper render ownership + closure guards           ⏭ 后续
+                                    + E4 presentation/render closure（§8.21）
 v2O-F System orchestration      ⏭ 后续
 MainWindow composition closure  ⏭ 后续
 ```
@@ -3227,7 +3316,7 @@ v2O-D Shadow orchestration      ✅ 已完成（§8.17）
 v2O-E1 Paper launch             ✅ 已完成（§8.18）
 v2O-E2 active Paper runtime     ✅ 已完成（§8.19）
 v2O-E3 HALT / reconciliation / finalization / shutdown   ✅ 已完成（§8.20）
-v2O-E4 Paper render ownership + closure guards
+v2O-E4 presentation / render closure + MainWindow guards  ✅ 已完成（§8.21）
 v2O-F System orchestration
 MainWindow composition closure
 Final Architecture Closure

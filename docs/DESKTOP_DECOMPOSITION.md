@@ -3872,6 +3872,10 @@ STOPPING → 排程 zero-state 证明（5s backoff）
 render ownership、`build_runtime_view` / ExecutionPage presenter、整个 `closeEvent`
 （除 Paper 判断外）、generic RuntimeSupervisor shutdown、MainWindow 整体架构收口。
 
+**forward reference**：本节最后一行描述的四项已由 v2O-E4 处理，见 §30。其中
+`_paper_render_snapshot` 已删除（不是改名搬迁），`build_runtime_view` 仍然留在 page
+package 作为纯投影，只是不再由窗口直接调用——窗口改调 `projector.build_session_view`。
+
 ### 29.2 result 仍然只有一条出口，并多了一个"后果"钩子
 
 ```text
@@ -4363,4 +4367,265 @@ substring：于是字段名（`_active_connect_inflight`）和一句含 "connect
 `trading/runtime/*`（`workflow.py` / `recovery.py` / `reconciliation.py` / `coordinator.py` /
 `trading.py`）、RiskExecution / ExecutionApplication、broker adapter、execution lease 与
 Shadow 仍然零 diff。
+
+---
+
+## 30. v2O-E4：Paper presentation / render closure 提取
+
+### 30.1 这一刀移走什么
+
+E1 移走了启动，E2 移走了 active run，E3 移走了 recovery / finalization。剩下的是窗口里
+最后一份 Paper 状态：`MainWindow._paper_render_snapshot`。它不是业务 truth，但它**仍然是
+一个窗口拥有的 Paper session fact**——而且它有存在的理由：`finalize_if_safe()` 释放 PAPER
+时会一并清空 canonical result，UI 若直读 `paper_workflow.result`，会话结束的瞬间页面就空
+了。E4 解决的就是这件事，做法不是把那个 attribute 换个名字搬进 orchestrator。
+
+### 30.2 两个 truth 的边界
+
+```text
+PaperWorkflowController.result
+    = 当前业务生命周期的 canonical result。每次 operation 替换它，
+      finalize_if_safe() 成功时清空它 —— 这是"已释放的会话没有当前 result"的正确表达。
+
+PaperPresentationSnapshot
+    = 最后一次被正式发布、并且可以展示的 immutable presentation fact。
+      它是某个 result 的投影，只由 result publication path 写入，
+      **在 canonical result 被清空时故意保留**。
+```
+
+两者互不代替：`PaperSessionResult` 不是 UI fact，`PaperPresentationSnapshot` 不是业务输入。
+
+### 30.3 presentation model 里有什么，以及为什么只有这些
+
+先读 execution page 真正的消费者（`presenter.py` / `rows.py`），再决定字段。**不机械复制
+`PaperSessionResult`**：health、两组 broker / reconciliation 计数、events 都不进模型——
+一个逐字段镜像 result 的模型就是本轮要删掉的第二份 truth，而每个用不到的字段都是一个
+"顺便加上"的理由。
+
+```python
+@dataclass(frozen=True, slots=True)
+class PaperPresentationSnapshot:
+    session_id: str
+    status: str
+    active: bool
+    entries_paused: bool
+    stop_requested: bool
+    candidate_count: int
+    trades_today: int
+    initial_equity: Decimal | None
+    estimated_equity: Decimal | None
+    estimated_realized_pnl: Decimal | None
+    estimated_unrealized_pnl: Decimal | None
+    positions: tuple[PaperPositionFact, ...]       # symbol/quantity/average_price/opened_at/provider
+    pending_orders: tuple[PaperPendingOrderFact, ...]  # execution_symbol/limit_price
+    fills: tuple[PaperFillFact, ...]               # occurred_at/symbol/side/quantity/price/commission/realized
+```
+
+`project_presentation(result) -> PaperPresentationSnapshot | None` 是纯函数：一个 result
+入，一个 immutable view 出。没有 service、没有 repository、没有 broker、没有 Qt、没有
+clock、没有 I/O。`None` 表示这个 result 没有 engine snapshot（没有可展示的东西），调用方
+**保留原有的 view**——"发布了一份没有东西可画的结果"不是清空页面的理由。
+
+行事实（positions / pending orders / fills）是**复制出来的 plain fact**，不是 runtime 的
+对象：否则一个"只画字符串"的 route 里仍然可以顺着 view 摸到 live runtime 的 order intent。
+
+### 30.4 数据流
+
+```text
+PaperSessionResult
+        ↓  _publish_result（唯一出口）
+PaperOrchestrator._retain_presentation(result)
+        ↓  paper_presentation.project_presentation(result)   ← 纯投影独立成模块
+PaperPresentationSnapshot                     （保留在 capability 里，_presentation）
+        ↓  result_changed.emit(result)         ← 先装 view，再发信号
+MainWindow._on_paper_result_changed → _render_auto_quant_snapshot
+        ↓  fetch（quotes / account / broker reading / journal rows）
+pages/execution/projector.build_session_view(session=…, …)    ← 纯 read model 组装
+        ↓
+ExecutionRuntimeView
+        ↓
+ExecutionPage.render(view)
+```
+
+顺序是硬约束：`result_changed` 是同步连接，窗口 handler 要从 `presentation` 重绘，所以
+投影必须**先装好再 emit**。guard 直接钉住这一点（M11）。
+
+### 30.5 会话读取权的收口
+
+`_render_auto_quant_snapshot` 以前自己组装 Paper session read model：按候选过滤 broker
+持仓、把 pending order 按 symbol 建表、把 journal audit row 按 session_id 过滤。这些是纯
+转换，不是 fetch 也不是 draw，因此本轮移进 `desktop_v2/pages/execution/projector.py`：
+
+```text
+session_positions(broker_state, symbols=…)   哪些券商持仓属于本次会话
+pending_by_symbol(session)                   在途订单按行情 symbol 建表
+audit_by_intent(rows, session_id=…)          哪些 journal row 是本次会话的
+build_session_view(…)                        上述三者 + presenter.build_runtime_view
+RECONCILIATION_ROW_LIMIT / AUDIT_ROW_LIMIT / LATENCY_ROW_LIMIT
+                                             行预算属于 route 自己的展示决定
+```
+
+窗口留下的只有 **fetch**：quotes、已批准的候选、只读账户快照、券商账户读数，以及两张表
+要读的 journal rows。`projector.py` 是 Qt-free / service-free / repository-free，并且
+**不 import 任何 orchestrator**：session view 以已构建的 immutable 值传入，按既有约定结构化
+读取（和 `presenter` / `rows` 对 snapshot 的做法一致），字段契约由
+`test_the_projector_reads_the_fields_the_model_provides` 双向钉住。
+
+### 30.6 MainWindow 还有哪些 Paper 代码，以及为什么它们留下
+
+```text
+构造 PaperOrchestrator + 注入窄 provider              composition
+_confirm_and_start_auto_quant                         presentation（QMessageBox）
+_confirm_paper_reconciliation_resume                   presentation（QMessageBox）
+_report_paper_launch_refusal / _record_paper_runtime_event   通用 wiring
+_on_paper_result_changed / _on_paper_session_finalized
+_on_paper_manual_recovery_required                    纯重绘
+_render_auto_quant_snapshot                            fetch + 委托 projector
+_publish_execution_controls                            canonical 读取 + 委托 capability
+_build_paper_session / _auto_quant_order_channel        composition provider
+closeEvent                                             generic teardown + 展示 verdict
+```
+
+本轮正式退出窗口的：
+
+```text
+_paper_render_snapshot          （presentation cache）
+_render_auto_quant_snapshot 里的 read model 组装
+_publish_execution_controls 里的 phase → 控件 判断
+_launch_locked 里的 CONNECTING 字面比较
+```
+
+`_publish_execution_controls` 与 `_launch_locked` 仍然读 **canonical phase**（§15 的硬不变量：
+启动与关闭不得从 retained view 推导），只是不再**解释**它：映射成为 capability 的纯规则
+`queries.control_facts(phase, awaiting_confirmation=…)`，经
+`paper_orchestrator.session_control_facts` 取用；`CONNECTING` 的判断改用 capability 自己
+已有的 `queries.launch_attempt_in_flight`。所以窗口里 Paper 生命周期词汇只剩候选准备流程
+（`phase() is PREPARING` 五处 + 一处 CONNECTING 重复确认提示），那属于 E1 家族的准备
+sequencing，见 §30.8。
+
+### 30.7 新 session 如何替换上一轮
+
+```text
+PREPARING / READY / CONNECTING     不发布 result → 保留上一轮 finalized view
+connect 失败（_connect_finished）  不发布 result → 保留
+启动被拒                            不发布 result → 保留
+新 session 发布第一个 result       原子替换
+```
+
+这是**结构性**的，不是靠约定：`_presentation` 没有 clear / reset / invalidate，唯一的写入
+点在 result publication path 上。所以"点了 Start 就把上一轮清空"、"连接失败后丢失上一轮记录"
+都无法被写出来，除非先新增一个清空方法——而 guard 会因为写入者集合改变而失败。
+
+### 30.8 retained view 不得参与任何业务判断
+
+硬不变量，也是本轮 mutation 的重点：
+
+```text
+presentation ≠ canonical lifecycle state
+presentation 不参与 start / preflight / launch
+presentation 不参与 stop / reconcile / finalize
+presentation 不参与 ownership / lease / shutdown 判断
+presentation 不参与 risk / execution
+```
+
+`test_no_decision_path_reads_the_retained_view` 逐个方法（`start` / `prepare_shutdown` /
+`_ownership_verdict` / `_release_paper_ownership_if_proven` / `_maybe_schedule_finalization` /
+`_start_finalization` / `reconcile` / `confirm_reconciliation_resume` / `session_control_facts`
+等 20 个）断言**代码里**不出现 `_presentation`；docstring 被排除，因为移除本身就要在注释里
+点名那个旧 cache。M4 / M5 分别把 retained view 塞进 shutdown verdict 与 start gate，都被抓住。
+
+§15 的对称面也测了：`test_a_retained_finished_session_does_not_gate_a_new_launch` ——
+页面上摆着一个 `active=False` 的已结束会话时，`start()` 仍然必须走到自己的 gate（拿到
+preflight 的拒绝），而不是因为"页面上那个是停的"就放行或拒绝。
+
+### 30.9 新增 guards
+
+```text
+Guard 1  test_the_window_keeps_no_paper_presentation_cache
+         _paper_render_snapshot 不得作为 attribute / property / 别名出现（AST 判定）
+         test_the_window_declares_no_presentation_cache_under_another_name
+         不得换名（render_snapshot / *_presentation / *_session_view）
+Guard 2  test_the_render_path_fetches_and_delegates_rather_than_assembling
+         render 路径必须委托 build_session_view，不得内联 scoping，不得出现 phase 词
+         test_the_route_draws_the_capabilitys_retained_presentation
+         不得直读 paper_workflow.result / engine_snapshot
+Guard 3  test_the_presentation_module_imports_no_widget_no_adapter_and_no_service
+Guard 4  test_the_retained_model_is_never_imported_downward（trading/** 反向 import）
+Guard 5  test_the_projector_imports_no_orchestrator_and_no_service
+Guard 6  test_the_retained_view_has_exactly_one_writer_and_no_clear（写者集合 + 无 clear）
+         test_the_view_is_retained_before_the_result_is_published（顺序）
+         test_a_published_result_is_projected_once_into_an_immutable_view
+         test_the_projector_never_mutates_anything（调用名判定）
+```
+
+`test_paper_trading_service_wiring.test_migrated_reads_no_longer_touch_the_workflow_directly`、
+`test_shell_and_navigation_are_the_only_desktop_v2_modules`、
+`test_the_execution_page_modules_stay_small`（既有行预算表新增 `projector.py` 一项，未放宽
+任何已有上限）与 `test_the_paper_phase_*` 系列随新 owner 跟进。
+
+### 30.10 测试与 mutation
+
+新增 `tests/test_desktop_paper_presentation_closure.py`（21 项），覆盖规范要求的 A–F：
+
+```text
+A presentation ownership   投影一次、原子替换、无可画内容时保留、单一写入者且无 clear
+B finalized retain         finalize_if_safe 之后 canonical result 为 None，页面仍渲染该会话
+C release failure          release 被拒 → 无 session_finalized、finalize_if_safe 未被调用、
+                           retained view 仍在，而 shutdown verdict 仍按 canonical ownership
+                           给出 OWNERSHIP_BLOCKED
+D new session replacement  PREPARING / READY / CONNECTING / connect 失败都保留上一轮；
+                           新 session 发布 result 时才替换
+E UI isolation             read model 纯函数（不改输入、不动 broker）；一次 result 只渲染一次
+                           execution route，不牵连 dashboard
+F no business use          20 个决策方法在代码层不读 retained view（结构判定）
+```
+
+`scripts/mutation_e4.ps1` 应用 **11** 项篡改；**11/11 RED**：
+
+```text
+M1  finalized result 不进入 retained view
+M2  canonical result 释放时把 view 清空
+M3  窗口重新缓存 result.engine_snapshot
+M4  shutdown verdict 读 retained view
+M5  start gate 读 retained view
+M6  view 在 active session phase 之外一律丢弃
+M7  新 session 不替换旧 view
+M8  render 路径改读 canonical result
+M9  projector 开始调用 broker mutation
+M10 窗口重新自己拼 session view
+M11 先 emit 再保留 view（窗口会永远慢一拍）
+```
+
+脚本沿用 E3 的语法闸门与 `HARNESS-ERROR` 判定。
+
+### 30.11 零 diff 与剩余项
+
+`trading/runtime/*`（`workflow.py` / `recovery.py` / `reconciliation.py` / `coordinator.py` /
+`trading.py`）、RiskApplication / ExecutionApplication、broker adapter、`ExecutionLeaseManager`、
+Shadow、`PaperTradingService` 的 ownership 协议（含 E3 刚稳定下来的
+`reserve_active_release` / `commit_active_release` / `cancel_active_release` / `connect_active` /
+`clear_active` / `finalize_if_safe`）**全部零 diff**。本轮没有发现需要在 canonical owner 修的
+bug，因此**没有** canonical-owner exception。
+
+明确留给后续的：
+
+```text
+候选准备流程的 PREPARING / mark_ready / cancel_preparing   E1 家族 launch sequencing
+                                                          （搬走它会把全市场扫描、scanner
+                                                           采纳与行情切换塞进 PaperOrchestrator）
+_on_paper_session_finalized 的 health 文案                窗口展示
+closeEvent 其余部分 / RuntimeSupervisor shutdown            MainWindow composition closure
+v2O-F System orchestration
+```
+
+### 30.12 判据
+
+Paper 生命周期中的每一个 intent 只有一个 orchestration owner；workflow / result / runtime /
+service / 两份 evidence 各自仍只有一个 truth owner；**retained presentation 有且只有一个
+owner、一个写者、一个更新时机**，并且不被任何业务路径读取；`MainWindow` 不再组装 Paper
+session read model，也不再持有它的任何缓存。至此
+**v2O-E Paper ✅ COMPLETE**（E1 启动链 / E2 active runtime / E3 recovery-finalization /
+E4 presentation-render closure）。下一步是 v2O-F System，随后才是 MainWindow composition
+closure 与 Final Architecture Closure。
+
 

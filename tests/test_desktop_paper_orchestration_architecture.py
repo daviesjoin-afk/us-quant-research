@@ -1,31 +1,36 @@
-"""Architecture guards for the v2O-E1 Paper launch orchestration extraction.
+"""Architecture guards for the v2O Paper orchestration extraction.
 
 Structural, not behavioural: they read the source tree and assert that the ownership
-this round moved really moved, and that the new capability cannot reach back into the
+these rounds moved really moved, and that the new capability cannot reach back into the
 window, sideways into another capability, or down into the broker.
 
 Seven guards matter most, and each fails for the right reason:
 
-* **Guard A -- the window left the launch.**  ``_start_auto_quant`` and
-  ``_auto_order_service_connected`` are gone, along with the retired plan mirror and
-  the three helpers that only they called.  No shim and no forwarding property, which
-  is why the check is for *declared* names rather than merely called ones;
+* **Guard A -- the window left the launch *and* the active session.**  ``_start_auto_quant``
+  and ``_auto_order_service_connected`` are gone, along with the retired plan mirror and
+  the three helpers that only they called; since v2O-E2 so are ``_poll_auto_quant_orders``,
+  ``_pause_auto_quant_entries``, ``_resume_auto_quant_entries``, ``_stop_auto_quant`` and
+  the ``trading_runtime`` handle.  No shim and no forwarding property, which is why the
+  check is for *declared* names rather than merely called ones;
 * **Guard B -- the dependency boundary.**  ``PaperOrchestrator`` imports no other
   capability orchestrator, no IBKR adapter, no desktop composition module and no
   widget.  ``QtCore`` is allowed, because every sibling orchestrator exposes signals
   that way;
 * **Guard C -- no second truth.**  The capability stores no phase, no plan mirror, no
   runtime, no risk verdict, no order intent, no candidate handle and no broker
-  connection state;
+  connection state.  What it may keep is bookkeeping about its own calls -- the attempt
+  number and the last-ingress stamp -- which is why those are asserted *present* in the
+  same breath as the ban;
 * **Guard D -- no broker bypass.**  No ``placeOrder`` / ``cancelOrder`` /
   ``reqGlobalCancel`` / ``submit`` / ``cancel`` appears anywhere in it: submission is
   the execution application's, reached only through the runtime;
 * **Guard E -- the candidate borrow.**  ``candidate_service(`` has exactly one call
   site, stores into a local, and never reaches an attribute;
-* **Guard F -- the exact public surface.**  ``start()`` plus the four published
-  signals, asserted in both directions so a convenience method fails here;
-* **Guard G -- the exact public surface.**  ``start()`` plus the four published signals,
-  asserted in both directions so a convenience method fails here.
+* **Guard F -- the exact public surface.**  The declared methods and signals, asserted
+  in both directions so a convenience method fails here;
+* **Guard G -- the E2 sequencing ownership.**  The intent wiring and the market fan-out
+  reach the capability directly, and the window neither checks a Paper phase nor reaches
+  the workflow on its behalf.
 
 There is deliberately **no line-count gate of any kind**, not even a renamed "navigability
 threshold": a file's length is a symptom, and a cap pinned at whatever a file happens to be
@@ -42,6 +47,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -63,6 +69,16 @@ RETIRED_WINDOW_LAUNCH_STATE = (
     "_next_auto_launch_attempt",
 )
 
+#: The window state v2O-E2 deleted: the runtime handle, the health cache and the
+#: ingress stamp.  Declared as an exact set so a re-added one -- or a forwarding
+#: property under the same name -- fails here rather than quietly restoring the old
+#: ownership.
+RETIRED_WINDOW_ACTIVE_STATE = (
+    "trading_runtime",
+    "paper_execution_health",
+    "_last_stream_ingress_monotonic",
+)
+
 #: The window methods the extraction deleted.  Declared as an exact set so a
 #: re-added one -- or a compatibility alias with the same name -- fails here.
 RETIRED_WINDOW_LAUNCH_METHODS = (
@@ -74,15 +90,44 @@ RETIRED_WINDOW_LAUNCH_METHODS = (
     "_reset_auto_launch_controls",
 )
 
+#: The active-session methods v2O-E2 deleted.  Every one of them decided *when* a
+#: live session polls, consumes the market, pauses, resumes or stops, which is the
+#: sequencing this round moved.  ``_stop_auto_quant``'s only surviving caller is
+#: ``closeEvent``, whose shutdown decision is E4's -- and it now calls the capability.
+RETIRED_WINDOW_ACTIVE_METHODS = (
+    "_poll_auto_quant_orders",
+    "_pause_auto_quant_entries",
+    "_resume_auto_quant_entries",
+    "_stop_auto_quant",
+)
+
+#: The workflow calls the window may no longer make on the active session's behalf.
+RETIRED_WINDOW_ACTIVE_CALLS = (
+    "paper_workflow.on_stream",
+    "paper_workflow.poll",
+    "paper_workflow.set_entries_paused",
+    "paper_workflow.request_stop",
+)
+
 #: The launch method that legitimately stays: the operator confirmation is
 #: presentation, and the capability may not import ``QMessageBox``.
 RETAINED_WINDOW_LAUNCH_METHODS = (
     "_confirm_and_start_auto_quant",
     "_auto_quant_order_channel",
     "_build_paper_session",
-    "_on_paper_session_published",
     "_report_paper_launch_refusal",
-    "_record_paper_launch_event",
+    "_record_paper_runtime_event",
+)
+
+#: What legitimately stays on the window after v2O-E2: the one result render path, the
+#: window-side publication the three E3-owned paths still need, and the E3 bridge the
+#: result handler keeps in its own method so E3 can delete it whole.
+RETAINED_WINDOW_E2_METHODS = (
+    "_on_paper_result_changed",
+    "_publish_window_paper_result",
+    "_handle_paper_e3_result_bridge",
+    "_render_auto_quant_snapshot",
+    "_paper_runtime_is_active",
 )
 
 #: What the Paper package may import.  Each entry is a capability, a shared
@@ -94,6 +139,9 @@ ALLOWED_IMPORTS = (
     "copy",
     "dataclasses",
     "decimal",
+    # ``monotonic``, the default clock for the poll-suppression window.  Stdlib, and
+    # the only reading this layer takes of the outside world that is not a result.
+    "time",
     "typing",
     # Qt, for the signals every orchestrator in this layer exposes.  Only
     # ``QtCore``: see the widget guard below.
@@ -197,16 +245,29 @@ FORBIDDEN_QT_NAMES = (
     "QThread",
 )
 
-#: The orchestrator's public surface, asserted exactly in both directions.
-PUBLIC_SURFACE = ("start",)
+#: The orchestrator's public surface, asserted exactly in both directions.  Methods
+#: and properties are both *intents or delegated questions*: the five operations a
+#: session's run is driven by, and the three questions other capabilities ask about it.
+PUBLIC_SURFACE = (
+    "start",
+    "on_market_snapshot",
+    "poll",
+    "pause",
+    "resume",
+    "stop",
+    "result",
+    "runtime_active",
+    "has_runtime_obligations",
+)
 
-#: The Qt signals the window relies on.  ``session_published`` carries the
-#: publication value object; ``runtime_event_requested`` and ``log_requested`` are
-#: the same request-not-own pattern every sibling capability uses.
+#: The Qt signals the window relies on.  ``result_changed`` carries the workflow's own
+#: ``PaperSessionResult`` -- one emission per operation, launch included --
+#: ``runtime_event_requested`` and ``log_requested`` are the same request-not-own
+#: pattern every sibling capability uses, and ``refused`` is the launch's dialog.
 PUBLIC_SIGNALS = (
     "refused",
     "log_requested",
-    "session_published",
+    "result_changed",
     "runtime_event_requested",
 )
 
@@ -219,6 +280,18 @@ WINDOW_ALLOWED_ORCHESTRATOR_MEMBERS = set(PUBLIC_SURFACE) | set(PUBLIC_SIGNALS)
 START_INTENT_WIRING = (
     ("start_requested", "self._confirm_and_start_auto_quant"),
 )
+
+#: The three session intents, which reach the capability with no window handler in
+#: between: there is nothing for presentation to add, and a hop through the window is
+#: how a second owner starts.
+SESSION_INTENT_WIRING = (
+    ("pause_requested", "self.paper_orchestrator.pause"),
+    ("resume_requested", "self.paper_orchestrator.resume"),
+    ("stop_requested", "self.paper_orchestrator.stop"),
+)
+
+#: The watchdog heartbeat enters the capability directly, for the same reason.
+HEARTBEAT_WIRING = ("timeout", "self.paper_orchestrator.poll")
 
 
 # -- helpers ------------------------------------------------------------
@@ -336,16 +409,40 @@ def _signal_members(path: pathlib.Path, name: str) -> set[str]:
 def _function_source(path: pathlib.Path, name: str) -> str:
     """The source of one ``PaperOrchestrator`` method, for ordering assertions."""
 
+    return _method_source(path, name, class_name="PaperOrchestrator")
+
+
+def _method_source(
+    path: pathlib.Path, name: str, *, class_name: str = "MainWindow"
+) -> str:
+    """The source of one method of one class, for scope-scoped assertions.
+
+    Scoped to the class rather than searched as text, because these names appear in
+    several places in a 4,500-line window: "which method reads this?" has to be
+    answerable, and a window-wide substring search cannot answer it.
+    """
+
     source = path.read_text(encoding="utf-8")
     for node in ast.walk(_tree(path)):
-        if isinstance(node, ast.ClassDef) and node.name == "PaperOrchestrator":
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
             for member in node.body:
                 if (
                     isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
                     and member.name == name
                 ):
                     return ast.get_source_segment(source, member) or ""
-    raise AssertionError(f"PaperOrchestrator.{name} not found")
+    raise AssertionError(f"{class_name}.{name} not found")
+
+
+def _dense(path: pathlib.Path) -> str:
+    """The file's source with every whitespace run collapsed, for wiring checks.
+
+    A wiring assertion is about which signal reaches which target.  Matching the
+    formatted call would also assert how long the target's name is -- and fail on a
+    rename that changed nothing about the wiring.
+    """
+
+    return re.sub(r"\s+", "", path.read_text(encoding="utf-8"))
 
 
 def _raises(path: pathlib.Path, name: str) -> bool:
@@ -488,6 +585,178 @@ def test_the_launch_gate_reads_the_workflow_phase() -> None:
     end = source.index("def ", start + 10)
     gate = source[start:end]
     assert "self.paper_trading.phase() is PaperWorkflowPhase.CONNECTING" in gate
+
+
+# -- Guard A2: the window left the active session ------------------------
+#
+# v2O-E2's half of the same property Guard A pins for the launch.  The window used to
+# decide when a live session consumed the market, when the watchdog polled, and what
+# pause/resume/stop meant; it kept the runtime handle those decisions were read off.
+# All of that is the capability's, so each retired name is asserted absent *and* each
+# surviving seam is asserted present -- a guard that only checked the deletions would
+# pass on a window that had dropped the wiring entirely.
+
+
+@pytest.mark.parametrize("attribute", RETIRED_WINDOW_ACTIVE_STATE)
+def test_the_window_keeps_no_active_paper_state(attribute: str) -> None:
+    """The runtime handle, the health cache and the ingress stamp are gone.
+
+    Checked as assignments *and* as declared names, so neither an attribute nor a
+    property under a retired name can restore the old ownership.
+    """
+
+    assert attribute not in _assigned_self_attrs(_DESKTOP_PATH), attribute
+    assert attribute not in _declared_names(_DESKTOP_PATH), attribute
+
+
+@pytest.mark.parametrize("name", RETIRED_WINDOW_ACTIVE_METHODS)
+def test_the_retired_active_methods_are_gone(name: str) -> None:
+    assert name not in _declared_names(_DESKTOP_PATH), name
+
+
+@pytest.mark.parametrize("call", RETIRED_WINDOW_ACTIVE_CALLS)
+def test_the_window_never_drives_the_active_session(call: str) -> None:
+    """No window path may reach the workflow for the session's own run."""
+
+    assert call not in _DESKTOP_PATH.read_text(encoding="utf-8"), call
+
+
+@pytest.mark.parametrize("name", RETAINED_WINDOW_E2_METHODS)
+def test_the_e2_composition_and_bridge_seams_remain(name: str) -> None:
+    """What legitimately stays: one render path, and the E3 bridge inside it.
+
+    Asserted so the guard cannot pass because the window dropped the result handling
+    altogether -- something still has to render a result, and E3's two remaining
+    decisions still have to run somewhere until E3 moves them.
+    """
+
+    assert name in _declared_names(_DESKTOP_PATH), name
+
+
+@pytest.mark.parametrize("signal,target", SESSION_INTENT_WIRING)
+def test_the_session_intents_reach_the_capability(signal: str, target: str) -> None:
+    """Pause, resume and stop are wired straight to the capability.
+
+    Whitespace is stripped before matching so the assertion is about the wiring rather
+    than about how black decided to wrap the call.
+    """
+
+    assert f"{signal}.connect({target})" in _dense(_DESKTOP_PATH), signal
+
+
+def test_the_watchdog_heartbeat_reaches_the_capability() -> None:
+    """The timer drives the capability, not a window handler."""
+
+    assert (
+        f"{HEARTBEAT_WIRING[0]}.connect({HEARTBEAT_WIRING[1]})"
+        in _dense(_DESKTOP_PATH)
+    )
+
+
+def test_the_market_fanout_only_hands_the_paper_fact_over() -> None:
+    """The fan-out stops at the capability.
+
+    It may not check the Paper phase, stamp an ingress, consult the finalization seam
+    or reach the workflow: each of those is a decision about a live Paper session, and
+    the window is no longer a party to any of them.  A second answer to "does this
+    session want the market right now?" is exactly how a halted session gets re-entered.
+    """
+
+    fanout = _method_source(_DESKTOP_PATH, "_on_market_snapshot_changed")
+    assert "self.paper_orchestrator.on_market_snapshot(snapshot)" in fanout
+    for forbidden in (
+        "paper_workflow",
+        "PaperWorkflowPhase",
+        "_paper_finalization_inflight",
+        "monotonic",
+    ):
+        assert forbidden not in fanout, forbidden
+
+
+def test_the_result_handler_is_presentation_and_bridge_only() -> None:
+    """The one result handler renders, and reaches nothing it could drive.
+
+    Asserted on the method's actual *calls* rather than its text, because its docstring
+    deliberately names the calls it must not make -- a substring search would fire on
+    the explanation instead of on a call.
+    """
+
+    used = _called_and_attributed(
+        _DESKTOP_PATH, "_on_paper_result_changed", class_name="MainWindow"
+    )
+    for forbidden in (
+        "on_stream",
+        "poll",
+        "set_entries_paused",
+        "request_stop",
+        "connect_candidate",
+        "disconnect",
+        "placeOrder",
+    ):
+        assert forbidden not in used, (forbidden, sorted(used))
+    # And it does the work it exists for, so it cannot pass by doing nothing.
+    assert "_render_auto_quant_snapshot" in used, sorted(used)
+    assert "_apply_paper_workflow_button_state" in used, sorted(used)
+    assert "_handle_paper_e3_result_bridge" in used, sorted(used)
+
+
+def test_the_one_result_path_is_the_only_emitter() -> None:
+    """Every operation publishes through ``_publish_result``; no operation emits itself.
+
+    This is the property that makes "how is a Paper result published?" answerable in one
+    place.  An operation that emitted ``result_changed`` directly would work, and would
+    silently skip the event requests that live beside it.
+    """
+
+    for method in (
+        "start",
+        "on_market_snapshot",
+        "poll",
+        "pause",
+        "resume",
+        "stop",
+        "_arm_and_publish",
+    ):
+        source = _function_source(_ORCHESTRATOR_PATH, method)
+        assert "result_changed.emit(" not in source, method
+
+    publish = _function_source(_ORCHESTRATOR_PATH, "_publish_result")
+    assert "self.result_changed.emit(result)" in publish
+    assert "for event in result.events:" in publish
+    assert "PaperRuntimeEventRequest(" in publish
+
+
+@pytest.mark.parametrize(
+    "method",
+    ("on_market_snapshot", "poll", "pause", "resume", "stop", "_arm_and_publish"),
+)
+def test_every_operation_publishes_through_the_one_path(method: str) -> None:
+    source = _function_source(_ORCHESTRATOR_PATH, method)
+    assert "self._publish_result(" in source, method
+
+
+def test_the_finalization_seam_is_a_provider_and_not_a_copy() -> None:
+    """TEMPORARY seam, pinned as a seam: the flag itself never lands here.
+
+    E3 deletes the provider.  Until then the guard keeps the *shape* honest -- a copied
+    flag would be a second owner of a lifecycle fact, and would survive E3's change to
+    the window as a stale mirror.
+    """
+
+    stored = _stored_self_attrs(_ORCHESTRATOR_PATH)
+    assert "_finalization_inflight_provider" in stored
+    assert "_paper_finalization_inflight" not in stored
+
+
+def test_the_market_fact_arrives_as_a_provider() -> None:
+    """Paper does not import, hold or name Market -- not even its orchestrator."""
+
+    source = _ORCHESTRATOR_PATH.read_text(encoding="utf-8")
+    assert "market_orchestrator" not in source
+    assert "market_snapshot_provider" in source
+    # Read at call time, so a stop cannot be judged against a stale quote.
+    stop = _function_source(_ORCHESTRATOR_PATH, "stop")
+    assert "self._market_snapshot_provider()" in stop
 
 
 # -- Guard B: dependency boundary ----------------------------------------
@@ -697,12 +966,17 @@ def test_the_orchestrator_stores_no_second_truth() -> None:
 
 
 def test_the_orchestrator_stores_only_its_injected_collaborators() -> None:
-    """What it *does* store is the injected providers plus its own attempt counter."""
+    """What it *does* store is the injected providers plus its own bookkeeping.
+
+    Two entries are not providers and are named deliberately: the attempt sequence,
+    which gives each attempt a distinct identity, and the last-ingress stamp, which
+    only decides whether the next poll would repeat work this object just did.  Both
+    are about this object's own calls; neither is a fact about the session.
+    """
 
     stored = _stored_self_attrs(_ORCHESTRATOR_PATH)
-    # The attempt sequence is desktop orchestration bookkeeping, not session truth:
-    # it only gives each attempt a distinct identity.
     assert "_next_attempt" in stored
+    assert "_last_stream_ingress_monotonic" in stored
     assert stored <= {
         "_workflow_getter",
         "_paper_trading_getter",
@@ -715,11 +989,39 @@ def test_the_orchestrator_stores_only_its_injected_collaborators() -> None:
         "_capital_limit_provider",
         "_order_channel_provider",
         "_shadow_is_active",
+        "_market_snapshot_provider",
+        "_finalization_inflight_provider",
         "_clear_arm_confirmation",
         "_render_launch_state",
         "_render_launch_context",
+        "_clock",
         "_next_attempt",
+        "_last_stream_ingress_monotonic",
     }, sorted(stored)
+
+
+def test_the_ingress_stamp_is_bookkeeping_and_not_a_session_fact() -> None:
+    """The one mutable field allowed in is touched by exactly three methods.
+
+    A stamp that other code read as "is the session live?" would be a second truth in
+    disguise, so the guard pins its readers by name: the field is initialised, written
+    by the ingress, and read by the poll's suppression window -- and by nothing else.
+    """
+
+    touching = [
+        name
+        for name in (
+            "__init__",
+            "start",
+            "on_market_snapshot",
+            "poll",
+            "pause",
+            "resume",
+            "stop",
+        )
+        if "_last_stream_ingress_monotonic" in _function_source(_ORCHESTRATOR_PATH, name)
+    ]
+    assert touching == ["__init__", "on_market_snapshot", "poll"], touching
 
 
 def test_the_duplicate_gate_reads_the_workflow_phase() -> None:
@@ -919,7 +1221,9 @@ def test_the_broker_gate_precedes_the_build() -> None:
     assert gate < built
 
 
-def _called_and_attributed(path: pathlib.Path, name: str) -> set[str]:
+def _called_and_attributed(
+    path: pathlib.Path, name: str, *, class_name: str = "PaperOrchestrator"
+) -> set[str]:
     """The names one method *uses*, ignoring its docstring prose.
 
     Needed because the post-publication handler's docstring legitimately *names* the
@@ -928,7 +1232,7 @@ def _called_and_attributed(path: pathlib.Path, name: str) -> set[str]:
     """
 
     for node in ast.walk(_tree(path)):
-        if not isinstance(node, ast.ClassDef) or node.name != "PaperOrchestrator":
+        if not isinstance(node, ast.ClassDef) or node.name != class_name:
             continue
         for member in node.body:
             if (
@@ -948,7 +1252,7 @@ def _called_and_attributed(path: pathlib.Path, name: str) -> set[str]:
                         elif isinstance(inner, ast.Attribute):
                             found.add(inner.attr)
                 return found
-    raise AssertionError(f"PaperOrchestrator.{name} not found")
+    raise AssertionError(f"{class_name}.{name} not found")
 
 
 def test_the_publish_failure_path_cannot_touch_the_active_service() -> None:

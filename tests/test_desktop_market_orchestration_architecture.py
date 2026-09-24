@@ -701,7 +701,10 @@ def test_the_snapshot_bridge_still_reaches_every_declared_consumer() -> None:
         # The targeted session's preflight is the capability's own command now
         # (v2O-C5B); the bridge asks for the refresh rather than doing it.
         "targeted_session_orchestrator.refresh_preflight",
-        "paper_workflow.on_stream",
+        # v2O-E2: the session's ingress is the Paper capability's, so the bridge hands
+        # the fact over and stops -- it no longer decides whether a Paper session wants
+        # it, and no longer reaches the workflow itself.
+        "paper_orchestrator.on_market_snapshot",
         # v2O-D: the internal simulation consumes the same fact, but the engine
         # is no longer the window's.  The bridge hands the snapshot to the
         # capability, which feeds its own engine and repaints its own session

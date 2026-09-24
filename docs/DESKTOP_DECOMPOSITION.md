@@ -3674,3 +3674,168 @@ cancel 不再拒绝覆盖一个无法交代的候选            → RED（2 fail
 顺带一处非 blocker 的文案修正：`closeEvent` 那句提示改成与事实一致——`disconnect()` 已经先跑过
 了，所以现在说的是「Paper 订单连接已停止，但所有权占用无法确认；客户端不会释放该所有权或正常
 退出」，而不是原先的「不会断开或退出」。整块 shutdown ownership closure 仍归 E4。
+
+## 28. v2O-E2：active Paper runtime 提取
+
+### 28.1 这一刀移走什么
+
+v2O-E1 之后，Paper 的**启动 sequencing** 已在 `desktop_v2/orchestration/paper/`，但
+`RUNNING` 之后到 recovery 之前的那一段仍散在窗口：`_on_market_snapshot_changed` 里的
+Paper ingress 分支（自检 phase + 打 `_last_stream_ingress_monotonic`）、
+`_poll_auto_quant_orders`、`_pause_auto_quant_entries` / `_resume_auto_quant_entries` /
+`_stop_auto_quant`，以及"结果由谁渲染、事件由谁写"这五条各自为政的路径。它们整体迁入
+同一个 orchestrator。
+
+```text
+desktop_v2/orchestration/paper/
+    __init__.py      命名理由与完整规则集
+    models.py        冻结事实 + 文案 + session 事件形状（launch 与 stream 共用一种）
+    queries.py       纯规则：launch 门 + active phase 集合 + 两个 snapshot 判读
+    orchestrator.py  启动序列 + active 序列 + 唯一的 result publication
+```
+
+**本轮不迁**（属 v2O-E3/E4）：HALT recovery、manual reconciliation、finalization、
+`closeEvent` teardown、execution page 的 session 渲染 ownership。
+
+### 28.2 四个 intent，各只有一个 owner
+
+`ExecutionPage` 的三个 session 控件和 watchdog heartbeat 的 wiring 表被改成**直连
+capability**：
+
+```text
+page.pause_requested  → self.paper_orchestrator.pause
+page.resume_requested → self.paper_orchestrator.resume
+page.stop_requested   → self.paper_orchestrator.stop
+paper_order_timer.timeout → self.paper_orchestrator.poll
+Market snapshot_changed → _on_market_snapshot_changed → on_market_snapshot(snapshot)
+```
+
+最后一条是本轮的边界要点：窗口仍然是 cross-capability fan-out 点，但它**只转交**，
+不再检查 Paper phase、不再打时间戳、不再调 workflow。`_on_market_snapshot_changed` 的
+docstring 与一处 guard 一起钉住这一点——一个"顺手判断一下相位"的早退分支就是第二个
+owner 的出生地。
+
+`stop` 需要的市场快照走注入的 `market_snapshot_provider`，且**在调用时读取**：Paper 不能
+import Market，而冻结的 snapshot 会静默变旧。
+
+### 28.3 phase 门只有一个定义，HALT 是粘的
+
+`queries.active_session_phase` 是唯一定义（`RUNNING` / `PAUSED` / `STOPPING`），
+`on_market_snapshot` 与 `poll` 共用它。`STOPPING` 必须在集合里：退出、broker event 与
+zero-state 证明都还要吃行情。
+
+`HALTED` 不在集合里，且这一刀最关键的 regression 不是"相位门不对"，而是**粘性**：
+
+```text
+RUNNING → on_market_snapshot() → coordinator 结果变 HALTED
+        → result 恰好发布一次 → phase 变 HALTED
+        → 之后的 market snapshot 不再进 coordinator
+        → 之后的 timer poll 也不再进 coordinator
+```
+
+测试断言的是"workflow 根本没被调用"（fake 先记录 attempt 再拒绝），而不是"没有渲染"：
+一个调用后把拒绝吞掉的实现同样不会渲染，但它仍然是错的。判断顺序也是退休 handler 的：
+finalization seam → phase 门 → 时间戳 → 调 workflow（时间戳在调用**之前**打，这样"拒绝"
+也意味着"stream 刚做过这件事"）。
+
+### 28.4 result 只有一条出口
+
+E2 之前，启动走 `session_published` + 窗口 `_on_paper_session_published`，而 stream /
+poll / pause / resume / stop 五条各自 `_apply_paper_workflow_result`。现在统一：
+
+```text
+workflow operation → PaperSessionResult → PaperOrchestrator._publish_result(result)
+                        ├─ result_changed.emit(result)          → 窗口唯一的渲染入口
+                        └─ 每个 event 一次 runtime_event_requested
+```
+
+**启动成功也走 `_publish_result`**，这样"从第一次 RUNNING 到最后一 tick"只有一条路径。
+guard 双向钉住：任何操作自己 emit `result_changed` 会 RED（它会静默跳过 event 请求，
+而这正是"事件写了两遍/一遍没写"的来源）。
+
+`result.events` 的写入请求也一并迁移（原来在窗口的结果 handler 里），复用同一个
+`runtime_event_requested`，不新增 `launch_event_requested` / `stream_event_requested`
+这类信号。`PaperLaunchEvent` 借此改名 `PaperRuntimeEventRequest`——它现在同时承载 launch
+的 `PAPER_SESSION_ARMED` 和 session 自己的 coordinator 事件，旧名字已经不准确。event
+store 仍然只在窗口手里写入。
+
+### 28.5 删掉的第二份 truth
+
+| 被删/降级的东西 | 为什么 |
+| --- | --- |
+| `self.trading_runtime` | 第二次拥有 live session：runtime 已由 `workflow → coordinator → engine` 这条 canonical chain 持有 |
+| `self.paper_execution_health` | 只写不读的缓存（三处赋值、零处消费） |
+| `self._last_stream_ingress_monotonic` | 迁进 capability。语义从 `0.0` 改成 `None` 哨兵：**"还没发生过 ingress"与"在时钟原点发生过 ingress"是两件事**，前者不该抑制第一次 poll |
+| `auto_quant_snapshot` → `_paper_render_snapshot` | 它同时被当 UI render 输入和业务 interlock 输入用。现在只允许出现在渲染路径，interlock 改读 canonical result |
+
+于是三个曾读 runtime handle 的判定改成向 capability 提问：
+
+```text
+Market stop / switch interlock  → paper_orchestrator.has_runtime_obligations
+                                  （canonical result 的 engine_snapshot：
+                                    active OR positions OR pending_orders）
+Shadow 的资金真值门            → paper_orchestrator.runtime_active
+candidate prepare / channel probe → 同上（runtime_active）
+```
+
+`PaperSessionBuildResult.runtime` 与 `PaperLaunchPublication` 一并删除——前者与
+`engine` 是同一个对象，后者只服务于退休的 `session_published`。**不留 compatibility
+property**：留一个转发属性会让每个未迁移的调用点继续工作，"谁拥有 active session"就
+不再是一次 grep 能回答的问题。
+
+### 28.6 四个注入 seam，其中一个是临时的
+
+```text
+build_session                     (E1) 组合 root 才认识具体类型
+submit_task                       (E1) 通用 task 生命周期仍在窗口
+market_snapshot_provider          (E2) Paper 不 import Market；stop 用，调用时读
+finalization_inflight_provider    (E2) TEMPORARY — v2O-E3 删除
+```
+
+最后一个必须说明：E2 不接管 finalization，但 active ingress 必须知道 zero-state 证明
+是否在跑（两边读同一个 broker）。所以注入的是 **provider**，`_paper_finalization_inflight`
+这个 flag 仍留在窗口——把它复制进来就会在 E3 改窗口之后留下一个不会更新的镜像。
+
+### 28.7 窗口刻意留下的东西
+
+```text
+_on_paper_result_changed          唯一的结果 handler：渲染 + 调下面的 bridge
+_handle_paper_e3_result_bridge    TEMPORARY — v2O-E3 整块删除
+                                  （STOPPING → 排程 finalization proof；
+                                    finalized → _finish_auto_quant_session_if_safe）
+_publish_window_paper_result      TEMPORARY — 三条仍由窗口直调 workflow 的 E3 路径
+                                  （finalization completed / reconnect / manual resume）
+                                  自己发布结果用；E3 后随它们一起消失
+```
+
+这个划分是刻意的：bridge 单独成方法，E3 才能**整块删**，而不是再一次从 render path 里
+挖业务逻辑。窗口 handler 不允许出现 `on_stream` / `poll` / `set_entries_paused` /
+`request_stop` / risk / execution / broker mutation，guard 通过 AST 检查调用名而不是
+substring——它的 docstring 会点名那些不许调用的方法，substring 会打在解释上。
+
+`closeEvent` 仍在窗口（E4），但它请求停止时调的是 `paper_orchestrator.stop()`：窗口仍
+决定**何时**（shutdown 是 E4 的），停止这件事本身只有一个 owner。
+
+### 28.8 行为测试与 mutation
+
+新增 `tests/test_desktop_paper_active_runtime_orchestrator.py`（68 项），覆盖：三个合法
+ingress 相位 / 八个非法相位（断言 workflow 未被调用）/ finalization 期间 stream 与 poll
+都 no-op / 抑制窗口边界（1.199 抑制、1.200 放行）/ 每次操作只调一次 workflow 且只发布
+一次 result / pause-resume 的成功-非法相位-HALT 三类 / stop 每次读最新 snapshot /
+refused 只 log 不造假 result / 每个 event 恰好请求一次 / HALT 粘性回归 / 三个 delegated
+query 与"不缓存"。
+
+真实 wiring 另加在 `tests/test_desktop_v2_paper_wiring.py`：页面三个控件的真实点击、
+真实 `paper_order_timer.timeout`（不手动调 poll）、fan-out 到 capability、以及删除
+`trading_runtime` 后 Shadow 门与 channel probe 不退化。
+
+`scripts/mutation_e2.ps1` 把 13 项篡改逐个应用到源码、跑对应测试、再还原；**13/13 RED**：
+删 ingress 相位门、把 HALTED 算作 live phase、抑制窗口改闭区间、poll 不看 finalization
+seam、poll 自己 emit result、stop 在构造时冻结 snapshot、ingress 不打时间戳、拒绝的
+pause 仍报成功、窗口重新持有 runtime handle、timer 不再指向 capability、fan-out 丢掉
+Paper、interlock 恒返回 False。脚本自身把 pytest 退出码 5（没有选中任何测试）判为
+HARNESS-ERROR 而不是"抓住"——一个匹配不到测试的选择器否则会被当成守卫在干活。
+
+本轮**未触碰**任何 frozen core：`trading/runtime/*`、`trading/application/*`、broker
+adapter、execution lease、Shadow 全部零 diff，包括 E1 刚完成的
+`reserve/commit/cancel_candidate_promotion` 与 reserved-id ownership。

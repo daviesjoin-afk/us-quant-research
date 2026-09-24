@@ -389,7 +389,7 @@ def test_a_successful_refresh_moves_the_execution_route_equity_card(
     )
     monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
 
-    window.auto_quant_snapshot = _session_snapshot()
+    window._paper_render_snapshot = _session_snapshot()
     window.broker_account._portfolio = None
     window._render_auto_quant_snapshot()
     before = window.execution_page.equity_card.value_label.text()

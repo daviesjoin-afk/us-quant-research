@@ -807,10 +807,12 @@ def test_a_halt_discovered_during_the_stop_reopens_manual_recovery(
 ) -> None:
     """Requirement 3 (second route): the *render* path is the other way in.
 
-    ``_apply_paper_workflow_result`` is where a poll that discovers unsafe
-    health lands the session in ``HALTED`` while a close is already draining.
-    That is a different call site from ``_paper_finalization_failed``, so it
-    needs its own regression.
+    The result handler is where a poll that discovers unsafe health lands the session
+    in ``HALTED`` while a close is already draining.  Since v2O-E2 that handler is
+    ``_on_paper_result_changed``; the route it exercises -- a result arriving, the
+    control state being republished, the refused-close drain being released -- is
+    unchanged, and that is exactly what this test pins.  It is a different call site
+    from ``_paper_finalization_failed``, so it needs its own regression.
     """
 
     from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
@@ -825,7 +827,7 @@ def test_a_halt_discovered_during_the_stop_reopens_manual_recovery(
         assert window._closing is True
 
         # A watchdog poll reports unsafe health mid-drain: STOPPING -> HALTED.
-        window._apply_paper_workflow_result(running.halt())
+        window._on_paper_result_changed(running.halt())
 
         assert window.paper_workflow.phase is PaperWorkflowPhase.HALTED
         assert window._closing is False

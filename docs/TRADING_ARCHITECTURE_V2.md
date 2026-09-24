@@ -144,7 +144,7 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Backtest Orchestration | MIGRATED（v2O-C3，`desktop_v2/orchestration/research/backtest/`） |
 | Research Orchestration | **COMPLETE**（v2O-C；Universe / History / Scanner / Backtest / Cross-Section / Targeted Evidence / Targeted Session 全部已迁） |
 | Shadow Orchestration | MIGRATED（v2O-D，`desktop_v2/orchestration/shadow/`） |
-| Paper Launch Orchestration | MIGRATED（v2O-E1，`desktop_v2/orchestration/paper/`）；active-session 一半仍在 `MainWindow`，属 v2O-E2/E3/E4 |
+| Paper Orchestration | MIGRATED（v2O-E1 启动链 + v2O-E2 active runtime，`desktop_v2/orchestration/paper/`）；recovery / finalization / render ownership 仍在 `MainWindow`，属 v2O-E3/E4 |
 
 Shadow 子系统：
 
@@ -1811,9 +1811,12 @@ service、admission 被拒后 busy 保持 True、failure 清空 last-good runs�
 **v2O-C1 Universe + History + v2O-C2 Scanner + v2O-C3 Backtest ✅**；
 **v2O-C4 Cross Section ✅**；**v2O-C5A Targeted Evidence ✅**；
 **v2O-C5B Targeted Session + Preflight ✅**；**v2O-D Shadow orchestration ✅**；
-**v2O-E1 Paper launch orchestration ✅（v2O-E partial）** ——
-顶层路线现在是 **v2O-C Research COMPLETE**。Paper 能力分四刀：启动已完成（§8.18），
-下一刀是 **v2O-E2 active Paper runtime orchestration**。
+**v2O-E1 Paper launch orchestration ✅**；**v2O-E2 active Paper runtime orchestration ✅
+（v2O-E partial）** ——
+顶层路线现在是 **v2O-C Research COMPLETE**。Paper 能力分四刀：启动链（§8.18）与 active
+runtime（§8.19）已完成，`MainWindow` 不再决定 active session 何时 poll / 何时吃行情 /
+何时 pause/resume/stop，也不再持有 runtime handle；下一刀是
+**v2O-E3 HALT / manual reconciliation / finalization / shutdown**。
 
 维护导航见 `docs/DESKTOP_CAPABILITY_MAP.md`；C5B 的设计依据见
 `DESKTOP_DECOMPOSITION.md` §25，本文的 §8.16 只记该轮改变了哪些 boundary。
@@ -2089,23 +2092,89 @@ buying power 替代，也就不会经 float 引入融资。
 `_apply_paper_workflow_result` 渲染，并保留 `trading_runtime` / `auto_quant_snapshot`
 赋值——这两个 active-session 事实属 E2。
 
-**窗口剩下的 Paper 代码**明确留给后续：`_apply_paper_workflow_result`、
-`_poll_auto_quant_orders`、`_on_market_snapshot_changed` 中的 Paper ingress、
-pause / resume / stop、manual reconciliation、finalization refresh、
-`_finish_auto_quant_session_if_safe`、`closeEvent` teardown、execution page 的
-session 渲染。
+**E1 当时窗口剩下的 Paper 代码**（这一刀结束时的事实，其中前四项已由 §8.19 迁走）：
+`_apply_paper_workflow_result`、`_poll_auto_quant_orders`、
+`_on_market_snapshot_changed` 中的 Paper ingress、pause / resume / stop、
+manual reconciliation、finalization refresh、`_finish_auto_quant_session_if_safe`、
+`closeEvent` teardown、execution page 的 session 渲染。
 
 后续阶段：
 
 ```text
-v2O-E2  active Paper runtime orchestration
-        market ingress / broker poll / pause-resume / orderly stop / workflow-result publication
 v2O-E3  HALT / manual reconciliation / finalization / shutdown
 v2O-E4  Paper render ownership + MainWindow closure guards
 ```
 
 本轮**未触碰**任何 frozen core：`trading/runtime/*`、`trading/application/*`、
 broker adapter、IBKR callback/gateway、Paper journal/schema、Shadow core 均无改动。
+
+### 8.19 active Paper runtime orchestration 已抽出（v2O-E2）
+
+E1 迁走的是**启动 sequencing**；`RUNNING` 之后那一段仍散在窗口：什么时候 poll、什么时候
+把行情喂给会话、pause/resume/stop 各自意味着什么、以及结果由谁渲染。这一刀把前四件事
+收进同一个 owner，窗口只留下 E3/E4 的职责。
+
+```text
+desktop_v2/orchestration/paper/
+    __init__.py      命名理由与完整规则集
+    models.py        冻结事实 + 文案（含 session 事件共用的一种 event 形状）
+    queries.py       纯规则：launch 门 + active phase 集合 + 两个 snapshot 判读
+    orchestrator.py  启动序列 + active 序列 + 唯一的 result publication
+```
+
+| 事实 / intent | 唯一 owner | E2 之前由谁驱动 | E2 之后由谁驱动 |
+| --- | --- | --- | --- |
+| 何时把行情喂给会话 | `PaperOrchestrator.on_market_snapshot` | 窗口的 `_on_market_snapshot_changed`（自检 phase + 打时间戳） | capability（窗口只做 cross-capability fan-out） |
+| 何时跑 watchdog poll | `PaperOrchestrator.poll` | 窗口的 `_poll_auto_quant_orders`（timer 直连） | capability（timer 直连 `poll`） |
+| pause / resume | `PaperOrchestrator.pause` / `resume` | 窗口两个 handler | capability（页面信号直连） |
+| orderly stop | `PaperOrchestrator.stop` | 窗口读 `market_orchestrator.snapshot` | capability，通过注入的 market-snapshot provider |
+| active session 的 runtime | `PaperWorkflowController` → coordinator → engine | 窗口额外持有 `trading_runtime` | 只由 canonical chain 持有 |
+| result 的发布 | `PaperOrchestrator._publish_result` | 五条路径各自调窗口渲染 | 一条路径：`result_changed` + 每个 event 一次写入请求 |
+
+三条判据，按重要性排序：
+
+**一、四个 intent 各只有一个 owner。** 窗口不再 import `PaperWorkflowPhase` 来判
+active session（唯一剩下的 phase 读都是 launch / reconciliation 的）；`pause_requested`
+/ `resume_requested` / `stop_requested` / `QTimer.timeout` 四条 wiring 全部**直连
+capability**，没有任何 window handler 中转——中转点就是第二 owner 的出生地。
+
+**二、Phase 门只有一个定义。** `queries.active_session_phase` 决定 `RUNNING` /
+`PAUSED` / `STOPPING` 三个合法 ingress 相位，`STOPPING` 必须在其中：退出、broker event
+和 zero-state 证明都还要读行情。HALT 是**粘的**——它是这一刀最关键的 regression：
+一次 tick 把会话打到 `HALTED` 之后，下一个 tick 和下一次 timer 都不得再进
+coordinator，而且 orchestrator 不得自行"修复"相位（recovery 属 E3）。
+
+**三、result 只有一条出口。** 启动成功也必须走 `_publish_result(result)`：它 emit
+`result_changed`（窗口唯一的结果 handler / 渲染入口）并为 `result.events` 各请求一次
+runtime event 写入。于是"一次操作 → 一个 result → 每个 event 写一次"成立，任何一条
+操作自己 emit 都会静默跳过 event 请求，这也被 guard 钉住。
+
+**四个跨边界 seam，都是注入而非 import：** market snapshot（stop 判定用，**call time
+读**而不是构造时冻结）、`finalization_inflight_provider`（**TEMPORARY，E3 删除**）、
+session-build seam（E1 已有）、task submitter。Paper 仍然不 import Market，也不知道
+Shadow 存在。
+
+**窗口刻意留下的两件事**：`_on_paper_result_changed`（一半渲染、一半是
+`_handle_paper_e3_result_bridge`），以及三条仍然直调 workflow 的 E3 路径
+（finalization proof / reconnect / manual resume 确认），后者走窗口侧的
+`_publish_window_paper_result`。这三个名字是 E3 的施工面，不是兼容层。
+
+**删掉的第二份 truth**：`trading_runtime`、`paper_execution_health`（只写不读的缓存）、
+`_last_stream_ingress_monotonic`（迁进 capability，语义从 `0.0` 改成 `None` 哨兵，因为
+"还没发生过 ingress"和"在时钟原点发生过 ingress"是两件事）。`auto_quant_snapshot` 改名
+`_paper_render_snapshot` 并降级为**只给渲染路径读**；三个 interlock 改读
+`has_runtime_obligations`（snapshot.active OR positions OR pending_orders），从
+canonical result 现读不缓存。
+
+本轮 **13 项 mutation 全部 RED**（`scripts/mutation_e2.ps1`，可复跑）：删 ingress 相位门 /
+把 HALTED 算作 live phase / 抑制窗口改成闭区间 / poll 不看 finalization seam /
+poll 自己 emit result / stop 在构造时冻结 snapshot / ingress 不打时间戳 / 拒绝的 pause
+仍报成功 / 窗口重新持有 runtime handle / timer 不再指向 capability / fan-out 丢掉 Paper /
+interlock 恒返回 False。
+
+本轮**未触碰**任何 frozen core：`trading/runtime/*`、`trading/application/*`、broker
+adapter、execution lease、Shadow core 均零 diff——包括 E1 刚完成的 promotion reservation
+（`reserve/commit/cancel_candidate_promotion` 与 reserved-id ownership）。
 
 ## 9. 已删除的旧架构
 
@@ -2882,8 +2951,7 @@ v2O-A Market orchestration      ✅ 已完成（§8.11）
 v2O-B Account orchestration     ✅ 已完成（§8.12）
 v2O-C Research orchestration    ✅ COMPLETE（§8.13–§8.16）
 v2O-D Shadow orchestration      ✅ 已完成（§8.17）
-v2O-E Paper orchestration       🔶 部分完成：E1 启动链已完成（§8.18）
-v2O-E2 active Paper runtime     ⏭ 后续
+v2O-E Paper orchestration       🔶 部分完成：E1 启动链（§8.18）+ E2 active runtime（§8.19）
 v2O-E3 HALT / reconciliation / finalization / shutdown   ⏭ 后续
 v2O-E4 Paper render ownership + closure guards           ⏭ 后续
 v2O-F System orchestration      ⏭ 后续
@@ -3021,7 +3089,7 @@ Desktop Dashboard v2
 v2O-C Research orchestration    ✅ COMPLETE（C1–C5B 全部完成）
 v2O-D Shadow orchestration      ✅ 已完成（§8.17）
 v2O-E1 Paper launch             ✅ 已完成（§8.18）
-v2O-E2 active Paper runtime     ⏭ 后续
+v2O-E2 active Paper runtime     ✅ 已完成（§8.19）
 v2O-E3 HALT / reconciliation / finalization / shutdown
 v2O-E4 Paper render ownership + closure guards
 v2O-F System orchestration

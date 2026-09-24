@@ -73,14 +73,14 @@ def test_the_declared_columns_are_present() -> None:
 
 
 def test_the_paper_row_names_the_launch_capability_and_stays_partial() -> None:
-    """v2O-E1 landed the *launch*, and the row must say exactly that.
+    """v2O-E1 landed the *launch*, v2O-E2 the active run, and the row says exactly that.
 
-    Two failures are guarded, in opposite directions.  A row that still said "not
-    started" would send the next maintainer to ``desktop.py`` for a sequence that is
-    no longer there; a row that said "v2O-E complete" would claim the active-session
-    half -- polling, ingress, pause/resume, stop, reconciliation, finalization -- had
-    moved when it has not.  This round is deliberately partial, so the status must
-    stay partial too.
+    Two failures are guarded, in opposite directions.  A row that still said the
+    session's polling, ingress or controls were the window's would send the next
+    maintainer to ``desktop.py`` for sequences that are no longer there; a row that said
+    "v2O-E complete" would claim the recovery, finalization and render ownership had
+    moved when they have not -- v2O-E3 and v2O-E4 are still ahead.  These rounds are
+    deliberately partial, so the status must stay partial too.
     """
 
     text = _MAP.read_text(encoding="utf-8")
@@ -89,11 +89,17 @@ def test_the_paper_row_names_the_launch_capability_and_stays_partial() -> None:
     )
     assert "PaperOrchestrator" in row
     assert "v2O-E1 launch orchestration complete" in row
+    assert "v2O-E2 active runtime orchestration complete" in row
     assert "v2O-E partial" in row
-    # The window must no longer be described as the launch owner...
+    # The window must no longer be described as the owner of the launch *or* of the
+    # active session's run...
     for retired in (
         "MainWindow._start_auto_quant",
         "MainWindow._auto_order_service_connected",
+        "MainWindow._poll_auto_quant_orders",
+        "MainWindow._pause_auto_quant_entries",
+        "MainWindow._resume_auto_quant_entries",
+        "MainWindow._stop_auto_quant",
     ):
         assert retired not in row, retired
     # ...and the round must not claim the whole capability is done.

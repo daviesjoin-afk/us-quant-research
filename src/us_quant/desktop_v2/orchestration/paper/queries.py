@@ -71,6 +71,66 @@ def launch_attempt_in_flight(phase: PaperWorkflowPhase) -> bool:
     return phase is PaperWorkflowPhase.CONNECTING
 
 
+#: The phases in which a live session owns the run loop.  ``STOPPING`` is in the set
+#: on purpose: an orderly stop still needs the market fact, because the exits, broker
+#: events and the zero-state proof all read it while the session flattens.  Every other
+#: phase -- the not-yet-connected ones, HALTED, the RECONCILING pair, FINALIZED -- gets
+#: nothing, and a halted session must stay halted rather than being re-entered by the
+#: next tick.
+_ACTIVE_SESSION_PHASES = frozenset(
+    {
+        PaperWorkflowPhase.RUNNING,
+        PaperWorkflowPhase.PAUSED,
+        PaperWorkflowPhase.STOPPING,
+    }
+)
+
+
+def active_session_phase(phase: PaperWorkflowPhase) -> bool:
+    """Whether ``phase`` is one in which market ingress and the watchdog are legal.
+
+    The one rule shared by :meth:`PaperOrchestrator.on_market_snapshot` and
+    :meth:`PaperOrchestrator.poll`, so the two can never disagree about which
+    sessions are live.
+    """
+
+    return phase in _ACTIVE_SESSION_PHASES
+
+
+def session_active(snapshot: object | None) -> bool:
+    """Whether one engine snapshot says its session is still running.
+
+    A missing snapshot and a snapshot with no ``active`` flag both answer ``False``:
+    neither states that a session is live, and the fail-closed reading of an absent
+    fact is the one that keeps a launch gate shut rather than opening it.
+    """
+
+    return bool(getattr(snapshot, "active", False))
+
+
+def runtime_obligations(snapshot: object | None) -> bool:
+    """Whether one engine snapshot shows facts a market stop would strand.
+
+    Three facts, and any one of them is enough: the session is still active, it holds
+    positions, or it has orders in flight.  This is the *rendered* snapshot the workflow
+    owns rather than a count mirrored anywhere, so the interlock that refuses a market
+    stop reads the same truth the operator is looking at.
+
+    Read with ``getattr`` because the value crosses the capability boundary as an
+    engine snapshot; a missing attribute means "no such obligation", which is the
+    fail-open direction for a *stop request* only -- the stop itself is still refused by
+    the workflow once it sees the phase.
+    """
+
+    if snapshot is None:
+        return False
+    return bool(
+        session_active(snapshot)
+        or getattr(snapshot, "positions", ())
+        or getattr(snapshot, "pending_orders", ())
+    )
+
+
 def preflight_failed(preflight: AutoQuantPreflight) -> bool:
     """Whether the first (or second) preflight refuses the launch."""
 
@@ -240,11 +300,14 @@ def account_reading(state: PaperBrokerState, *, account_alias: str) -> PaperAcco
 
 __all__ = [
     "account_reading",
+    "active_session_phase",
     "current_inputs_match",
     "freeze_launch",
     "launch_attempt_in_flight",
     "preflight_failed",
     "preflight_failure_text",
+    "runtime_obligations",
+    "session_active",
     "strategy_launch_fact",
     "validate_broker_state",
 ]

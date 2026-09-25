@@ -137,12 +137,20 @@ $mutations = @(
 
     # -- the stale writer ------------------------------------------------
     @{
+        # Anchored on the store-level assertion, not on the concurrency test.
+        # The concurrency test can pass while the store has lost its atomicity:
+        # a losing writer whose read lands after the winner's commit is refused
+        # by the *application's* revision comparison, which this mutation does
+        # not touch.  Measured -- an earlier version of this entry selected both
+        # tests and reported "1 failed, 1 passed".  The direct repository call is
+        # the one that always fails, because it holds an expectation the store
+        # can no longer check.
         name = 'M5  the store writes regardless of the expected revision'
         file = $adapterAutonomy
         find = 'if stored_intent\.revision != expected_revision:'
         repl = 'if False:'
         tests = @($autonomyBehaviour)
-        select = @("-k", "stale_writer_is_refused_and_changes_nothing or concurrent_writers_produce_exactly_one_transition")
+        select = @("-k", "stale_writer_is_refused_and_changes_nothing")
     },
     @{
         name = 'M6  the authority never compares the revision it was given'
@@ -300,6 +308,32 @@ $mutations = @(
         repl = 'raise error'
         tests = @($autonomyBehaviour)
         select = @("-k", "storage_fault_on_the_write_lock_is_reported_here")
+    },
+
+    # -- the trail and the intent have to describe the same outcome ------
+    @{
+        name = 'M24 the latest event kind is not checked against the intent'
+        file = $adapterAutonomy
+        find = 'if not event_describes_intent\(latest\.kind, intent\):'
+        repl = 'if False:'
+        tests = @($autonomyBehaviour)
+        select = @("-k", "valid_kind_that_contradicts_the_intent_is_refused or valid_kind_over_a_latched_intent_is_refused")
+    },
+    @{
+        name = 'M26 the store accepts an event kind that is not its transition'
+        file = $adapterAutonomy
+        find = 'if not event_describes_intent\(event\.kind, replacement\):'
+        repl = 'if False:'
+        tests = @($autonomyBehaviour)
+        select = @("-k", "refuses_a_pair_that_is_not_one_transition")
+    },
+    @{
+        name = 'M25 a latched intent is allowed to stay paused'
+        file = $domainAutonomy
+        find = 'if \(\s+self\.kill_switch_latched\s+and self\.mode is not PaperAutonomyMode\.DISABLED\s+\):'
+        repl = 'if self.kill_switch_latched and self.mode is PaperAutonomyMode.ENABLED:'
+        tests = @($autonomyBehaviour)
+        select = @("-k", "a_latched_intent_is_always_disabled")
     }
 )
 

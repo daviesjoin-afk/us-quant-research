@@ -13,8 +13,9 @@ the question an operator would ask:
 * is the operator CLI a surface rather than a second authority?  (P)
 * is a transition one commit, or two writes with a gap between them?  (Q, R)
 * is a transition that did nothing recorded as one that did?  (S)
-* is a corrupt *trail* as unreadable as a corrupt row?  (T, T2, U)
+* is a corrupt *trail* as unreadable as a corrupt row?  (T, T2, T3, T4, U)
 * is an event for revision 0 a transition?  (X)
+* is a latched intent always disabled?  (X2)
 * can a write extend a trail nobody can read?  (Y)
 * does a storage fault leave the module as a sqlite3 error?  (Z, Z2, Z3)
 
@@ -23,10 +24,11 @@ implementation cannot pass.  Q forces the audit write to fail inside real SQLite
 and asserts the intent went with it; R refuses a pair of arguments that disagree
 with each other; S asserts that clearing a latch that is not set is not a
 transition; T and U assert that a damaged history is reported rather than
-shortened; T2 asserts that a *well-formed* event which has stopped describing
-its intent is caught too; Y asserts the store will not extend a broken trail;
-and Z/Z2/Z3 assert that no storage fault -- on the write lock, on a read, or on
-opening the store -- escapes as a bare sqlite3 error.
+shortened; T2/T3/T4 assert that a *well-formed* record which has stopped
+describing itself is caught -- a rewritten reason, a rewritten instant, and a
+valid event kind that reports a different outcome; Y asserts the store will not
+extend a broken trail; and Z/Z2/Z3 assert that no storage fault -- on the write
+lock, on a read, or on opening the store -- escapes as a bare sqlite3 error.
 """
 
 from __future__ import annotations
@@ -55,6 +57,7 @@ from us_quant.trading.domain.paper_autonomy import (
     PaperAutonomyEventKind,
     PaperAutonomyIntent,
     PaperAutonomyMode,
+    PaperAutonomyViolation,
     initial_intent,
 )
 from us_quant.trading.ports.paper_autonomy_repository import (
@@ -666,7 +669,7 @@ def test_r_the_store_refuses_a_pair_that_is_not_one_transition(
     good = _event_for(first, PaperAutonomyEventKind.ENABLED)
     later = first.updated_at + timedelta(seconds=1)
 
-    incoherent = {
+    inversions = {
         "a revision jump": (replace(first, revision=3), good),
         "a revision that does not advance": (first, good),
         "an event naming a revision the intent never reaches": (
@@ -681,9 +684,24 @@ def test_r_the_store_refuses_a_pair_that_is_not_one_transition(
             replace(first, revision=2),
             replace(good, revision=2, detail="a different decision"),
         ),
+        "a kind that reports another outcome": (
+            replace(first, revision=2),
+            replace(
+                good, revision=2, kind=PaperAutonomyEventKind.KILL_LATCHED
+            ),
+        ),
+        "a kind that does not report the latch": (
+            replace(
+                first,
+                revision=2,
+                mode=PaperAutonomyMode.DISABLED,
+                kill_switch_latched=True,
+            ),
+            replace(good, revision=2, kind=PaperAutonomyEventKind.ENABLED),
+        ),
     }
 
-    for label, (replacement, event) in incoherent.items():
+    for label, (replacement, event) in inversions.items():
         with pytest.raises(PaperAutonomyRepositoryError):
             store.commit_transition(
                 expected_revision=first.revision,
@@ -972,6 +990,108 @@ def test_x_an_event_cannot_describe_revision_zero() -> None:
             detail="a transition that produced no revision",
             occurred_at=_BASE_INSTANT,
         )
+
+
+def test_x2_a_latched_intent_is_always_disabled() -> None:
+    """The latch implies ``DISABLED``, not merely "not ``ENABLED``".
+
+    ``engage_kill_switch`` moves the mode to ``DISABLED`` in the same step and
+    ``clear_kill_switch`` only releases the latch, so a latched intent is never
+    ``PAUSED`` either.  Forbidding the whole shape is what keeps "the latch is
+    set" and "the system is not running" one statement rather than two.
+    """
+
+    for mode in (PaperAutonomyMode.ENABLED, PaperAutonomyMode.PAUSED):
+        with pytest.raises(PaperAutonomyViolation):
+            PaperAutonomyIntent(
+                revision=1,
+                mode=mode,
+                kill_switch_latched=True,
+                updated_at=_BASE_INSTANT,
+                reason="a latched switch that is not disabled",
+            )
+
+    # And the one shape a latch does describe is still constructible, so this is
+    # not a blanket refusal of the latch -- which would make the value type
+    # unable to represent the state the kill switch exists to produce.
+    latched = PaperAutonomyIntent(
+        revision=1,
+        mode=PaperAutonomyMode.DISABLED,
+        kill_switch_latched=True,
+        updated_at=_BASE_INSTANT,
+        reason="operator kill",
+    )
+    assert latched.allows_autonomous_work is False
+
+
+def test_t3_a_valid_kind_that_contradicts_the_intent_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A well-formed kind reporting a different outcome is corruption too.
+
+    This is the disagreement the previous round's checks could not see.
+    ``AUTONOMY_KILL_LATCHED`` is a real member, the revision sequence is intact,
+    the instant matches and the reason matches -- every field is valid on its
+    own, and the record still says two different things:
+
+        intent:       mode=enabled, kill_switch_latched=False
+        latest event: AUTONOMY_KILL_LATCHED
+
+    Handing that to an unattended reader would be handing it an authorisation
+    whose own audit trail reports it was latched off.
+    """
+
+    store = _store(tmp_path)
+    application = _application(store)
+    application.enable(INITIAL_REVISION, "authorise autonomy")
+    _execute(
+        store.path,
+        "UPDATE paper_autonomy_events SET event = 'AUTONOMY_KILL_LATCHED' "
+        "WHERE revision = 1",
+    )
+
+    # The trail still parses: nothing here is caught by an unknown-enum error,
+    # which is what makes this a test of the coherence check rather than of the
+    # parser.
+    assert store.recent_events(10)[0].kind is (
+        PaperAutonomyEventKind.KILL_LATCHED
+    )
+
+    with pytest.raises(PaperAutonomyStoreUnreadable):
+        store.load_intent()
+    with pytest.raises(PaperAutonomyStoreUnreadable):
+        application.snapshot()
+
+
+def test_t4_a_valid_kind_over_a_latched_intent_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The other direction: a trail claiming autonomy over a latched switch.
+
+    Asserted separately because the two directions fail through different
+    assertions, and a check that only caught the first would leave a latched
+    store looking enabled to anything that trusts the trail.
+    """
+
+    store = _store(tmp_path)
+    application = _application(store)
+    enabled = application.enable(INITIAL_REVISION, "authorise autonomy")
+    latched = application.engage_kill_switch(enabled.revision, "kill")
+    _execute(
+        store.path,
+        "UPDATE paper_autonomy_events SET event = 'AUTONOMY_ENABLED' "
+        "WHERE revision = ?",
+        (latched.revision,),
+    )
+
+    assert (
+        store.recent_events(10)[-1].kind is PaperAutonomyEventKind.ENABLED
+    )
+
+    with pytest.raises(PaperAutonomyStoreUnreadable):
+        store.load_intent()
+    with pytest.raises(PaperAutonomyStoreUnreadable):
+        application.snapshot()
 
 
 def test_y_the_store_refuses_to_extend_a_corrupt_trail(

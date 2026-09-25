@@ -49,9 +49,11 @@ from us_quant.trading.application.paper_autonomy import (
 )
 from us_quant.trading.domain.paper_autonomy import (
     INITIAL_REVISION,
+    PaperAutonomyEventKind,
     PaperAutonomyIntent,
     PaperAutonomyMode,
     PaperAutonomyViolation,
+    event_describes_intent,
     initial_intent,
 )
 from us_quant.trading.ports.paper_autonomy_repository import (
@@ -349,6 +351,79 @@ def test_pa6_the_intent_carries_no_runtime_truth() -> None:
         assert phase not in modes
 
 
+def test_pa6b_every_event_kind_states_the_shape_it_leaves() -> None:
+    """The vocabulary is total: no member is left without a postcondition.
+
+    A kind without a declared result shape would be a decision the trail cannot
+    be checked against, and the check that reads it would fail with a KeyError
+    rather than with a refusal an operator can act on.
+    """
+
+    shapes = {
+        kind: (kind.resulting_mode, kind.resulting_kill_switch_latched)
+        for kind in PaperAutonomyEventKind
+    }
+    assert set(shapes) == set(PaperAutonomyEventKind)
+    assert shapes[PaperAutonomyEventKind.ENABLED] == (
+        PaperAutonomyMode.ENABLED,
+        False,
+    )
+    assert shapes[PaperAutonomyEventKind.PAUSED] == (
+        PaperAutonomyMode.PAUSED,
+        False,
+    )
+    assert shapes[PaperAutonomyEventKind.DISABLED] == (
+        PaperAutonomyMode.DISABLED,
+        False,
+    )
+    assert shapes[PaperAutonomyEventKind.KILL_LATCHED] == (
+        PaperAutonomyMode.DISABLED,
+        True,
+    )
+    assert shapes[PaperAutonomyEventKind.KILL_CLEARED] == (
+        PaperAutonomyMode.DISABLED,
+        False,
+    )
+
+    # Every shape a kind states has to be a constructible intent, or the
+    # vocabulary would be describing a state the value type forbids -- and the
+    # pairwise check would then reject its own happy path.
+    for mode, latched in shapes.values():
+        probe = PaperAutonomyIntent(
+            revision=1,
+            mode=mode,
+            kill_switch_latched=latched,
+            updated_at=_FIXED_NOW,
+            reason="a shape the vocabulary is allowed to describe",
+        )
+        assert event_describes_intent(
+            next(
+                kind
+                for kind, shape in shapes.items()
+                if shape == (probe.mode, probe.kill_switch_latched)
+            ),
+            probe,
+        )
+
+
+def test_pa6c_the_result_shape_mapping_lives_only_in_the_vocabulary() -> None:
+    """One definition of what a transition produces, in the domain.
+
+    Checked as "which module builds a table keyed by event kind" rather than as
+    a text search: a second mapping with different values is exactly the drift
+    that would let the read path and the write path disagree about what an event
+    produced, and the shape of that mistake is a dict, not a word.  The
+    application passes kinds as arguments; only the vocabulary tabulates them.
+    """
+
+    owners = [
+        _module_name(path)
+        for path in _SRC.rglob("*.py")
+        if "__pycache__" not in path.parts and _tabulates_event_kinds(path)
+    ]
+    assert owners == ["us_quant.trading.domain.paper_autonomy"]
+
+
 def test_pa7_no_second_autonomy_authority_was_introduced() -> None:
     """One write authority, and no aggregate manager above it.
 
@@ -639,6 +714,23 @@ def _protocol_class_names(path: pathlib.Path) -> set[str]:
             for base in node.bases
         )
     }
+
+
+def _tabulates_event_kinds(path: pathlib.Path) -> bool:
+    """Whether ``path`` builds a mapping keyed by ``PaperAutonomyEventKind``."""
+
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key in node.keys:
+            if (
+                isinstance(key, ast.Attribute)
+                and isinstance(key.value, ast.Name)
+                and key.value.id == "PaperAutonomyEventKind"
+            ):
+                return True
+    return False
 
 
 def _execute(path: pathlib.Path, statement: str) -> None:

@@ -171,8 +171,13 @@ class PaperAutonomyRepositoryPort(Protocol):
         Raises ``PaperAutonomyStoreUnreadable`` when a row exists but cannot be
         interpreted, when an event cannot be interpreted, and when the trail and
         the intent do not agree -- an intent at revision *n* whose trail is not
-        exactly ``1..n`` in order and does not end on the transition that
-        produced *n*, or a trail with no intent row in front of it.  An
+        exactly ``1..n`` in order, a trail that does not end on the transition
+        that produced *n*, a trail whose last entry names a different instant or
+        reason, and a trail whose last entry states a transition to a different
+        *shape* than the stored intent has.  That last one matters because it is
+        the only disagreement the others cannot see: a valid event kind, an
+        intact sequence and matching instant and reason can still leave a record
+        that says the kill switch was latched beside an enabled intent.  An
         incomplete record is not a fresh one; it is a store an operator has to
         look at.
         """
@@ -201,11 +206,14 @@ class PaperAutonomyRepositoryPort(Protocol):
         The three arguments are one fact, and implementations must refuse a set
         that could not have come from a single accepted transition: the
         replacement must advance the revision by exactly one, the event must
-        name that same revision, and the two must share one instant and one
-        operator reason.  That is storage integrity -- the record has to be
-        self-consistent -- not lifecycle policy, and it is checked here rather
-        than trusted because a store that accepted an incoherent pair would
-        leave the trail unable to describe the intent it belongs to.
+        name that same revision, the two must share one instant and one operator
+        reason, and the event kind must state the shape the replacement has.  That
+        is storage integrity -- the record has to be self-consistent -- not
+        lifecycle policy: whether a transition was *legal* here is the
+        application's decision, while what it *results in* is a fact about the
+        record.  It is checked rather than trusted because a store that accepted
+        an incoherent pair would leave a trail unable to describe the intent it
+        belongs to, with every individual field still valid.
 
         Raises ``PaperAutonomyConflict`` when the stored revision differs, in
         which case nothing is written.  Raises ``PaperAutonomyRepositoryError``

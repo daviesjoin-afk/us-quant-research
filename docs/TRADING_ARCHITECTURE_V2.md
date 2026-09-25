@@ -3389,11 +3389,22 @@ domain / ports / composition，不直接 import application——与本仓库既
 CLI 约定一致。
 
 `domain/paper_autonomy.py` 是纯值模块：`PaperAutonomyMode`（`disabled` / `enabled` /
-`paused`）、`PaperAutonomyIntent`、`PaperAutonomyEventKind`、`initial_intent()`。
-`PaperAutonomyIntent` 的 `__post_init__` 强制三条 invariant：revision 非负、
-`updated_at` 必须带时区、reason 非空，以及**latched ⇒ mode 不是 ENABLED**。
-最后一条是防御纵深而不是文档约定——"把 latch 清掉就能复活自动交易"这个失败模式，
-在值层面就构造不出来。
+`paused`）、`PaperAutonomyIntent`、`PaperAutonomyEventKind`、`initial_intent()`、
+`event_describes_intent()`。`PaperAutonomyIntent` 的 `__post_init__` 强制四条
+invariant：revision 非负、`updated_at` 必须带时区、reason 非空，以及
+**latched ⇒ mode 是 DISABLED**。
+
+最后一条是刻意比"不是 ENABLED"更严的：`engage_kill_switch` 把 mode 与 latch 在同一步
+里一起推到 `DISABLED`，`clear_kill_switch` 只释放 latch，所以 latched 的 intent 也永远
+不是 `PAUSED`。禁掉整个形状，才能让"latch 已置位"和"系统不在运行"是同一句话而不是两
+句。`mode=PAUSED + latched` 因此在值层面构造不出来——防御纵深而不是文档约定。
+
+每个 event kind 也自带它的 **result shape**：`PaperAutonomyEventKind.resulting_mode` /
+`resulting_kill_switch_latched` 取自 domain 里唯一一张表，`event_describes_intent(kind,
+intent)` 是唯一的比较谓词。这是 vocabulary 的后置条件，不是 transition table：
+"clear 是否在此处合法"是 policy，仍归 `PaperAutonomyApplication`；"clear 的结果是什么"
+是关于记录的事实，归 vocabulary。guard 断言全树只有 domain 构建 kind→shape 的表
+（adapter 只是传入 kind 作为参数），避免读写路径各持一份 mapping 而漂移。
 
 `application/paper_autonomy.py` 是唯一 write authority，实现 §8.28.4 / §8.28.5 的
 transition 与 revision 规则；repository **只存**，不做任何 transition 判断。
@@ -3415,8 +3426,26 @@ revision ≤ 0 的 intent 行 → PaperAutonomyStoreUnreadable
 trail ≠ 1..n 的 intent   → PaperAutonomyStoreUnreadable（缺口 / 少一条 / 顺序错）
 latest event 与 intent 的
   occurred_at / detail 不一致 → PaperAutonomyStoreUnreadable
+latest event 的 kind 所声明的
+  result shape 与 intent 不符 → PaperAutonomyStoreUnreadable
+  （例：intent=enabled/unlatched 但最后一条是 KILL_LATCHED）
+latched 的 intent 若不是 DISABLED → 值层拒绝（domain invariant）
 duplicate revision  → schema 唯一索引拒绝；旧库已存在重复时初始化即失败
 ```
+
+**轨迹与 intent 必须描述同一个结果。** 上一轮只验证了 revision 序列、时刻与 reason，
+这三者全对仍然可以留下一条自相矛盾的记录：kind 是**合法**成员
+（`AUTONOMY_KILL_LATCHED`），序列完整，时刻匹配，reason 匹配，而 intent 是
+`enabled/unlatched`——每字段单独看都有效，记录却在说两件不同的事。
+`event_describes_intent()` 比较 kind 声明的 result shape 与 intent 的实际形状，两个
+方向都锁：`ENABLED intent + KILL_LATCHED event` 与
+`DISABLED/latched intent + ENABLED event` 都拒绝。
+
+刻意**不**做的是按 kind 顺序重放状态机（那会把 lifecycle policy 搬进 store）。后果是
+只有**最后一条** event 会与当前 intent 比对：它正是产生被读取的那个 revision 的
+transition，而它中间产生过的 intent 并没有被存下来可供比对。这对安全性质已经足够
+——`snapshot()` 只有在 intent 行**和**最后一次 transition 都这么说时才能报 `ENABLED`
+——而要求更多就等于让这个模块重放一台它不该拥有的状态机。
 
 `missing row` 是**真实状态**而不是被构造函数悄悄写掉的状态：空表读出来就是
 `initial_intent()`，第一次 transition 才会插入。但"空"是 intent 表**和** event 表都空
@@ -3583,7 +3612,9 @@ audit event。
 | 一个 revision 一个 event | `ux_paper_autonomy_events_revision`（schema） | 同一 revision 第二条 event / 旧库重复静默修复 | `::test_v_the_schema_allows_one_event_per_revision`、`::test_v2_a_pre_existing_duplicate_revision_is_not_repaired` | —（schema 约束） | ✅ |
 | revision / stale writer | `PaperAutonomyRepositoryPort.commit_transition` | last-write-wins / 无 expected_revision | `::test_k_a_stale_writer_is_refused_and_changes_nothing`、`::test_n_concurrent_writers_produce_exactly_one_transition`、`::test_pa10_…` | A1 M5、M6 | ✅ |
 | 审计轨迹与 intent 同源 | `_read_and_validate_state()`（读写共用） | 孤立历史读成全新 store / 缺口被当成更短的历史 / 只有拓扑被验证而 event 内容没被解析 | `::test_pa9b_an_orphaned_history_is_not_a_fresh_store`、`::test_u_a_gap_in_the_audit_trail_is_not_a_readable_intent`、`::test_t_a_corrupt_audit_entry_poisons_every_read_of_the_store` | A1 M15、M18、M19 | ✅ |
-| latest event 仍描述其 intent | `_read_and_validate_state()` | 合法但已不对应的 detail / occurred_at | `::test_t2_a_trail_that_stopped_describing_its_intent_is_refused` | A1 M20 | ✅ |
+| latest event 仍描述其 intent | `_read_and_validate_state()` | 合法但已不对应的 detail / occurred_at / **kind** | `::test_t2_a_trail_that_stopped_describing_its_intent_is_refused`、`::test_t3_a_valid_kind_that_contradicts_the_intent_is_refused`、`::test_t4_…` | A1 M20、M24 | ✅ |
+| event kind 的 result shape 唯一来源 | `event_describes_intent()`（domain） | repository 里再写一份 kind→state mapping | `::test_pa6b_every_event_kind_states_the_shape_it_leaves`、`::test_pa6c_the_result_shape_mapping_lives_only_in_the_vocabulary` | A1 M26 | ✅ |
+| latched ⇒ DISABLED | `PaperAutonomyIntent.__post_init__` | `PAUSED + latched` 这类不可达状态 | `::test_x2_a_latched_intent_is_always_disabled` | A1 M25 | ✅ |
 | event revision ≥ 1 | `PaperAutonomyEvent.__post_init__` | revision 0 的 event（等于"没有发生过 transition"） | `::test_x_an_event_cannot_describe_revision_zero` | A1 M21 | ✅ |
 | 写路径不扩展不可读轨迹 | `commit_transition()` 内的写锁校验 | 跳过读取直接把 transition 追加到损坏轨迹 | `::test_y_the_store_refuses_to_extend_a_corrupt_trail` | A1 M23 | ✅ |
 | 存储故障归一 | adapter 的 error 边界 | `sqlite3.Error` 裸漏出 port | `::test_z_a_storage_fault_on_the_write_lock_is_reported_here`、`::test_z2_…`、`::test_z3_…` | A1 M22 | ✅ |
@@ -3595,28 +3626,32 @@ audit event。
 | import 方向 | §8.28.2 的分层表 | domain/ports/application 越过 allowlist | `::test_pa1_…`、`::test_pa2_…`、`::test_pa3_…`、`::test_pa11_the_new_modules_are_inside_the_guarded_layers` | A1 M9 | ✅ |
 
 ```text
-tests/test_paper_autonomy.py                        30 test function / 48 case
-tests/test_paper_autonomy_architecture.py           15 test function / 17 case
-scripts/mutation_paper_autonomy_a1.ps1              23 mutant / 23 RED / 0 survived
+tests/test_paper_autonomy.py                        33 test function / 53 case
+tests/test_paper_autonomy_architecture.py           17 test function / 17 case
+scripts/mutation_paper_autonomy_a1.ps1              26 mutant / 26 RED / 0 survived
                                                  / 0 harness-error
 ```
 
-v1-A mutation 里有四处捕获方式值得记下，因为它们说明"哪一道守卫真正在工作"：
+v1-A mutation 里有几处捕获方式值得记下，因为它们说明"哪一道守卫真正在工作"，以及
+"测试有没有打到它"：
 
-- M2（kill 不移动 mode）被 domain 的 `latched ⇒ not ENABLED` invariant 直接拦住——
-  值层面构造不出来，所以接住它的是守卫而不是测试断言。
-- M5（store 无视 expected_revision）由**并发**测试接住：application 的 revision 比对
-  在同一读窗口内对所有写者都通过，只有 store 的 CAS 能仲裁——这正是"application 侧
-  比对只是消息"这条设计的可执行证据。
-- M17（pair 校验忽略 event revision）在第一次写这个 mutant 时**存活了**，原因是那条
-  测试当时用一个会与已存 revision 撞车的编号，于是被唯一索引挡住，而 pair 校验本身
-  从未被触发。改成"intent 永远不会到达的 revision"之后才 RED。这是测试隔离度不够，
-  不是守卫无效。
-- M22（写路径的存储故障裸漏成 `sqlite3.Error`）同样**存活过一次**，原因是那次测试用
-  "每条语句都失败"的假连接，于是失败发生在 `load_intent()`（另一个 wrapper）里，被
-  mutate 的写 wrapper 根本没被触达。改成"能读但拿不到写锁"的故障、并先断言读仍然正常
-  之后才 RED。这两次存活都记录在此：它们暴露的是测试没打到目标，而 mutation harness
-  的价值正在于把这类"看起来在测、其实没测到"变成可见。
+- M2（kill 不移动 mode）被 domain 的 `latched ⇒ DISABLED` invariant 直接拦住——值层面
+  构造不出来，所以接住它的是守卫而不是测试断言。
+- M5（store 无视 expected_revision）的锚点刻意选在 **store 级**直接调用上，而不是并发
+  测试：并发测试在 M5 下**可能通过**，因为一个"读发生在赢家提交之后"的败者会被
+  application 的 revision 比对（M5 没动它）拦成 conflict。实测过——早期版本同时选了
+  两个测试，报告是 "1 failed, 1 passed"。store 级那次调用持有的期望是 store 再也无法
+  校验的，所以它每次都失败。这也顺带说明唯一 revision 索引是第二道闸：跳过 CAS 的
+  store 不是静默覆盖，而是撞上索引。
+- M17（pair 校验忽略 event revision）第一次**存活**：那条测试用了会与已存 revision
+  撞车的编号，被唯一索引挡住，pair 校验本身从未被触发。
+- M22（写路径存储故障裸漏 sqlite3）第一次也**存活**：测试用"每条语句都失败"的假连接，
+  失败发生在 `load_intent`（另一个 wrapper），被 mutate 的写 wrapper 根本没被触达。
+- M24（不对 kind 做一致性校验）是这一轮 review 找出的漏洞本体：合法 kind + 完整序列 +
+  匹配的时刻与 reason，仍能留下自相矛盾的记录。
+
+这些存活记录都留在文档里：它们暴露的是测试没打到目标或守卫互补，而 mutation 的价值
+正在于把"看起来在测、其实没测到"变成可见。
 
 ## 9. 已删除的旧架构
 

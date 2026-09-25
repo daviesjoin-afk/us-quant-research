@@ -19,11 +19,18 @@ scheduler placing an order, which is the worst place to find it.
 
 Three properties of the value type are also deliberate:
 
-* ``kill_switch_latched`` implies the mode is **not** ``ENABLED``.  A latched
-  kill switch is a promise that no future ``enable()`` can resurrect trading,
-  and that promise is only keepable if the forbidden combination cannot be
-  constructed at all.  The check lives in ``__post_init__`` rather than in the
-  repository so that it holds for every construction site, the store included.
+* ``kill_switch_latched`` implies the mode is ``DISABLED`` -- not merely "not
+  ``ENABLED``".  Engaging the latch moves the mode to ``DISABLED`` in the same
+  step and clearing it only releases the latch, so a latched intent is never
+  ``PAUSED`` either; forbidding the whole shape is what keeps "the latch is set"
+  and "the system is not running" the same statement.  The check lives in
+  ``__post_init__`` rather than in the repository so that it holds for every
+  construction site, the store included.
+* an event kind states the intent shape it leaves behind, and
+  :func:`event_describes_intent` compares one against an intent.  That is the
+  vocabulary's own postcondition, not a transition table: whether a clear is
+  *legal* here is policy and stays in the application, while what a clear
+  *results in* is a fact about the record.
 * ``updated_at`` must be aware.  The intent's revision is ordered against a
   wall-clock audit trail, and a naive timestamp cannot be ordered against
   anything.
@@ -65,6 +72,13 @@ class PaperAutonomyEventKind(StrEnum):
     replay of the transitions rather than a snapshot of the state: an operator
     reviewing "why was autonomous trading on this morning" needs the sequence,
     not the final value.
+
+    Each member also states the intent shape it leaves behind, and that
+    statement is part of this vocabulary rather than something a reader infers.
+    It has to be, because the trail and the intent are two halves of one record:
+    a trail whose last entry says the kill switch was latched, standing next to
+    an enabled intent, is not a record anybody can act on -- and the difference
+    is invisible to anything that only checks revisions, timestamps and reasons.
     """
 
     ENABLED = "AUTONOMY_ENABLED"
@@ -72,6 +86,35 @@ class PaperAutonomyEventKind(StrEnum):
     DISABLED = "AUTONOMY_DISABLED"
     KILL_LATCHED = "AUTONOMY_KILL_LATCHED"
     KILL_CLEARED = "AUTONOMY_KILL_CLEARED"
+
+    @property
+    def resulting_mode(self) -> PaperAutonomyMode:
+        """The mode this transition leaves the intent in."""
+
+        return _RESULTING_SHAPE[self][0]
+
+    @property
+    def resulting_kill_switch_latched(self) -> bool:
+        """Whether this transition leaves the kill switch latched."""
+
+        return _RESULTING_SHAPE[self][1]
+
+
+#: What each event kind leaves behind, as ``(mode, kill_switch_latched)``.
+#:
+#: Deliberately the *result shape* and not a transition table.  ``KILL_CLEARED``
+#: and ``DISABLED`` both leave ``DISABLED`` unlatched, and this mapping does not
+#: try to tell them apart: deciding that a clear is only legal after a kill is
+#: lifecycle policy, and that belongs to ``PaperAutonomyApplication``.  What it
+#: does state is the postcondition, which is what lets a stored pair be checked
+#: for self-consistency without this module replaying the state machine.
+_RESULTING_SHAPE: dict[PaperAutonomyEventKind, tuple[PaperAutonomyMode, bool]] = {
+    PaperAutonomyEventKind.ENABLED: (PaperAutonomyMode.ENABLED, False),
+    PaperAutonomyEventKind.PAUSED: (PaperAutonomyMode.PAUSED, False),
+    PaperAutonomyEventKind.DISABLED: (PaperAutonomyMode.DISABLED, False),
+    PaperAutonomyEventKind.KILL_LATCHED: (PaperAutonomyMode.DISABLED, True),
+    PaperAutonomyEventKind.KILL_CLEARED: (PaperAutonomyMode.DISABLED, False),
+}
 
 
 #: The revision of an intent that has never been written.
@@ -137,10 +180,15 @@ class PaperAutonomyIntent:
             raise PaperAutonomyViolation(
                 "an autonomy intent must record the operator's reason"
             )
-        if self.kill_switch_latched and self.mode is PaperAutonomyMode.ENABLED:
+        if (
+            self.kill_switch_latched
+            and self.mode is not PaperAutonomyMode.DISABLED
+        ):
             raise PaperAutonomyViolation(
-                "a latched kill switch is never an enabled intent: clearing the "
-                "latch must not be able to resurrect autonomous trading"
+                f"a latched kill switch leaves the system disabled, not "
+                f"'{self.mode.value}': engaging the latch moves the mode to "
+                f"DISABLED in the same step, and clearing it only releases the "
+                f"latch, so a latched intent is never enabled or paused"
             )
 
     @property
@@ -157,6 +205,31 @@ class PaperAutonomyIntent:
             self.mode is PaperAutonomyMode.ENABLED
             and not self.kill_switch_latched
         )
+
+
+def event_describes_intent(
+    kind: PaperAutonomyEventKind,
+    intent: PaperAutonomyIntent,
+) -> bool:
+    """Whether a transition's event still describes the intent beside it.
+
+    The two halves of one stored record have to agree: an event says what a
+    transition produced, and the intent is what it produced.  A trail whose last
+    entry reports that the kill switch was latched, standing next to an enabled
+    intent, is a record that contradicts itself -- and the contradiction is
+    invisible to every cheaper check, because the kind is a valid member, the
+    revision sequence is intact, and the instant and the reason match.
+
+    The comparison is on the *result* shape only.  This function does not ask
+    whether the transition was legal from whatever came before it: that is
+    ``PaperAutonomyApplication``'s decision, and answering it here would put the
+    lifecycle back into the vocabulary.
+    """
+
+    return (
+        intent.mode is kind.resulting_mode
+        and intent.kill_switch_latched == kind.resulting_kill_switch_latched
+    )
 
 
 def initial_intent() -> PaperAutonomyIntent:
@@ -185,5 +258,6 @@ __all__ = [
     "PaperAutonomyIntent",
     "PaperAutonomyMode",
     "PaperAutonomyViolation",
+    "event_describes_intent",
     "initial_intent",
 ]

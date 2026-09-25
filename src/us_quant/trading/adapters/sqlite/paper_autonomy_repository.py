@@ -25,10 +25,12 @@ Six storage decisions are deliberate.
   half of a conflicting record to believe.
 * **A stored record is only believed as a *pair*.**  Reading the intent means
   reading its whole trail and parsing every row of it, and the latest event has
-  to still describe the intent standing beside it.  Revision arithmetic that
-  adds up over rows nobody parsed is not coherence: a trail of rows that cannot
-  be turned into events would otherwise hand back a perfectly plausible intent,
-  and an unattended reader would act on an authorisation whose record is broken.
+  to still describe the intent beside it -- same instant, same reason, and the
+  same *result shape*, which is the half a parse, a revision sequence and a
+  timestamp comparison are all blind to.  Revision arithmetic that adds up over
+  rows nobody parsed is not coherence: a trail of rows that cannot be turned
+  into events would otherwise hand back a perfectly plausible intent, and an
+  unattended reader would act on an authorisation whose record is broken.
 * **The same validation guards reads and writes.**  :func:`_read_and_validate_state`
   is called by ``load_intent`` *and* by ``commit_transition`` before it modifies
   anything, so the store can never extend a trail it cannot read.  Two copies of
@@ -60,6 +62,7 @@ from us_quant.trading.domain.paper_autonomy import (
     PaperAutonomyEventKind,
     PaperAutonomyIntent,
     PaperAutonomyMode,
+    event_describes_intent,
     initial_intent,
 )
 from us_quant.trading.ports.paper_autonomy_repository import (
@@ -330,14 +333,23 @@ def _read_and_validate_state(
       revision ``n`` -- which is also what says the latest event is the
       transition that produced the stored value;
     * the latest event has to still describe the intent: same instant, same
-      operator reason, and (through the sequence above) the same revision.  That
-      is the pair the atomic commit wrote, and this is the check that it is
-      still one pair on disk.
+      operator reason, the same revision (through the sequence above), and --
+      the half every one of those is blind to -- the *result shape* the kind
+      states.  The trail and the intent are two halves of one record, and a
+      record whose last entry reports a transition to a different shape is a
+      record that contradicts itself.  That is the pair the atomic commit wrote,
+      and this is the check that it is still one pair on disk.
 
     What is deliberately **not** derived here is the mode.  Reconstructing
-    ``ENABLED`` / ``PAUSED`` / ``DISABLED`` from the event kinds would put
-    lifecycle policy in the store, and transition legality belongs to
-    ``PaperAutonomyApplication`` alone.
+    ``ENABLED`` / ``PAUSED`` / ``DISABLED`` by replaying the kinds in order would
+    put lifecycle policy in the store, and transition legality belongs to
+    ``PaperAutonomyApplication`` alone.  The consequence is worth stating: only
+    the *latest* entry is compared against the stored intent, because that is
+    the transition that produced the value being read, and the intermediate
+    intents it produced are not stored to compare against.  That is enough for
+    the property that matters -- a snapshot can only report ``ENABLED`` when the
+    intent row *and* the last transition both say so -- and asking for more
+    would mean replaying a state machine this module must not own.
     """
 
     row = connection.execute(  # type: ignore[attr-defined]
@@ -416,6 +428,18 @@ def _require_coherent_history(
             "the latest audit event does not record the reason the intent was "
             "written with"
         )
+    if not event_describes_intent(latest.kind, intent):
+        # The check the revision sequence, the instant and the reason all miss:
+        # every one of them can be intact while the last entry of the trail
+        # reports a transition that produced a different intent.  A trail that
+        # says the kill switch was latched, beside an enabled intent, is the one
+        # contradiction an unattended reader must never be handed.
+        raise PaperAutonomyStoreUnreadable(
+            f"the latest audit event '{latest.kind.value}' says the transition "
+            f"left {_event_kind_shape_text(latest.kind)}, but the stored intent "
+            f"is {_intent_shape_text(intent)}; the trail contradicts the intent "
+            f"it belongs to"
+        )
 
 
 def _require_unique_event_revision(connection: object) -> None:
@@ -460,6 +484,12 @@ def _require_coherent_pair(
     intent and its stored event describe the same transition, because a reader
     reconstructs one from the other and a store that accepted a mismatched pair
     would hand every future reader two facts that cannot both be true.
+
+    The last check is the one the others cannot reach: revision, instant and
+    reason can all agree while the event records a transition to a completely
+    different shape -- an ``AUTONOMY_KILL_LATCHED`` written beside an enabled
+    intent.  Every field is a valid value in its own right, and the record is
+    still self-contradictory.
     """
 
     if replacement.revision != expected_revision + 1:
@@ -481,6 +511,26 @@ def _require_coherent_pair(
             "the audit event must record the operator reason the intent was "
             "written with"
         )
+    if not event_describes_intent(event.kind, replacement):
+        raise PaperAutonomyRepositoryError(
+            f"the audit event '{event.kind.value}' says the transition left "
+            f"{_event_kind_shape_text(event.kind)}, but the intent it is stored "
+            f"with is {_intent_shape_text(replacement)}"
+        )
+
+
+def _shape_text(mode: PaperAutonomyMode, latched: bool) -> str:
+    return f"'{mode.value}' with the kill switch {'latched' if latched else 'released'}"
+
+
+def _intent_shape_text(intent: PaperAutonomyIntent) -> str:
+    return _shape_text(intent.mode, intent.kill_switch_latched)
+
+
+def _event_kind_shape_text(kind: PaperAutonomyEventKind) -> str:
+    return _shape_text(
+        kind.resulting_mode, kind.resulting_kill_switch_latched
+    )
 
 
 def _rollback_quietly(connection: object) -> None:

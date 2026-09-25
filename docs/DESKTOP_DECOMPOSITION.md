@@ -6003,9 +6003,12 @@ selection；desktop ownership closure；AI future boundary。结论与证据见
 而 `parameter_hash` 读自 governed identity 而非重算，于是一个已治理版本会变成
 「declared hash 不再描述自己 parameters」的分裂身份。修复是窄的 representation 改动：
 `domain/common.py` 新增 `FrozenParameters(dict)` / `FrozenList(list)` /
-`freeze_parameters()`（递归冻结；副本仍冻结；`isinstance` / `==` / `json` / deepcopy /
-pickle 全部兼容），`StrategyVersion.__post_init__` 改用它。先写 failing regression
-再改产品代码；兼容性由真实 `SQLiteStrategyRepository` round-trip 的 hash 相等断言证明。
+`freeze_parameters()`（递归冻结 dict / list / **tuple 的 descendants**；生产用到的
+copy 协议 —— `copy.copy` / `copy.deepcopy` / `pickle` —— 保持冻结形态，但继承的
+`.copy()` 仍返回普通 dict/list，这是 Python 自身语义且无法改动原 governed version；
+`isinstance` / `==` / `json` 全部兼容），`StrategyVersion.__post_init__` 改用它。
+先写 failing regression 再改产品代码；兼容性由真实 `SQLiteStrategyRepository`
+round-trip 的 hash 相等断言证明。
 
 **Class C（trading safety semantics 需要改变）**：**本轮未发现**。Risk bypass、
 broker ordering、reconciliation、finalization proof、order retry、Paper workflow
@@ -6020,8 +6023,8 @@ scanner ranking、backtest math —— 一律未改。
 ### 36.4 交付物
 
 ```text
-tests/test_final_architecture_closure.py              38 条跨层 guard
-scripts/mutation_final_architecture_closure.ps1       31 个跨层 mutant（全 RED）
+tests/test_final_architecture_closure.py              40 个跨层 guard case（34 function）
+scripts/mutation_final_architecture_closure.ps1       33 个跨层 mutant（全 RED）
 docs/TRADING_ARCHITECTURE_V2.md §8.27                 Final Architecture Closure + evidence matrix
 ```
 
@@ -6041,20 +6044,34 @@ controller 行为。**没有** `assert "IBKR" not in entire repo`（adapters / c
 ### 36.5 Mutation 结果
 
 ```text
-FAC mutant        31 / 31 RED      0 survived / 0 harness-error
+FAC mutant        33 / 33 RED      0 survived / 0 harness-error
 historical mutant 165 / 165 RED    0 not-caught
                   e2 13 · e3 41 · e4 11 · F1 14 · F2 22 · G1 17 · G2-A 12 · G2-B 35
-aggregate         196 / 196 RED
+aggregate         198 / 198 RED
 ```
 
 historical 165 全部 RED，**没有**因 Final Closure 的改动而需要重锚（没有删 mutant、
 没有把 pattern miss 当 caught、没有注释掉 mutant）。
 
-**OCR review 发现的两个真实缺陷（同一修复内，已修）**：\dict.__init__\ 继承导致
-frozen mapping 可被 \__init__\ 重新填充（与 \list.__init__\ 在 frozen list 上打开的洞相同，
-现改为 \__new__\ 填充 + 首次 \__init__\ seal；刻意不防显式基类调用
-\dict.__setitem__\，那与 frozen dataclass 的 \object.__setattr__\ 边界相同）；
-以及 FAC test 文件一个未使用的 \MappingProxyType\ import。新增 FA26d + mutant M24b。
+**review / OCR 发现的三个真实缺陷（同一 immutable-version 修复内，已修）**：
+`dict.__init__` 继承导致 frozen mapping 可被 `__init__` 重新填充（与 `list.__init__`
+在 frozen list 上打开的洞相同，现改为 `__new__` 填充 + 首次 `__init__` seal；
+刻意不防显式基类调用 `dict.__setitem__`，那与 frozen dataclass 的
+`object.__setattr__` 边界相同）；**tuple descendants 未递归冻结**（tuple 本身
+immutable，但 `json.dumps` 接受 tuple，故其内部 dict/list 仍是可变容器，会重现 split
+identity —— 修法是 tuple 保持 tuple、只递归冻结 descendants，不改成 list 也不做
+Sequence 一刀切）；以及 FAC test 文件一个未使用的 `MappingProxyType` import。
+新增 FA26d / FA26e 与 mutant M24b / M24c / M24d。
+
+**FA19b 的重构（review 发现）**：初版断言"当前不存在 `live*.py`"，既 future-hostile
+（Live adapter 是路线目标，命名成 `live_execution.py` 会让 suite 因做对的事而变红）
+又不可靠（命名成 `ibkr_production.py` 就绕过）。**文件名上的 guard 不是 architecture
+guard。** 现改为断言长期 invariant：全树中 `RiskApplication` / `ExecutionApplication` /
+`TradingRuntime` 各自恰好一个定义且为 canonical owner（按类名），并新增 FA19c 断言
+authority 构造体内无 mode 分支。已实测：新增 `LiveExecutionApplication` → RED；
+新增合法 `IBKRLiveExecutionAdapter` → GREEN。AI boundary 则如实标为
+**documented future constraint**（当前无 AI package，故无可执行的 module guard），
+不再拿无关的 no-Live test 当 evidence。
 
 FAC harness 的两个 harness-error 修复值得记录，因为它们是「脚本缺陷」而非「guard
 通过」的例子：M18 的初版替换删掉了 `if` 的 body，产生 SyntaxError；M1 的初版用

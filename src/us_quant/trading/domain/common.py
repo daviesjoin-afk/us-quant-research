@@ -19,8 +19,14 @@ Two properties matter for these types, and both are deliberate:
   ``MappingProxyType`` breaks ``copy.deepcopy`` and ``pickle``, and a tuple would
   change what those consumers see.  A subclass keeps every one of those working
   while refusing mutation.
-* a copy stays frozen.  ``copy.deepcopy`` of a governed value must not hand back
-  a mutable one, or the immutability would last only until someone copied it.
+* the copy protocol used here -- ``copy.copy`` / ``copy.deepcopy`` and a
+  ``pickle`` round trip -- preserves the frozen representation, via
+  ``__copy__`` / ``__deepcopy__`` / ``__reduce__``.  That is asserted and
+  meaningful.  It is **not** a claim that every way of copying a mapping yields a
+  frozen one: the inherited ``FrozenParameters.copy()`` / ``FrozenList.copy()``
+  return an ordinary ``dict`` / ``list``, as they do for any subclass.  That is
+  Python's own collection semantics, it cannot mutate the governed version it was
+  copied from, and this module deliberately does not redesign it.
 """
 
 from __future__ import annotations
@@ -159,11 +165,24 @@ class FrozenList(list):
 
 
 def freeze_parameters(value: Any) -> Any:
-    """Return ``value`` with every mapping and list replaced by a frozen one.
+    """Return ``value`` with every nested mutable container frozen.
 
     Recursive on purpose: a shallow freeze would still alias the list a strategy
     runtime reads for its market reference symbols, which is the half that a
     scalar-only check misses.  Scalars are returned unchanged.
+
+    Three container kinds are handled, and only these three.  ``dict`` and
+    ``list`` become the frozen subclasses above; ``tuple`` is rebuilt with frozen
+    descendants but **stays a tuple**, because ``json.dumps`` encodes a tuple as
+    a JSON array -- so a tuple is a legitimate, hashable parameter value, and
+    turning it into a list would change the canonical JSON the parameter hash is
+    taken over.  A tuple cannot be edited in place, but the dicts and lists *in*
+    it can, which is exactly the hole this branch closes.
+
+    Anything else is returned as-is.  In particular this deliberately does not
+    treat every ``Sequence`` as one case: ``str`` is a sequence too, and other
+    sequences carry their own business meaning.  Only the containers that are
+    both JSON-compatible and able to hold mutable descendants are recursed into.
     """
 
     if isinstance(value, dict):
@@ -172,4 +191,6 @@ def freeze_parameters(value: Any) -> Any:
         )
     if isinstance(value, list):
         return FrozenList(freeze_parameters(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(freeze_parameters(item) for item in value)
     return value

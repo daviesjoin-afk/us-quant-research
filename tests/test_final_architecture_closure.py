@@ -127,13 +127,22 @@ def test_fa26_a_governed_versions_parameters_cannot_be_edited_in_place() -> None
     assert parameter_hash_for(version.parameters) == before
 
 
-def test_fa26b_a_copy_of_a_governed_version_is_still_frozen() -> None:
-    """FA26b: immutability must survive a copy, or it lasts until someone copies.
+def test_fa26b_a_governed_versions_parameters_survive_the_copy_protocol() -> None:
+    """FA26b: the copy protocol used in production preserves the frozen form.
 
     ``strategy_launch_fact`` takes a ``copy.deepcopy`` of the parameters before
     freezing them into a launch request.  If deepcopy handed back a plain dict,
     the "frozen" request would be mutable again and the split-identity failure
     the copy exists to prevent would come straight back.
+
+    Scope is stated precisely: what is locked is ``copy.copy`` /
+    ``copy.deepcopy`` and a ``pickle`` round trip -- the three ways this codebase
+    actually copies a governed value.  It is **not** a claim that every way of
+    copying a mapping yields a frozen one.  The inherited
+    ``FrozenParameters.copy()`` returns an ordinary ``dict``, as it does for any
+    ``dict`` subclass; that is Python's own collection semantics, it cannot
+    mutate the governed version it was copied from, and no production path uses
+    it.  The last block records that boundary rather than pretending it away.
     """
 
     version = _governed_version(
@@ -156,6 +165,15 @@ def test_fa26b_a_copy_of_a_governed_version_is_still_frozen() -> None:
     assert version.parameters == {"short_window": "5", "lookbacks": ["63", "126"]}
     assert isinstance(version.parameters["lookbacks"], list)
     assert list(version.parameters["lookbacks"]) == ["63", "126"]
+
+    # The documented boundary, asserted so the docstring cannot drift: the
+    # inherited ``copy()`` yields a plain, mutable dict -- and the governed
+    # version it came from is untouched by editing it.
+    detached = version.parameters.copy()
+    assert type(detached) is dict
+    detached["short_window"] = "999"
+    assert version.parameters["short_window"] == "5"
+    assert parameter_hash_for(version.parameters) == version.parameter_hash
 
 
 def test_fa26c_the_repository_round_trip_still_reproduces_the_same_hash(
@@ -236,6 +254,63 @@ def test_fa26d_a_frozen_mapping_cannot_be_re_populated_through_init() -> None:
     assert list(FrozenList([3])) == [3]
     assert dict(copy.copy(params)) == {"a": "1"}
     assert list(copy.deepcopy(items)) == [1, 2]
+
+
+def test_fa26e_tuple_descendants_of_governed_parameters_are_frozen() -> None:
+    """FA26e: a tuple is immutable, but what it *holds* need not be.
+
+    ``json.dumps`` accepts a tuple and encodes it as a JSON array, so a tuple
+    container is a legitimate, hashable parameter value.  Freezing only ``dict``
+    and ``list`` therefore leaves a hole: the tuple itself cannot be edited, but
+    a dict or list *inside* it is never visited, so it stays a plain mutable
+    container and the split identity this whole fix removes comes straight back.
+
+    The tuple itself must stay a tuple -- converting it to a list would change
+    the canonical JSON the hash is taken over, and would change what existing
+    consumers see.
+    """
+
+    parameters = {
+        "custom": (
+            {
+                "items": [1, 2],
+                "nested": {"value": ["a"]},
+            },
+        )
+    }
+
+    version = _governed_version(parameters)
+    before = version.parameter_hash
+
+    # The container is still a tuple, and the descendants are frozen.
+    assert isinstance(version.parameters["custom"], tuple)
+    assert isinstance(version.parameters["custom"][0], dict)
+
+    with pytest.raises(TypeError):
+        version.parameters["custom"][0]["items"].append(3)
+
+    with pytest.raises(TypeError):
+        version.parameters["custom"][0]["nested"]["value"].append("b")
+
+    with pytest.raises(TypeError):
+        version.parameters["custom"][0]["new"] = "x"
+
+    # A tuple inside a tuple is reached too, so the recursion is not one level.
+    deeper = _governed_version({"deep": (({"inner": [1]},),)})
+    with pytest.raises(TypeError):
+        deeper.parameters["deep"][0][0]["inner"].append(2)
+
+    # The declared hash still describes the parameters it governs, and the
+    # values still read as ordinary JSON-compatible values.
+    assert parameter_hash_for(version.parameters) == before
+    assert version.parameters["custom"] == (
+        {"items": [1, 2], "nested": {"value": ["a"]}},
+    )
+    assert list(version.parameters["custom"][0]["items"]) == [1, 2]
+
+    # And the hash is unchanged from the tuple's pre-freeze form: the fix is
+    # representation-only, so already-governed versions keep their identity.
+    assert parameter_hash_for(parameters) == before
 
 
 def test_fa21_register_refuses_a_callers_own_gate_attestation() -> None:
@@ -1521,26 +1596,130 @@ def test_fa25c_the_execution_package_owns_no_workflow_phase_branch() -> None:
 # =====================================================================
 
 
-def test_fa19b_no_live_adapter_exists_yet() -> None:
-    """The Future Live seam is a seam, not an implementation.
+def test_fa19b_a_future_live_path_must_reuse_the_single_authority_stack() -> None:
+    """FA19b: the durable Live invariant is *no second authority*, not "no Live".
 
-    This phase proves the current architecture *permits* a Live adapter behind
-    the existing business path.  It does not add one, and a guard that stopped
-    holding the moment someone added it would be the wrong guard -- so this test
-    asserts the seam (FA20) and records that no Live adapter is wired into the
-    trading core yet.
+    An earlier version of this guard asserted that no ``live*.py`` file existed.
+    That was the wrong shape twice over: it is **future-hostile** (a Live adapter
+    is a route goal, and naming it ``trading/adapters/ibkr/live_execution.py``
+    would have turned this suite red for doing the right thing) and it is
+    **unreliable** (naming the same file ``ibkr_production.py`` would walk
+    straight past it).  A guard on a filename is not an architecture guard.
+
+    What is durable is the invariant the Live work actually has to respect:
+    there is exactly **one** risk authority, **one** execution authority and
+    **one** trading runtime, and a future Live path adds an *adapter* behind
+    ``BrokerExecutionPort`` -- it does not fork the deterministic
+    ``Risk → Execution`` stack into a parallel one.
+
+    So this asserts class names, not file names: a class whose name ends in
+    ``RiskApplication`` / ``ExecutionApplication`` / ``TradingRuntime`` must be
+    the canonical one.  ``IBKRExecutionAdapter`` and a future
+    ``IBKRLiveExecutionAdapter`` are untouched by that rule -- they implement the
+    port, which is exactly the extension point this phase locked (FA20).  Adding
+    a Live adapter keeps this green; adding a ``LiveRiskApplication`` does not.
     """
 
-    live_like = [
-        path.name
-        for path in _SRC.rglob("*.py")
-        if "__pycache__" not in path.parts
-        and path.stem.lower() in {"live", "live_execution", "live_broker"}
-    ]
-    assert live_like == [], live_like
+    canonical = {
+        "RiskApplication": "us_quant.trading.application.risk",
+        "ExecutionApplication": "us_quant.trading.application.execution",
+        "TradingRuntime": "us_quant.trading.runtime.trading",
+    }
 
-    # The live environment exists only as a domain vocabulary value.
+    definitions: dict[str, list[str]] = {name: [] for name in canonical}
+    for path in _SRC.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        module = _module_name(path)
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for authority in canonical:
+                if node.name.endswith(authority):
+                    definitions[authority].append(f"{module}::{node.name}")
+
+    for authority, owner in canonical.items():
+        found = definitions[authority]
+        # Exactly one definition in the whole tree -- the canonical owner.
+        assert found == [f"{owner}::{authority}"], (authority, found)
+
+    # The extension point is the port, and it is the only one: the Live work
+    # reuses this seam rather than inventing a parallel authority surface.
+    from us_quant.trading.ports.broker_execution import BrokerExecutionPort
+
+    assert isinstance(BrokerExecutionPort, type)
+
+    # `Environment.LIVE` stays a domain vocabulary value, so a future Live path
+    # is described by configuration rather than by a second set of authorities.
     from us_quant.trading.domain.common import Environment
 
     assert Environment.LIVE == "live"
+
+
+def test_fa19c_paper_and_live_differences_are_not_a_mode_branch() -> None:
+    """FA19c: Paper/Live must differ by adapter / config / permission.
+
+    The counterpart to FA19b.  If the difference were expressed inside the
+    authority stack, a Live path would need a second stack -- so the authority
+    constructors must take ports and policy, and must not branch on a mode.
+
+    Checked over the constructor's **AST**, not its source text: a docstring that
+    happens to contain the word "lives" is not a mode branch, and a text scan
+    cannot tell the two apart.  What is forbidden is a *comparison or attribute
+    access* on a mode word, and a branch whose body differs by mode.
+    """
+
+    import inspect
+    import textwrap
+
+    from us_quant.trading.application.execution import ExecutionApplication
+    from us_quant.trading.application.risk import RiskApplication
+
+    mode_words = {"paper", "live", "ibkr", "alpaca", "production"}
+
+    for authority in (RiskApplication, ExecutionApplication):
+        # ``getsource`` returns the method at its class indentation, and the
+        # docstring is dropped so prose cannot trip the guard.
+        body = ast.parse(
+            textwrap.dedent(inspect.getsource(authority.__init__))
+        ).body[0]
+        statements = body.body
+        if (
+            statements
+            and isinstance(statements[0], ast.Expr)
+            and isinstance(statements[0].value, ast.Constant)
+            and isinstance(statements[0].value.value, str)
+        ):
+            statements = statements[1:]
+
+        offending: list[str] = []
+        for node in ast.walk(ast.Module(body=statements, type_ignores=[])):
+            if isinstance(node, ast.Attribute) and node.attr.lower() in mode_words:
+                offending.append(f"{authority.__name__}: attr {node.attr}")
+            elif isinstance(node, ast.Name) and node.id.lower() in mode_words:
+                offending.append(f"{authority.__name__}: name {node.id}")
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if node.value.lower() in mode_words:
+                    offending.append(f"{authority.__name__}: literal {node.value!r}")
+            elif isinstance(node, ast.Compare):
+                for comparator in [node.left, *node.comparators]:
+                    if (
+                        isinstance(comparator, ast.Attribute)
+                        and comparator.attr.lower() in mode_words
+                    ):
+                        offending.append(
+                            f"{authority.__name__}: compare on {comparator.attr}"
+                        )
+        assert offending == [], offending
+
+    # And the execution authority really does take exactly the two ports, so the
+    # substitution point is the adapter rather than a mode flag.
+    hints = inspect.get_annotations(
+        ExecutionApplication.__init__, eval_str=True
+    )
+    from us_quant.trading.ports.broker_execution import BrokerExecutionPort
+    from us_quant.trading.ports.order_repository import OrderRepositoryPort
+
+    assert hints.get("broker") is BrokerExecutionPort
+    assert hints.get("repository") is OrderRepositoryPort
 

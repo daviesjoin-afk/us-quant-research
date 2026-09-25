@@ -287,7 +287,7 @@ $mutations = @(
         find = '        object\.__setattr__\(\r?\n            self, "parameters", freeze_parameters\(dict\(self\.parameters\)\)\r?\n        \)'
         repl = "        object.__setattr__(self, `"parameters`", dict(self.parameters))"
         tests = @($fac)
-        select = @("-k", "governed_versions_parameters_cannot_be_edited_in_place or copy_of_a_governed_version_is_still_frozen")
+        select = @("-k", "governed_versions_parameters_cannot_be_edited_in_place or governed_versions_parameters_survive_the_copy_protocol")
     },
     @{
         name = 'M23 the frozen parameter mapping allows in-place writes'
@@ -316,6 +316,25 @@ $mutations = @(
         repl = "        dict.__init__(instance, *args, **kwargs)`n        return instance`n`n    def __init__(self, *args: Any, **kwargs: Any) -> None:`n        object.__setattr__(self, `"_sealed`", True)"
         tests = @($fac)
         select = @("-k", "frozen_mapping_cannot_be_re_populated_through_init or governed_versions_parameters_cannot_be_edited_in_place")
+    },
+    @{
+        name = 'M24c tuple descendants are left mutable'
+        file = $domainCommon
+        # A tuple cannot be edited in place, but the dicts and lists inside it
+        # can -- and json.dumps accepts a tuple, so it is a legitimate parameter
+        # value.  Dropping this branch is what re-opens the split identity.
+        find = '    if isinstance\(value, tuple\):\r?\n        return tuple\(freeze_parameters\(item\) for item in value\)\r?\n'
+        repl = ""
+        tests = @($fac)
+        select = @("-k", "tuple_descendants_of_governed_parameters_are_frozen")
+    },
+    @{
+        name = 'M24d a frozen mapping is re-populated through the inherited copy()'
+        file = $domainCommon
+        find = '    def __copy__\(self\) -> "FrozenParameters":\r?\n        return FrozenParameters\(dict\(self\)\)'
+        repl = "    def __copy__(self) -> `"FrozenParameters`":`n        return dict(self)"
+        tests = @($fac)
+        select = @("-k", "governed_versions_parameters_survive_the_copy_protocol")
     },
     @{
         name = 'M25 register accepts a callers own gate attestation'

@@ -16,14 +16,23 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 > 判据 A–G 合法 composition、H route-specific orchestration = 0、I duplicate
 > mutable truth = 0、J private reach-through = 0 全部成立，**G2-C = NOT
 > REQUIRED**。在此基础上本轮只做跨层 invariant 锁定，不再继续拆窗口：见 §8.24
-> 的收口落档与 §8.27 的 Final Architecture Closure（38 条跨层 guard / 31 个
+> 的收口落档与 §8.27 的 Final Architecture Closure（40 条跨层 guard case / 33 个
 > 跨层 mutant / 一处真实 immutable-version defect 修复）。
 >
-> **Architecture Closure baseline SHA**：Final Architecture Closure PR 的 head
-> commit（见该 PR 描述；其 base 为 G2-B merge commit
-> `c78a27f95f482336383282b94e6c877030df6b77`）。**下一阶段**：
-> Paper Autonomous Trading v1。**尚未开始**：Live ready、autonomous trading、
-> strategy evolution、AI decision —— 本轮均未实现，也不声称完成。
+> **Final Architecture Closure base**：`c78a27f95f482336383282b94e6c877030df6b77`
+> （G2-B merge commit，本分支的 base）。**Closure vehicle**：
+> PR #58 / `refactor/final-architecture-closure`。**Final immutable baseline**：
+> PR #58 合并时产生的 merge commit，由 Git 历史记录。
+>
+> 本节刻意**不**写"本 PR 最终 HEAD SHA"：一个 commit 无法在自己的内容里预先写出
+> 自己的最终 SHA —— 只要写入 SHA，commit 内容就变了，SHA 也随之改变，形成不可落地
+> 的自引用。PR body 可以记录 exact HEAD，因为 PR body 不参与 commit hash。
+>
+> **下一阶段**：Paper Autonomous Trading v1。**尚未开始**：Live ready、
+> autonomous trading、strategy evolution、AI decision —— 本轮均未实现，也不声称
+> 完成。（本轮未新增 Live adapter / Live credential / 真钱开关 / production
+> scheduler；这是 PR scope fact，由 `git diff --name-only` 可查，不是永久
+> architecture invariant。）
 >
 > **进度更新（Trading Framework Closure v2C）**：正式 Trading Runtime 已完全
 > 脱离内部 Shadow 模拟器，正式 session config 与 Shadow overlay 分离，
@@ -2932,7 +2941,7 @@ Strategy Evolution / AI assistance 时，不需要绕开或重写现有安全边
 
 原则是 **AUDIT FIRST**：先扫现状、再锁 invariant、只在发现真实 defect 时修。不按 LOC
 优化，不为减少文件数合并 capability，不为"统一"建立 global manager。因此本轮
-**新增 38 条跨层 guard + 31 个跨层 mutant + 一处真实 defect 修复**，没有搬动任何
+**新增 40 条跨层 guard case + 33 个跨层 mutant + 同一 immutable-version 缺陷的三个真实漏洞修复**，没有搬动任何
 capability 的 owner。
 
 #### 8.27.1 Audit 1 — import / layer dependency graph
@@ -3067,14 +3076,27 @@ Paper begin_connecting 取得 PAPER → shadow.start() 必须 WorkflowStateError
 本轮**不实现 Live**，只证明现有架构允许未来 Live adapter 复用同一 business path。
 `ExecutionApplication.__init__(repository: OrderRepositoryPort, broker: BrokerExecutionPort)`
 的抽象保持不变（FA20 用 `inspect.get_annotations(..., eval_str=True)` 断言参数注解**就是**
-这两个 port），且 `ExecutionApplication.__init__` 内无 `paper` / `live` / `IBKR`
-分支（FA20 后半）。具体 adapter construction 在 composition：
+这两个 port），且 `ExecutionApplication.__init__` 内无 mode 分支（FA19c 用 AST 断言
+构造体内不出现 `paper` / `live` / `ibkr` / `alpaca` / `production` 的 name / attr /
+字面量 / compare —— 按 AST 而非源码文本，因为 docstring 里的 "lives" 之类的散文不是
+mode branch）。具体 adapter construction 在 composition：
 `build_execution_candidate() -> IBKRExecutionAdapter`，
-`build_execution_application() -> ExecutionApplication(port)`。未来 Paper / Live 差异应是
-**不同 adapter / config / permissions**，而不是复制一套 risk/execution。FA19 断言
-`application/risk.py` 与 `application/execution.py` 零 concrete broker import；
-FA19b 断言当前不存在 `live*.py` 实现（`Environment.LIVE` 只是 domain 词汇值）。
-本轮未加 Live adapter、Live port、真钱开关、Live credential 或 production scheduler。
+`build_execution_application() -> ExecutionApplication(port)`。FA19 断言
+`application/risk.py` 与 `application/execution.py` 零 concrete broker import。
+
+**Future Live 锁的是"没有第二套 authority"，不是"没有 Live 文件"。** 本轮的初版
+FA19b 断言"当前不存在 `live*.py`"，这个形状两处都错：它 **future-hostile**（Live
+adapter 本来就是路线目标，把它命名成 `trading/adapters/ibkr/live_execution.py` 会让
+本 suite 因为做对的事而变红），而且 **不可靠**（同一文件命名成 `ibkr_production.py`
+就绕过去了）。**文件名上的 guard 不是 architecture guard。** 现在 FA19b 断言的是长期
+invariant：全树中 `RiskApplication` / `ExecutionApplication` / `TradingRuntime` 各自
+**恰好一个**定义，且就是 canonical owner（按**类名**而非文件名）。因此未来新增
+`IBKRLiveExecutionAdapter` 保持 GREEN（它实现 port，正是本轮锁定的 extension point），
+而新增 `LiveRiskApplication` 会让它 RED。`Environment.LIVE` 只是 domain 词汇值。
+
+本轮未加 Live adapter、Live port、真钱开关、Live credential 或 production scheduler ——
+这是 **PR scope fact**（`git diff --name-only` 可查），不是永久 architecture
+invariant，因此不写进 pytest。
 
 #### 8.27.6 Audit 6 — Strategy immutable lifecycle（含 deep immutability defect）
 
@@ -3111,8 +3133,12 @@ parameter_hash_for(version.parameters) != version.parameter_hash   # True
   tuple 则会改变消费方看到的东西。
 * 递归冻结：浅冻结会仍然 alias strategy runtime 读取的
   `market_reference_symbols` 列表，那正是 scalar-only 检查漏掉的一半。
-* 副本仍是冻结的（`__deepcopy__` / `__reduce__` 都返回 frozen 类型），否则不可变性
-  只持续到有人复制一次为止 —— 而 `strategy_launch_fact` 正是先 `copy.deepcopy` 再冻结。
+* 生产用到的 copy 协议（`copy.copy` / `copy.deepcopy` / `pickle` round-trip）经
+  `__copy__` / `__deepcopy__` / `__reduce__` 保持冻结形态 —— 这是被断言且有意义的部分。
+  **不**声称"任何复制方式都得到冻结结果"：继承来的
+  `FrozenParameters.copy()` / `FrozenList.copy()` 返回普通 `dict` / `list`（任何
+  dict/list 子类都如此）。这是 Python 自身的 collection 语义，它无法改动被复制的那份
+  governed version，生产路径也没有用到它，本模块刻意不重新设计它。
 * `StrategyVersion.__post_init__` 的 `dict(self.parameters)` 改为
   `freeze_parameters(dict(self.parameters))`。
 
@@ -3135,7 +3161,7 @@ parameter_hash_for(version.parameters) != version.parameter_hash   # True
 invariant，且行为可完全证明兼容（behavior test + mutation + migration 证据齐备）。
 它**不是** Class C：不改变任何 trading safety 语义。
 
-**OCR review 发现并已修的两个真实缺陷（同一修复内）**：
+**OCR / review 发现并已修的三个真实缺陷（同一 immutable-version 修复内）**：
 
 1. **`dict.__init__` 继承导致 frozen mapping 可被重新填充。** 只覆盖 mutating 方法不够：
    `params.__init__({...})` 会重新填充一个本应 immutable 的 mapping —— 与
@@ -3148,9 +3174,34 @@ invariant，且行为可完全证明兼容（behavior test + mutation + migratio
    新增 FA26d 与 mutant M24b（锚在 `__new__` 的 `dict.__init__` 上，因此只匹配
    `FrozenParameters` 的 seal —— `FrozenList` 的 seal 除该行外逐字节相同，
    匹配两者的模式会同时变异两个类）。
-2. **FAC test 文件里一个未使用的 `MappingProxyType` import。**
+2. **tuple descendants 未被递归冻结（review 发现）。** tuple 容器本身 immutable，
+   但 `json.dumps` **接受 tuple 并编码成 JSON array**，所以 tuple 是合法且可哈希的
+   parameter 值。`freeze_parameters` 只递归 dict / list，于是 tuple **内部**的
+   dict / list 从未被访问、仍是普通可变容器：
 
-因此 guard 37 → **38**，FAC mutant 30 → **31**（全 RED），aggregate 195 → **196**。
+   ```text
+   {"custom": ({"items": [1, 2]},)}   ->  FrozenParameters -> tuple -> 普通 dict -> 普通 list
+   version.parameters["custom"][0]["items"].append(3)        # 成功
+   parameter_hash_for(version.parameters) != version.parameter_hash   # split identity 重现
+   ```
+
+   修复是**最小**的：tuple 分支保持 tuple 类型、只递归冻结其 descendants ——
+   不把 tuple 改成 list（那会改变 canonical JSON，进而改变 hash），不做
+   "所有 Sequence 一刀切"（`str` 也是 Sequence，其它 sequence 各有业务语义）。
+   实测：tuple 仍 `isinstance(..., tuple)`，descendants 全部 frozen，
+   `parameter_hash_for` 不变。先写 failing regression（FA26e 在修复前 RED：
+   `DID NOT RAISE TypeError`），新增 mutant M24c。
+3. **FAC test 文件里一个未使用的 `MappingProxyType` import。**
+
+**copy 文案的精确化（同一 review）**：锁住的是**生产用到的** copy 协议 ——
+`copy.copy` / `copy.deepcopy` / `pickle` round-trip（经 `__copy__` / `__deepcopy__` /
+`__reduce__`）。**不**泛化成"任何复制都冻结"：继承来的 `FrozenParameters.copy()` /
+`FrozenList.copy()` 返回普通 `dict` / `list`（任何 dict/list 子类都如此）。这不会改动
+被复制的 governed version（生产路径也没有用到它），因此本 PR 不重新设计 Python 的
+collection 语义；FA26b 把这个边界断言下来，避免 docstring 漂移。
+
+因此 FAC collected case 37 → **40**，FAC mutant 31 → **33**（全 RED），
+aggregate 196 → **198**。
 
 #### 8.27.7 Audit 7–9 — selection / desktop residual / AI boundary
 
@@ -3171,14 +3222,20 @@ invariant，且行为可完全证明兼容（behavior test + mutation + migratio
   （Paper ↔ Market、Shadow ↔ Market、strategy catalogue fan-out、account/market facts
   fan-out、Paper manual recovery ↔ RuntimeSupervisor、runtime event routing、terminal
   export）继续留在 composition root。
-* **Audit 9（AI future boundary）**：本轮不实现 AI，只在本文档记录边界。AI 未来可以提供
+* **Audit 9（AI future boundary）**：本轮不实现 AI，只在本文档记录边界 —— 这是一条
+  **DOCUMENTED FUTURE CONSTRAINT**，不是当前可执行的 guard。AI 未来可以提供
   external information extraction / news-event features / research hypotheses /
   strategy proposals / parameter proposals / explanation / confidence-evidence
-  annotations。AI **不允许**：直接拿 `BrokerExecutionPort`、直接拿 IBKR adapter、直接写
-  `OrderIntent`、直接 bypass `RiskApplication`、直接改 `ExecutionLease`、直接把
-  `StrategyVersion` 标 `gate_passed`、直接 promotion 到 Live。AI 输出必须进入
-  Strategy / Research evidence path，或进入 deterministic Risk → Execution path。
-  FA19b 记录本轮未新增 AI module。
+  annotations。AI **不允许**：直接拿 `BrokerExecutionPort`、直接拿 concrete broker
+  adapter、直接 construct/write `OrderIntent`、直接 bypass `RiskApplication`、直接改
+  `ExecutionLease`、自行把 `StrategyVersion` 标 `gate_passed`、自行 promotion 到 Live。
+  AI 输出必须进入 Strategy / Research evidence path，或进入 deterministic
+  Risk → Execution path。
+
+  **当前没有 AI package**，因此不存在可针对具体 AI module 的 executable import guard；
+  evidence matrix 里该行如实写 "documented boundary; executable package guard deferred
+  until an AI integration package actually exists"，**不拿无关的 no-Live test 当
+  evidence**。
 
 #### 8.27.8 Evidence matrix
 
@@ -3195,7 +3252,7 @@ invariant，且行为可完全证明兼容（behavior test + mutation + migratio
 | Recovery / reconciliation | `ManualReconciliation`（`runtime/recovery.py`） | HALTED 自动回 RUNNING | FAC `test_fa15_a_halted_session_has_no_automatic_route_back_to_running`、`test_fa16_manual_reconciliation_is_an_explicit_two_step_route`；`tests/test_desktop_paper_recovery_finalization_orchestrator.py` | FAC M17、M18 | ✅ |
 | Finalization / release | `PaperWorkflowController.finalize_if_safe` | finalization 前释放 PAPER | FAC `test_fa14_the_paper_lease_cannot_be_released_before_finalization` | FAC M16 | ✅ |
 | Shutdown ordering | `MainWindow.closeEvent` + `RuntimeSupervisor` | 强制释放未证明安全的 Paper ownership | `tests/test_desktop_runtime_teardown.py`；`tests/test_desktop_composition_closure_architecture.py::test_close_event_reads_no_paper_internal` | E3 M40、M41 | ✅ |
-| Strategy immutable versions | `StrategyVersion`（`domain/strategy.py`） | 原地修改 parameters | FAC `test_fa26_a_governed_versions_parameters_cannot_be_edited_in_place`、`test_fa26b_a_copy_of_a_governed_version_is_still_frozen`、`test_fa26c_the_repository_round_trip_still_reproduces_the_same_hash` | FAC M22、M23、M24 | ✅ |
+| Strategy immutable versions | `StrategyVersion`（`domain/strategy.py`） | 原地修改 parameters（含 tuple / list 内的 descendants） | FAC `test_fa26_a_governed_versions_parameters_cannot_be_edited_in_place`、`test_fa26b_a_governed_versions_parameters_survive_the_copy_protocol`、`test_fa26c_the_repository_round_trip_still_reproduces_the_same_hash`、`test_fa26d_a_frozen_mapping_cannot_be_re_populated_through_init`、`test_fa26e_tuple_descendants_of_governed_parameters_are_frozen` | FAC M22、M23、M24、M24b、M24c、M24d | ✅ |
 | Strategy governance gate | `StrategyApplication` | caller self-attest `gate_passed` | FAC `test_fa21_register_refuses_a_callers_own_gate_attestation`、`test_fa23b_entering_paper_shadow_requires_the_gate` | FAC M25、M27 | ✅ |
 | Strategy lifecycle terminality | `ALLOWED_TRANSITIONS`（domain） | STOPPED / LEGACY_INVALIDATED 复活 | FAC `test_fa23_stopped_and_legacy_invalidated_are_terminal`、`test_fa23c_a_retired_version_cannot_be_cloned` | FAC M28、M29 | ✅ |
 | Clone evidence reset | `StrategyApplication.clone_version` | clone 继承 gate / status | FAC `test_fa22_cloning_a_version_resets_its_evidence_state` | FAC M26 | ✅ |
@@ -3203,11 +3260,11 @@ invariant，且行为可完全证明兼容（behavior test + mutation + migratio
 | Runtime Events owner | `RuntimeEventsOrchestrator` | 窗口自持 runtime event 状态 | `tests/test_desktop_runtime_events_orchestration_architecture.py` | F1 M1–M14 | ✅ |
 | Settings owner | `SettingsOrchestrator` | 窗口自持 settings 呈现状态 | `tests/test_desktop_settings_orchestration_architecture.py` | F2 M1–M22 | ✅ |
 | Generic task owner | `DesktopTaskController` | 窗口保留 `workers` alias | `tests/test_desktop_composition_closure_architecture.py::test_the_window_holds_no_worker_collection_alias` | G1 M 组 | ✅ |
-| Future Live extension seam | `composition/execution.py` | Live 另建 risk/execution 栈 | FAC `test_fa20_the_execution_builder_accepts_the_port_abstraction`、`test_fa19b_no_live_adapter_exists_yet` | FAC M20、M21 | ✅（仅 seam，未实现） |
-| Future AI boundary | 本文档 §8.27.7 | AI 拿 broker port / bypass risk | FAC `test_fa19b_no_live_adapter_exists_yet`（本轮无 AI module） | — | ✅（仅边界，未实现） |
+| Future Live extension seam | `composition/execution.py` | Live 另建 risk/execution 栈（`LiveRiskApplication` / `LiveExecutionApplication` / `LiveTradingRuntime`） | FAC `test_fa20_the_execution_builder_accepts_the_port_abstraction`、`test_fa19b_a_future_live_path_must_reuse_the_single_authority_stack`、`test_fa19c_paper_and_live_differences_are_not_a_mode_branch` | FAC M20、M21 | ✅ 长期 invariant（seam 已锁；Live 未实现） |
+| Future AI boundary | 本文档 §8.27.7 | AI 拿 broker port / concrete adapter / 写 `OrderIntent` / bypass risk / 改 lease / 自签 gate | **documented boundary；executable package guard deferred until an AI integration package actually exists**（当前无 AI package，故无可针对的 module guard） | — | ✅ 仅文档化约束，未实现 |
 
-FAC guard 总数 **38**，FAC mutant 总数 **31**（全 RED），historical mutant **165**
-（全 RED），aggregate **196**。
+FAC collected test case 总数 **40**（34 个 test function，参数化展开后 40 个 case），
+FAC mutant 总数 **33**（全 RED），historical mutant **165**（全 RED），aggregate **198**。
 
 设计依据见 `DESKTOP_DECOMPOSITION.md` §36。
 

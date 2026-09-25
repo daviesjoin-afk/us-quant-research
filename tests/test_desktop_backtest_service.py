@@ -1036,8 +1036,9 @@ def test_a_busy_backtest_worker_blocks_the_run(monkeypatch, tmp_path) -> None:
     """Spec 49: an already-running backtest worker means "busy".
 
     Registered through the controller, which is what the capability's admission
-    pre-check asks.  Rebinding ``window.workers`` would not reach it: that
-    attribute is a view onto the controller's own list.
+    pre-check asks.  Since G1 the window holds no worker alias at all: the
+    controller's collection is the only register/release point, so there is no
+    second list to fall out of step with it.
     """
 
     from PySide6.QtWidgets import QMessageBox

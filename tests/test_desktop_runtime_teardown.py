@@ -21,7 +21,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from us_quant.desktop import MainWindow
-from us_quant.runtime_supervisor import STATE_STOPPED, RuntimeSupervisor
+from us_quant.runtime_supervisor import STATE_FAILED, STATE_STOPPED, RuntimeSupervisor
 from us_quant.trading.runtime.workflow_state import ExecutionLease
 
 
@@ -35,11 +35,19 @@ def _window() -> MainWindow:
 
 
 def test_main_window_registers_its_owned_runtime_resources() -> None:
+    """Only generic lifecycle, and no second admission-gate component.
+
+    ``closing_gate`` was retired in G1: the admission fact is the
+    supervisor's own ``shutting_down`` flag, which ``begin_shutdown`` raises
+    before it drains anything, so a registered component that only set a
+    second boolean was a duplicate truth to keep in step.  The remaining
+    names are the resources whose teardown is unconditional.
+    """
+
     window = _window()
     try:
         names = [component.name for component in window.runtime_supervisor.snapshot().components]
         assert set(names) == {
-            "closing_gate",
             "paper_order_heartbeat",
             "extended_session_heartbeat",
             "stream_snapshot_timer",
@@ -77,7 +85,7 @@ def test_close_stops_every_registered_heartbeat_timer() -> None:
     }
     assert states["paper_order_heartbeat"] == STATE_STOPPED
     assert states["extended_session_heartbeat"] == STATE_STOPPED
-    assert states["closing_gate"] == STATE_STOPPED
+    assert states["background_workers"] == STATE_STOPPED
 
 
 def test_close_raises_the_admission_gate() -> None:
@@ -85,7 +93,7 @@ def test_close_raises_the_admission_gate() -> None:
     window.close()
     _APP.processEvents()
 
-    assert window._closing is True
+    assert window.runtime_supervisor.shutting_down is True
 
 
 def test_admission_gate_refuses_new_tasks_after_close() -> None:
@@ -212,12 +220,12 @@ def test_close_with_a_running_task_is_ignored_but_raises_the_gate(
     window = _window()
     try:
         with _BlockingWorker(window):
-            assert window._closing is False
+            assert window.runtime_supervisor.shutting_down is False
 
             accepted = _close_verdict(window)
 
             assert accepted is False
-            assert window._closing is True
+            assert window.runtime_supervisor.shutting_down is True
     finally:
         window.deleteLater()
 
@@ -368,10 +376,10 @@ def test_close_after_the_task_finished_completes_the_teardown(
     try:
         with _BlockingWorker(window):
             assert _close_verdict(window) is False
-            assert window._closing is True
+            assert window.runtime_supervisor.shutting_down is True
 
         # The task has now exited; a second close must finish the job.
-        assert window._running_workers() == []
+        assert window.task_controller.running_workers() == ()
         assert _close_verdict(window) is True
 
         assert not window.paper_order_timer.isActive()
@@ -382,7 +390,6 @@ def test_close_after_the_task_finished_completes_the_teardown(
             for component in window.runtime_supervisor.snapshot().components
         }
         assert states["background_workers"] == STATE_STOPPED
-        assert states["closing_gate"] == STATE_STOPPED
         assert window.runtime_supervisor.errors() == ()
     finally:
         window.deleteLater()
@@ -426,7 +433,7 @@ def test_close_defers_the_paper_session_without_raising_the_gate(
         accepted = _close_verdict(window)
 
         assert accepted is False
-        assert window._closing is True
+        assert window.runtime_supervisor.shutting_down is True
 
         # The proof that finalizes the session is admitted even though the
         # gate is down, or the window could never close.
@@ -441,7 +448,7 @@ def test_close_defers_the_paper_session_without_raising_the_gate(
         assert admitted is True
     finally:
         window.paper_workflow = real_workflow
-        for worker in window._running_workers():
+        for worker in window.task_controller.running_workers():
             worker.wait(5_000)
         _APP.processEvents()
         window.deleteLater()
@@ -594,7 +601,7 @@ def _install_paper_workflow(monkeypatch, window: MainWindow, workflow: object):
 
 def _restore_paper_workflow(window: MainWindow, real: object) -> None:
     window.paper_workflow = real  # type: ignore[assignment]
-    for worker in window._running_workers():
+    for worker in window.task_controller.running_workers():
         worker.wait(5_000)
     _APP.processEvents()
 
@@ -663,7 +670,7 @@ def test_halted_close_does_not_lock_out_manual_reconciliation(
     try:
         assert _close_verdict(window) is False
         # The refused close handed the client back.
-        assert window._closing is False
+        assert window.runtime_supervisor.shutting_down is False
         assert window.runtime_supervisor.shutting_down is False
 
         # And the real recovery entry point is admitted again.
@@ -694,7 +701,7 @@ def test_reconciling_phases_also_release_the_close_drain(monkeypatch) -> None:
         real = _install_paper_workflow(monkeypatch, window, _HaltedPaperWorkflow(phase))
         try:
             assert _close_verdict(window) is False
-            assert window._closing is False, phase
+            assert window.runtime_supervisor.shutting_down is False, phase
             assert window.runtime_supervisor.shutting_down is False, phase
         finally:
             _restore_paper_workflow(window, real)
@@ -726,14 +733,14 @@ def test_finalization_failure_during_close_reopens_manual_recovery(
 
         assert _close_verdict(window) is False
         # RUNNING has an automatic route, so the gate stays down for it.
-        assert window._closing is True
+        assert window.runtime_supervisor.shutting_down is True
         assert running.phase is PaperWorkflowPhase.STOPPING
 
         # The proof then fails: STOPPING -> HALTED, the automatic route.
         window.paper_orchestrator._finalization_failed("zero-state proof failed")
 
         assert window.paper_workflow.phase is PaperWorkflowPhase.HALTED
-        assert window._closing is False
+        assert window.runtime_supervisor.shutting_down is False
         assert window.runtime_supervisor.shutting_down is False
 
         admitted = window._start_task(
@@ -764,7 +771,7 @@ def test_ordinary_tasks_stay_refused_while_an_automatic_stop_drains(
         with _BlockingWorker(window):
             assert _close_verdict(window) is False
 
-        assert window._closing is True
+        assert window.runtime_supervisor.shutting_down is True
         assert window.runtime_supervisor.shutting_down is True
         assert (
             window._start_task(
@@ -831,14 +838,14 @@ def test_a_halt_reported_by_a_running_proof_reopens_manual_recovery(
     try:
         window.paper_orchestrator._finalization_inflight = True
         assert _close_verdict(window) is False
-        assert window._closing is True
+        assert window.runtime_supervisor.shutting_down is True
 
         # The in-flight proof reports unsafe health: STOPPING -> HALTED, and the
         # result reaches the capability's own completion path.
         window.paper_orchestrator._finalization_completed(running.halt())
 
         assert window.paper_workflow.phase is PaperWorkflowPhase.HALTED
-        assert window._closing is False
+        assert window.runtime_supervisor.shutting_down is False
         assert window.runtime_supervisor.shutting_down is False
         # And the flag was cleared even though the result halted the session.
         assert window.paper_orchestrator._finalization_inflight is False
@@ -869,17 +876,292 @@ def test_the_recovery_publication_is_what_releases_the_close_drain() -> None:
     window = _window()
     try:
         window.runtime_supervisor.begin_shutdown()
-        assert window._closing is True
+        assert window.runtime_supervisor.shutting_down is True
         assert window.runtime_supervisor.shutting_down is True
 
         window.paper_orchestrator.manual_recovery_required.emit()
 
-        assert window._closing is False
+        assert window.runtime_supervisor.shutting_down is False
         assert window.runtime_supervisor.shutting_down is False
 
         # And it is idempotent, because the capability re-announces the condition rather
         # than diffing phases -- a listener that assumed a transition would double-count.
         window.paper_orchestrator.manual_recovery_required.emit()
-        assert window._closing is False
+        assert window.runtime_supervisor.shutting_down is False
     finally:
+        window.deleteLater()
+
+
+# -- G1: one admission truth, and the composition-only close path --------
+
+
+class _PaperDispositionStub:
+    """A Paper controller stub that answers ``prepare_shutdown`` directly.
+
+    G1's rule is that the *capability* owns the safe-shutdown verdict, so these
+    tests stub the verdict at the only legal seam -- ``prepare_shutdown`` --
+    rather than reconstructing a phase.  The window must not care how the
+    disposition was derived, which is exactly what the guards below pin.
+    """
+
+    def __init__(self, disposition, message: str = "stub") -> None:
+        self.disposition = disposition
+        self.message = message
+        self.calls = 0
+
+    def prepare_shutdown(self):
+        from us_quant.desktop_v2.orchestration.paper.models import (
+            PaperShutdownResult,
+        )
+
+        self.calls += 1
+        return PaperShutdownResult(self.disposition, self.message)
+
+
+def _install_paper_disposition(monkeypatch, window, stub) -> None:
+    monkeypatch.setattr(
+        window.paper_orchestrator, "prepare_shutdown", stub.prepare_shutdown
+    )
+
+
+def test_waiting_for_finalization_keeps_the_admission_closed(monkeypatch) -> None:
+    """T4: an automatic route is still running -- refuse, keep refusing work.
+
+    Re-admitting here would race the finalization the close just discovered,
+    which is the difference between this branch and the manual-recovery one.
+    """
+
+    from us_quant.desktop_v2.orchestration.paper.models import (
+        PaperShutdownDisposition,
+    )
+
+    _silence_dialogs(monkeypatch)
+    window = _window()
+    stub = _PaperDispositionStub(
+        PaperShutdownDisposition.WAITING_FOR_FINALIZATION
+    )
+    try:
+        _install_paper_disposition(monkeypatch, window, stub)
+
+        assert _close_verdict(window) is False
+        assert window.runtime_supervisor.shutting_down is True
+        assert (
+            window._start_task(
+                lambda report: None,
+                on_success=lambda result: None,
+                start_message="ordinary task",
+                resource_group="research",
+                suppress_busy_message=True,
+            )
+            is False
+        )
+    finally:
+        window.deleteLater()
+
+
+def test_ownership_blocked_is_refused_without_forcing_a_release(
+    monkeypatch,
+) -> None:
+    """T5: an unaccounted ownership is never released to let the process exit.
+
+    ``OWNERSHIP_BLOCKED`` keeps the admission gate *down* on purpose, and the
+    generic runtime release never runs past it -- nothing here disconnects an
+    order service, releases a lease or swallows the refusal to make the
+    process exit.
+    """
+
+    from us_quant.desktop_v2.orchestration.paper.models import (
+        PaperShutdownDisposition,
+    )
+
+    _silence_dialogs(monkeypatch)
+    window = _window()
+    stub = _PaperDispositionStub(PaperShutdownDisposition.OWNERSHIP_BLOCKED)
+    real_shutdown = window.runtime_supervisor.shutdown
+    shutdowns: list[str] = []
+
+    def spy_shutdown():
+        shutdowns.append("shutdown")
+        return real_shutdown()
+
+    window.runtime_supervisor.shutdown = spy_shutdown  # type: ignore[method-assign]
+    try:
+        _install_paper_disposition(monkeypatch, window, stub)
+
+        assert _close_verdict(window) is False
+        assert window.runtime_supervisor.shutting_down is True
+        assert shutdowns == [], "the runtime released past a blocked ownership"
+    finally:
+        window.deleteLater()
+
+
+def test_a_ready_session_shuts_shadow_down_before_the_runtime(monkeypatch) -> None:
+    """T6: trading-safety ordering -- Shadow first, generic release second."""
+
+    from us_quant.desktop_v2.orchestration.paper.models import (
+        PaperShutdownDisposition,
+    )
+
+    _silence_dialogs(monkeypatch)
+    window = _window()
+    stub = _PaperDispositionStub(PaperShutdownDisposition.READY)
+    order: list[str] = []
+    real_shadow = window.shadow_orchestrator.shutdown
+    real_supervisor = window.runtime_supervisor.shutdown
+
+    def spy_shadow_shutdown():
+        order.append("shadow")
+        real_shadow()
+
+    def spy_supervisor_shutdown():
+        order.append("supervisor")
+        return real_supervisor()
+
+    try:
+        _install_paper_disposition(monkeypatch, window, stub)
+        monkeypatch.setattr(
+            window.shadow_orchestrator, "shutdown", spy_shadow_shutdown
+        )
+        monkeypatch.setattr(
+            window.runtime_supervisor,
+            "shutdown",
+            spy_supervisor_shutdown,
+        )
+
+        assert _close_verdict(window) is True
+        assert order == ["shadow", "supervisor"], order
+    finally:
+        window.deleteLater()
+
+
+def test_a_stuck_market_worker_is_retried_and_never_terminated(
+    monkeypatch,
+) -> None:
+    """T8 + T9: a thread that will not exit is retried, never killed.
+
+    The first close asks the network thread to stop, the 3-second wait times
+    out, the stream's join reports "did not exit", and the close is refused.
+    A second close -- the thread still alive -- retries the release instead of
+    trusting a cached "already shut down" verdict, and refuses again.  The
+    thread is never terminated: a half-written artifact is worse than a slow
+    close.  Once the thread exits on its own, the same close succeeds, because
+    the decision reads the live probe rather than a verdict cache.
+    """
+
+    from us_quant.desktop_v2.orchestration.paper.models import (
+        PaperShutdownDisposition,
+    )
+
+    _silence_dialogs(monkeypatch)
+    window = _window()
+    stub = _PaperDispositionStub(PaperShutdownDisposition.READY)
+
+    class _StuckWorker:
+        """A network thread that ignores every stop request."""
+
+        def __init__(self) -> None:
+            self.alive = True
+            self.stop_requests = 0
+
+        def isRunning(self) -> bool:
+            return self.alive
+
+        def request_stop(self) -> None:
+            self.stop_requests += 1
+
+        def wait(self, _timeout: int) -> bool:
+            return False  # never exits in time
+
+    worker = _StuckWorker()
+    try:
+        _install_paper_disposition(monkeypatch, window, stub)
+        monkeypatch.setattr(
+            window.market_orchestrator, "_worker", worker, raising=False
+        )
+
+        assert _close_verdict(window) is False
+        assert worker.stop_requests == 1
+        assert worker.alive is True, "the thread was terminated"
+
+        assert _close_verdict(window) is False
+        assert worker.stop_requests == 2, "the failed release was not retried"
+        assert worker.alive is True, "the thread was terminated on the retry"
+
+        # The thread exits on its own; the same close now succeeds.
+        worker.alive = False
+        assert _close_verdict(window) is True
+    finally:
+        window.market_orchestrator._worker = None
+        window.deleteLater()
+
+
+def test_a_failed_release_is_reported_and_does_not_block_the_others(
+    monkeypatch,
+) -> None:
+    """T7 (wiring) + T10: isolated failure, visible, never swallowed.
+
+    The market stream's thread does not exit in time, so its release fails.
+    Everything after it in the release order is still released, the failure
+    reaches the footer log and one ``RUNTIME_SHUTDOWN_PARTIAL`` warning event,
+    and the close itself is refused because the thread is still alive.  A
+    failure is reported -- never swallowed, never converted into a clean
+    release, and never an excuse to terminate the thread.
+    """
+
+    from us_quant.desktop_v2.orchestration.paper.models import (
+        PaperShutdownDisposition,
+    )
+
+    _silence_dialogs(monkeypatch)
+    window = _window()
+    stub = _PaperDispositionStub(PaperShutdownDisposition.READY)
+
+    class _StuckWorker:
+        def isRunning(self) -> bool:
+            return True
+
+        def request_stop(self) -> None:
+            return None
+
+        def wait(self, _timeout: int) -> bool:
+            return False
+
+    logged: list[str] = []
+    events: list[dict] = []
+    try:
+        _install_paper_disposition(monkeypatch, window, stub)
+        monkeypatch.setattr(
+            window.market_orchestrator,
+            "_worker",
+            _StuckWorker(),
+            raising=False,
+        )
+        monkeypatch.setattr(window, "_log", logged.append)
+        monkeypatch.setattr(
+            window.runtime_events_orchestrator,
+            "record",
+            lambda **kwargs: events.append(kwargs),
+        )
+
+        assert _close_verdict(window) is False
+
+        joined = "\n".join(logged)
+        assert "运行期资源释放异常" in joined
+        states = {
+            component.name: component.state
+            for component in window.runtime_supervisor.snapshot().components
+        }
+        # The failure stayed on its own component: everything after it in the
+        # release order was still released.
+        assert states["market_data_stream"] == STATE_FAILED
+        assert states["background_workers"] == STATE_STOPPED
+        assert any(
+            event.get("code") == "RUNTIME_SHUTDOWN_PARTIAL" for event in events
+        ), events
+        assert any(
+            event.get("severity") == "warning" for event in events
+        ), events
+        assert window.runtime_supervisor.errors() != ()
+    finally:
+        window.market_orchestrator._worker = None
         window.deleteLater()

@@ -93,8 +93,10 @@ from us_quant.desktop_v2.pages.dashboard.models import (
     DashboardChartView,
 )
 from us_quant.desktop_v2.pages.dashboard.page import DashboardPage
-from us_quant.desktop_v2.pages.dashboard.presenter import (
-    build_dashboard_view,
+from us_quant.desktop_v2.orchestration.dashboard import (
+    EMPTY_CHART,
+    DashboardOrchestrator,
+    DashboardProviders,
 )
 from us_quant.scanner import (
     MarketScan,
@@ -308,6 +310,28 @@ _PAPER_SHUTDOWN_TITLES = {
 }
 
 
+def runtime_shutdown_messages(
+    snapshot: RuntimeSnapshot,
+    errors: tuple[str, ...] | list[str],
+) -> tuple[str, ...]:
+    """Aggregate one shutdown's failures, deduplicated, oldest first.
+
+    Qt-free and pure: a function of the snapshot the shutdown returned and the
+    supervisor's own error log, so the window's reporting method stays three
+    lines of presentation and this aggregation is testable without a window.
+    A component whose ``stop``/``join`` failed is reported once even when the
+    supervisor's error log already carries the same message from an earlier
+    phase (``drain``).
+    """
+
+    messages = list(errors)
+    for component in snapshot.components:
+        if component.exit_ok is False and component.last_error is not None:
+            if not any(component.last_error in message for message in messages):
+                messages.append(f"{component.name}: {component.last_error}")
+    return tuple(messages)
+
+
 def _money(
     value: Decimal | float | int | None,
     *,
@@ -499,7 +523,11 @@ class MainWindow(QMainWindow):
         # property would keep every unmigrated caller working, so "who owns the
         # target status?" would stop being one grep.  The *evidence* half moved one
         # round earlier.
-        self._dashboard_chart_view = DashboardChartView(None, ())
+        #
+        # The Dashboard chart fact is not here either (G1): the retained chart
+        # presentation belongs to ``dashboard_orchestrator``, which is also the
+        # only caller of ``DashboardPage.render``.  The window keeps the bridge
+        # that turns a finished research artifact into a chart fact.
         # Shadow runtime state used to live here: the engine, its snapshot as
         # mutable truth, the store and the workflow.  It belongs to
         # ``shadow_orchestrator``, built below.  Note what is *not* stored: no
@@ -627,7 +655,12 @@ class MainWindow(QMainWindow):
             int(self.config.initial_equity)
         )
         self.task_controller = DesktopTaskController[TaskThread]()
-        self.workers = self.task_controller.workers
+        # No ``self.workers`` alias: the collection is the controller's, and a
+        # window-held list would be a second, mutable handle on it -- appended
+        # to by whoever noticed it first, and stale the moment a worker
+        # finished.  Everything that needs to know what is running asks the
+        # controller (``running_workers`` / ``has_running_workers`` /
+        # ``active_count``), which recomputes from the collection every time.
         # The universe, history and scanner routes keep their runtime in
         # ``desktop_v2/orchestration/research``.  There is deliberately no
         # ``self.universe``, no ``self.scan``, no refresh ``Event``/worker
@@ -635,10 +668,11 @@ class MainWindow(QMainWindow):
         # property either: a forwarding property would keep every unmigrated
         # caller silently working, so "who reads universe or scan truth" would
         # stop being one grep.
-        # Admission gate for new background work.  The runtime supervisor
-        # raises it as the first step of teardown so a close cannot race a
-        # task that is still being admitted.
-        self._closing = False
+        # Admission gate for new background work.  There is deliberately no
+        # second boolean here: ``RuntimeSupervisor.shutting_down`` *is* the
+        # admission fact, raised by ``begin_shutdown`` and lowered only by
+        # ``cancel_shutdown`` -- so the gate, the drain and the refused-close
+        # recovery cannot disagree about whether the client is closing.
         self.runtime_supervisor = RuntimeSupervisor()
         # Broker/Account v2: the account application is built first because it
         # is the runtime owner of the IBKR connection settings.  Market data
@@ -1049,7 +1083,7 @@ class MainWindow(QMainWindow):
             # A provider, not a value: the count is read on every repaint, so a
             # task that starts or finishes after this line is never missed.  The
             # lifecycle it counts is still the window's.
-            active_task_count=lambda: len(self.workers),
+            active_task_count=lambda: self.task_controller.active_count,
             export_bundle=self._export_runtime_bundle,
             parent=self,
         )
@@ -1181,8 +1215,21 @@ class MainWindow(QMainWindow):
         self._connect_execution_page()
 
         self.dashboard_page = DashboardPage(palette=self.theme)
+        # The Dashboard page's render has one owner (G1): the projection of the
+        # account / market / artifact facts plus the retained chart fact.  The
+        # window hands over narrow providers instead of values, so a repaint
+        # always draws what those capabilities published *now*.
+        self.dashboard_orchestrator = DashboardOrchestrator(
+            page=self.dashboard_page,
+            providers=DashboardProviders(
+                portfolio=lambda: self.account_orchestrator.portfolio,
+                snapshot=lambda: self.market_orchestrator.snapshot,
+                artifacts=lambda: self.artifact_catalog.artifacts,
+                market_stop_reason=lambda: self.market_orchestrator.stop_reason,
+            ),
+        )
         self._connect_dashboard_page()
-        self._publish_dashboard_view()
+        self.dashboard_orchestrator.render_current()
 
         pages: dict[str, QWidget] = {
             "dashboard": self.dashboard_page,
@@ -1479,7 +1526,7 @@ class MainWindow(QMainWindow):
             message=snapshot.message,
         )
         self._record_minute_snapshot(snapshot)
-        self._publish_dashboard_view()
+        self.dashboard_orchestrator.render_current()
         self._populate_auto_quant_candidates()
         self.targeted_session_orchestrator.refresh_preflight()
         # Paper and Shadow each decide for themselves whether this fact belongs to a
@@ -1493,7 +1540,7 @@ class MainWindow(QMainWindow):
     def _on_market_snapshot_invalidated(self) -> None:
         """The feed's snapshot was invalidated; the dashboard card must follow."""
 
-        self._publish_dashboard_view()
+        self.dashboard_orchestrator.render_current()
 
     def _publish_market_readiness_inputs(self) -> None:
         """Hand the market layer the cross-domain symbols it must classify.
@@ -1519,21 +1566,6 @@ class MainWindow(QMainWindow):
 
         self.dashboard_page.gateway_probe_requested.connect(
             self._probe_gateway
-        )
-
-    def _publish_dashboard_view(self) -> None:
-        """Project window facts onto the native Dashboard page once."""
-
-        if not hasattr(self, "dashboard_page"):
-            return
-        self.dashboard_page.render(
-            build_dashboard_view(
-                portfolio=self.account_orchestrator.portfolio,
-                snapshot=self.market_orchestrator.snapshot,
-                artifacts=self.artifact_catalog.artifacts,
-                chart=self._dashboard_chart_view,
-                market_stop_reason=self.market_orchestrator.stop_reason,
-            )
         )
 
     def _connect_targeted_validation_page(self) -> None:
@@ -1876,7 +1908,7 @@ class MainWindow(QMainWindow):
         self.artifact_catalog = load_artifact_catalog(
             self.paths.research_results_root
         )
-        self._publish_dashboard_view()
+        self.dashboard_orchestrator.render_current()
 
     def _report_cross_section_refusal(
         self, title: str, message: str
@@ -2011,6 +2043,12 @@ class MainWindow(QMainWindow):
         # nothing because re-reading a local file is not new research.  The
         # window therefore neither parses the JSON nor checks for the file.
         self.cross_section_orchestrator.restore_saved()
+        # The chart fact is the Dashboard capability's; the bridge that produces
+        # it from a local research series is the window's, and it publishes the
+        # finished view rather than holding the fact.  One ``set_chart`` after
+        # the search, whatever the outcome, keeps the restore to exactly one
+        # dashboard repaint.
+        chart = EMPTY_CHART
         for symbol in ("SPY", "QQQ", "DIA"):
             try:
                 points = load_close_series(
@@ -2020,11 +2058,9 @@ class MainWindow(QMainWindow):
                 )
             except (FileNotFoundError, ValueError):
                 continue
-            self._dashboard_chart_view = DashboardChartView(
-                symbol, tuple(points)
-            )
+            chart = DashboardChartView(symbol, tuple(points))
             break
-        self._publish_dashboard_view()
+        self.dashboard_orchestrator.set_chart(chart)
         # The targeted evidence capability owns its seven artifact schemas now: it
         # restores all seven families in one call and paints the evidence exactly
         # once, and publishes nothing because re-reading local files is not new
@@ -3016,7 +3052,7 @@ class MainWindow(QMainWindow):
         already refresh is still not refreshed here.
         """
 
-        self._publish_dashboard_view()
+        self.dashboard_orchestrator.render_current()
         # The route is repainted only when there is a session to paint.  The question is
         # "is there a retained presentation fact?", which is a *presentation* read and
         # deliberately nothing more: no account fact may be turned into a statement about
@@ -3551,22 +3587,17 @@ class MainWindow(QMainWindow):
         """
 
         supervisor = self.runtime_supervisor
-        # Order 5: the admission gate.  ``begin_shutdown`` calls this the
-        # moment the operator asks to close, before any task is joined, so it
-        # must be a drain component -- without the flag the gate would only
-        # ever be raised by the *release* pass, which runs after the running
-        # tasks it is supposed to exclude.
-        supervisor.register(
-            "closing_gate",
-            stop=self._close_admission_gate,
-            order=5,
-            drain=True,
-        )
         # Order 10-30: stop the heartbeats first so no new work is scheduled
         # while the rest of the stack is being released.  These timers are
         # started in ``_build_ui``; the probe makes them releasable anyway.
         # None of them is a drain component: stopping the timer *is* the
         # release, so ``begin_shutdown`` must not touch it.
+        #
+        # There is deliberately no ``closing_gate`` component here any more.
+        # The admission fact is the supervisor's own ``shutting_down`` flag,
+        # which ``begin_shutdown`` raises before it drains anything, so a
+        # registered gate that only set a second boolean would be a duplicate
+        # truth to keep in step rather than an extra safety net.
         supervisor.register(
             "paper_order_heartbeat",
             stop=self.paper_order_timer.stop,
@@ -3609,45 +3640,37 @@ class MainWindow(QMainWindow):
             "background_workers",
             stop=self._request_worker_stops,
             join=self._join_background_workers,
-            is_running=lambda: bool(self._running_workers()),
+            is_running=self.task_controller.has_running_workers,
             order=200,
             # A worker's ``stop`` is a cancel request, not a release: ask the
             # cancellable ones to wind down as soon as closing starts.
             drain=True,
         )
 
-    def _close_admission_gate(self) -> None:
-        """First teardown step: refuse any new background work."""
-
-        self._closing = True
-
     def _cancel_close_drain(self) -> None:
         """Undo phase one: this close was refused, so the client stays usable.
 
         A refused close hands control back to the operator -- reconcile, then
         confirm -- and that recovery runs through ``_start_task`` like any
-        other work.  Leaving ``_closing`` up would refuse the very task that
-        can finalize the session, so the client would be stuck: halted,
+        other work.  Leaving the admission gate up would refuse the very task
+        that can finalize the session, so the client would be stuck: halted,
         unable to reconcile, unable to finalize, unable to exit.
 
-        This only lifts the admission gate; the supervisor starts nothing,
+        There is no second flag to clear: the gate *is*
+        ``RuntimeSupervisor.shutting_down``, and ``cancel_shutdown`` is what
+        lowers it.  This only lifts admission; the supervisor starts nothing,
         restarts nothing, creates no thread and performs no I/O.  If the
         drain can no longer be undone (something was already released) the
         gate stays *down* and the failure is logged: a half-released runtime
         must never be presented as open.
         """
 
-        if not self._closing:
+        if not self.runtime_supervisor.shutting_down:
             return
         try:
             self.runtime_supervisor.cancel_shutdown()
         except RuntimeError as error:
             self._log(f"关闭流程无法撤销，保持关闭状态：{error}")
-            return
-        self._closing = False
-
-    def _running_workers(self) -> list[TaskThread]:
-        return [worker for worker in self.workers if worker.isRunning()]
 
     def _request_worker_stops(self) -> None:
         """Ask the one cancellable task to stop.
@@ -3665,10 +3688,17 @@ class MainWindow(QMainWindow):
         self.universe_orchestrator.cancel_for_shutdown()
 
     def _join_background_workers(self) -> bool:
-        """Wait for running workers; report whether all of them exited."""
+        """Wait for running workers; report whether all of them exited.
+
+        Generic Qt infrastructure and nothing more: it knows the worker
+        abstraction, not what any worker was doing.  The thread is never
+        terminated -- a half-written artifact is worse than a slow close -- so
+        a timeout is reported and the release continues elsewhere, leaving the
+        close path to refuse the exit while the thread is still alive.
+        """
 
         all_exited = True
-        for worker in self._running_workers():
+        for worker in self.task_controller.running_workers():
             if not worker.wait(3_000):
                 all_exited = False
                 self._log(
@@ -3683,7 +3713,7 @@ class MainWindow(QMainWindow):
         # a second close must not re-admit anything.  ``begin_shutdown`` never
         # joins and never releases, so no in-flight write is disturbed.
         self.runtime_supervisor.begin_shutdown()
-        running_tasks = self._running_workers()
+        running_tasks = self.task_controller.running_workers()
         if running_tasks:
             event.ignore()
             QMessageBox.information(
@@ -3753,19 +3783,22 @@ class MainWindow(QMainWindow):
     def _report_runtime_shutdown(self, snapshot: RuntimeSnapshot) -> None:
         """Surface supervisor teardown failures instead of swallowing them.
 
+        Global shell/runtime presentation, and nothing else: it writes the
+        footer log and one Runtime Events warning.  It retries no capability's
+        business action, releases no resource, changes no supervisor component
+        state, releases no Paper lease and never hides a failed market worker.
+
         Reports the *snapshot that was returned by the shutdown call* rather
         than re-reading the supervisor, so a component whose error arrived
         from an earlier phase (``drain``) is still visible even when the
-        release pass itself was clean.
+        release pass itself was clean.  The message aggregation itself is a
+        Qt-free pure query (``runtime_shutdown_messages``), so it is testable
+        without a window.
         """
 
-        messages = list(self.runtime_supervisor.errors())
-        for component in snapshot.components:
-            if component.exit_ok is False and component.last_error is not None:
-                if not any(
-                    component.last_error in message for message in messages
-                ):
-                    messages.append(f"{component.name}: {component.last_error}")
+        messages = runtime_shutdown_messages(
+            snapshot, self.runtime_supervisor.errors()
+        )
         if messages:
             for message in messages:
                 self._log(f"运行期资源释放异常：{message}")
@@ -3848,13 +3881,15 @@ class MainWindow(QMainWindow):
         shutdown_essential: bool = False,
         on_finished: Callable[[], None] | None = None,
     ) -> bool:
-        if self._closing and not shutdown_essential:
-            # Closing raises the admission gate before releasing anything,
-            # so no new work is admitted while teardown is in flight.  The
+        if self.runtime_supervisor.shutting_down and not shutdown_essential:
+            # Closing raises the admission gate before releasing anything, so
+            # no new work is admitted while teardown is in flight.  The
             # teardown's own mandatory proof is the one exception: the Paper
             # zero-state finalization is what lets the session reach
             # ``finalized``, and refusing it would leave the window
-            # permanently unclosable.
+            # permanently unclosable.  The gate is the supervisor's own flag:
+            # one truth for begin_shutdown, cancel_shutdown and shutdown, so
+            # a refused close and the recovery it re-admits cannot disagree.
             self._log("程序正在关闭；拒绝启动新的后台任务。")
             return False
         if not self.task_controller.can_start(resource_group):
@@ -3868,11 +3903,9 @@ class MainWindow(QMainWindow):
             return False
         worker = TaskThread(task, resource_group=resource_group)
         self.task_controller.register(worker)
-        # The count card is repainted through the capability that draws it.  The
-        # task's lifecycle -- admission, registration, teardown -- is unchanged
-        # and still entirely the window's.
-        if hasattr(self, "runtime_events_orchestrator"):
-            self.runtime_events_orchestrator.notify_task_count_changed()
+        # Every signal is connected before start(): an extremely short task may
+        # emit its completion before the event loop runs again, and a slot
+        # connected afterwards would miss it.
         worker.progress.connect(self._log)
         if on_failure is None:
             worker.failed.connect(self._task_failed)
@@ -3888,7 +3921,14 @@ class MainWindow(QMainWindow):
             lambda: self._finish_task(worker, on_finished)
         )
         self._log(start_message)
+        # ``start()`` first, notification second: the count the card draws is
+        # ``active_count`` (running workers), and a real QThread is not running
+        # until start() flips it.  Notifying before start would repaint the
+        # card with 0 and leave it there for the whole task -- this path sends
+        # no second notification.
         worker.start()
+        if hasattr(self, "runtime_events_orchestrator"):
+            self.runtime_events_orchestrator.notify_task_count_changed()
         return True
 
     def _finish_task(

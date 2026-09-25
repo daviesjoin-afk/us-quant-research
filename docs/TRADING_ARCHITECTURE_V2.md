@@ -135,9 +135,9 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Desktop ScannerPage | MIGRATED |
 | Desktop BacktestPage | MIGRATED |
 | Desktop CrossSectionResearchPage | MIGRATED |
-| Desktop Dashboard | TRANSITIONAL |
+| Desktop Dashboard | MIGRATED（G1：`DashboardOrchestrator` 持有 render 与 retained chart fact；Dashboard 无 canonical business truth） |
 | Desktop Research aggregate | MIGRATED |
-| Desktop System | TRANSITIONAL（页面 native v2；Runtime Events orchestration 已迁 v2O-F1 §8.22，Settings orchestration 已迁 v2O-F2 §8.23；Gateway probe 仍暂留） |
+| Desktop System | MIGRATED（页面 native v2；Runtime Events = v2O-F1 §8.22，Settings = v2O-F2 §8.23；Gateway probe 经重审定性为 shell/composition diagnostic 留在窗口 §8.24；**v2O-F System COMPLETE**） |
 | AutoQuant Risk Integration | MIGRATED |
 | Execution Domain | MIGRATED |
 | Execution Application | MIGRATED |
@@ -163,6 +163,8 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 | Paper Orchestration | MIGRATED（v2O-E1 启动链 + v2O-E2 active runtime + v2O-E3 recovery/finalization/shutdown + v2O-E4 presentation / render closure，`desktop_v2/orchestration/paper/`）；Paper 的 presentation fact 也由 capability 持有（`PaperOrchestrator.presentation`），`MainWindow` 不再持有任何 Paper session 缓存 |
 | Runtime Events Orchestration | MIGRATED（v2O-F1，`desktop_v2/orchestration/system/runtime_events/`）；store 仍是唯一 truth，页面仍只 render / emit，窗口只剩 composition（事件路由 / 跨 capability 导出事实 / task-count provider / dialog） |
 | Settings Orchestration | MIGRATED（v2O-F2，`desktop_v2/orchestration/system/settings/`）；`UserPreferencesStore` / `DesktopSettingsService`（validate→derive→preflight→guard→persist→apply 顺序冻结）/ `DesktopCredentialService`（存储语义冻结）仍是各自 canonical owner，`SettingsPage` 仍只 render / emit，窗口只剩 composition（九项 intent 转发、commit 采纳与 fan-out、主题、market selection/switch bridge、dialog） |
+| Dashboard Orchestration | MIGRATED（G1，`desktop_v2/orchestration/dashboard/`）；`DashboardOrchestrator` 是 `DashboardPage.render` 的唯一 caller 并持有 retained chart fact；四个输入（account portfolio / market snapshot / artifact catalogue / market stop reason）全部经由 callable provider 现读，**不缓存**；无 canonical business truth |
+| Generic Runtime / Shell Ownership | MIGRATED（G1）：worker collection 归 `DesktopTaskController`（`running_workers` / `has_running_workers` / `active_count`，collection 不外借），shutdown admission 归 `RuntimeSupervisor.shutting_down`（`_closing` / `closing_gate` 已删），closeEvent 为 composition-only，Gateway probe 为 shell diagnostic |
 
 Shadow 子系统：
 
@@ -2678,7 +2680,77 @@ broker adapter、Shadow、Paper orchestration、Market / Account / Research busi
 **未做**：Gateway probe 未迁（是否独立 F3 待重新扫描）、MainWindow composition closure、
 Dashboard、trading/live/AI 全部未开始。本轮**不**声称 "v2O-F System COMPLETE"。
 
+> **前向引用（G1）**：重审结论是 Gateway 不需要 F3（§8.24），Dashboard 的 render 由
+> `DashboardOrchestrator` 持有，`v2O-F System` 正式 COMPLETE。**（前向引用结束）**
+
 设计依据见 `DESKTOP_DECOMPOSITION.md` §32。
+
+
+### 8.24 MainWindow composition closure G1：generic runtime / shell ownership
+
+这一轮不按行数拆窗口。它把 `MainWindow` 剩余的 generic runtime / shell ownership 收到终局，
+使窗口只保留合法的五类职责：dependency construction、signal wiring、cross-capability
+fan-out、global shell presentation、dialog 与 application-wide finished-fact adoption。
+
+**worker collection 归 `DesktopTaskController`（G1）。** 退休前 `self.workers =
+self.task_controller.workers` 持有的是 controller 内部可变 list 的别名。G1 删除该 property 与
+窗口别名，新增窄查询 API：`running_workers() -> tuple`（每次现算的不可变快照）、
+`has_running_workers()`、`active_count`（只计 `isRunning()`）。Runtime Events 的 task-count
+provider 改为 `lambda: self.task_controller.active_count`；register / finish 仍是 collection
+唯一修改点，Qt signal wiring 留在窗口。
+
+**shutdown admission 归 `RuntimeSupervisor.shutting_down`（G1）。** 退休前
+`MainWindow._closing` 与 `RuntimeSupervisor.shutting_down` 是两个靠调用顺序同步的 admission
+boolean，`closing_gate` 作为 drain component 存在只为置位前者。G1 删除 `_closing` /
+`_close_admission_gate` / `closing_gate` 三者：`begin_shutdown` 直接置位、`cancel_shutdown`
+直接复位、`_start_task` 读 `self.runtime_supervisor.shutting_down`。安全语义逐字保留——
+`shutdown_essential` 豁免、MANUAL_RECOVERY_REQUIRED 拒绝后经 `cancel_shutdown` 重开、
+WAITING_FOR_FINALIZATION 与 OWNERSHIP_BLOCKED 不自动开门（各有 wiring 测试）。
+
+**RuntimeSupervisor 边界不动。** 仍 Qt-free / broker-free / capability-free / callback-driven；
+`_register_runtime_components()` 是纯 composition registration（五个 generic component，无
+Paper phase 判断、无 lease 释放、无事件写入、无 render）。
+
+**closeEvent 是合法的 composition point**（不为它建 ShutdownCoordinator），且只消费 PUBLIC
+facts/verdicts：`begin_shutdown`、`task_controller.running_workers()`、
+`paper_orchestrator.prepare_shutdown()`（Paper 安全判定的唯一 owner）、disposition 呈现、
+`shadow_orchestrator.shutdown()`、`runtime_supervisor.shutdown()`、
+`market_orchestrator.worker_running`。AST guard 锁死：closeEvent 对 `paper_orchestrator`
+的访问恰好是 `{prepare_shutdown}`，不读 phase / lease / Paper result 内部。
+
+**Gateway probe 终局：shell diagnostic，不设 F3。** 重审后它没有独立的 canonical state、
+lifecycle、状态机、worker、repository、lease 或 transaction；`_probe_gateway` 留在窗口，guard
+锁死为四件事（读 `self.config.ibkr` → `probe_ibkr_socket` → badge text/state → repolish）。
+**v2O-F System 至此 COMPLETE。**
+
+**Dashboard ownership（G1）。** 新增本轮唯一允许的轻量 page owner
+`desktop_v2/orchestration/dashboard/`：`DashboardOrchestrator`（state 恰好 `_page` /
+`_providers` / `_chart`）是 `DashboardPage.render` 的唯一 caller，持有 retained chart fact，
+四个输入经 callable provider 现读、绝不缓存；`set_chart` 恰好一次 repaint；不 import 任何其它
+orchestrator；Gateway probe 不进入（它是 shell badge，不是 Dashboard truth）。
+
+**guards 与 mutation。**
+`tests/test_desktop_composition_closure_architecture.py` 20 条结构 guard +
+`scripts/mutation_mainwindow_composition_g1.ps1` 17 个 mutant 全部 RED（0 survived /
+0 harness-error）。M17：started-task notification 必须观察 `worker.start()` 之后的
+`active_count`——提前发布会把 task-count 卡片刷成 0 并保持到任务结束。e2/e3/e4/F1/F2 五个既有 harness 重跑 0 not-caught。行为测试：
+shutdown 12 项（含 refused-close 后 admission 恢复、stuck worker 重试且不 terminate、组件失败
+隔离且写 RUNTIME_SHUTDOWN_PARTIAL）、TaskController 8 项、DashboardOrchestrator 8 项。
+
+**G1 后的 residual inventory**：A composition dependencies / B shell presentation（badges、
+status label、theme）/ C 共享 canonical state（`ResearchScenarioCapitalState`）/ D generic
+runtime（supervisor、task controller）之外，本轮移除的 E 类是 `workers` / `_closing` /
+`_dashboard_chart_view`——但窗口仍持有 route-specific ownership，如实列为 **G2 candidates**：
+Strategy governance（`_strategy_clone_requested` / `_strategy_transition_requested` /
+`_refresh_strategy_page` / `StrategyApplication → StrategyPage.render` 窗口直 render）、
+Execution / AutoQuant（`_launch_busy` / `_channel_check_inflight` / `auto_quant_candidates` /
+candidate preparation / channel probe sequencing / `ExecutionPage` 的窗口直 render 与 control
+presentation）；Risk 仅列为 G2 audit item（若只有 read-only 初始渲染且无独立 runtime /
+intents，不预先承诺 `RiskOrchestrator`）。因此 **G2 = Strategy Governance +
+Execution/AutoQuant residual orchestration，为 required**；本轮不声称 MainWindow
+Composition Closure COMPLETE 与 Final Architecture Closure complete。
+
+设计依据见 `DESKTOP_DECOMPOSITION.md` §33。
 
 ## 9. 已删除的旧架构
 
@@ -3460,8 +3532,10 @@ v2O-E Paper orchestration       ✅ COMPLETE：E1 启动链（§8.18）+ E2 acti
                                     + E4 presentation/render closure（§8.21）
 v2O-F1 Runtime Events orchestration  ✅ 已完成（§8.22）
 v2O-F2 Settings orchestration        ✅ 已完成（§8.23）
-Gateway probe（是否独立 F3）           ⏭ 重新扫描后再定
-MainWindow composition closure  ⏭ 后续
+v2O-F System                         ✅ COMPLETE（Gateway probe 重审定性，见 §8.24）
+G1 MainWindow composition closure    ✅ 已完成（generic runtime / shell）
+G2 Strategy Governance + Execution/AutoQuant residual orchestration ⏭（required）
+Final Architecture Closure           ⏭ G2 之后
 ```
 
 维护导航：`docs/DESKTOP_CAPABILITY_MAP.md`（capability → truth owner /
@@ -3601,9 +3675,10 @@ v2O-E3 HALT / reconciliation / finalization / shutdown   ✅ 已完成（§8.20�
 v2O-E4 presentation / render closure + MainWindow guards  ✅ 已完成（§8.21）
 v2O-F1 Runtime Events orchestration                      ✅ 已完成（§8.22）
 v2O-F2 Settings orchestration                            ✅ 已完成（§8.23）
-Gateway probe 是否独立 F3                                ⏭ 重新扫描 System 剩余职责
-MainWindow composition closure
-Final Architecture Closure
+v2O-F System                                             ✅ COMPLETE（Gateway probe = shell diagnostic）
+G1 MainWindow composition closure                        ✅ 已完成（§8.24）
+G2 Strategy Governance + Execution/AutoQuant residual orchestration ⏭（required）
+Final Architecture Closure                                ⏭ G2 之后
 ```
 
 Shadow Framework v2 刻意没有做的事，留给更后面：
@@ -3740,6 +3815,9 @@ v2O-F2 刻意没有做的事，留给更后面：
 - 只抽 Settings orchestration，没有搬 Gateway probe
   （`_probe_gateway` / `probe_ibkr_socket` / `gateway_badge`），也没有做
   MainWindow composition closure、Dashboard 或 trading/live/AI；
+  **（G1 更新）** Gateway probe 重审定性为 shell diagnostic 且**不设 F3**（§8.24），
+  Dashboard render 由 `DashboardOrchestrator` 持有，MainWindow composition closure
+  的 generic runtime / shell 一半由 G1 完成；
 - 没有创建 `SystemOrchestrator` / `SystemManager` / `SettingsManager` /
   `DesktopManager` / `ApplicationContext` / `ServiceBag` / `GlobalController`：
   Runtime Events 与 Settings 是两个互不相关的 capability，只共用一个页面，

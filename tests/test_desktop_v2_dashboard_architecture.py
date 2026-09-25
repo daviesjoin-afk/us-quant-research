@@ -162,6 +162,13 @@ def test_dashboard_route_points_at_the_native_page() -> None:
 
 
 def test_main_window_does_not_reach_into_dashboard_widgets() -> None:
+    """The window wires the page's one intent and paints its palette only.
+
+    Since G1 the *render* belongs to ``dashboard_orchestrator``: the window
+    may not call ``DashboardPage.render`` at all, so ``render`` is no longer
+    in the allowed surface.
+    """
+
     for node in ast.walk(_tree(_DESKTOP_PATH)):
         if not isinstance(node, ast.Attribute):
             continue
@@ -174,7 +181,6 @@ def test_main_window_does_not_reach_into_dashboard_widgets() -> None:
         ):
             assert node.attr in {
                 "gateway_probe_requested",
-                "render",
                 "set_palette",
             }, node.attr
 
@@ -273,7 +279,24 @@ def test_gateway_and_theme_are_wired_at_page_level() -> None:
     ),
 )
 def test_fact_change_paths_publish_the_dashboard(method: str) -> None:
-    assert "_publish_dashboard_view()" in _method_source(_DESKTOP_PATH, method)
+    """Every fact change repaints the dashboard *through its owner* (G1).
+
+    The window no longer assembles the view itself.  Two legal shapes exist,
+    both on the capability's public API: a plain fact change calls
+    ``dashboard_orchestrator.render_current()``, and the chart-restore bridge
+    in ``_load_local_state`` hands the finished chart fact in through
+    ``set_chart`` -- which is itself exactly one render.  What neither may do
+    is call ``DashboardPage.render`` or the retired window projection.
+    """
+
+    source = _method_source(_DESKTOP_PATH, method)
+    publishes = (
+        "self.dashboard_orchestrator.render_current()" in source
+        or "self.dashboard_orchestrator.set_chart(" in source
+    )
+    assert publishes, source
+    assert "_publish_dashboard_view()" not in source
+    assert "dashboard_page.render(" not in source
 
 
 @pytest.mark.parametrize(("name", "budget"), sorted(LINE_BUDGETS.items()))

@@ -705,6 +705,8 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "orchestration/account/models.py",
         "orchestration/account/orchestrator.py",
         "orchestration/account/queries.py",
+        "orchestration/dashboard/__init__.py",
+        "orchestration/dashboard/orchestrator.py",
         "orchestration/research/__init__.py",
         "orchestration/research/universe/__init__.py",
         "orchestration/research/universe/orchestrator.py",

@@ -142,7 +142,7 @@ def test_dashboard_route_is_native_and_owns_no_legacy_widget_alias(window) -> No
 
 def test_account_publish_is_visible_on_the_real_dashboard_cards(window) -> None:
     window.broker_account._portfolio = None
-    window._publish_dashboard_view()
+    window.dashboard_orchestrator.render_current()
     assert window.dashboard_page._net_liquidation_card.value_label.text() == "未读取"
     assert window.dashboard_page._daily_pnl_card.value_label.text() == "不可用"
     assert window.dashboard_page._positions_card.value_label.text() == "未读取"
@@ -157,7 +157,7 @@ def test_account_publish_is_visible_on_the_real_dashboard_cards(window) -> None:
 
 def test_market_snapshot_states_are_visible_on_the_real_dashboard(window) -> None:
     window.market_orchestrator._snapshot = None
-    window._publish_dashboard_view()
+    window.dashboard_orchestrator.render_current()
     card = window.dashboard_page._intraday_market_card
     assert (card.value_label.text(), card.note_label.text()) == (
         "不可用",
@@ -165,14 +165,14 @@ def test_market_snapshot_states_are_visible_on_the_real_dashboard(window) -> Non
     )
 
     window.market_orchestrator._snapshot = _snapshot(quotes=(_quote(),))
-    window._publish_dashboard_view()
+    window.dashboard_orchestrator.render_current()
     assert (card.value_label.text(), card.note_label.text()) == (
         "可用",
         "Alpaca IEX 单交易所实时",
     )
 
     window.market_orchestrator._snapshot = _snapshot(message="Type 1 尚未就绪")
-    window._publish_dashboard_view()
+    window.dashboard_orchestrator.render_current()
     assert (card.value_label.text(), card.note_label.text()) == (
         "不可用",
         "Type 1 尚未就绪",
@@ -236,7 +236,7 @@ def test_theme_switch_repaints_dashboard_without_business_intent(window) -> None
     window.dashboard_page.gateway_probe_requested.connect(
         lambda: fired.append(1)
     )
-    window._publish_dashboard_view()
+    window.dashboard_orchestrator.render_current()
     window._apply_theme("light")
     assert window.dashboard_page._palette.name == "light"
     assert fired == []

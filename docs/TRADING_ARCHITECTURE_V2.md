@@ -3401,27 +3401,45 @@ transition 与 revision 规则；repository **只存**，不做任何 transition
 #### 8.28.3 默认与 fail-closed
 
 ```text
-NO ROW            → DISABLED, kill=false, revision=0
-corrupt mode      → PaperAutonomyStoreUnreadable（绝不落到 ENABLED）
-corrupt latch     → PaperAutonomyStoreUnreadable
-corrupt timestamp → PaperAutonomyStoreUnreadable（naive 也不行）
-blank reason      → PaperAutonomyStoreUnreadable
+NO ROW + NO EVENT   → DISABLED, kill=false, revision=0   （唯一的"从未配置"）
+corrupt mode        → PaperAutonomyStoreUnreadable（绝不落到 ENABLED）
+corrupt latch       → PaperAutonomyStoreUnreadable
+corrupt timestamp   → PaperAutonomyStoreUnreadable（naive 也不行）
+blank reason        → PaperAutonomyStoreUnreadable
+corrupt event kind  → PaperAutonomyStoreUnreadable
+corrupt event time  → PaperAutonomyStoreUnreadable
+NO ROW + EVENTS     → PaperAutonomyStoreUnreadable（孤立历史 ≠ 全新 store）
+revision < 1 的行    → PaperAutonomyStoreUnreadable
+COUNT ≠ revision / MIN ≠ 1 / MAX ≠ revision
+                    → PaperAutonomyStoreUnreadable（缺口 / 少一条 / 多一条）
+duplicate revision  → schema 唯一索引拒绝；旧库已存在重复时初始化即失败
 ```
 
 `missing row` 是**真实状态**而不是被构造函数悄悄写掉的状态：空表读出来就是
-`initial_intent()`，第一次 CAS 才会插入。方向只有一边——读不出来的东西永远不会被
-猜成 `enabled`。
+`initial_intent()`，第一次 transition 才会插入。但"空"是 intent 表**和** event 表都空
+——这是唯一能读成 revision 0 的状态。revision 0 是一句关于历史的断言（"这里从来没有
+被授权过"），一个审计轨迹里已经有 transition 的 store 没有资格说这句话。孤立历史、
+缺口、重复 revision 都**不做静默修复**：删掉冲突行、或按 revision 计数重建轨迹，等于
+这个模块自己发明历史，而轨迹的意义就在于它是记录本身。读不出来的东西永远不会被猜成
+`enabled`。
 
 SQLite adapter 的 CAS 是单个 `BEGIN IMMEDIATE` 事务（先取写锁再读 revision，然后
 UPSERT）：deferred 事务会先读后锁，两个写者可能都看到 revision *n* 并双双通过。单条
 UPSERT 表达不了"表为空才插入、否则 revision 相符才更新"——两条路径里必有一条不可达
 （已实测）。8 个并发写者的实测结果是 1 胜 7 冲突。
 
+`schema` 层用 `CREATE UNIQUE INDEX IF NOT EXISTS ux_paper_autonomy_events_revision`
+把"一个 accepted transition ⟶ 一个 revision ⟶ 一个 event"变成 store 的性质而不是约定。
+用独立索引而不是列上的 `UNIQUE` 是为了让旧库还能打开（`CREATE TABLE IF NOT EXISTS`
+不会给已存在的表重新声明约束）；而旧库若已存在重复 revision，索引建不起来就直接
+失败，不挑一条相信。
+
 #### 8.28.4 kill switch 语义
 
 ```text
 engage_kill_switch()  ⟶  latched=true  AND  mode=DISABLED   （任何状态均可，原子）
-clear_kill_switch()    ⟶  只清 latch，mode 原样不动
+                         重复按 kill 仍记新的 operator event（这是真实操作，不做 no-op 吞掉）
+clear_kill_switch()    ⟶  只清 latch，mode 原样不动；latch 未置位时 refused
 enable() while latched ⟶  refused，且不写 revision、不写 event
 ```
 
@@ -3431,7 +3449,43 @@ enable() while latched ⟶  refused，且不写 revision、不写 event
 持久化事实，CLI 输出因此逐字写成 "kill switch latched; the autonomous runner will
 refuse new work"，绝不写 "positions flattened" / "session stopped"——A1 还没有执行层。
 
-#### 8.28.5 revision / stale writer
+`clear_kill_switch` 在 latch 未置位时必须拒绝（`PaperAutonomyRefused`），不能成功。
+否则会为一次没有发生过的 kill 写入 `AUTONOMY_KILL_CLEARED`，让审计轨迹谎报 operator
+做过的事——一次 kill 对应两条 clear。反过来 `engage_kill_switch` 保持 **total**：重复
+按 kill 是真实 operator action，不能被吸收成 no-op。
+
+#### 8.28.5 一个 transition 一次 commit
+
+intent 的写入与 audit event 的写入是**同一个** SQLite transaction：
+
+```text
+application transition
+   → repository.commit_transition(expected_revision, replacement, event)
+        BEGIN IMMEDIATE
+        check stored revision
+        write intent row
+        append exactly one event for the new revision
+        COMMIT
+   （任何一步失败 → ROLLBACK 全部）
+```
+
+这不是效率问题。旧结构是两次 repository 调用（CAS 然后 append），也就是两个
+transaction，而它们之间的空隙是真实缺陷：
+
+- 进程在空隙里死掉 → intent revision 已永久变化，event 缺失 —— 运维复盘第一个要看的
+  那条记录正好不在；
+- 更糟的是这个空隙**并发可见**：writer A 提交 rev *n+1* 后被切走，writer B 提交
+  rev *n+2* 并先写入自己的 event，于是 event 表的自增顺序是 `n+2, n+1`，而 revision
+  顺序是 `n+1, n+2`。任何把行序当作 decision timeline 的读者都会读反；
+- event 写入失败时 operator 看到"失败"，但 canonical intent 其实已经改变。
+
+store 在真正写入前校验三个参数必须是**同一次** transition：`replacement.revision ==
+expected_revision + 1`、`event.revision == replacement.revision`、`event.occurred_at ==
+replacement.updated_at`、`event.detail == replacement.reason`。这是 stored pair
+consistency（记录必须自洽），不是 lifecycle policy——repository 仍然不判断
+enable/pause/disable/kill 是否合法。
+
+#### 8.28.6 revision / stale writer
 
 所有 mutation 都必须携带 `expected_revision`，由 repository 做 compare-and-swap；
 陈旧写入被拒绝为 `PaperAutonomyConflict`，不是 last-write-wins。原因不是洁癖：这个
@@ -3440,7 +3494,10 @@ revision 的页面不能覆盖它之后才按下的 kill switch。application �
 只负责**给出正确的理由**（"你的视图过期了" ≠ "这个 transition 非法"），真正使其原子
 的是 store 里的 CAS——guard 与 mutant 都按这个分工设计。
 
-#### 8.28.6 operator CLI（不依赖 Desktop 按钮）
+注：`PaperAutonomyApplication` 是生产代码中**唯一**调用 `commit_transition` 的模块，
+由 guard 逐文件断言（adapter 只是定义它，不调用）。
+
+#### 8.28.7 operator CLI（不依赖 Desktop 按钮）
 
 ```text
 python -m us_quant paper-autonomy status
@@ -3453,11 +3510,12 @@ python -m us_quant paper-autonomy clear-kill  --reason "..."
 
 六个命令都是"先读当前 revision → 调 application mutation → 打印新 revision/state"。
 CLI 里没有任何到达 store 的路径：它不 import sqlite adapter，也不调用
-`load_intent` / `compare_and_swap_intent` / `append_event` / `recent_events`
-（结构 + 行为双向 guard）。拒绝返回 exit 2 且 `applied=false`，存储不可读返回 exit 9，
-并在非 paper 配置下直接拒绝。
+`load_intent` / `commit_transition` / `recent_events`（结构 + 行为双向 guard）。
+拒绝返回 exit 2 且 `applied=false`，存储不可读返回 exit 9，非 paper 配置下直接拒绝。
+`clear-kill` 作用在未置位的 latch 上同样是 exit 2 / `applied=false`，且不产生任何
+audit event。
 
-#### 8.28.7 本轮刻意不做的事
+#### 8.28.8 本轮刻意不做的事
 
 - **不**把 `AutoLaunchPlan` 改造成 persistent intent：它的语义是"一次异步 Paper
   launch attempt 的 immutable fingerprint"（attempt_id / strategy_version_id /
@@ -3477,33 +3535,43 @@ CLI 里没有任何到达 store 的路径：它不 import sqlite adapter，也�
   idempotency：那是 v1-B，且必须从 v1-A merge 后的 main 重新开分支，**不**从本轮
   feature branch 叠加。
 
-#### 8.28.8 验证
+#### 8.28.9 验证
 
 | Invariant | Canonical owner | Forbidden bypass | Guard / test | Mutation | Status |
 | --- | --- | --- | --- | --- | --- |
-| autonomy intent 默认关闭 | `initial_intent()` | 缺失 / 损坏的值落到 ENABLED | `test_paper_autonomy.py::test_a_a_store_nobody_configured_is_disabled`、`::test_m_a_corrupt_stored_intent_is_never_read_as_enabled`；`test_paper_autonomy_architecture.py::test_pa9_…` | A1 M1、M12 | ✅ |
+| autonomy intent 默认关闭 | `initial_intent()` | 缺失 / 损坏的值落到 ENABLED | `test_paper_autonomy.py::test_a_a_store_nobody_configured_is_disabled`、`::test_m_a_corrupt_stored_intent_is_never_read_as_enabled`；`test_paper_autonomy_architecture.py::test_pa9_a_brand_new_store_is_disabled_and_never_enabled` | A1 M1、M12 | ✅ |
 | kill switch 是持久 latch | `PaperAutonomyApplication.engage_kill_switch` | 清 latch 即自动复活 / `enable()` 绕过 latch | `::test_h_enabling_while_latched_is_refused_and_writes_nothing`、`::test_i_clearing_the_latch_does_not_re_enable`、`::test_pa8_the_kill_switch_cannot_be_bypassed` | A1 M2、M3、M4 | ✅ |
-| revision / stale writer | `PaperAutonomyRepositoryPort.compare_and_swap_intent` | last-write-wins / 无 expected_revision | `::test_k_a_stale_writer_is_refused_and_changes_nothing`、`::test_n_concurrent_writers_produce_exactly_one_transition`、`::test_pa10_…` | A1 M5、M6 | ✅ |
-| 决策审计轨迹 | `PaperAutonomyApplication._write` → `append_event` | 接受 transition 但不记录 | `::test_b_…`、`::test_o_the_event_trail_replays_the_revisions_in_order` | A1 M7 | ✅ |
-| 单一 persistence adapter | `SQLitePaperAutonomyRepository` | 第二份 intent store（JSON / settings / 内存） | `::test_pa5_the_sqlite_store_is_the_only_intent_persistence` | A1 M8 | ✅ |
+| 空操作不是 transition | `PaperAutonomyApplication.clear_kill_switch` | latch 未置位时仍写入 `KILL_CLEARED` | `::test_s_clear_kill_is_refused_when_the_latch_is_not_set`、`::test_p2_…`（CLI exit 2） | A1 M16 | ✅ |
+| 一个 transition 一次 commit | `PaperAutonomyRepositoryPort.commit_transition` | intent 与 event 分两个 transaction | `::test_q_a_failed_audit_write_rolls_the_intent_back`（真实 SQLite trigger 强制 event 写入失败） | A1 M7、M14 | ✅ |
+| transition pair 自洽 | `SQLitePaperAutonomyRepository._require_coherent_pair` | replacement/event 的 revision、时刻、reason 不一致 | `::test_r_the_store_refuses_a_pair_that_is_not_one_transition` | A1 M17 | ✅ |
+| 一个 revision 一个 event | `ux_paper_autonomy_events_revision`（schema） | 同一 revision 第二条 event / 旧库重复静默修复 | `::test_v_the_schema_allows_one_event_per_revision`、`::test_v2_a_pre_existing_duplicate_revision_is_not_repaired` | —（schema 约束） | ✅ |
+| revision / stale writer | `PaperAutonomyRepositoryPort.commit_transition` | last-write-wins / 无 expected_revision | `::test_k_a_stale_writer_is_refused_and_changes_nothing`、`::test_n_concurrent_writers_produce_exactly_one_transition`、`::test_pa10_…` | A1 M5、M6 | ✅ |
+| 审计轨迹与 intent 同源 | `load_intent()` 的 coherence 校验 | 孤立历史读成全新 store / 缺口被当成更短的历史 | `::test_pa9b_an_orphaned_history_is_not_a_fresh_store`、`::test_u_a_gap_in_the_audit_trail_is_not_a_readable_intent`、`::test_t_a_corrupt_audit_entry_is_never_read_as_a_valid_trail` | A1 M15、M18 | ✅ |
+| 单一 persistence adapter | `SQLitePaperAutonomyRepository` | 第二份 intent store（JSON / settings / 内存） | `::test_pa5_the_sqlite_store_is_the_only_intent_persistence`、`::test_pa2b_the_two_step_write_protocol_is_gone` | A1 M8 | ✅ |
+| 单一 write authority | `PaperAutonomyApplication` | 第二处调用 `commit_transition` | `::test_pa5b_only_the_authority_commits_a_transition` | A1 M13 | ✅ |
 | intent 不持有 runtime truth | `domain/paper_autonomy.py` | 持久化 candidate / strategy / phase / lease / broker 事实 | `::test_pa6_the_intent_carries_no_runtime_truth`、`::test_pa4_…`、`::test_pa3_…` | A1 M9、M10、M11 | ✅ |
 | Paper-only 隔离线 | module 命名 + 枚举成员 | 加 `environment` / `broker_mode` / LIVE 成员 | `::test_pa7_no_second_autonomy_authority_was_introduced`、`::test_pa7b_…` | —（结构 invariant） | ✅ |
 | operator CLI 只是 surface | `PaperAutonomyApplication` | CLI 直接读写 SQLite | `::test_p_the_cli_is_a_surface_and_not_a_second_authority` | A1 M13 | ✅ |
 | import 方向 | §8.28.2 的分层表 | domain/ports/application 越过 allowlist | `::test_pa1_…`、`::test_pa2_…`、`::test_pa3_…`、`::test_pa11_the_new_modules_are_inside_the_guarded_layers` | A1 M9 | ✅ |
 
 ```text
-tests/test_paper_autonomy.py                        17 test function / 27 case
-tests/test_paper_autonomy_architecture.py           12 test function / 14 case
-scripts/mutation_paper_autonomy_a1.ps1              13 mutant / 13 RED / 0 survived
+tests/test_paper_autonomy.py                        24 test function / 40 case
+tests/test_paper_autonomy_architecture.py           15 test function / 17 case
+scripts/mutation_paper_autonomy_a1.ps1              18 mutant / 18 RED / 0 survived
                                                  / 0 harness-error
 ```
 
-其中 v1-A mutation 里有两个值得记下的捕获方式：M2（kill 不移动 mode）被 domain 的
-`latched ⇒ not ENABLED` invariant 直接拦住——值层面构造不出来，所以是守卫而不是测试
-断言接住的；M8（store 自己决定存什么 mode）会被 restart 测试接住，因为读回来的
-latched+enabled 组合同样无法构造。M5（store 无视 expected_revision）由**并发**测试
-接住：application 的 revision 比对在同一读窗口内对所有写者都通过，只有 store 的 CAS
-能仲裁——这也正是"application 侧比对只是消息"这条设计的可执行证据。
+v1-A mutation 里有三处捕获方式值得记下，因为它们说明"哪一道守卫真正在工作"：
+
+- M2（kill 不移动 mode）被 domain 的 `latched ⇒ not ENABLED` invariant 直接拦住——
+  值层面构造不出来，所以接住它的是守卫而不是测试断言。
+- M5（store 无视 expected_revision）由**并发**测试接住：application 的 revision 比对
+  在同一读窗口内对所有写者都通过，只有 store 的 CAS 能仲裁——这正是"application 侧
+  比对只是消息"这条设计的可执行证据。
+- M17（pair 校验忽略 event revision）在第一次写这个 mutant 时**存活了**，原因是那条
+  测试当时用一个会与已存 revision 撞车的编号，于是被唯一索引挡住了，而 pair 校验
+  本身从未被触发。改成"intent 永远不会到达的 revision"之后才 RED。这是本轮唯一一次
+  真实的 mutant 存活，记录在此：它暴露的是测试隔离度不够，而不是守卫无效。
 
 ## 9. 已删除的旧架构
 

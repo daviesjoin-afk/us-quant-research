@@ -8,24 +8,44 @@ that a latched kill switch blocks ``enable()``, that ``ENABLED`` follows
 adapter -- an in-memory one for tests, or a different store -- satisfy this
 protocol without implementing a slightly different state machine.
 
-Two protocol operations carry real safety weight and are specified rather than
-left to the adapter's discretion:
+The port has **one** write operation.  That is the whole point of its shape, and
+it is a correction rather than a preference.  An earlier version exposed two
+calls -- compare-and-swap the intent, then append the event -- and two calls are
+two transactions.  The gap between them is a real correctness hole, not a
+theoretical one:
 
-* :meth:`PaperAutonomyRepositoryPort.compare_and_swap_intent` is a genuine
-  compare-and-swap.  Last-write-wins is not an acceptable fallback here.  The
-  writers of this value are the desktop shell, the operator CLI and, later, an
-  unattended scheduler; a stale operator page that still believes the revision
-  it loaded must not be able to overwrite a kill switch that was latched after
-  the page was drawn.
-* :meth:`PaperAutonomyRepositoryPort.load_intent` returns a domain value, never
-  a row, and it fails closed.  The adapter owns the decision to refuse a value
-  it cannot interpret, because "I could not read the mode" must never be
-  answered with a mode.
+* a process that dies in the gap leaves a committed intent whose transition was
+  never recorded, so the audit trail is missing exactly the revision an incident
+  review reads first;
+* worse, the gap is *observable* by a concurrent writer.  Writer A can load
+  revision *n*, commit *n+1*, and be descheduled before appending its event;
+  writer B then loads *n+1*, commits *n+2* and appends its event first.  The
+  event table's autoincrement order is now ``n+2, n+1`` while the revisions are
+  ``n+1, n+2`` -- and any reader that treats row order as the decision timeline
+  reads the decisions out of order;
+* and a failed event write leaves the operator looking at an error for a
+  transition that has, in fact, permanently happened.
+
+So :meth:`PaperAutonomyRepositoryPort.commit_transition` takes the intent and
+its event **together**, and the implementation must hold one transaction across
+the compare, the intent write and the event write.
+
+Two further protocol operations carry real safety weight:
+
+* ``load_intent`` returns a domain value, never a row, and it fails closed -- on
+  a value it cannot interpret *and* on a history that does not agree with it.  A
+  revision whose event is missing is not a revision that can be believed, and
+  "no intent row but a non-empty trail" is not "never configured".
+* the compare-and-swap inside ``commit_transition`` is genuine.  Last-write-wins
+  is not an acceptable fallback.  The writers of this value are the desktop
+  shell, the operator CLI and, later, an unattended scheduler; a stale operator
+  page must not be able to overwrite a kill switch latched after it was drawn.
 
 Errors are rooted at :class:`PaperAutonomyError` rather than at ``RuntimeError``
 so a caller can catch the whole feature -- store unreadable, revision conflict,
-value refused -- with one clause.  A refusal and a storage failure lead to
-different operator actions, so they stay distinct *types* while sharing a root.
+value refused, storage failure -- with one clause.  A refusal and a storage
+failure lead to different operator actions, so they stay distinct *types* while
+sharing a root.
 """
 
 from __future__ import annotations
@@ -43,21 +63,38 @@ from us_quant.trading.domain.paper_autonomy import (
 
 
 class PaperAutonomyRepositoryError(PaperAutonomyError):
-    """Base class for every Paper autonomy persistence failure."""
+    """Base class for every Paper autonomy persistence failure.
+
+    Also raised when a transition's own parts do not agree with each other -- a
+    replacement that does not advance the revision by one, an event naming a
+    different revision, or an event whose instant or reason is not the intent's.
+    That is not a policy refusal: it is a record that could not have been
+    produced by one accepted transition, and a store that accepted it would hold
+    a trail that does not describe the intent beside it.
+    """
 
 
 class PaperAutonomyStoreUnreadable(PaperAutonomyRepositoryError):
-    """A stored intent cannot be believed and will not be repaired.
+    """A stored intent or audit trail cannot be believed and will not be repaired.
 
     Raised for a stored mode that is not a ``PaperAutonomyMode``, a latch column
-    that is not a boolean, a revision that is not a non-negative integer, or an
-    ``updated_at`` that is not an aware timestamp.
+    that is not a boolean, a revision that is not a non-negative integer, an
+    ``updated_at`` that is not an aware timestamp, an event kind that is not a
+    ``PaperAutonomyEventKind``, a stale or naive event timestamp, and -- the half
+    that only a history can violate -- an audit trail that does not describe the
+    intent in front of it: events with no intent row, a gap in the revisions, or
+    a count that disagrees with the intent's revision.
 
     There is deliberately no "fall back to the default" path.  The default is
     ``DISABLED``, so a fallback would be safe here -- but it would also be
     silent, and an operator who latched a kill switch needs to be told that the
     record of it could not be read rather than shown a plausible ``DISABLED``
     that means "you never asked for anything".
+
+    Duplicate revisions are refused by the store's own uniqueness constraint
+    rather than by a read, and that failure surfaces here too: choosing which of
+    two conflicting entries to believe is an operator decision, not this
+    module's.
     """
 
 
@@ -113,36 +150,45 @@ class PaperAutonomyRepositoryPort(Protocol):
     def load_intent(self) -> PaperAutonomyIntent:
         """The stored intent, or the canonical initial one when none is stored.
 
-        A missing row is ``DISABLED`` with revision
-        :data:`~us_quant.trading.domain.paper_autonomy.INITIAL_REVISION`.  It is
-        never ``ENABLED``: a store that has never been written describes an
-        operator who has never authorised anything.
+        "None is stored" means the whole store is empty: no intent row **and**
+        no audit events.  A brand-new database is the only thing that reads as
+        :data:`~us_quant.trading.domain.paper_autonomy.INITIAL_REVISION` /
+        ``DISABLED``; it is never ``ENABLED``, because a store that has never
+        been written describes an operator who has never authorised anything.
 
         Raises ``PaperAutonomyStoreUnreadable`` when a row exists but cannot be
-        interpreted.
+        interpreted, and -- just as importantly -- when the stored history and
+        the stored intent do not agree: an intent at revision *n* whose trail
+        does not hold exactly revisions ``1..n``, or a trail with no intent row
+        in front of it.  An incomplete record is not a fresh one; it is a store
+        an operator has to look at.
         """
 
-    def compare_and_swap_intent(
+    def commit_transition(
         self,
         *,
         expected_revision: int,
         replacement: PaperAutonomyIntent,
+        event: PaperAutonomyEvent,
     ) -> None:
-        """Write ``replacement`` only if the stored revision is still expected.
+        """Store one transition -- the intent **and** its audit event -- atomically.
 
-        Atomic: the check and the write are one transaction, so two writers that
-        both loaded revision *n* produce exactly one accepted write.
+        One transaction holds the compare, the intent write and the event
+        write.  Any failure rolls back all of them, so there is no stored state
+        in which the intent has moved and the trail has not.
 
-        Raises ``PaperAutonomyConflict`` when the stored revision differs, and
-        leaves the stored value untouched in that case.
-        """
+        The three arguments are one fact, and implementations must refuse a set
+        that could not have come from a single accepted transition: the
+        replacement must advance the revision by exactly one, the event must
+        name that same revision, and the two must share one instant and one
+        operator reason.  That is storage integrity -- the record has to be
+        self-consistent -- not lifecycle policy, and it is checked here rather
+        than trusted because a store that accepted an incoherent pair would
+        leave the trail unable to describe the intent it belongs to.
 
-    def append_event(self, event: PaperAutonomyEvent) -> None:
-        """Append one transition to the audit trail.
-
-        Called after an accepted :meth:`compare_and_swap_intent`, never before:
-        an audit entry that claims a transition which was then refused would be
-        a lie in the one record an incident review reads first.
+        Raises ``PaperAutonomyConflict`` when the stored revision differs, in
+        which case nothing is written.  Raises ``PaperAutonomyRepositoryError``
+        for an incoherent pair or any storage failure, also writing nothing.
         """
 
     def recent_events(
@@ -153,6 +199,11 @@ class PaperAutonomyRepositoryPort(Protocol):
         Chronological order rather than newest-first because the caller is
         replaying a decision sequence; a newest-first list would have to be
         reversed by every reader to be read as a story.
+
+        The events are never pruned, so this is a read *window* over the whole
+        trail rather than a separate history: the revision of the intent and the
+        number of events in the store are always the same number, and a reader
+        that needs the whole sequence asks for a limit large enough to hold it.
         """
 
 

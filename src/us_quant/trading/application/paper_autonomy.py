@@ -2,10 +2,16 @@
 
 Every accepted transition in the system goes through this object.  It decides
 *which* transitions are legal (the store decides nothing), computes the revision
-that results, performs the compare-and-swap through the port, and records the
-transition in the audit trail.  A desktop button, an operator CLI invocation and
-a future scheduler all end up calling the same method here, which is what makes
-"two surfaces, one truth" a property rather than a hope.
+that results, and hands the intent and its audit event to the store as **one**
+transition.  A desktop button, an operator CLI invocation and a future scheduler
+all end up calling the same method here, which is what makes "two surfaces, one
+truth" a property rather than a hope.
+
+One decision and one commit, not a sequence of writes: the intent and the event
+that records it are built here and committed together, so there is no stored
+state in which the revision has moved and the trail has not.  This authority
+therefore writes through exactly one repository call, and the architecture
+guards assert that no other module in the production tree makes it.
 
 What this authority does **not** do is the reason it is safe to add before any
 automation exists.  It does not start, stop or inspect a Paper session; it does
@@ -20,11 +26,14 @@ argument, so it is worth stating plainly:
 
 * ``engage_kill_switch`` is *total* -- it is legal from any state and always
   produces ``DISABLED`` with the latch set.  It is the one transition an
-  operator may need to perform without knowing what state they are in.
+  operator may need to perform without knowing what state they are in, and a
+  second press is a real operator action rather than a no-op to be absorbed.
 * ``clear_kill_switch`` clears the latch and **only** the latch.  It never
   restores the previous mode, because the previous mode is exactly what the
-  operator latched away.  Re-enabling autonomy after a kill requires a fresh
-  ``enable()``, which is a second, separate decision.
+  operator latched away, and it refuses when the latch is not set -- there is no
+  such transition as "cleared a kill that was not there".  Re-enabling autonomy
+  after a kill requires a fresh ``enable()``, which is a second, separate
+  decision.
 * ``enable()`` refuses while the latch is set.  Between the four of those, the
   sequence ``kill -> clear -> enable`` cannot collapse into ``kill -> clear``.
 
@@ -195,9 +204,18 @@ class PaperAutonomyApplication:
         clearing a kill switch must not be able to *enable* anything, and it
         must not be able to look like a second disable either.  It releases one
         bit and records that it did.
+
+        Refused when the latch is not set.  A transition that clears a latch
+        that was already clear would write a ``KILL_CLEARED`` event for a kill
+        that never happened -- an audit trail entry recording an operator action
+        whose effect was nothing, in the one table an incident review trusts.
         """
 
         current = self._prepare(expected_revision, reason, "clear-kill")
+        if not current.kill_switch_latched:
+            raise PaperAutonomyRefused(
+                "the kill switch is not latched; there is no latch to release"
+            )
         return self._write(
             current,
             expected_revision,
@@ -289,6 +307,16 @@ class PaperAutonomyApplication:
         reason: str,
         latched: bool | None = None,
     ) -> PaperAutonomyIntent:
+        """Hand one complete transition to the store, in one call.
+
+        The intent and its event are built here and committed together.  They
+        are not two writes because they are not two facts: a stored revision
+        whose transition was never recorded is an audit hole, and -- worse --
+        the gap between two transactions is visible to a concurrent writer, who
+        can commit the next revision in between and leave the event table's row
+        order disagreeing with the revision order it exists to describe.
+        """
+
         moment = self._clock()
         replacement = replace(
             current,
@@ -300,17 +328,15 @@ class PaperAutonomyApplication:
             updated_at=moment,
             reason=reason,
         )
-        self._repository.compare_and_swap_intent(
+        self._repository.commit_transition(
             expected_revision=expected_revision,
             replacement=replacement,
-        )
-        self._repository.append_event(
-            PaperAutonomyEvent(
+            event=PaperAutonomyEvent(
                 revision=replacement.revision,
                 kind=kind,
                 detail=reason,
                 occurred_at=moment,
-            )
+            ),
         )
         return replacement
 

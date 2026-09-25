@@ -11,12 +11,22 @@ the question an operator would ask:
 * what survives a restart, and what happens when the record is corrupt?  (L, M)
 * can the decision trail be read back?  (O)
 * is the operator CLI a surface rather than a second authority?  (P)
+* is a transition one commit, or two writes with a gap between them?  (Q, R)
+* is a transition that did nothing recorded as one that did?  (S)
+* is a corrupt *trail* as unreadable as a corrupt row?  (T, U)
+
+The Q-U group is the half that a two-transaction implementation cannot pass.
+Q forces the audit write to fail inside real SQLite and asserts the intent went
+with it; R refuses a pair of arguments that disagree with each other; S asserts
+that clearing a latch that is not set is not a transition; T and U assert that a
+damaged history is reported rather than shortened.
 """
 
 from __future__ import annotations
 
 import ast
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 import pathlib
@@ -36,11 +46,14 @@ from us_quant.trading.application.paper_autonomy import (
 from us_quant.trading.domain.paper_autonomy import (
     INITIAL_REVISION,
     PaperAutonomyEventKind,
+    PaperAutonomyIntent,
     PaperAutonomyMode,
     initial_intent,
 )
 from us_quant.trading.ports.paper_autonomy_repository import (
     PaperAutonomyConflict,
+    PaperAutonomyEvent,
+    PaperAutonomyRepositoryError,
     PaperAutonomyStoreUnreadable,
 )
 
@@ -101,6 +114,36 @@ def _revisions(store: SQLitePaperAutonomyRepository) -> list[int]:
 
 def _kinds(store: SQLitePaperAutonomyRepository) -> list[str]:
     return [event.kind.value for event in store.recent_events(50)]
+
+
+def _event_for(
+    intent: PaperAutonomyIntent, kind: PaperAutonomyEventKind
+) -> PaperAutonomyEvent:
+    """The audit event a transition to ``intent`` must carry.
+
+    Built from the intent rather than alongside it so a test that hands the
+    store a manually assembled transition hands it a *coherent* one; the tests
+    that deliberately hand it an incoherent pair build the disagreement
+    explicitly.
+    """
+
+    return PaperAutonomyEvent(
+        revision=intent.revision,
+        kind=kind,
+        detail=intent.reason,
+        occurred_at=intent.updated_at,
+    )
+
+
+def _stored_event_revisions(path: pathlib.Path) -> list[int]:
+    connection = sqlite3.connect(path)
+    try:
+        rows = connection.execute(
+            "SELECT revision FROM paper_autonomy_events ORDER BY revision"
+        ).fetchall()
+    finally:
+        connection.close()
+    return [int(row[0]) for row in rows]
 
 
 # =====================================================================
@@ -298,9 +341,10 @@ def test_k_a_stale_writer_is_refused_and_changes_nothing(
     # application's read and the store's write are two moments, and only the
     # store can arbitrate between them.
     with pytest.raises(PaperAutonomyConflict):
-        store.compare_and_swap_intent(
+        store.commit_transition(
             expected_revision=INITIAL_REVISION,
             replacement=first,
+            event=_event_for(first, PaperAutonomyEventKind.ENABLED),
         )
     assert store.load_intent() == first
     assert _revisions(store) == [first.revision]
@@ -338,8 +382,18 @@ def test_n_concurrent_writers_produce_exactly_one_transition(
     assert outcomes.count("conflict") == workers - 1
 
     store = SQLitePaperAutonomyRepository(path)
-    assert store.load_intent().revision == INITIAL_REVISION + 1
+    final = store.load_intent()
+    assert final.revision == INITIAL_REVISION + 1
     assert _revisions(store) == [INITIAL_REVISION + 1]
+
+    # The winner's transition is the *whole* transition: one event, and one that
+    # describes the intent that survived.  A store that committed the intent and
+    # then raced to append the event would have nowhere to put the loser's, and
+    # the trail would stop describing the value beside it.
+    assert _kinds(store) == ["AUTONOMY_ENABLED"]
+    event = store.recent_events(10)[0]
+    assert event.detail == final.reason
+    assert event.occurred_at == final.updated_at
 
 
 # =====================================================================
@@ -438,6 +492,356 @@ def test_o_the_event_trail_replays_the_revisions_in_order(
     assert [event.revision for event in restarted.recent_events(2)] == [4, 5]
     assert restarted.recent_events(0) == ()
     assert restarted.load_intent() == state
+
+    # And the whole trail, not a window: the intent's revision *is* the number
+    # of accepted transitions, so the two can never disagree.  Read the whole
+    # sequence rather than the first five so this cannot pass by construction.
+    whole = restarted.recent_events(50)
+    assert [event.revision for event in whole] == list(
+        range(1, state.revision + 1)
+    )
+    assert len(whole) == state.revision
+    assert whole[-1].detail == state.reason
+    assert whole[-1].occurred_at == state.updated_at
+
+
+# =====================================================================
+# Q, R. One transition, one commit
+# =====================================================================
+
+
+def test_q_a_failed_audit_write_rolls_the_intent_back(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The intent and its event are one commit, proved against a real database.
+
+    The failure is forced inside SQLite rather than by patching the repository.
+    A patched method would only show that the application makes one *call*, which
+    is a different and much weaker claim than "a refused event write leaves no
+    intent behind" -- the defect this test exists for is a store that commits
+    the intent and then cannot append the event, and only a real failing write
+    can produce that state.
+
+    A trigger is used because it fails at exactly the moment the second half of
+    the transition is written, which is the only moment that matters here.
+    """
+
+    store = _store(tmp_path)
+    application = _application(store)
+    _execute(
+        store.path,
+        """
+        CREATE TRIGGER fail_autonomy_event
+        BEFORE INSERT ON paper_autonomy_events
+        BEGIN
+            SELECT RAISE(ABORT, 'forced event failure');
+        END
+        """,
+    )
+
+    with pytest.raises(PaperAutonomyRepositoryError) as caught:
+        application.enable(INITIAL_REVISION, "authorise autonomy")
+
+    # A storage failure, not a refusal and not a stale write: those two send the
+    # operator looking for a policy problem that does not exist.
+    assert not isinstance(
+        caught.value, (PaperAutonomyConflict, PaperAutonomyStoreUnreadable)
+    )
+    # And it does not leak the statement or the file path it failed on.
+    assert "INSERT" not in str(caught.value)
+    assert str(store.path) not in str(caught.value)
+
+    # Nothing survived the failure -- neither half of the transition.  This is
+    # the assertion a two-transaction store fails: it leaves revision 1 behind,
+    # with the operator holding an error and the canonical intent already moved.
+    assert store.load_intent() == initial_intent()
+    assert store.load_intent().revision == INITIAL_REVISION
+    assert store.recent_events(10) == ()
+    assert _stored_event_revisions(store.path) == []
+
+
+def test_r_the_store_refuses_a_pair_that_is_not_one_transition(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Revision, instant and reason have to describe the same transition.
+
+    No production caller can build these -- the authority derives all three from
+    one decision -- which is exactly why they are asserted here: a store that
+    accepted them would hold an intent and a trail that disagree, and a reader
+    reconstructs each from the other.
+
+    The mismatched-event case names a revision the intent never reaches, rather
+    than one that is merely wrong.  A colliding revision would also be stopped by
+    the revision index, which would make this test pass for a reason that has
+    nothing to do with the check under it -- measured, not assumed: an earlier
+    version of this case used a colliding revision and let a mutant that removes
+    the check survive.
+    """
+
+    store = _store(tmp_path)
+    application = _application(store)
+    first = application.enable(INITIAL_REVISION, "authorise autonomy")
+    good = _event_for(first, PaperAutonomyEventKind.ENABLED)
+    later = first.updated_at + timedelta(seconds=1)
+
+    incoherent = {
+        "a revision jump": (replace(first, revision=3), good),
+        "a revision that does not advance": (first, good),
+        "an event naming a revision the intent never reaches": (
+            replace(first, revision=2),
+            replace(good, revision=3),
+        ),
+        "an event from another instant": (
+            replace(first, revision=2),
+            replace(good, revision=2, occurred_at=later),
+        ),
+        "an event recording another reason": (
+            replace(first, revision=2),
+            replace(good, revision=2, detail="a different decision"),
+        ),
+    }
+
+    for label, (replacement, event) in incoherent.items():
+        with pytest.raises(PaperAutonomyRepositoryError):
+            store.commit_transition(
+                expected_revision=first.revision,
+                replacement=replacement,
+                event=event,
+            )
+        assert store.load_intent() == first, label
+        assert _revisions(store) == [first.revision], label
+
+    # And the coherent version of the same call still goes through, so the
+    # checks above cannot be passing because the store refuses everything.
+    second = application.pause(first.revision, "stop opening new work")
+    assert second.revision == first.revision + 1
+    assert _revisions(store) == [first.revision, second.revision]
+
+
+def test_v_the_schema_allows_one_event_per_revision(
+    tmp_path: pathlib.Path,
+) -> None:
+    """One accepted transition, one event -- enforced by the store, not by habit.
+
+    Written through SQL, because the store itself cannot produce a duplicate:
+    that is the point.  The constraint has to hold against something reaching
+    past the store, or it is only a convention the store happens to follow.
+    """
+
+    store = _store(tmp_path)
+    application = _application(store)
+    application.enable(INITIAL_REVISION, "authorise autonomy")
+
+    with pytest.raises(sqlite3.IntegrityError):
+        _execute(
+            store.path,
+            """
+            INSERT INTO paper_autonomy_events(
+                revision, event, detail, occurred_at
+            ) VALUES (1, 'AUTONOMY_PAUSED', 'a second event for revision 1',
+                      '2026-03-02T14:30:00+00:00')
+            """,
+        )
+
+    assert _stored_event_revisions(store.path) == [1]
+
+
+def test_v2_a_pre_existing_duplicate_revision_is_not_repaired(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A store written before the index is reported, not silently rebuilt.
+
+    The database is assembled by hand so it can hold what the current schema
+    forbids: the same revision twice.  Opening it has to fail rather than pick
+    one of the two rows, and both rows have to still be there afterwards --
+    deleting one, or regenerating the trail from the revision count, would be
+    this module inventing the history it exists to report.
+    """
+
+    path = tmp_path / "paper_autonomy.sqlite3"
+    _execute(
+        path,
+        """
+        CREATE TABLE paper_autonomy_intent(
+            key TEXT PRIMARY KEY,
+            revision INTEGER NOT NULL,
+            mode TEXT NOT NULL,
+            kill_switch_latched INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+    )
+    _execute(
+        path,
+        """
+        CREATE TABLE paper_autonomy_events(
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            revision INTEGER NOT NULL,
+            event TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+        )
+        """,
+    )
+    _execute(
+        path,
+        """
+        INSERT INTO paper_autonomy_intent(
+            key, revision, mode, kill_switch_latched, reason, updated_at
+        ) VALUES ('paper', 1, 'enabled', 0, 'legacy', '2026-03-02T14:30:00+00:00')
+        """,
+    )
+    for detail in ("first", "duplicate"):
+        _execute(
+            path,
+            """
+            INSERT INTO paper_autonomy_events(
+                revision, event, detail, occurred_at
+            ) VALUES (1, 'AUTONOMY_ENABLED', ?, '2026-03-02T14:30:00+00:00')
+            """,
+            (detail,),
+        )
+    assert _stored_event_revisions(path) == [1, 1]
+
+    with pytest.raises(PaperAutonomyStoreUnreadable):
+        SQLitePaperAutonomyRepository(path)
+
+    assert _stored_event_revisions(path) == [1, 1]
+
+
+# =====================================================================
+# S. A transition that did nothing is not a transition
+# =====================================================================
+
+
+def test_s_clear_kill_is_refused_when_the_latch_is_not_set(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Clearing a latch that is not set is refused, and writes no audit entry.
+
+    Allowing it would put a ``KILL_CLEARED`` event in the trail for a kill that
+    never happened, in the one table an incident review trusts.  The trail would
+    then say two clears for one kill, which is a lie about the operator's
+    actions rather than a harmless no-op.
+    """
+
+    store = _store(tmp_path)
+    application = _application(store)
+
+    # The store nobody configured.
+    with pytest.raises(PaperAutonomyRefused):
+        application.clear_kill_switch(
+            INITIAL_REVISION, "release a latch that is not set"
+        )
+    assert store.load_intent() == initial_intent()
+    assert store.recent_events(10) == ()
+
+    # And an enabled system, which has no latch either.
+    enabled = application.enable(INITIAL_REVISION, "authorise autonomy")
+    with pytest.raises(PaperAutonomyRefused):
+        application.clear_kill_switch(
+            enabled.revision, "release a latch that is not set"
+        )
+    assert store.load_intent() == enabled
+    assert _kinds(store) == ["AUTONOMY_ENABLED"]
+
+    # Latched is the one state where it means something.
+    latched = application.engage_kill_switch(enabled.revision, "kill")
+    cleared = application.clear_kill_switch(latched.revision, "release it")
+    assert cleared.kill_switch_latched is False
+    assert cleared.mode is PaperAutonomyMode.DISABLED
+    assert cleared.revision == latched.revision + 1
+    assert _kinds(store) == [
+        "AUTONOMY_ENABLED",
+        "AUTONOMY_KILL_LATCHED",
+        "AUTONOMY_KILL_CLEARED",
+    ]
+
+    # A second clear is refused too, and writes nothing at all -- no revision
+    # and no event.
+    with pytest.raises(PaperAutonomyRefused):
+        application.clear_kill_switch(cleared.revision, "release it again")
+    assert store.load_intent() == cleared
+    assert _kinds(store).count("AUTONOMY_KILL_CLEARED") == 1
+
+    # ``engage_kill_switch`` stays total.  A second press of a kill switch is a
+    # real operator action and is recorded as one; absorbing it as a no-op would
+    # lose the fact that the operator pressed it.
+    again = application.engage_kill_switch(cleared.revision, "kill again")
+    assert again.kill_switch_latched is True
+    assert again.mode is PaperAutonomyMode.DISABLED
+    assert again.revision == cleared.revision + 1
+    assert _kinds(store).count("AUTONOMY_KILL_LATCHED") == 2
+
+
+# =====================================================================
+# T, U. A damaged trail is reported, not shortened
+# =====================================================================
+
+
+@pytest.mark.parametrize(
+    "column, value",
+    (
+        ("event", "AUTONOMY_SOMETHING_ELSE"),
+        ("event", ""),
+        ("detail", "   "),
+        ("occurred_at", "not a timestamp"),
+        ("occurred_at", "2026-03-02T14:30:00"),
+        ("revision", "-1"),
+        ("revision", "many"),
+    ),
+)
+def test_t_a_corrupt_audit_entry_is_never_read_as_a_valid_trail(
+    tmp_path: pathlib.Path, column: str, value: str
+) -> None:
+    """A damaged entry is refused, for the same reason a damaged row is.
+
+    The cases split in two.  A bad kind, reason or timestamp damages the *entry*,
+    so reading the trail has to refuse even though the revision arithmetic still
+    adds up.  A bad revision damages the *sequence*, so the intent beside it
+    stops being readable at all.
+    """
+
+    store = _store(tmp_path)
+    application = _application(store)
+    application.enable(INITIAL_REVISION, "authorise autonomy")
+    _execute(
+        store.path,
+        f"UPDATE paper_autonomy_events SET {column} = ? WHERE revision = 1",
+        (value,),
+    )
+
+    with pytest.raises(PaperAutonomyStoreUnreadable):
+        store.recent_events(10)
+
+
+def test_u_a_gap_in_the_audit_trail_is_not_a_readable_intent(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A missing event is a missing record, not a shorter history.
+
+    Built as a real gap -- the intent at revision 3 with events 1 and 3 -- so
+    the refusal cannot be passing because the count happened to disagree for
+    some other reason.  The events are deleted through SQL because the store
+    itself has no way to remove one, which is the point: a gap can only be
+    created by something other than this store reaching into it.
+    """
+
+    store = _store(tmp_path)
+    application = _application(store)
+    state = application.enable(INITIAL_REVISION, "authorise autonomy")
+    state = application.pause(state.revision, "hold new work")
+    state = application.enable(state.revision, "resume")
+    assert state.revision == 3
+
+    _execute(store.path, "DELETE FROM paper_autonomy_events WHERE revision = 2")
+    assert _stored_event_revisions(store.path) == [1, 3]
+
+    with pytest.raises(PaperAutonomyStoreUnreadable):
+        store.load_intent()
+    with pytest.raises(PaperAutonomyStoreUnreadable):
+        application.snapshot()
 
 
 # =====================================================================
@@ -560,7 +964,7 @@ def test_p2_the_cli_requires_a_reason_and_covers_every_verb(
     """The operator surface's own guards.
 
     A blank reason is refused by the application even when the caller bypasses
-    the parser, and the parser itself makes ``--reason`` mandatory.  The last
+    the parser, and the parser itself makes ``--reason`` mandatory.  The verb-set
     assertion is the non-vacuous one: the transition table and the help table
     have to describe the same verbs, so a command cannot exist with no
     implementation or an implementation with no command.
@@ -593,6 +997,21 @@ def test_p2_the_cli_requires_a_reason_and_covers_every_verb(
     payload = json.loads(capsys.readouterr().out)
     assert payload["applied"] is False
     assert "reason" in payload["error"]
+    assert SQLitePaperAutonomyRepository(database).recent_events(5) == ()
+
+    # clear-kill against a switch that is not latched: refused, non-zero, and
+    # with no audit entry for a kill that never happened.
+    assert (
+        paper_autonomy_transition(
+            config_path=_PAPER_CONFIG,
+            database_path=database,
+            action="clear-kill",
+            reason="release a latch that is not set",
+        )
+        == 2
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["applied"] is False
     assert SQLitePaperAutonomyRepository(database).recent_events(5) == ()
 
     for verb in _OPERATOR_TRANSITIONS:

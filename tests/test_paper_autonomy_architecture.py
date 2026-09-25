@@ -57,6 +57,7 @@ from us_quant.trading.domain.paper_autonomy import (
 from us_quant.trading.ports.paper_autonomy_repository import (
     PaperAutonomyConflict,
     PaperAutonomyRepositoryPort,
+    PaperAutonomyStoreUnreadable,
 )
 
 
@@ -153,12 +154,38 @@ def test_pa2_the_port_does_not_name_a_concrete_store() -> None:
 
     methods = _class_methods(_SRC / _PORT_MODULE)
     assert "PaperAutonomyRepositoryPort" in methods
-    assert {
+    # An exact surface, not a superset: one read of the intent, one write of a
+    # whole transition, one read window over the trail.  A second write method
+    # is exactly how the two-transaction hole comes back, so its presence has to
+    # fail here rather than be tolerated as an extra.
+    assert methods["PaperAutonomyRepositoryPort"] == {
+        "commit_transition",
         "load_intent",
-        "compare_and_swap_intent",
-        "append_event",
         "recent_events",
-    } <= methods["PaperAutonomyRepositoryPort"]
+    }
+
+
+def test_pa2b_the_two_step_write_protocol_is_gone() -> None:
+    """No module keeps a second way to write the intent.
+
+    A compatibility alias would be worse than a dead method: the next caller --
+    a supervisor, say -- would find a compare-and-swap and an append that look
+    entirely reasonable, and would rebuild the two-transaction gap out of them
+    without ever seeing the atomic call.
+    """
+
+    retired = {"append_event", "compare_and_swap_intent"}
+    definitions: list[str] = []
+    for path in _SRC.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        for name, methods in _class_methods(path).items():
+            for method in sorted(methods & retired):
+                definitions.append(f"{_module_name(path)}::{name}.{method}")
+        for node in ast.parse(path.read_text(encoding="utf-8")).body:
+            if isinstance(node, ast.FunctionDef) and node.name in retired:
+                definitions.append(f"{_module_name(path)}::{node.name}")
+    assert definitions == []
 
 
 def test_pa3_the_application_depends_on_the_domain_and_the_ports_only() -> None:
@@ -245,7 +272,7 @@ def test_pa5_the_sqlite_store_is_the_only_intent_persistence(
             continue
         protocols = _protocol_class_names(path)
         for name, methods in _class_methods(path).items():
-            if "compare_and_swap_intent" in methods and name not in protocols:
+            if "commit_transition" in methods and name not in protocols:
                 implementations.append(f"{_module_name(path)}::{name}")
 
     assert implementations == [
@@ -255,6 +282,32 @@ def test_pa5_the_sqlite_store_is_the_only_intent_persistence(
 
     # And the concrete store satisfies the port it claims to implement.
     assert isinstance(store, PaperAutonomyRepositoryPort)
+
+
+def test_pa5b_only_the_authority_commits_a_transition() -> None:
+    """The operator surface reaches the store through the authority, or not at all.
+
+    One caller, in one module.  A second caller -- the CLI reaching for the
+    store directly, a composition root, a future host -- would be a second way
+    to write the intent, and the transition rules, the revision arithmetic and
+    the audit event would each have to be re-derived there.  The adapter defines
+    ``commit_transition``; it does not call one, so this stays exact.
+    """
+
+    callers: list[str] = []
+    for path in _SRC.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "commit_transition"
+            ):
+                callers.append(f"{_module_name(path)}:{node.lineno}")
+    assert [
+        caller.rsplit(":", 1)[0] for caller in callers
+    ] == ["us_quant.trading.application.paper_autonomy"], callers
 
 
 # =====================================================================
@@ -422,35 +475,61 @@ def test_pa8_the_kill_switch_cannot_be_bypassed(
     assert [event.revision for event in store.recent_events(10)] == [1, 2, 3, 4]
 
 
-def test_pa9_a_missing_row_is_disabled_and_never_enabled(
+def test_pa9_a_brand_new_store_is_disabled_and_never_enabled(
     store: SQLitePaperAutonomyRepository,
-    application: PaperAutonomyApplication,
 ) -> None:
-    """The default has to point away from trading."""
+    """The default has to point away from trading.
+
+    "Brand new" is the whole of the condition: no intent row *and* no history.
+    That is the only state in this store that means "nobody has ever decided
+    anything", and it is the only state that reads as the initial value.
+    """
 
     assert store.load_intent() == initial_intent()
     assert store.load_intent().mode is PaperAutonomyMode.DISABLED
     assert store.load_intent().kill_switch_latched is False
     assert store.load_intent().revision == INITIAL_REVISION
+    assert store.load_intent().allows_autonomous_work is False
+    assert store.recent_events(10) == ()
 
-    # And it stays that way if the row is destroyed underneath the store.  An
-    # absent record is indistinguishable from one that was never written, and
-    # that is the point: the *same* "nothing was authorised" answer comes back,
-    # never a mode the kill switch had latched away.
+
+def test_pa9b_an_orphaned_history_is_not_a_fresh_store(
+    store: SQLitePaperAutonomyRepository,
+    application: PaperAutonomyApplication,
+) -> None:
+    """A trail with no intent in front of it is corruption, not a clean slate.
+
+    An earlier version of this test asserted the opposite -- that deleting the
+    intent row left a readable ``DISABLED`` intent at revision 0 -- and that was
+    wrong in a way worth keeping on the record.  Revision 0 is a claim about
+    history ("nothing was ever authorised here"), and a store whose audit trail
+    already holds transitions has no standing to make it.  Reporting a fresh
+    default over an incomplete record is exactly how an operator ends up
+    re-authorising over the top of a kill switch they cannot see any more.
+
+    Every read fails, nothing is repaired, and the surviving event proves it.
+    """
+
     application.enable(INITIAL_REVISION, "operator authorises autonomy")
     _execute(store.path, "DELETE FROM paper_autonomy_intent")
 
-    assert store.load_intent().mode is PaperAutonomyMode.DISABLED
-    assert store.load_intent().allows_autonomous_work is False
+    with pytest.raises(PaperAutonomyStoreUnreadable):
+        store.load_intent()
+    with pytest.raises(PaperAutonomyStoreUnreadable):
+        application.snapshot()
+    # And a first write cannot be issued against it either: there is no
+    # "revision 0" left to compare against, so this is not a fresh store that a
+    # second authorisation could simply restart from.
+    with pytest.raises(PaperAutonomyStoreUnreadable):
+        application.enable(
+            INITIAL_REVISION, "re-authorise over an incomplete record"
+        )
 
-    # A writer that had seen the (now deleted) revision 1 cannot write over the
-    # absence, and the only write the store accepts is a first write against
-    # the initial revision -- which is an explicit operator decision, not a
-    # consequence of the row having gone missing.
-    with pytest.raises(PaperAutonomyConflict):
-        application.enable(1, "a stale surface authorises autonomy")
-
-    assert store.load_intent().allows_autonomous_work is False
+    # The transition that did happen is still on disk, unrepaired.  Deleting
+    # it, or regenerating it from the revision count, would be this store
+    # inventing a history instead of reporting that it has one it cannot read.
+    assert _stored_event_revisions(store.path) == [1]
+    assert _stored_intent_rows(store.path) == 0
 
 
 def test_pa10_the_intent_write_is_a_compare_and_swap(
@@ -472,7 +551,7 @@ def test_pa10_the_intent_write_is_a_compare_and_swap(
     # The port's contract names the expectation, so an adapter cannot satisfy
     # this protocol by last-write-wins.
     signature = inspect.signature(
-        PaperAutonomyRepositoryPort.compare_and_swap_intent
+        PaperAutonomyRepositoryPort.commit_transition
     )
     assert "expected_revision" in signature.parameters
 
@@ -569,3 +648,27 @@ def _execute(path: pathlib.Path, statement: str) -> None:
         connection.commit()
     finally:
         connection.close()
+
+
+def _stored_event_revisions(path: pathlib.Path) -> list[int]:
+    """Every stored event revision, read without going through the store."""
+
+    connection = sqlite3.connect(path)
+    try:
+        rows = connection.execute(
+            "SELECT revision FROM paper_autonomy_events ORDER BY revision"
+        ).fetchall()
+    finally:
+        connection.close()
+    return [int(row[0]) for row in rows]
+
+
+def _stored_intent_rows(path: pathlib.Path) -> int:
+    connection = sqlite3.connect(path)
+    try:
+        row = connection.execute(
+            "SELECT COUNT(*) FROM paper_autonomy_intent"
+        ).fetchone()
+    finally:
+        connection.close()
+    return int(row[0])

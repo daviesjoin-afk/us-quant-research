@@ -153,14 +153,57 @@ $mutations = @(
         select = @("-k", "stale_writer_is_refused_and_changes_nothing")
     },
 
-    # -- the audit trail -------------------------------------------------
+    # -- one transition, one commit ---------------------------------------
     @{
-        name = 'M7  the authority accepts a transition and records nothing'
-        file = $applicationAutonomy
-        find = 'self\._repository\.append_event\('
-        repl = "_skip_event_write = True`n        if not _skip_event_write:`n            self._repository.append_event("
+        name = 'M7  the store commits the intent without recording it'
+        file = $adapterAutonomy
+        find = 'VALUES \(\?, \?, \?, \?\)'
+        repl = 'SELECT ?, ?, ?, ? WHERE 0'
         tests = @($autonomyBehaviour)
         select = @("-k", "enable_advances_one_revision_and_records_one_event or the_event_trail_replays_the_revisions_in_order")
+    },
+    @{
+        name = 'M14 the intent is committed before the event insert'
+        file = $adapterAutonomy
+        find = 'connection\.execute\(\s+"""\s+INSERT INTO paper_autonomy_events\('
+        repl = "connection.execute(`"COMMIT`")`n                connection.isolation_level = None`n                connection.execute(`"BEGIN IMMEDIATE`")`n                connection.execute(`n                    `"`"`"`n                    INSERT INTO paper_autonomy_events("
+        tests = @($autonomyBehaviour)
+        select = @("-k", "failed_audit_write_rolls_the_intent_back")
+    },
+    @{
+        name = 'M17 the pair check ignores the event revision'
+        file = $adapterAutonomy
+        find = 'if event\.revision != replacement\.revision:'
+        repl = 'if False:'
+        tests = @($autonomyBehaviour)
+        select = @("-k", "refuses_a_pair_that_is_not_one_transition")
+    },
+    # -- the stored history has to describe the stored intent -------------
+    @{
+        name = 'M15 an orphaned history reads as a fresh revision 0'
+        file = $adapterAutonomy
+        find = 'if count:'
+        repl = 'if False:'
+        tests = @($autonomyArch)
+        select = @("-k", "orphaned_history_is_not_a_fresh_store")
+    },
+    @{
+        name = 'M18 a gap in the audit trail is accepted'
+        file = $adapterAutonomy
+        find = 'if count != revision or lowest != 1 or highest != revision:'
+        repl = 'if lowest != 1 or highest != revision:'
+        tests = @($autonomyBehaviour)
+        select = @("-k", "a_gap_in_the_audit_trail")
+    },
+
+    # -- a transition that did nothing is not a transition ----------------
+    @{
+        name = 'M16 clear-kill succeeds while the latch is already clear'
+        file = $applicationAutonomy
+        find = 'if not current\.kill_switch_latched:'
+        repl = 'if False:'
+        tests = @($autonomyBehaviour)
+        select = @("-k", "clear_kill_is_refused_when_the_latch_is_not_set")
     },
 
     # -- one truth -------------------------------------------------------

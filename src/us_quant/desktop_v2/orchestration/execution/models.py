@@ -171,9 +171,6 @@ class PaperFactsPort(Protocol):
     def runtime_active(self) -> bool: ...
 
     @property
-    def has_runtime_obligations(self) -> bool: ...
-
-    @property
     def presentation(self) -> object | None: ...
 
     @property
@@ -212,6 +209,16 @@ class ExecutionProviders:
     #: Repaint the history route after new gaps were queued.
     refresh_history: Callable[[], None]
 
+    # -- ambient reads -------------------------------------------------
+    #
+    # Everything below is a *read* of a fact another capability published, or a
+    # value this route owns the decision to consult.  The market entries are the
+    # whole of this route's market surface, and they are reads on purpose: a
+    # market *command* may only leave here as one of the four
+    # ``market_*_requested`` signals, because whether a stop or a switch is
+    # allowed depends on Paper and Shadow, which only composition may name.  A
+    # command smuggled in as a provider field would put that decision back
+    # inside this capability.
     market_snapshot: Callable[[], Any]
     market_is_live: Callable[[], bool]
     market_provider: Callable[[], str | None]
@@ -237,8 +244,6 @@ class ExecutionProviders:
     #: concrete port, client id, timeout, repository and service call live in
     #: the composition root; admission, the flag and the reporting stay here.
     probe_order_channel: Callable[[], object]
-    #: The window's market-stop interlock, which may name Paper and Shadow.
-    stop_market_data: Callable[[], bool]
 
     #: The Paper order capability preference, and the 5x24 preference.
     paper_capability_enabled: Callable[[], bool]

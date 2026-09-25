@@ -164,19 +164,96 @@ _FORBIDDEN_MODULE_PATHS = (
     "us_quant.trading.composition",
 )
 
-#: The six Paper seams the route is allowed to use, matching ``PaperFactsPort``.
+#: Every member ``PaperFactsPort`` declares, and therefore the whole of the Paper
+#: surface the route may touch: the three delegated queries it has always had,
+#: plus G2-B's six narrow preparation seams.
+#:
+#: Note what is absent from G2-B's review fix onwards: ``has_runtime_obligations``.
+#: The route used to read it to decide whether a market stop was allowed, which
+#: made the Paper -> Market interlock a capability decision; choosing to stop is
+#: composition's, so the route may not even ask.
 _PAPER_SEAMS = {
     "preparation_active",
     "launch_attempt_in_flight",
     "order_service_held",
     "runtime_active",
-    "has_runtime_obligations",
     "presentation",
     "session_control_facts",
     "begin_preparation",
     "cancel_preparation",
     "mark_preparation_ready",
 }
+
+#: Every field the route's provider group may carry, enumerated and frozen.
+#:
+#: This is an *allowlist of the whole surface*, not a denylist of command names.
+#: The G2-B review found the difference the hard way: the earlier guard banned
+#: the guessed names ``start_market`` / ``stop_market`` / ``switch_market`` /
+#: ``set_subscription_symbols``, and ``stop_market_data`` walked straight through
+#: it while carrying a Paper fact into a Market command.  A name-based ban can
+#: always be evaded by renaming; a frozen surface cannot.  Adding a field -- under
+#: any name -- now has to be a deliberate edit here, which is exactly the moment
+#: to ask whether the fact belongs to composition instead.
+#: The market-facing provider fields, and every one of them is a read.
+_MARKET_READ_PROVIDER_FIELDS = {
+    "market_snapshot",
+    "market_is_live",
+    "market_provider",
+    "was_recently_ready",
+    "recently_ready_symbols",
+}
+
+#: The route's own provider-backed actions.  This route decides *when* a scan
+#: runs and *when* the order channel is probed, and neither is a cross-capability
+#: interlock -- one reads the research pool, the other opens a read-only probe.
+#: They are named here so the market-name rule below can tell them apart from a
+#: Market *lifecycle* command.
+_ROUTE_OWNED_PROVIDER_ACTIONS = {
+    "run_market_scan",
+    "probe_order_channel",
+}
+
+_ALLOWED_PROVIDER_FIELDS = (
+    _ROUTE_OWNED_PROVIDER_ACTIONS
+    | _MARKET_READ_PROVIDER_FIELDS
+    | {
+        # Facts other capabilities own, read when needed and never cached.
+        "universe",
+        "scan",
+        "adopt_scan",
+        "schedule_history",
+        "refresh_history",
+        "account_portfolio",
+        "fresh_paper_capital",
+        "broker_state",
+        "reconciliation_rows",
+        "audit_rows",
+        "latency_rows",
+        "exposure_multipliers",
+        "research_scenario_capital",
+        "maximum_position_exposure_pct",
+        "paper_capability_enabled",
+        "extended_hours_enabled",
+    }
+)
+
+#: The four market commands.  Each is a signal, because each one is gated by a
+#: Paper or Shadow fact this route may not read.
+_MARKET_REQUEST_SIGNALS = {
+    "market_start_requested",
+    "market_switch_requested",
+    "market_subscription_requested",
+    "market_stop_requested",
+}
+
+#: The composition bridge that owns the stop interlock, and the capabilities it
+#: is the only thing allowed to name at once.
+_STOP_BRIDGE = "_on_execution_market_stop_requested"
+_STOP_BRIDGE_KNOWS = (
+    "paper_orchestrator",
+    "shadow_orchestrator",
+    "market_orchestrator",
+)
 
 #: The state the execution orchestrator is allowed to keep.  Five injected
 #: handles and three route-local facts -- nothing that belongs to a capability.
@@ -713,35 +790,148 @@ def test_the_governance_route_still_cannot_repoint_auto_rotation() -> None:
 # -- 11: the market interlock stays in composition -----------------------
 
 
-def test_the_market_interlock_still_lives_in_the_composition_root() -> None:
-    window = _window_methods()
-    for name in ("_stop_market_data", "_request_market_switch"):
-        assert name in window, name
-    # The route asks; the window decides.  It names no market object at all, and
-    # the providers it is given are reads -- a market *command* would have to be
-    # a provider field, so its absence is the interlock's absence.
-    names = _self_attribute_names(
-        _EXECUTION_ORCHESTRATOR, "ExecutionOrchestrator"
-    )
-    assert "market_orchestrator" not in names
+def _provider_fields() -> set[str]:
     providers = _class_node(_tree(_EXECUTION_MODELS), "ExecutionProviders")
-    fields = {
+    return {
         member.target.id
         for member in providers.body
         if isinstance(member, ast.AnnAssign)
         and isinstance(member.target, ast.Name)
     }
-    for command in (
-        "start_market",
-        "stop_market",
-        "switch_market",
-        "set_subscription_symbols",
-    ):
-        assert command not in fields, command
-    source = _EXECUTION_ORCHESTRATOR.read_text(encoding="utf-8")
-    assert "market_start_requested.emit()" in source
-    assert "market_switch_requested.emit(" in source
-    assert "market_subscription_requested.emit(" in source
+
+
+def _signal_names(path: pathlib.Path, class_name: str) -> set[str]:
+    node = _class_node(_tree(path), class_name)
+    return {
+        member.targets[0].id
+        for member in node.body
+        if isinstance(member, ast.Assign)
+        and isinstance(member.targets[0], ast.Name)
+        and isinstance(member.value, ast.Call)
+        and isinstance(member.value.func, ast.Name)
+        and member.value.func.id == "Signal"
+    }
+
+
+def test_the_provider_surface_is_frozen_and_command_free() -> None:
+    """No market command may hide in the provider group -- under any name.
+
+    The review fix's whole point: the previous guard banned four *guessed* names
+    and missed ``stop_market_data``.  The surface is now enumerated, so any
+    addition fails here whatever it is called.
+    """
+
+    fields = _provider_fields()
+    assert fields == _ALLOWED_PROVIDER_FIELDS, sorted(
+        fields ^ _ALLOWED_PROVIDER_FIELDS
+    )
+    assert "stop_market_data" not in fields
+    assert _MARKET_READ_PROVIDER_FIELDS <= fields
+    # Nothing else may carry a market name in any spelling, so a renamed market
+    # command fails here even before the frozen-surface check above is updated.
+    reads = _MARKET_READ_PROVIDER_FIELDS | _ROUTE_OWNED_PROVIDER_ACTIONS
+    for field in sorted(fields - reads):
+        assert "market" not in field.lower(), field
+
+
+def test_the_market_interlock_still_lives_in_the_composition_root() -> None:
+    window = _window_methods()
+    for name in ("_stop_market_data", "_request_market_switch"):
+        assert name in window, name
+    # The route names no market object at all.
+    names = _self_attribute_names(
+        _EXECUTION_ORCHESTRATOR, "ExecutionOrchestrator"
+    )
+    assert "market_orchestrator" not in names
+    assert "market_orchestrator" not in _EXECUTION_ORCHESTRATOR.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_request_stop_stream_only_publishes_the_request() -> None:
+    """The route asks; it does not read Paper, decide, or stop anything."""
+
+    body = _method_source(_tree(_EXECUTION_ORCHESTRATOR), "request_stop_stream")
+    assert "market_stop_requested.emit()" in body
+    # No Paper fact, no provider call, no market call, no presentation.
+    assert "_paper" not in body
+    assert "has_runtime_obligations" not in body
+    assert "obligations" not in body
+    assert "_providers" not in body
+    assert "render_context" not in body
+    assert "information_requested" not in body
+    # Exactly one statement: one emit.
+    statements = [
+        statement
+        for statement in _statements_without_docstring(
+            _methods(
+                _class_node(_tree(_EXECUTION_ORCHESTRATOR), "ExecutionOrchestrator")
+            )["request_stop_stream"]
+        )
+    ]
+    assert len(statements) == 1, ast.unparse(statements)
+
+
+def test_the_stop_outcome_is_presentation_only() -> None:
+    """The route draws the refusal and the completed stop; it decides neither."""
+
+    refused = _method_source(_tree(_EXECUTION_ORCHESTRATOR), "on_market_stop_refused")
+    assert "STOP_STREAM_BLOCKED_TITLE" in refused
+    assert "STOP_STREAM_BLOCKED_MESSAGE" in refused
+    assert "information_requested.emit" in refused
+    stopped = _method_source(_tree(_EXECUTION_ORCHESTRATOR), "on_market_stopped")
+    assert "STOP_STREAM_SUMMARY" in stopped
+    assert "render_context" in stopped
+    for body in (refused, stopped):
+        assert "_paper" not in body
+        assert "_providers" not in body
+
+
+def test_the_execution_stop_bridge_owns_the_interlock() -> None:
+    """One composition bridge knows Paper, Shadow and Market at the same time."""
+
+    assert _STOP_BRIDGE in _window_methods(), _STOP_BRIDGE
+    bridge = _method_source(_tree(_DESKTOP), _STOP_BRIDGE)
+    for owner in _STOP_BRIDGE_KNOWS:
+        assert owner in bridge, owner
+    # The Paper answer comes first, and it short-circuits.
+    assert bridge.index("has_runtime_obligations") < bridge.index(
+        "market_orchestrator.stop()"
+    )
+    assert "on_market_stop_refused()" in bridge
+    assert "on_market_stopped()" in bridge
+    # Shadow is taken down before Market, and only Market's own verdict decides
+    # whether the route is told the stop happened.
+    assert bridge.index("shadow_orchestrator.stop()") < bridge.index(
+        "market_orchestrator.stop()"
+    )
+    assert "is_active" in bridge
+    # The bridge is wired to the request signal, and to nothing else.
+    wiring = _method_source(_tree(_DESKTOP), "_connect_execution_page")
+    assert "market_stop_requested.connect(" in wiring
+    assert f"self.{_STOP_BRIDGE}" in wiring
+
+
+def test_the_four_market_commands_are_requests() -> None:
+    """Four signals, four composition consumers, no fifth provider command."""
+
+    signals = _signal_names(_EXECUTION_ORCHESTRATOR, "ExecutionOrchestrator")
+    assert _MARKET_REQUEST_SIGNALS <= signals, sorted(
+        _MARKET_REQUEST_SIGNALS - signals
+    )
+    wiring = _method_source(_tree(_DESKTOP), "_connect_execution_page")
+    for name in sorted(_MARKET_REQUEST_SIGNALS):
+        assert f"execution.{name}.connect(" in wiring, name
+    # The route's public API names no market mutating verb as a method.
+    methods = _methods(
+        _class_node(_tree(_EXECUTION_ORCHESTRATOR), "ExecutionOrchestrator")
+    )
+    for name in sorted(methods):
+        lowered = name.lower()
+        assert not (
+            lowered.startswith(("start_market", "stop_market", "switch_market"))
+        ), name
+        assert "subscription" not in lowered, name
 
 
 def test_the_market_interlock_still_reads_paper_and_shadow() -> None:

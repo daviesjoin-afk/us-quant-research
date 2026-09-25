@@ -2841,24 +2841,47 @@ preparation + 释放 busy + 不发布假 shortlist；channel probe 单飞、Pape
 `confirm_start(accepted)` 返回——**确认不等于授权**，`PaperOrchestrator.start()`
 仍重跑 canonical preflight 与全部安全门。Paper 的 retained presentation 只允许
 render 读：guard 锁死整个包内只有 `refresh_current` 一个读者，launch lock 只由
-Paper 的窄 seam 加本地两个 flag 决定；Market 的 stop / switch interlock 仍在
+Paper 的窄 seam 加本地两个 flag 决定；Market 的 stop / switch interlock 完全在
 composition root，Execution 只发 `market_start_requested` /
-`market_switch_requested` / `market_subscription_requested` 三类请求。
+`market_switch_requested` / `market_subscription_requested` /
+`market_stop_requested` 四类请求。
 
-Guards：`tests/test_desktop_execution_architecture.py` 30 条（窗口无 route state /
+**PR review 发现的 ownership blocker（已修）**：初版把 stop interlock 一半留在
+provider —— `ExecutionProviders.stop_market_data` 注入窗口的
+`_stop_market_data`，而窗口和 route 又各自读一次
+`PaperFactsPort.has_runtime_obligations`，于是 capability 实际上参与了
+「Paper fact → Market command」的跨能力判定。修复后：route 的
+`request_stop_stream()` **只** `market_stop_requested.emit()`；
+`has_runtime_obligations` 从 `PaperFactsPort` 删除；`stop_market_data` 从
+provider 表面删除；新增 composition bridge
+`MainWindow._on_execution_market_stop_requested()`，它是唯一同时知道 Paper /
+Shadow / Market 的地方（Paper obligations 先判并短路 → Shadow active 先停 →
+`market_orchestrator.stop()` → 按返回值把 outcome 交回 route），route 侧只新增
+`on_market_stop_refused()` / `on_market_stopped()` 两个纯呈现方法，操作员可见
+文案与顺序逐字保留。`_stop_market_data` 本身保留（Market page 停止意图、自动
+切换、close 路径仍在用）。
+
+Guards：`tests/test_desktop_execution_architecture.py` 35 条（窗口无 route state /
 窗口只给页面 palette / orchestrator 是唯一 orchestration caller /
 `set_strategy_options` 三个 page 三个 owner / 零 capability import / 零 Paper 类型 /
 零 risk-execution-broker 词汇 / state 恰好三项 / shortlist 唯一 owner / presentation
-只读一处 / Paper port 面恰好六 seam / generic task 不触 route / selection service
-仍是 truth / Market interlock 仍在 composition / G1-G2A-F1-F2 零回退 / 无 god
-object）。行为测试 `tests/test_desktop_execution_orchestration.py` 67 项（真实
+只读一处 / Paper port 面与 `PaperFactsPort` 声明完全一致（三个既有 delegated
+query 加本轮六个窄 seam，`has_runtime_obligations` 已不在其中）/ generic task
+不触 route / selection service
+仍是 truth / **provider 表面整体枚举冻结且不含 market 命令** /
+**`request_stop_stream` 只发一个请求** / **两个 outcome 方法只做呈现** /
+**stop bridge 必须同时命名 Paper-Shadow-Market 且顺序正确** / G1-G2A-F1-F2 零回退 /
+无 god object）。行为测试 `tests/test_desktop_execution_orchestration.py` 75 项（真实
 `ExecutionPage` + fake selection / Paper port / provider 组 / 同步 task 边界），覆盖
 selection 四态、preflight 现读与 arm 排除、reference symbol 归一化、准备六条拒绝
 路径、scan 成功/失败、capital 缩小规则、`<3` 不 READY、channel probe 五种状态、
-launch confirmation 两态、stop-stream 两态、render 路径与无缓存、Paper 三条发布、
+launch confirmation 两态、stop 请求与两种 outcome 的呈现、**composition 拒绝 /
+成功 / Shadow 先停顺序 / 失败不报成功四态**、render 路径与无缓存、Paper 三条发布、
 以及两个窗口级事实（无关 task 失败 / 无关 worker 完成都不触 route）。Mutation：
-`scripts/mutation_execution_autoquant_g2b.ps1` **31 个 mutant 全部 RED**
-（0 survived / 0 harness-error）。
+`scripts/mutation_execution_autoquant_g2b.ps1` **35 个 mutant 全部 RED**
+（0 survived / 0 harness-error），其中 M33 / M34 / M35 分别复现 review 发现的
+「route 重新读 obligations 判定」「Market stop seam 回流 provider 表面」
+「bridge 跳过 Paper interlock」；M34 正是旧名字型 denylist 漏掉的那个 seam。
 
 设计依据见 `DESKTOP_DECOMPOSITION.md` §35。
 

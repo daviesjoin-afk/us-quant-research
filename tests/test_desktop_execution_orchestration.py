@@ -37,6 +37,7 @@ unrelated background task failing or finishing must not touch this route.
 
 from __future__ import annotations
 
+import inspect
 import os
 import pathlib
 import sys
@@ -266,7 +267,6 @@ class FakePaper:
         self.launch_attempt_in_flight = False
         self.order_service_held = False
         self.runtime_active = False
-        self.has_runtime_obligations = False
         self.presentation: object | None = None
         self.session_control_facts = _ControlFacts()
         self.transitions: list[str] = []
@@ -369,8 +369,6 @@ class Harness:
         self.extended_hours_enabled = False
         self.probe_result: object = _probe_result()
         self.probe_calls: list[int] = []
-        self.stop_market_calls: list[int] = []
-        self.stop_market_result = True
         self.adopted: list[object] = []
         self.scheduled: list[object] = []
         self.history_refreshes: list[int] = []
@@ -418,6 +416,9 @@ class Harness:
         self.orchestrator.market_subscription_requested.connect(
             lambda symbols: self.market_events.append(("subscribe", symbols))
         )
+        self.orchestrator.market_stop_requested.connect(
+            lambda: self.market_events.append(("stop", None))
+        )
         self.orchestrator.market_readiness_inputs_changed.connect(
             self.readiness.append
         )
@@ -450,7 +451,6 @@ class Harness:
             research_scenario_capital=lambda: self.research_capital,
             maximum_position_exposure_pct=lambda: self.max_position_pct,
             probe_order_channel=self._probe,
-            stop_market_data=self._stop_market,
             paper_capability_enabled=lambda: self.paper_capability_enabled,
             extended_hours_enabled=lambda: self.extended_hours_enabled,
         )
@@ -467,10 +467,6 @@ class Harness:
     def _probe(self) -> object:
         self.probe_calls.append(1)
         return self.probe_result
-
-    def _stop_market(self) -> bool:
-        self.stop_market_calls.append(1)
-        return self.stop_market_result
 
     # -- conveniences --------------------------------------------------
     def prepare_successfully(self) -> None:
@@ -1120,32 +1116,213 @@ def test_consent_is_not_authorization(harness: Harness) -> None:
     assert harness.paper.transitions == []
 
 
-# -- the stop-stream control --------------------------------------------
+# -- the stop request, and the outcome composition hands back -------------
 
 
-def test_stopping_the_stream_is_refused_under_obligations(
-    harness: Harness,
-) -> None:
-    harness.paper.has_runtime_obligations = True
+def test_the_stop_request_is_only_a_request(harness: Harness) -> None:
+    """A: one signal, and no Paper fact, provider call or render of its own.
+
+    The route may not know whether a stop is *allowed* -- that depends on Paper
+    and Shadow -- so this must be exactly one emit and nothing else.
+    """
+
     harness.orchestrator.request_stop_stream()
-    assert harness.stop_market_calls == []
-    assert harness.information[-1][0] == (
-        execution_models.STOP_STREAM_BLOCKED_TITLE
-    )
-
-
-def test_stopping_the_stream_reports_the_result(harness: Harness) -> None:
-    harness.orchestrator.request_stop_stream()
-    assert harness.stop_market_calls == [1]
-    assert harness.page.last("render_context")[2]["summary"] == (
-        execution_models.STOP_STREAM_SUMMARY
-    )
-
-
-def test_a_refused_market_stop_says_nothing(harness: Harness) -> None:
-    harness.stop_market_result = False
-    harness.orchestrator.request_stop_stream()
+    assert harness.market_events == [("stop", None)]
     assert harness.page.count("render_context") == 0
+    assert harness.information == []
+    assert harness.log == []
+    assert harness.page.count("render_execution_health") == 0
+
+
+def test_the_stop_seam_is_gone_from_the_paper_port() -> None:
+    """E: the obligation fact is not merely unused, it is unavailable."""
+
+    from us_quant.desktop_v2.orchestration.execution import models
+
+    assert not hasattr(models.PaperFactsPort, "has_runtime_obligations")
+    assert "has_runtime_obligations" not in vars(models.PaperFactsPort)
+    # The check is looking at the real port, not at an empty one.
+    assert "runtime_active" in vars(models.PaperFactsPort)
+    # And nothing in the package reads it, under any spelling.
+    for path in sorted(
+        pathlib.Path(execution_orchestrator.__file__).parent.glob("*.py")
+    ):
+        assert "has_runtime_obligations" not in path.read_text(
+            encoding="utf-8"
+        ), path.name
+
+
+def test_a_refused_stop_is_presented_not_decided(harness: Harness) -> None:
+    """The refusal copy is the route's; the decision was composition's."""
+
+    harness.orchestrator.on_market_stop_refused()
+    assert harness.information == [
+        (
+            execution_models.STOP_STREAM_BLOCKED_TITLE,
+            execution_models.STOP_STREAM_BLOCKED_MESSAGE,
+        )
+    ]
+    # The operator-visible title is unchanged by the round that moved the call.
+    assert execution_models.STOP_STREAM_BLOCKED_TITLE == "请先停止模拟下单"
+    assert harness.market_events == []
+
+
+def test_a_completed_stop_is_presented(harness: Harness) -> None:
+    harness.orchestrator.on_market_stopped()
+    assert harness.page.last("render_context")[2] == {
+        "summary": execution_models.STOP_STREAM_SUMMARY
+    }
+
+
+def test_the_outcome_methods_touch_no_capability() -> None:
+    """Neither outcome method may consult a capability or a provider."""
+
+    for name in ("on_market_stop_refused", "on_market_stopped"):
+        source = inspect.getsource(
+            getattr(execution_orchestrator.ExecutionOrchestrator, name)
+        )
+        assert "_paper" not in source, name
+        assert "_providers" not in source, name
+        assert "has_runtime_obligations" not in source, name
+
+
+# -- composition owns the interlock --------------------------------------
+
+
+def _stop_recorders(window, monkeypatch) -> list[str]:
+    """Record every actor the stop path can reach, in the order it ran."""
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        window.market_orchestrator,
+        "stop",
+        lambda *args, **kwargs: (calls.append("market"), True)[1],
+    )
+    monkeypatch.setattr(
+        window.shadow_orchestrator, "stop", lambda: calls.append("shadow")
+    )
+    monkeypatch.setattr(
+        window.execution_orchestrator,
+        "on_market_stop_refused",
+        lambda: calls.append("refused"),
+    )
+    monkeypatch.setattr(
+        window.execution_orchestrator,
+        "on_market_stopped",
+        lambda: calls.append("stopped"),
+    )
+    return calls
+
+
+def _patch_property(monkeypatch, instance, name: str, value: object) -> None:
+    monkeypatch.setattr(type(instance), name, property(lambda self: value))
+
+
+def test_composition_refuses_the_stop_when_paper_has_obligations(
+    window, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B: neither Market nor Shadow is touched, and the route is told."""
+
+    calls = _stop_recorders(window, monkeypatch)
+    _patch_property(
+        monkeypatch, window.paper_orchestrator, "has_runtime_obligations", True
+    )
+
+    window.execution_page.stop_stream_requested.emit()
+
+    assert calls == ["refused"]
+    assert window.paper_orchestrator.has_runtime_obligations is True
+
+
+def test_the_refusal_copy_reaches_the_operator(
+    window, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[str, str]] = []
+    window.execution_orchestrator.information_requested.connect(
+        lambda title, message: seen.append((title, message))
+    )
+    _patch_property(
+        monkeypatch, window.paper_orchestrator, "has_runtime_obligations", True
+    )
+
+    window.execution_page.stop_stream_requested.emit()
+
+    assert seen == [
+        (
+            execution_models.STOP_STREAM_BLOCKED_TITLE,
+            execution_models.STOP_STREAM_BLOCKED_MESSAGE,
+        )
+    ]
+    assert seen[0][0] == "请先停止模拟下单"
+
+
+def test_composition_stops_market_and_reports_it(
+    window, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C: no obligations, no Shadow -> Market once, and the route is told once."""
+
+    market_calls: list[str] = []
+    monkeypatch.setattr(
+        window.market_orchestrator,
+        "stop",
+        lambda *args, **kwargs: (market_calls.append("market"), True)[1],
+    )
+    _patch_property(
+        monkeypatch, window.paper_orchestrator, "has_runtime_obligations", False
+    )
+    _patch_property(monkeypatch, window.shadow_orchestrator, "is_active", False)
+    rendered: list[dict] = []
+    real = window.execution_page.render_context
+    monkeypatch.setattr(
+        window.execution_page,
+        "render_context",
+        lambda **lines: (rendered.append(dict(lines)), real(**lines))[1],
+    )
+
+    window.execution_page.stop_stream_requested.emit()
+
+    assert market_calls == ["market"]
+    assert rendered == [{"summary": execution_models.STOP_STREAM_SUMMARY}]
+
+
+def test_composition_takes_shadow_down_before_market(
+    window, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D: the order is the contract, so it is asserted."""
+
+    calls = _stop_recorders(window, monkeypatch)
+    _patch_property(
+        monkeypatch, window.paper_orchestrator, "has_runtime_obligations", False
+    )
+    _patch_property(monkeypatch, window.shadow_orchestrator, "is_active", True)
+
+    window.execution_page.stop_stream_requested.emit()
+
+    assert calls == ["shadow", "market", "stopped"]
+
+
+def test_a_failed_market_stop_is_not_reported_as_stopped(
+    window, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        window.market_orchestrator,
+        "stop",
+        lambda *args, **kwargs: (calls.append("market"), False)[1],
+    )
+    monkeypatch.setattr(
+        window.execution_orchestrator,
+        "on_market_stopped",
+        lambda: calls.append("stopped"),
+    )
+    _patch_property(
+        monkeypatch, window.paper_orchestrator, "has_runtime_obligations", False
+    )
+    _patch_property(monkeypatch, window.shadow_orchestrator, "is_active", False)
+
+    window.execution_page.stop_stream_requested.emit()
+
+    assert calls == ["market"]
 
 
 # -- T / U: the render path ---------------------------------------------

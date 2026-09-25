@@ -35,6 +35,9 @@ What it deliberately does not own:
 * **the Market interlock.**  A start, a switch, a subscription and a stop are
   *requested*; the window applies the Paper and Shadow gates and calls the
   market capability, because only composition may name two capabilities at once.
+  The stop is the sharpest case: this route does not read ``Paper``'s runtime
+  obligations at all, so it cannot know whether a stop is allowed -- it asks, and
+  the window answers with a refusal or a completed stop for it to present.
 * **dialogs and the shell.**  Every refusal and every log line is requested.
   The launch confirmation in particular is asked for and answered back, so the
   operator's consent is collected by the window while the *decision* stays here.
@@ -126,10 +129,14 @@ class ExecutionOrchestrator(QObject):
     paper_start_requested = Signal()
 
     #: Market commands, as *requests*: the window applies the Paper / Shadow
-    #: interlocks and reaches the market capability itself.
+    #: interlocks and reaches the market capability itself.  There are four of
+    #: them and there will not be a fifth smuggled in as a provider field -- a
+    #: stop is refused while a Paper session has obligations, and this route may
+    #: not even *ask* that question, let alone answer it.
     market_start_requested = Signal()
     market_switch_requested = Signal(str)
     market_subscription_requested = Signal(object)
+    market_stop_requested = Signal()
 
     #: The cross-domain symbols the market readiness card must classify.  Emitted
     #: as a finished fact so the window turns it into a market input without
@@ -619,15 +626,31 @@ class ExecutionOrchestrator(QObject):
         self.market_start_requested.emit()
 
     def request_stop_stream(self) -> None:
-        """Stop the feed, unless a Paper session still has obligations."""
+        """Ask for the feed to be stopped.  Say nothing else.
 
-        if self._paper.has_runtime_obligations:
-            self.information_requested.emit(
-                STOP_STREAM_BLOCKED_TITLE, STOP_STREAM_BLOCKED_MESSAGE
-            )
-            return
-        if self._providers.stop_market_data():
-            self._page.render_context(summary=STOP_STREAM_SUMMARY)
+        Whether a stop is *allowed* is not this route's question: stopping the
+        feed under a live Paper session would strand its positions and orders,
+        and stopping the internal Shadow book is a Shadow decision -- so the
+        Paper and Shadow facts the answer depends on may only be read by
+        composition.  This method therefore publishes one request and returns;
+        the window reads those facts, applies the interlocks, calls the market
+        capability, and hands the *outcome* back through
+        :meth:`on_market_stop_refused` / :meth:`on_market_stopped`.
+        """
+
+        self.market_stop_requested.emit()
+
+    def on_market_stop_refused(self) -> None:
+        """Draw the refusal composition decided on.  Presentation only."""
+
+        self.information_requested.emit(
+            STOP_STREAM_BLOCKED_TITLE, STOP_STREAM_BLOCKED_MESSAGE
+        )
+
+    def on_market_stopped(self) -> None:
+        """Draw a stop that actually happened.  Presentation only."""
+
+        self._page.render_context(summary=STOP_STREAM_SUMMARY)
 
     # -- launch ---------------------------------------------------------
 

@@ -5697,10 +5697,16 @@ backtest / targeted 各一个，窗口一个都不是。
   两个 flag 决定，从不读 presentation、从不比较 phase（窗口与 execution 包内
   `PaperWorkflowPhase` / `.phase()` 出现次数均为 0）。
 - **Market 命令只是请求**：`market_start_requested` /
-  `market_switch_requested(provider)` / `market_subscription_requested(symbols)`
-  三类信号由窗口施加既有 Paper / Shadow interlock 后调用 MarketOrchestrator；
-  execution 包不出现 `market_orchestrator` 标识符，providers 里也没有任何
-  market 写命令字段（guard 逐字段检查）。
+  `market_switch_requested(provider)` / `market_subscription_requested(symbols)` /
+  `market_stop_requested` 四类信号由窗口施加既有 Paper / Shadow interlock 后
+  调用 MarketOrchestrator；execution 包不出现 `market_orchestrator` 标识符，
+  providers 里也没有任何 market 写命令字段（guard 把**整个 provider 表面枚举
+  冻结**，任何新增字段都失败）。stop 是最锋利的一例：route **不读**
+  `PaperFactsPort.has_runtime_obligations`——该 seam 本轮已从 port 删除——所以它
+  根本不知道停止是否被允许，只能发请求；窗口 `_on_execution_market_stop_requested`
+  读 Paper obligations、必要时先停 Shadow、再调 `market_orchestrator.stop()`，
+  然后把结果经 `on_market_stop_refused()` / `on_market_stopped()` 交回 route 做
+  呈现。
 - **Paper 三条发布**：`result_changed` → `on_paper_result_changed`（只 render +
   refresh controls，不存任何东西）、`presentation_refresh_requested` →
   `refresh_controls`、`session_finalized` → `on_paper_session_finalized`（安全
@@ -5771,7 +5777,7 @@ late-bound callable，没有任何一个能在 `__init__` 返回前被调用）�
 
 ### 35.6 Guards、行为测试与 mutation
 
-`tests/test_desktop_execution_architecture.py` 30 条 AST guard：
+`tests/test_desktop_execution_architecture.py` 35 条 AST guard：
 窗口无 route state（无 `auto_quant_candidates` / `_launch_busy` /
 `_channel_check_inflight`，无同名 method，无 forwarding property）；窗口不调任何
 execution page orchestration API 且只给 palette；每个 page API 的
@@ -5784,11 +5790,14 @@ writer + `candidates` 只读；`_build_shortlist` 只用 `queries.build_candidat
 完全一致；preparation 三转移确有代理、包内无 `.phase`；launch lock 不含
 shortlist；generic task failure / worker release 不触 route；两个 route task 都
 自带 `on_failure` 释放；selection service 仍是 truth 且 combo 不是；governance
-仍不触 AUTO_ROTATION；Market interlock 仍在 composition 且 providers 无 market
-写命令；G1 / G2-A / F1 / F2 零回退；无 god object；providers 逐字段必须是
-callable。
+仍不触 AUTO_ROTATION；Market interlock 仍在 composition，provider 表面被整体
+枚举冻结（新增任何字段都失败，且带 market 名字的字段必须在只读白名单里），
+`request_stop_stream` 只发一个请求、两个 outcome 方法只做呈现，
+composition bridge `_on_execution_market_stop_requested` 必须同时命名 Paper /
+Shadow / Market；G1 / G2-A / F1 / F2 零回退；无 god object；providers 逐字段
+必须是 callable。
 
-`tests/test_desktop_execution_orchestration.py` 67 项行为测试：真实
+`tests/test_desktop_execution_orchestration.py` 75 项行为测试：真实
 `ExecutionPage`（counting subclass）+ fake selection service / fake Paper port
 （三个转移真的会移动 `preparation_active`）/ recording provider 组 / 同步 task
 边界（admit / defer / fail 三态）。覆盖 selection 四态、combo 从 service 重填、
@@ -5801,7 +5810,7 @@ presentation 现读不缓存、快照不驻留）、extended-hours / scope 归�
 发布，以及两个窗口级事实：无关 task 失败不改 route 的任何 state、无关 worker
 完成不重绘 route。
 
-`scripts/mutation_execution_autoquant_g2b.ps1`：**31 个 mutant 全部 RED**
+`scripts/mutation_execution_autoquant_g2b.ps1`：**35 个 mutant 全部 RED**
 （0 survived / 0 harness-error）。M1/M2 窗口重新持有 launch-busy / shortlist、
 M3 窗口加 shortlist property、M4 窗口直 render 页面、M5 无关 task 失败清
 lock、M6 无关 worker 完成重绘 route、M7/M8 缓存 market snapshot / Paper
@@ -5811,7 +5820,16 @@ M16 `<3` 仍 READY、M17 reference 进候选、M18 重复 probe、M19 lock 忽�
 flag、M20 拒绝后仍启动、M21 combo 取代 service、M22 失败不释放 busy、M23 未接纳
 不收回 PREPARING、M24 不发布 readiness、M25 finalized 不清 arm、M26 已占通道仍
 probe、M27/M28 不排历史 / 不 adopt scan、M29 不 retain shortlist、M30 引入
-`ExecutionManager`、M31 provider 改收 capability 句柄。
+`ExecutionManager`、M31 provider 改收 capability 句柄、M32 adopt 先于校验。
+
+**M33 / M34 / M35 针对 PR review 发现的 ownership blocker**（market stop
+interlock 没有完全留在 composition root）：M33 让 `request_stop_stream` 重新读
+`self._paper.has_runtime_obligations` 来判定；M34 把一个 Market stop seam
+（`stop_market_data`）重新加回 `ExecutionProviders`；M35 让 composition bridge
+跳过 Paper interlock 直接停 Market。三个都 RED —— 其中 M34 正是**旧 guard 漏检
+的那个 seam**：旧 guard 只禁 `start_market` / `stop_market` / `switch_market` /
+`set_subscription_symbols` 四个猜出来的名字，`stop_market_data` 因此逃过检查；
+现在 provider 表面是**整体枚举冻结**，任何新增字段（无论叫什么）都会失败。
 
 历史 harness 重跑（`desktop.py` 与 execution 包都有改动 ⇒ 全部重跑）：
 e2（13）/ e3（41）/ e4（11）/ F1（14）/ F2（22）/ G1（17）/ G2-A（12）全部
@@ -5888,6 +5906,14 @@ truth、也不是 route orchestration**；记录在案，不构成 G2-C owner �
 **J private reach-through（不允许）**：**清零**。窗口不再读 worker list、不再读
 broker 内部、不再读 workflow phase、不再直接 render 任何 route page（除
 `set_palette` 与构造期 RiskPage 静态渲染）。
+
+**Review 修复后重新确认（market stop ownership）**：H / I / J 仍归零。修复把
+「读 Paper obligations 决定是否停 Market」这一 route-specific 判定从 execution
+capability 退回 composition bridge，因此 H 的 `PaperWorkflowPhase` / `.phase()` 计数
+仍为 0，且 execution 包与 `PaperFactsPort` 都不再出现 `has_runtime_obligations`；
+`_stop_market_data` 本身是合法的 cross-capability composition interlock（Market
+page 的停止意图、自动切换、close 路径都在用），保留在窗口，只是**不再**被
+execution route 经 provider 间接调用。没有产生新的 concrete owner 问题。
 
 **顺带发现（不是 ownership 问题，也不是 G2-B 引入）**：四个窗口私有方法在
 `main` 上就没有任何调用点——`_sync_strategy_combo`、`_configure_combo_width`、

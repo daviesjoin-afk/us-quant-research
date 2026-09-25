@@ -357,6 +357,34 @@ $mutations = @(
         repl = "        result = result`n"
         tests = @($scannerWiring, $behaviour)
         select = @("-k", "autoquant_finish_rejects_a_wrong_type or unexpected_result_never_reaches_the_capability")
+    },
+    #: The three below reproduce the ownership blocker the PR review found: the
+    #: route deciding, and commanding, a Market stop through a Paper fact and a
+    #: provider seam.  M33 is the decision half, M34 the seam half, M35 the
+    #: composition interlock being bypassed.
+    @{
+        name = 'M33 the route reads Paper obligations to decide a stop again'
+        file = $orchestratorPath
+        find = '        self\.market_stop_requested\.emit\(\)'
+        repl = "        if self._paper.has_runtime_obligations:`n            self.information_requested.emit(STOP_STREAM_BLOCKED_TITLE, STOP_STREAM_BLOCKED_MESSAGE)`n            return`n        self.market_stop_requested.emit()"
+        tests = @($g2bGuards, $behaviour)
+        select = @("-k", "request_stop_stream_only_publishes_the_request or stop_request_is_only_a_request or stop_seam_is_gone_from_the_paper_port")
+    },
+    @{
+        name = 'M34 a Market stop seam returns to the provider surface'
+        file = $modelsPath
+        find = '    probe_order_channel: Callable\[\[\], object\]'
+        repl = "    probe_order_channel: Callable[[], object]`n    stop_market_data: Callable[[], bool]"
+        tests = @($g2bGuards)
+        select = @("-k", "provider_surface_is_frozen_and_command_free")
+    },
+    @{
+        name = 'M35 the stop bridge skips the Paper interlock'
+        file = $desktopPath
+        find = '        if self\.paper_orchestrator\.has_runtime_obligations:\r?\n            self\.execution_orchestrator\.on_market_stop_refused\(\)\r?\n            return'
+        repl = "        if False:`n            self.execution_orchestrator.on_market_stop_refused()`n            return"
+        tests = @($behaviour, $g2bGuards)
+        select = @("-k", "composition_refuses_the_stop_when_paper_has_obligations or refusal_copy_reaches_the_operator or execution_stop_bridge_owns_the_interlock")
     }
 )
 

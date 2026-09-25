@@ -1270,7 +1270,6 @@ class MainWindow(QMainWindow):
                     lambda: self.config.risk_limits.max_position_exposure_pct
                 ),
                 probe_order_channel=self._probe_auto_order_channel,
-                stop_market_data=self._stop_market_data,
                 paper_capability_enabled=(
                     lambda: self.preferences.paper_order_capability_enabled
                 ),
@@ -1453,6 +1452,9 @@ class MainWindow(QMainWindow):
         execution.market_subscription_requested.connect(
             self._apply_execution_subscription
         )
+        execution.market_stop_requested.connect(
+            self._on_execution_market_stop_requested
+        )
         execution.market_readiness_inputs_changed.connect(
             self._publish_market_readiness_inputs
         )
@@ -1482,6 +1484,31 @@ class MainWindow(QMainWindow):
         """Hand the route's finished subscription set to the market capability."""
 
         self.market_orchestrator.set_subscription_symbols(symbols)
+
+    def _on_execution_market_stop_requested(self) -> None:
+        """The execution route asked for a market stop; composition decides.
+
+        The one place allowed to know Paper, Shadow and Market at the same time,
+        and therefore the whole of the stop interlock: a Paper session with
+        obligations strands its positions and orders if the feed goes down, so the
+        request is refused -- with the *route's* operator copy, which the route
+        draws -- an active internal Shadow book is taken down first, and only then
+        is the market capability asked to stop.  The route never sees any of those
+        three facts; it receives the outcome and presents it.
+
+        ``_stop_market_data`` is deliberately not called here: it carries the
+        Market page's own refusal copy and serves that page's stop intent, the
+        automatic source switch and the close path.  This path has already asked
+        the Paper question above, and its refusal text is the execution route's.
+        """
+
+        if self.paper_orchestrator.has_runtime_obligations:
+            self.execution_orchestrator.on_market_stop_refused()
+            return
+        if self.shadow_orchestrator.is_active:
+            self.shadow_orchestrator.stop()
+        if self.market_orchestrator.stop():
+            self.execution_orchestrator.on_market_stopped()
 
     def _confirm_execution_start(self, title: str, message: str) -> None:
         """Collect the operator's launch consent and hand the answer back.

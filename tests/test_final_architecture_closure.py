@@ -827,6 +827,124 @@ NARROW_APPLICATION_EXCEPTIONS: dict[tuple[str, str], frozenset[str]] = {
 #: on purpose: every application-side exception is symbol-scoped.
 APPLICATION_MODULES_WITH_NO_SYMBOL_SCOPE: frozenset[str] = frozenset()
 
+#: Every module named by a symbol-scoped exception, derived rather than listed.
+#:
+#: The rule is a property of the exception table: if the application layer may
+#: only take *named symbols* out of a module, then handing it the whole module is
+#: the same permission granted a different way -- ``import X`` followed by
+#: ``X.anything`` reaches every symbol the table exists to keep out.  Deriving
+#: the set here means a future exception is covered the moment it is added,
+#: instead of the whole-module guard having to be remembered and edited too.
+SYMBOL_SCOPED_APPLICATION_MODULES: frozenset[str] = frozenset(
+    module for module, _symbol in NARROW_APPLICATION_EXCEPTIONS
+)
+
+
+def test_fa4d_no_application_module_takes_a_symbol_scoped_module_whole() -> None:
+    """FA4d: the whole-module forms are the same open door as a bad symbol.
+
+    ``from us_quant.ibkr import IBKRConnectionConfig`` is symbol-scoped;
+    ``import us_quant.ibkr`` hands the whole module over and lets the caller
+    reach ``connect_ibkr_client`` through attribute access, which no symbol
+    check on the import statement can see.  A star import is the same thing
+    spelled differently.
+
+    This covers **every** module named by :data:`NARROW_APPLICATION_EXCEPTIONS`,
+    not just the provider one.  The same hole existed for
+    ``import us_quant.trading.runtime.workflow_state``: it makes
+    ``ExecutionLeaseManager`` / ``validate_paper_transition`` / ``ExecutionLease``
+    / ``WorkflowStateError`` reachable by attribute access, turning the
+    ``PaperWorkflowPhase``-only seam back into a whole door -- and an earlier
+    version of this guard, hardcoded to the provider module, survived that
+    mutation.  The set is derived from the exception table so the two cannot
+    drift apart.
+
+    Absolute and relative spellings both go through
+    :func:`_resolved_import_from_module`, so ``from ...ibkr import *`` and
+    ``from ...runtime.workflow_state import *`` are caught like their absolute
+    forms.  A plain ``import`` statement is always absolute in Python 3, so its
+    half needs no resolution -- but an ``as`` alias is still the same
+    whole-module access and is caught with it.
+    """
+
+    application = _SRC / "trading" / "application"
+    scoped = SYMBOL_SCOPED_APPLICATION_MODULES
+    offending: list[str] = []
+
+    for path in sorted(application.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        module = _module_name(path)
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    # ``alias.name`` is the module; an ``as`` alias does not
+                    # change what was taken.
+                    if alias.name in scoped:
+                        offending.append(
+                            f"{module}:{node.lineno}: import {alias.name}"
+                        )
+            elif isinstance(node, ast.ImportFrom):
+                target = _resolved_import_from_module(path, node)
+                if target not in scoped:
+                    continue
+                for alias in node.names:
+                    if alias.name == "*":
+                        offending.append(
+                            f"{module}:{node.lineno}: star import of {target}"
+                        )
+    assert offending == [], offending
+
+    # The guard must be checking a real, non-empty set that names both seams.
+    assert scoped == {
+        "us_quant.ibkr",
+        "us_quant.trading.runtime.workflow_state",
+    }, scoped
+
+    # And the resolver really does fold the relative spelling onto the absolute
+    # one, so this guard is not passing because a relative star import is
+    # invisible.
+    accounts = application / "accounts.py"
+    assert (
+        _resolved_import_from_module(
+            accounts,
+            ast.ImportFrom(module="ibkr", names=[ast.alias(name="*")], level=3),
+        )
+        == "us_quant.ibkr"
+    )
+    paper_service = application / "paper" / "service.py"
+    assert (
+        _resolved_import_from_module(
+            paper_service,
+            ast.ImportFrom(
+                module="runtime.workflow_state",
+                names=[ast.alias(name="*")],
+                level=3,
+            ),
+        )
+        == "us_quant.trading.runtime.workflow_state"
+    )
+
+    # The names the whole-module form would expose really are in those modules,
+    # so the rule is not vacuous.
+    workflow_symbols = {
+        node.name
+        for node in ast.walk(
+            ast.parse(
+                (
+                    _SRC / "trading" / "runtime" / "workflow_state.py"
+                ).read_text(encoding="utf-8")
+            )
+        )
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+    }
+    assert {
+        "ExecutionLeaseManager",
+        "validate_paper_transition",
+        "ExecutionLease",
+        "WorkflowStateError",
+    } <= workflow_symbols
+
 
 def test_fa4c_the_application_layer_exceptions_are_symbol_scoped() -> None:
     """FA4c: the two historical seams are locked to exact symbols, not modules.
@@ -920,57 +1038,6 @@ def test_fa4c_the_application_layer_exceptions_are_symbol_scoped() -> None:
         "validate_paper_transition",
     } <= workflow_symbols
 
-
-def test_fa4d_no_application_module_imports_a_bare_provider_module() -> None:
-    """FA4d: the whole-module forms are the same open door as a bad symbol.
-
-    ``from us_quant.ibkr import IBKRConnectionConfig`` is symbol-scoped;
-    ``import us_quant.ibkr`` hands the whole module over and lets the caller
-    reach ``connect_ibkr_client`` through attribute access, which no symbol
-    check on the import statement can see.  A star import is the same thing
-    spelled differently.
-
-    Both the ``import`` form and the ``ImportFrom`` form are resolved through
-    :func:`_resolved_import_from_module`, so ``from ...ibkr import *`` cannot
-    slip past on a relative spelling while ``from us_quant.ibkr import *`` is
-    caught.  The bare-``import`` half also covers the relative spelling that
-    Python actually allows there (``from . import x`` never names the provider,
-    and a plain ``import`` statement is always absolute in Python 3).
-    """
-
-    application = _SRC / "trading" / "application"
-    provider_modules = ("us_quant.ibkr",)
-    offending: list[str] = []
-
-    for path in sorted(application.rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
-        module = _module_name(path)
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name in provider_modules:
-                        offending.append(f"{module}:{node.lineno}: import {alias.name}")
-            elif isinstance(node, ast.ImportFrom):
-                target = _resolved_import_from_module(path, node)
-                if target not in provider_modules:
-                    continue
-                for alias in node.names:
-                    if alias.name == "*":
-                        offending.append(
-                            f"{module}:{node.lineno}: star import of {target}"
-                        )
-    assert offending == [], offending
-
-    # The resolver really does fold the relative spelling onto the absolute one,
-    # so this guard is not passing because a relative star import is invisible.
-    accounts = application / "accounts.py"
-    synthetic = ast.ImportFrom(
-        module="ibkr",
-        names=[ast.alias(name="*")],
-        level=3,
-    )
-    assert _resolved_import_from_module(accounts, synthetic) == "us_quant.ibkr"
 
 
 def test_fa1b_the_domain_layer_is_not_empty() -> None:

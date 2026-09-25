@@ -181,7 +181,7 @@ $mutations = @(
         find = 'from us_quant\.ibkr import IBKRConnectionConfig'
         repl = "import us_quant.ibkr`nfrom us_quant.ibkr import IBKRConnectionConfig"
         tests = @($fac)
-        select = @("-k", "no_application_module_imports_a_bare_provider_module or application_layer_exceptions_are_symbol_scoped")
+        select = @("-k", "takes_a_symbol_scoped_module_whole or application_layer_exceptions_are_symbol_scoped")
     },
     # The three below are the relative-spelling half.  An earlier FA4c compared
     # the raw ``node.module`` against its ``us_quant.ibkr`` key, so a relative
@@ -211,7 +211,21 @@ $mutations = @(
         find = 'from us_quant\.ibkr import IBKRConnectionConfig'
         repl = "from ...ibkr import *`nfrom us_quant.ibkr import IBKRConnectionConfig"
         tests = @($fac)
-        select = @("-k", "no_application_module_imports_a_bare_provider_module")
+        select = @("-k", "takes_a_symbol_scoped_module_whole")
+    },
+    @{
+        name = 'M6h the Paper application imports the whole workflow-state module'
+        # The hole the whole-module guard was extended to close: taking the
+        # module whole makes ExecutionLeaseManager / validate_paper_transition /
+        # ExecutionLease / WorkflowStateError reachable by attribute access, so
+        # the PaperWorkflowPhase-only seam becomes a whole door again.  The
+        # rebind keeps ``PaperWorkflowPhase`` defined, so the mutant cannot be
+        # killed by a NameError -- only by the FA4d assertion.
+        file = (Join-Path $src "trading\application\paper\service.py")
+        find = 'from us_quant\.trading\.runtime\.workflow_state import PaperWorkflowPhase'
+        repl = "import us_quant.trading.runtime.workflow_state as _workflow_state`nPaperWorkflowPhase = _workflow_state.PaperWorkflowPhase"
+        tests = @($fac)
+        select = @("-k", "takes_a_symbol_scoped_module_whole")
     },
 
     # -- Risk -> Execution path ----------------------------------------

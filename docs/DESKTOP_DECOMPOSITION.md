@@ -6024,7 +6024,7 @@ scanner ranking、backtest math —— 一律未改。
 
 ```text
 tests/test_final_architecture_closure.py              42 个跨层 guard case（36 function）
-scripts/mutation_final_architecture_closure.ps1       41 个跨层 mutant（全 RED）
+scripts/mutation_final_architecture_closure.ps1       42 个跨层 mutant（全 RED）
 docs/TRADING_ARCHITECTURE_V2.md §8.27                 Final Architecture Closure + evidence matrix
 ```
 
@@ -6065,13 +6065,16 @@ symbol 或其它 importer 都 RED；FA4d 再堵住 `import us_quant.ibkr` / `fro
 symbol、relative lease-manager symbol、relative star import 都是 RED，且三者都 syntax valid、
 正常 pytest collection、最终 assertion RED（非 import error / SyntaxError / collection error）。
 
+**FA4d 覆盖全部 symbol-scoped exception module（review 发现的最后一个 hole）**：初版 FA4d 把待保护
+module 硬编码成 `("us_quant.ibkr",)`，于是 `import us_quant.trading.runtime.workflow_state as _workflow_state` 让 `ExecutionLeaseManager` / `validate_paper_transition` / `ExecutionLease` / `WorkflowStateError` 全部可经属性访问拿到，PaperWorkflowPhase-only seam 重新变成整扇门，而该 mutation **survived**。现改为从 `NARROW_APPLICATION_EXCEPTIONS` **派生** `SYMBOL_SCOPED_APPLICATION_MODULES`（当前 = {`us_quant.ibkr`, `us_quant.trading.runtime.workflow_state`}），`import X`（含 `as` 别名）与 `from X import *` 对两个 module 一律 RED，absolute / relative spelling 都按 canonical module 判定。新增 mutant M6h（whole workflow_state module，语法有效、模块正常 import、pytest 正常 collection、由 FA4d assertion 杀死）。三层职责现为：package allowlist 控方向 → FA4c 控 symbol + importer → FA4d 防 whole-module escape。
+
 ### 36.5 Mutation 结果
 
 ```text
-FAC mutant        41 / 41 RED      0 survived / 0 harness-error
+FAC mutant        42 / 42 RED      0 survived / 0 harness-error
 historical mutant 165 / 165 RED    0 not-caught
                   e2 13 · e3 41 · e4 11 · F1 14 · F2 22 · G1 17 · G2-A 12 · G2-B 35
-aggregate         206 / 206 RED
+aggregate         207 / 207 RED
 ```
 
 **FAC harness 的 exact-one contract（本轮修）**：原实现用

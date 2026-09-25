@@ -5929,10 +5929,219 @@ H / I / J 清零，唯一记录的 I 项（`_minute_recorded_keys`）不是第�
 ### 35.8 路线状态
 
 **G2-A Strategy Governance ✅；G2-B Execution / AutoQuant ✅；
-G2-C：residual audit（§35.7）判定 not required，待 review 确认。**
+G2-C：residual audit（§35.7）判定 not required。**
 
-MainWindow Composition Closure 按 §35.7 的 evidence 已具备 COMPLETE 的条件，
-但**正式标记留到 review 通过之后**（先 audit → 再 evidence → 再结论，不反过来）；
-Final Architecture Closure 尚未开始。
+MainWindow Composition Closure 按 §35.7 的 evidence 已具备 COMPLETE 的条件；
+**该正式标记已在 G2-B 合并后落档（§36）**。Final Architecture Closure 见 §36。
+
+## 36. Final Architecture Closure
+
+G2-B（PR #57）以 merge commit `c78a27f95f482336383282b94e6c877030df6b77` 合并后，
+架构路线正式变为：
+
+```text
+v2O-A Market                         ✅
+v2O-B Account                        ✅
+v2O-C Research / Shadow              ✅
+v2O-D Shadow                         ✅
+v2O-E Paper                          ✅
+v2O-F System                         ✅
+
+G1 Generic Runtime / Shell           ✅
+G2-A Strategy Governance             ✅
+G2-B Execution / AutoQuant           ✅
+G2-C                                 NOT REQUIRED
+
+MainWindow Composition Closure       ✅ COMPLETE
+Final Architecture Closure           ✅ COMPLETE
+```
+
+### 36.1 这一阶段不是什么
+
+不是「继续拆 MainWindow」，不是「再建一层 manager」，也不是「顺手开始 Live / AI /
+自动交易新功能」。目标是**证明当前架构已具备稳定、可维护、可审计的基础**，之后新增
+Paper autonomy / Live / Strategy Evolution / AI assistance 时不需要绕开或重写现有
+安全边界。原则是 AUDIT FIRST：找现状 → 锁 invariant → 发现真实 defect 才修 →
+没 defect 不为形式改代码。不按 LOC 优化，不为减少文件数合并 capability，不为「统一」
+建立 global manager。
+
+### 36.2 MainWindow Composition Closure 正式 COMPLETE
+
+G2-A / G2-B 合并后，§35.7 的 residual audit 判据正式成立：
+
+```text
+A–G  合法 composition                      ✅
+H    route-specific orchestration = 0      ✅
+I    duplicate mutable truth = 0           ✅
+J    private reach-through = 0             ✅
+```
+
+因此 **MainWindow Composition Closure ✅ COMPLETE**，且 **G2-C = NOT REQUIRED**。
+特别保留两条说明：
+
+* `_minute_recorded_keys` 是 minute persistence ingress 的 **write-dedup 实现细节**，
+  不是 capability truth 的第二份 copy；
+* `_sync_strategy_combo` / `_configure_combo_width` / `_configure_table_view` /
+  `_apply_legacy_style` 四个 dead helper 记录为 **technical-debt cleanup**，
+  不属于 missing owner，**不因此创建 G2-C**，Final Closure 也不顺手删除它们
+  （它们不影响任何 invariant）。
+
+### 36.3 本轮实际做了什么
+
+**只做三件事：audit、跨层 guard、一处真实 defect 修复。** 没有搬动任何 capability 的
+owner，没有新增 orchestrator / manager / service bag。
+
+**Audit（9 项）**：import / layer dependency graph（AST，284 模块）；
+Risk → Execution 不可绕过；Paper / Shadow execution XOR；Paper lifecycle /
+recovery / finalization / shutdown；Broker abstraction / future Live seam；
+Strategy immutable lifecycle（含 deep immutability）；governance vs runtime
+selection；desktop ownership closure；AI future boundary。结论与证据见
+`TRADING_ARCHITECTURE_V2.md` §8.27。
+
+**发现的真实 defect（Class B，已修）**：`StrategyVersion.parameters` 名义 immutable
+实际可变 —— `frozen=True` 只拒绝属性重绑定，`parameters` 是普通 `dict`，可原地修改，
+而 `parameter_hash` 读自 governed identity 而非重算，于是一个已治理版本会变成
+「declared hash 不再描述自己 parameters」的分裂身份。修复是窄的 representation 改动：
+`domain/common.py` 新增 `FrozenParameters(dict)` / `FrozenList(list)` /
+`freeze_parameters()`（递归冻结 dict / list / **tuple 的 descendants**；生产用到的
+copy 协议 —— `copy.copy` / `copy.deepcopy` / `pickle` —— 保持冻结形态，但继承的
+`.copy()` 仍返回普通 dict/list，这是 Python 自身语义且无法改动原 governed version；
+`isinstance` / `==` / `json` 全部兼容），`StrategyVersion.__post_init__` 改用它。
+先写 failing regression 再改产品代码；兼容性由真实 `SQLiteStrategyRepository`
+round-trip 的 hash 相等断言证明。
+
+**Class C（trading safety semantics 需要改变）**：**本轮未发现**。Risk bypass、
+broker ordering、reconciliation、finalization proof、order retry、Paper workflow
+transition 六项审计全部落在既有安全语义内，无需另开窄 safety PR。
+
+**Frozen areas 未动**：candidate scoring、strategy signal、risk limits 数值、
+commission / whole-share / order pricing / DAY limit / extended-hours 语义、
+IBKR client-id allocation、account identity policy、reconciliation proof algorithm、
+Paper finalization algorithm、Shadow trading algorithm、Market source behavior、
+scanner ranking、backtest math —— 一律未改。
+
+### 36.4 交付物
+
+```text
+tests/test_final_architecture_closure.py              42 个跨层 guard case（36 function）
+scripts/mutation_final_architecture_closure.ps1       42 个跨层 mutant（全 RED）
+docs/TRADING_ARCHITECTURE_V2.md §8.27                 Final Architecture Closure + evidence matrix
+```
+
+这个 test 文件刻意**不**复制各 capability 已有的几百条 guard：细粒度 owner 仍由
+Market / Account / Research / Paper / System / G1 / G2-A / G2-B 各自现有测试负责，
+这里只放**跨层 / 跨子系统** invariant。同理，mutation harness 只覆盖跨层安全边界，
+不复制已有 165 个 mutant。
+
+Guard 实现方式遵守 PART Q：import boundary 用 AST（`ast.Import` / `ast.ImportFrom`
+构建 `module -> imported module` 再按 package prefix 判定，错误信息报出
+source module / forbidden target / violated rule）；class field 用 `dataclasses.fields`
+或 AST；runtime behavior 用真实 / fake object 行为测试；workflow transition 用真实
+controller 行为。**没有** `assert "IBKR" not in entire repo`（adapters / composition
+本来就该出现），也**没有** `assert "submit(" 只出现一次`（broker adapter 与 tests 里
+合法出现）。层间 guard 用**白名单**而非黑名单 —— 理由见 §36.5。
+
+**方向规则 + symbol 规则成对（本轮最后一项 guard precision）**：package allowlist 只决定
+"能不能命名这个包"，因此它本身也会放行
+`from us_quant.ibkr import connect_ibkr_client` 与
+`from ...workflow_state import ExecutionLeaseManager` —— 这两个 module 除了 seam 真正需要的
+那一个值之外，还带着 socket/thread I/O（`connect_ibkr_client` / `probe_ibkr_socket` /
+`IBKRClientConnectError`）与 lease 机制（`ExecutionLeaseManager` /
+`validate_paper_transition` / `WorkflowSnapshot` / `WorkflowStateError` /
+`ExecutionLease`）。因此新增 FA4c：两条历史 exception 被收窄到 **exact symbol + exact
+importer**（`IBKRConnectionConfig` 只允许 `application/accounts.py`；
+`PaperWorkflowPhase` 只允许 `paper/contracts.py` 与 `paper/service.py`），任何其它
+symbol 或其它 importer 都 RED；FA4d 再堵住 `import us_quant.ibkr` / `from ... import *`
+这类"整扇门"写法（`import X` 之后可以属性访问拿到任何 symbol，symbol 检查看不到）。
+实测七种越界全部 RED。新增 mutant M6b / M6c / M6d。
+
+**relative import 只有一份解析器（review 发现的最后一个 blocker）**：初版 FA4c 直接比对
+`node.module`，而 layer guard 用自己的解析逻辑，于是
+`from ...ibkr import connect_ibkr_client` 解析成 `"ibkr"`、对不上 `us_quant.ibkr` key，整条 symbol 规则被绕过；而且它当时"看起来"是 RED，实际失败在
+覆盖度记账断言 `seen == set(allowed)` 上，属于**假通过**而非真检出。修法是抽出唯一一份
+`_resolved_import_from_module(path, node)`，`_imported_modules()` 与 FA4c / FA4d
+全部经它；另外两处直接读 `node.module` 的 guard（FA17/FA18、FA25c）也一并改走它，
+全文件不再有直接 `node.module` 比较。新增 mutant M6e / M6f / M6g 证明 relative forbidden
+symbol、relative lease-manager symbol、relative star import 都是 RED，且三者都 syntax valid、
+正常 pytest collection、最终 assertion RED（非 import error / SyntaxError / collection error）。
+
+**FA4d 覆盖全部 symbol-scoped exception module（review 发现的最后一个 hole）**：初版 FA4d 把待保护
+module 硬编码成 `("us_quant.ibkr",)`，于是 `import us_quant.trading.runtime.workflow_state as _workflow_state` 让 `ExecutionLeaseManager` / `validate_paper_transition` / `ExecutionLease` / `WorkflowStateError` 全部可经属性访问拿到，PaperWorkflowPhase-only seam 重新变成整扇门，而该 mutation **survived**。现改为从 `NARROW_APPLICATION_EXCEPTIONS` **派生** `SYMBOL_SCOPED_APPLICATION_MODULES`（当前 = {`us_quant.ibkr`, `us_quant.trading.runtime.workflow_state`}），`import X`（含 `as` 别名）与 `from X import *` 对两个 module 一律 RED，absolute / relative spelling 都按 canonical module 判定。新增 mutant M6h（whole workflow_state module，语法有效、模块正常 import、pytest 正常 collection、由 FA4d assertion 杀死）。三层职责现为：package allowlist 控方向 → FA4c 控 symbol + importer → FA4d 防 whole-module escape。
+
+### 36.5 Mutation 结果
+
+```text
+FAC mutant        42 / 42 RED      0 survived / 0 harness-error
+historical mutant 165 / 165 RED    0 not-caught
+                  e2 13 · e3 41 · e4 11 · F1 14 · F2 22 · G1 17 · G2-A 12 · G2-B 35
+aggregate         207 / 207 RED
+```
+
+**FAC harness 的 exact-one contract（本轮修）**：原实现用
+`[regex]::Replace($input, $pattern, $repl, 1)` —— 这个**静态 overload 的第三个参数绑定的是
+`RegexOptions`（1 == IgnoreCase），不是 replacement count**，因此"要求作者保证 pattern
+唯一"只写在注释里，0 match 能发现而 2+ match 会被静默地一次改多处，把单点 mutant 变成
+多点 mutation 且仍报 caught。现在改为实例 overload：先
+`[regex]::new($find, IgnoreCase).Matches($original)` 并**要求 Count 恰为 1**，再用
+`$regex.Replace($original, $repl, 1)`（此处第三参数才是真正的 count）。最终 contract：
+
+```text
+0 match                       -> HARNESS-ERROR
+2+ match                      -> HARNESS-ERROR
+replacement 未改变文本         -> HARNESS-ERROR
+SyntaxError                   -> HARNESS-ERROR
+pytest exit 5（未选中测试）      -> HARNESS-ERROR
+pytest 非 0/1（collection/usage/internal）-> HARNESS-ERROR
+exit 0（survived）             -> non-zero 退出
+harness-error > 0             -> non-zero 退出
+```
+
+即"唯一性由 harness 自己验证"，不再依赖注释约束作者。
+
+historical 165 全部 RED，**没有**因 Final Closure 的改动而需要重锚（没有删 mutant、
+没有把 pattern miss 当 caught、没有注释掉 mutant）。
+
+**review / OCR 发现的三个真实缺陷（同一 immutable-version 修复内，已修）**：
+`dict.__init__` 继承导致 frozen mapping 可被 `__init__` 重新填充（与 `list.__init__`
+在 frozen list 上打开的洞相同，现改为 `__new__` 填充 + 首次 `__init__` seal；
+刻意不防显式基类调用 `dict.__setitem__`，那与 frozen dataclass 的
+`object.__setattr__` 边界相同）；**tuple descendants 未递归冻结**（tuple 本身
+immutable，但 `json.dumps` 接受 tuple，故其内部 dict/list 仍是可变容器，会重现 split
+identity —— 修法是 tuple 保持 tuple、只递归冻结 descendants，不改成 list 也不做
+Sequence 一刀切。**保留 tuple 的理由是 representation 而非 hash**：`json.dumps` 对 tuple
+与 list 都编码成 JSON array，等价元素下 canonical JSON 与 hash 本来就相同，所以
+"改成 list 会改变 hash" 是**错的**；真正理由是修复只应递归冻结 descendants、不应额外
+规范化容器类型，否则会改变 Python consumer 看到的 `isinstance(..., tuple)`。hash
+兼容性由 FA26e 的 `parameter_hash_for(...) == before` 单独证明）；以及 FAC test 文件一个
+未使用的 `MappingProxyType` import。新增 FA26d / FA26e 与 mutant M24b / M24c / M24d。
+
+**FA19b 的重构（review 发现）**：初版断言"当前不存在 `live*.py`"，既 future-hostile
+（Live adapter 是路线目标，命名成 `live_execution.py` 会让 suite 因做对的事而变红）
+又不可靠（命名成 `ibkr_production.py` 就绕过）。**文件名上的 guard 不是 architecture
+guard。** 现改为断言长期 invariant：全树中 `RiskApplication` / `ExecutionApplication` /
+`TradingRuntime` 各自恰好一个定义且为 canonical owner（按类名），并新增 FA19c 断言
+authority 构造体内无 mode 分支。已实测：新增 `LiveExecutionApplication` → RED；
+新增合法 `IBKRLiveExecutionAdapter` → GREEN。AI boundary 则如实标为
+**documented future constraint**（当前无 AI package，故无可执行的 module guard），
+不再拿无关的 no-Live test 当 evidence。
+
+FAC harness 的两个 harness-error 修复值得记录，因为它们是「脚本缺陷」而非「guard
+通过」的例子：M18 的初版替换删掉了 `if` 的 body，产生 SyntaxError；M1 的初版用
+`import us_quant.desktop` 作 forbidden target，结果触发**循环 import 导致 collection
+error**（pytest exit 2），不是干净的 assertion failure。后者暴露出层间 guard 的
+黑名单确实漏项（`us_quant.desktop_workers` 既不是 `us_quant.desktop` 也不是
+`us_quant.desktop_v2`），于是 guard 改成白名单形式。
+
+### 36.6 下一阶段
+
+**Paper Autonomous Trading v1。** 只记录，不执行：unattended Paper session
+lifecycle、market-session-aware scheduler、deterministic startup preflight、
+crash/restart recovery、persistent autonomous intent/state、bounded automatic
+preparation、deterministic candidate refresh、safe pause/stop/shutdown、
+watchdog/health supervision、no human button dependency、full audit/event trail、
+operator kill switch、Paper-only hard gate。仍然走
+`RiskApplication → ExecutionApplication → BrokerExecutionPort`，不绕开现有安全链。
+
+本轮**没有**声称完成：Live ready、autonomous trading、strategy evolution、AI decision。
 
 

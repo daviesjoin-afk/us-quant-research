@@ -195,10 +195,18 @@ def test_gateway_button_reaches_the_real_main_window_handler(
 
 
 def test_stream_receive_updates_dashboard_through_the_window(window, monkeypatch) -> None:
-    """A market snapshot must reach the dashboard card through the fan-out."""
+    """A market snapshot must reach the dashboard card through the fan-out.
+
+    The execution half of that fan-out is the route's own since G2-B -- the
+    deleted window seam ``_populate_auto_quant_candidates`` is
+    ``execution_orchestrator.refresh_all`` -- so it is stubbed at its new owner
+    while the *dashboard* card, this test's subject, is asserted for real.
+    """
 
     monkeypatch.setattr(window, "_record_minute_snapshot", lambda snapshot: None)
-    monkeypatch.setattr(window, "_populate_auto_quant_candidates", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_all", lambda: None
+    )
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )

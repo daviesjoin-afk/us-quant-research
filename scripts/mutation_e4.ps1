@@ -32,6 +32,12 @@ $projectorPath = "src\us_quant\desktop_v2\pages\execution\projector.py"
 
 $closure = "tests/test_desktop_paper_presentation_closure.py"
 $architecture = "tests/test_desktop_paper_orchestration_architecture.py"
+#: G2-B moved the execution route's render path, and the launch inputs derived
+#: from Paper's presentation, into ``ExecutionOrchestrator``.  M3 / M8 / M10
+#: below are re-anchored there; their invariants are locked by this round's
+#: guard file as well, so each mutant is checked against both owners.
+$g2bGuards = "tests/test_desktop_execution_architecture.py"
+$executionOrchestrator = "src\us_quant\desktop_v2\orchestration\execution\orchestrator.py"
 
 function Get-Text([string]$path) { [System.IO.File]::ReadAllText($path) }
 function Set-Text([string]$path, [string]$text) {
@@ -60,12 +66,12 @@ $mutations = @(
         select = @("-k", "finalized_session_survives or exactly_one_writer or route_still_renders_the_finished")
     },
     @{
-        name = "M3  the window caches the result's snapshot again"
-        file = $desktopPath
-        find = "        self\._render_auto_quant_snapshot\(\)\r?\n        self\._apply_paper_workflow_button_state\(\)"
-        repl = "        self._paper_render_snapshot = result.engine_snapshot`n        self._render_auto_quant_snapshot()`n        self._apply_paper_workflow_button_state()"
-        tests = @($architecture)
-        select = @("-k", "keeps_no_paper_presentation_cache or presentation_cache_under_another_name")
+        name = "M3  the route caches the result's snapshot again"
+        file = $executionOrchestrator
+        find = "        self\.refresh_current\(\)\r?\n        self\.refresh_controls\(\)"
+        repl = "        self._paper_render_snapshot = _result.engine_snapshot`n        self.refresh_current()`n        self.refresh_controls()"
+        tests = @($architecture, $g2bGuards)
+        select = @("-k", "keeps_no_paper_presentation_cache or presentation_cache_under_another_name or keeps_only_route_local_state")
     },
     @{
         name = "M4  the shutdown verdict reads the retained view"
@@ -101,11 +107,11 @@ $mutations = @(
     },
     @{
         name = "M8  the route reads the canonical result instead of the view"
-        file = $desktopPath
-        find = "        session = self\.paper_orchestrator\.presentation\r?\n        if session is None:\r?\n            return"
-        repl = "        result = self.paper_workflow.result`n        session = result.engine_snapshot if result is not None else None`n        if session is None:`n            return"
-        tests = @($architecture, $closure)
-        select = @("-k", "route_draws_the_capabilitys_retained_presentation or renders_the_execution_route_once")
+        file = $executionOrchestrator
+        find = "        session = self\._paper\.presentation\r?\n        if session is None:\r?\n            return"
+        repl = "        result = self._paper.result`n        session = result.engine_snapshot if result is not None else None`n        if session is None:`n            return"
+        tests = @($architecture, $closure, $g2bGuards)
+        select = @("-k", "route_draws_the_capabilitys_retained_presentation or renders_the_execution_route_once or presentation_is_read_only_on_the_render_path")
     },
     @{
         name = "M9  the projector mutates the broker it was handed"
@@ -116,11 +122,11 @@ $mutations = @(
         select = @("-k", "read_model_is_pure or projector_never_mutates")
     },
     @{
-        name = "M10 the window assembles the session view again"
-        file = $desktopPath
+        name = "M10 the route assembles the session view again"
+        file = $executionOrchestrator
         find = "            build_session_view\(\r?\n                session=session,"
         repl = "            build_runtime_view(`n                snapshot=session,"
-        tests = @($architecture)
+        tests = @($architecture, $g2bGuards)
         select = @("-k", "fetches_and_delegates_rather_than_assembling")
     },
     @{

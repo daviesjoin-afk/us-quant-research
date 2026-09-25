@@ -163,9 +163,20 @@ def test_the_preview_reads_the_canonical_scan() -> None:
 # -- execution page: summary, detail navigation ----------------------------
 
 
-def test_the_preview_renders_the_execution_summary_through_the_page() -> None:
+def test_the_preview_renders_the_execution_summary_through_the_route() -> None:
+    """The preview reaches the page the way production does: through its owner.
+
+    G2-B made ``ExecutionOrchestrator`` the only orchestration caller of the
+    execution page, so the preview's summary line goes through the route's
+    ``render_launch_context`` rather than writing the page's context directly --
+    the same requirement as before (there is no second window and no direct
+    page write), with the owner the round introduced.
+    """
+
     source = _source()
-    assert "execution_page.render_context(" in source
+    assert "window.execution_orchestrator" in source
+    assert ".render_launch_context(" in source
+    assert "execution_page.render_context(" not in source
     assert "auto_summary_label" not in source
 
 

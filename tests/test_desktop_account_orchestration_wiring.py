@@ -180,11 +180,15 @@ def test_a_successful_refresh_promotes_the_shell_badges(
         window.runtime_events_orchestrator, "record", lambda **_: None
     )
     monkeypatch.setattr(window, "_log", lambda _message: None)
-    monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_preflight", lambda: None
+    )
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
-    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_current", lambda: None
+    )
     monkeypatch.setattr(
             window.dashboard_orchestrator, "render_current", lambda: None
         )
@@ -207,11 +211,15 @@ def test_a_successful_refresh_does_not_touch_the_market_badge(
         window.runtime_events_orchestrator, "record", lambda **_: None
     )
     monkeypatch.setattr(window, "_log", lambda _message: None)
-    monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_preflight", lambda: None
+    )
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
-    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_current", lambda: None
+    )
     monkeypatch.setattr(
             window.dashboard_orchestrator, "render_current", lambda: None
         )
@@ -236,11 +244,15 @@ def test_a_successful_refresh_repaints_the_dashboard_card(
         window.runtime_events_orchestrator, "record", lambda **_: None
     )
     monkeypatch.setattr(window, "_log", lambda _message: None)
-    monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_preflight", lambda: None
+    )
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
-    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_current", lambda: None
+    )
 
     portfolio = _portfolio()
     window.broker_account._portfolio = portfolio
@@ -258,11 +270,15 @@ def test_a_successful_refresh_records_a_runtime_event(
     from us_quant.paths import STATE_ROOT_ENV
 
     monkeypatch.setenv(STATE_ROOT_ENV, str(tmp_path))
-    monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_preflight", lambda: None
+    )
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
-    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_current", lambda: None
+    )
     monkeypatch.setattr(
             window.dashboard_orchestrator, "render_current", lambda: None
         )
@@ -282,6 +298,14 @@ def test_a_successful_refresh_records_a_runtime_event(
 def test_a_successful_refresh_refreshes_both_preflights(
     window, monkeypatch
 ) -> None:
+    """The account fact still reaches both readiness lines, one owner each.
+
+    The auto-quant half is no longer a window method: since G2-B it is
+    ``execution_orchestrator.refresh_preflight``, which
+    ``MainWindow._on_account_portfolio_changed`` calls *because the route owns
+    it*, not because it forwards.
+    """
+
     monkeypatch.setattr(
         window.runtime_events_orchestrator, "record", lambda **_: None
     )
@@ -289,11 +313,15 @@ def test_a_successful_refresh_refreshes_both_preflights(
     monkeypatch.setattr(
             window.dashboard_orchestrator, "render_current", lambda: None
         )
-    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_current", lambda: None
+    )
 
     calls: list[str] = []
     monkeypatch.setattr(
-        window, "_refresh_auto_quant_preflight", lambda: calls.append("auto")
+        window.execution_orchestrator,
+        "refresh_preflight",
+        lambda: calls.append("auto"),
     )
     monkeypatch.setattr(
         window.targeted_session_orchestrator,
@@ -353,8 +381,12 @@ def test_the_targeted_preflight_reads_the_canonical_account(
         window.runtime_events_orchestrator, "record", lambda **_: None
     )
     monkeypatch.setattr(window, "_log", lambda _message: None)
-    monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
-    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_preflight", lambda: None
+    )
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_current", lambda: None
+    )
 
     portfolio = _portfolio()
     window.broker_account._portfolio = portfolio
@@ -430,18 +462,22 @@ def test_a_successful_refresh_moves_the_execution_route_equity_card(
 ) -> None:
     """Spec 39: the execution route's rendered account fact follows the read.
 
-    ``_render_auto_quant_snapshot`` projects ``account_orchestrator.portfolio``
-    into the execution page's equity card.  Reading that card is the end-to-end
-    check: a window that still kept its own ``account_portfolio`` -- or that
-    handed the presenter a stale copy -- would leave the card on the old value
-    while every callback-level assertion still passed.
+    ``execution_orchestrator.refresh_current`` -- the render the retired
+    ``MainWindow._render_auto_quant_snapshot`` became -- projects
+    ``account_orchestrator.portfolio`` into the execution page's equity card.
+    Reading that card is the end-to-end check: a window that still kept its own
+    ``account_portfolio`` -- or that handed the presenter a stale copy -- would
+    leave the card on the old value while every callback-level assertion still
+    passed.
     """
 
     monkeypatch.setattr(
         window.runtime_events_orchestrator, "record", lambda **_: None
     )
     monkeypatch.setattr(window, "_log", lambda _message: None)
-    monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_preflight", lambda: None
+    )
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
@@ -451,7 +487,7 @@ def test_a_successful_refresh_moves_the_execution_route_equity_card(
 
     _retain_a_session(window)
     window.broker_account._portfolio = None
-    window._render_auto_quant_snapshot()
+    window.execution_orchestrator.refresh_current()
     before = window.execution_page.equity_card.value_label.text()
 
     portfolio = _portfolio()
@@ -478,11 +514,15 @@ def test_a_successful_refresh_puts_a_row_in_the_real_ledger_table(
         window.runtime_events_orchestrator, "record", lambda **_: None
     )
     monkeypatch.setattr(window, "_log", lambda _message: None)
-    monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_preflight", lambda: None
+    )
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
-    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_current", lambda: None
+    )
     monkeypatch.setattr(
             window.dashboard_orchestrator, "render_current", lambda: None
         )
@@ -515,11 +555,15 @@ def test_a_failed_refresh_preserves_the_last_good_truth(
         window.runtime_events_orchestrator, "record", lambda **_: None
     )
     monkeypatch.setattr(window, "_log", lambda _message: None)
-    monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_preflight", lambda: None
+    )
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
-    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_current", lambda: None
+    )
     monkeypatch.setattr(
             window.dashboard_orchestrator, "render_current", lambda: None
         )

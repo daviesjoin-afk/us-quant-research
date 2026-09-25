@@ -300,11 +300,15 @@ def test_a_successful_refresh_renders_the_page_and_appends_once(
         window.runtime_events_orchestrator, "record", lambda **_: None
     )
     monkeypatch.setattr(window, "_log", lambda _message: None)
-    monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_preflight", lambda: None
+    )
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
-    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_current", lambda: None
+    )
     monkeypatch.setattr(
             window.dashboard_orchestrator, "render_current", lambda: None
         )
@@ -323,11 +327,15 @@ def test_a_successful_refresh_sets_the_account_badge(window, monkeypatch) -> Non
         window.runtime_events_orchestrator, "record", lambda **_: None
     )
     monkeypatch.setattr(window, "_log", lambda _message: None)
-    monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_preflight", lambda: None
+    )
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
-    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_current", lambda: None
+    )
     monkeypatch.setattr(
             window.dashboard_orchestrator, "render_current", lambda: None
         )
@@ -342,6 +350,13 @@ def test_a_successful_refresh_sets_the_account_badge(window, monkeypatch) -> Non
 def test_a_successful_refresh_fans_out_to_the_preflights(
     window, monkeypatch
 ) -> None:
+    """Both readiness lines move, one owner each.
+
+    The route's half is no longer a window method: since G2-B the fan-out calls
+    ``execution_orchestrator.refresh_preflight`` on the object that owns the
+    preflight.
+    """
+
     monkeypatch.setattr(
         window.runtime_events_orchestrator, "record", lambda **_: None
     )
@@ -349,11 +364,15 @@ def test_a_successful_refresh_fans_out_to_the_preflights(
     monkeypatch.setattr(
             window.dashboard_orchestrator, "render_current", lambda: None
         )
-    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_current", lambda: None
+    )
 
     calls: list[str] = []
     monkeypatch.setattr(
-        window, "_refresh_auto_quant_preflight", lambda: calls.append("auto")
+        window.execution_orchestrator,
+        "refresh_preflight",
+        lambda: calls.append("auto"),
     )
     monkeypatch.setattr(
         window.targeted_session_orchestrator,
@@ -371,11 +390,15 @@ def test_a_wrong_result_type_is_refused(window, monkeypatch) -> None:
         window.runtime_events_orchestrator, "record", lambda **_: None
     )
     monkeypatch.setattr(window, "_log", lambda _message: None)
-    monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_preflight", lambda: None
+    )
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
-    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_current", lambda: None
+    )
     monkeypatch.setattr(
             window.dashboard_orchestrator, "render_current", lambda: None
         )
@@ -396,11 +419,15 @@ def test_a_successful_refresh_does_not_touch_the_market_badge(
         window.runtime_events_orchestrator, "record", lambda **_: None
     )
     monkeypatch.setattr(window, "_log", lambda _message: None)
-    monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_preflight", lambda: None
+    )
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
-    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_current", lambda: None
+    )
     monkeypatch.setattr(
             window.dashboard_orchestrator, "render_current", lambda: None
         )

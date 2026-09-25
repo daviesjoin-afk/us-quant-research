@@ -10,9 +10,10 @@ What changed is only *where* the window keeps them: the window now knows one
 object, ``self.execution_page``, and the controls inside it are the page's
 business.  The tests read them through the page for the same reason.
 
-The phase-driven cases go through the window's one result handler rather than
+The phase-driven cases go through the route's one result handler rather than
 poking the controls, because the mapping is produced by the render path and a
-test that set the controls directly would pass with that path broken.
+test that set the controls directly would pass with that path broken.  Since
+G2-B that handler is ``ExecutionOrchestrator.on_paper_result_changed``.
 """
 
 from __future__ import annotations
@@ -96,10 +97,17 @@ class _Result:
 
 
 def _apply(window: MainWindow, phase: PaperWorkflowPhase, *, awaiting=False):
-    """Drive one result through the real render path for ``phase``."""
+    """Drive one result through the real render path for ``phase``.
+
+    Since G2-B the result handler is the route's own:
+    ``paper_orchestrator.result_changed`` is connected to
+    ``ExecutionOrchestrator.on_paper_result_changed``, which reads the phase
+    through ``paper_orchestrator.session_control_facts`` -- the capability's own
+    interpretation of its phase -- and repaints the controls from it.
+    """
 
     window.paper_workflow = _Phase(phase, awaiting=awaiting)  # type: ignore[assignment]
-    window._on_paper_result_changed(_Result())  # type: ignore[arg-type]
+    window.execution_orchestrator.on_paper_result_changed(_Result())  # type: ignore[arg-type]
 
 
 def test_the_execution_route_starts_ready_to_prepare_only() -> None:
@@ -235,6 +243,10 @@ def test_the_candidates_are_visible_before_a_session_is_armed() -> None:
     candidates, with no session behind them.  A route that waited for a runtime
     snapshot -- which only exists once a session is armed -- would show an empty
     table while asking the operator to approve exactly that content.
+
+    Since G2-B the shortlist is ``execution_orchestrator.candidates``, the one
+    retained candidate fact on the desktop, and the draw is that orchestrator's
+    ``refresh_current``.
     """
 
     window = _window()
@@ -244,11 +256,11 @@ def test_the_candidates_are_visible_before_a_session_is_armed() -> None:
         # the window keeps.
         assert window.paper_orchestrator.presentation is None
 
-        window.auto_quant_candidates = (
+        window.execution_orchestrator._candidates = (
             _candidate("AAA"),
             _candidate("BBB"),
         )
-        window._populate_auto_quant_candidates()
+        window.execution_orchestrator.refresh_current()
 
         table = window.execution_page.details.candidate_table
         assert table.rowCount() == 2
@@ -323,12 +335,20 @@ def test_the_window_no_longer_owns_the_execution_widgets() -> None:
             "auto_execution_health_label",
         ):
             assert not hasattr(window, retired), retired
-        # What the window legitimately keeps is the prepared shortlist.  The session fact
-        # the route draws is *not* one of them: since v2O-E4 it is
-        # ``paper_orchestrator.presentation`` -- one immutable projection the capability
-        # retains and the window only reads -- so there is no window-side snapshot cache
-        # left to be a second owner of a session fact.
-        assert hasattr(window, "auto_quant_candidates")
+        # And neither the shortlist nor the route's two flags are the window's either
+        # (G2-B).  The one retained candidate fact is
+        # ``execution_orchestrator.candidates`` -- read by the route's table, its market
+        # readiness inputs and the Paper launch alike -- and ``_launch_busy`` /
+        # ``_channel_check_inflight`` moved to that orchestrator under its own names, so
+        # there is no window-side copy of any of them left to disagree with it.
+        assert not hasattr(window, "auto_quant_candidates")
+        assert not hasattr(window, "_launch_busy")
+        assert not hasattr(window, "_channel_check_inflight")
+        assert window.execution_orchestrator.candidates == ()
+        # The session fact the route draws is *not* one of them either: since v2O-E4 it
+        # is ``paper_orchestrator.presentation`` -- one immutable projection the
+        # capability retains and the window only reads -- so there is no window-side
+        # snapshot cache left to be a second owner of a session fact.
         assert not hasattr(window, "_paper_render_snapshot")
         assert hasattr(window.paper_orchestrator, "presentation")
         assert not hasattr(window, "trading_runtime")

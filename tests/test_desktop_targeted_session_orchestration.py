@@ -433,6 +433,26 @@ def _render_callers(attr: str) -> list[tuple[str, str]]:
     return callers
 
 
+def _strategy_options_callers() -> list[tuple[str, str]]:
+    """Who fills a strategy combo: every ``<owner>.set_strategy_options`` call
+    outside the page package.
+
+    The pages delegate to their own controls
+    (``self.controls.set_strategy_options``); that is the widget plumbing the
+    method exists for, not a driver of it, so the page package is filtered out.
+    What remains is exactly the set of modules that decide what a combo shows.
+    """
+
+    callers: list[tuple[str, str]] = []
+    for path in _python_files(_SRC):
+        if "pages" in path.parts:
+            continue
+        for owner, attr in _called_pieces(path):
+            if attr == "set_strategy_options":
+                callers.append((path.relative_to(_SRC).as_posix(), owner))
+    return sorted(callers)
+
+
 def test_the_session_capability_is_the_only_render_session_caller() -> None:
     callers = _render_callers("render_session")
     assert callers == [("orchestrator.py", "self._page")], callers
@@ -452,9 +472,12 @@ def test_the_session_capability_never_paints_the_evidence_half() -> None:
 def test_the_session_capability_is_the_only_targeted_set_strategy_options_caller() -> None:
     """MainWindow no longer paints the targeted combo; the capability does.
 
-    Scoped to the *targeted* page: the execution page has a combo of its own with
-    its own owner, and a blanket rule would forbid a second capability's
-    legitimate paint.
+    G2-B made this guard stronger and removed the scoping caveat it used to carry.
+    The rule was scoped to the *targeted* page because the window still filled the
+    *execution* page's combo; when that combo moved to ``ExecutionOrchestrator``
+    the window stopped calling ``set_strategy_options`` at all.  So the claim is now
+    the whole one: the window paints no combo, and each of the three combo pages
+    has exactly one driver -- its own capability.
     """
 
     window_calls = {
@@ -462,7 +485,7 @@ def test_the_session_capability_is_the_only_targeted_set_strategy_options_caller
         for owner, attr in _called_pieces(_DESKTOP)
         if attr == "set_strategy_options"
     }
-    assert window_calls == {"self.execution_page"}, sorted(window_calls)
+    assert window_calls == set(), sorted(window_calls)
 
     callers = {
         owner
@@ -470,6 +493,24 @@ def test_the_session_capability_is_the_only_targeted_set_strategy_options_caller
         if attr == "set_strategy_options"
     }
     assert callers == {"self._page"}, sorted(callers)
+
+    # The positive half, across the tree: one driver per combo page, and each one
+    # is the capability that owns that page.  Without it the rule above would pass
+    # if the window had stopped refreshing every combo and left the pages empty.
+    assert _strategy_options_callers() == [
+        (
+            "desktop_v2/orchestration/execution/orchestrator.py",
+            "self._page",
+        ),
+        (
+            "desktop_v2/orchestration/research/backtest/orchestrator.py",
+            "self._page",
+        ),
+        (
+            "desktop_v2/orchestration/research/targeted/session/orchestrator.py",
+            "self._page",
+        ),
+    ], _strategy_options_callers()
 
 
 def test_the_session_capability_is_the_only_set_target_symbol_caller() -> None:

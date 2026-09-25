@@ -208,14 +208,69 @@ def test_startup_restore_refreshes_scanner_page(
 def test_auto_market_scan_finished_refreshes_scanner_page(
     window: MainWindow, monkeypatch
 ) -> None:
+    """The route's finished preparation reaches the Scanner capability once.
+
+    G2-B moved the AutoQuant completion path onto ``ExecutionOrchestrator``: the
+    deleted ``_auto_market_scan_finished`` is ``_preparation_finished``, which
+    adopts the scan it just produced and hands it to the capability that owns
+    scan truth.  This drives the real ``request_prepare`` through a synchronous
+    task boundary -- rather than calling the retired callback by hand -- so the
+    fact that reaches the capability is the one the route's own task returned.
+    The shortlist build is stubbed out: sizing the *candidates* is a different
+    subject, and it is not what this test asserts.
+    """
+
+    from dataclasses import replace
+
+    scan = _scan()
     window.universe_orchestrator.restore_snapshot(_universe())
     monkeypatch.setattr(window, "_refresh_market_scope_summary", lambda: None)
-    monkeypatch.setattr(window, "_select_auto_quant_candidates", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "_build_shortlist", lambda: None
+    )
+    monkeypatch.setattr(
+        window.paper_orchestrator, "begin_preparation", lambda: None
+    )
+    monkeypatch.setattr(
+        "us_quant.desktop.scan_market", lambda universe, **kwargs: scan
+    )
+    monkeypatch.setattr("us_quant.desktop.save_market_scan", lambda *a: None)
 
-    window._auto_market_scan_finished(_scan())
+    # The adoption is counted at the route's own provider: the orchestrator
+    # captured it when the window built it, so the spy replaces the provider
+    # rather than the capability's method.
+    orchestrator = window.execution_orchestrator
+    adopted: list[object] = []
+    original_adopt = orchestrator._providers.adopt_scan
 
-    assert window.scanner_orchestrator.scan is not None
+    def adopt(finished: object) -> None:
+        adopted.append(finished)
+        original_adopt(finished)
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_providers",
+        replace(orchestrator._providers, adopt_scan=adopt),
+    )
+
+    logged: list[str] = []
+    monkeypatch.setattr(window, "_log", logged.append)
+
+    def submit(task, *, on_success, **_kwargs):
+        on_success(task(lambda message: None))
+        return True
+
+    monkeypatch.setattr(window.execution_orchestrator, "_submit_task", submit)
+
+    window.execution_orchestrator.request_prepare()
+    _APP.processEvents()
+
+    # Exactly one adoption, and the capability's scan *is* the finished scan.
+    assert adopted == [scan]
+    assert window.scanner_orchestrator.scan is scan
     assert window.scanner_page.table.rowCount() == 2
+    # Nobody clicked 扫描, so the adoption writes no manual completion line.
+    assert not [line for line in logged if "扫描完成" in line]
 
 
 def test_page_filter_does_not_change_business_scan_truth(

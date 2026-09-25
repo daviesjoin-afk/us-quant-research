@@ -262,8 +262,11 @@ $mutations = @(
     @{
         name = "M26 the window drives the workflow's release gate again"
         file = $desktopPath
-        find = "        self\._publish_execution_controls\(\)\r?\n\r?\n    def _render_auto_quant_snapshot"
-        repl = "        self._publish_execution_controls()`n        self.paper_workflow.finalize_if_safe()`n`n    def _render_auto_quant_snapshot"
+        # G2-B deleted the two window methods this used to anchor between.  The
+        # invariant is unchanged -- the window must not drive Paper's release
+        # gate -- so the mutant is re-anchored on a surviving window method.
+        find = "        self\._cancel_close_drain\(\)\r?\n(\r?\n)+    def _configured_exposure_multipliers"
+        repl = "        self._cancel_close_drain()`n        self.paper_workflow.finalize_if_safe()`n`n    def _configured_exposure_multipliers"
         tests = @($architecture)
         select = @("-k", "never_drives_recovery_or_finalization")
     },

@@ -34,6 +34,7 @@ _RESEARCH = _SRC / "desktop_v2" / "orchestration" / "research"
 _UNIVERSE_DIR = _RESEARCH / "universe"
 _HISTORY_DIR = _RESEARCH / "history"
 _SCANNER_DIR = _RESEARCH / "scanner"
+_EXECUTION_DIR = _SRC / "desktop_v2" / "orchestration" / "execution"
 
 #: Spec 43: this file must never exist, and these classes must never be
 #: declared.  One object owning all of Universe/History/Scanner/Backtest/
@@ -240,6 +241,15 @@ RETIRED_WINDOW_STATE = (
 )
 
 #: The methods the window must no longer declare (spec 28).
+#:
+#: ``_schedule_history`` is deliberately **not** on this list any more.  G2-B
+#: gave the name back as a *composition adapter*: the window supplies the queue
+#: path, and ``ExecutionOrchestrator`` decides when to queue (after a successful
+#: preparation scan).  Listing it here would now assert against a legitimate
+#: seam, so the strength is kept by
+#: ``test_the_schedule_history_adapter_cannot_start_a_run`` below, which pins
+#: that the adapter cannot start or drive a history run and is never called by
+#: the window itself.
 RETIRED_WINDOW_METHODS = (
     "_publish_universe_view",
     "_refresh_universe",
@@ -247,7 +257,6 @@ RETIRED_WINDOW_METHODS = (
     "_reset_universe_refresh_controls",
     "_universe_refreshed",
     "_publish_history_view",
-    "_schedule_history",
     "_run_history",
     "_history_finished",
     "_history_task_failed",
@@ -512,6 +521,46 @@ def test_the_window_no_longer_holds_research_state(needle: str) -> None:
 @pytest.mark.parametrize("name", RETIRED_WINDOW_METHODS)
 def test_the_window_no_longer_declares_the_retired_method(name: str) -> None:
     assert _method_source(name) is None, f"{name} must be retired"
+
+
+def test_the_schedule_history_adapter_cannot_start_a_run() -> None:
+    """G2-B gave ``_schedule_history`` back as composition, not as an entry point.
+
+    The window supplies the queue *path*; ``ExecutionOrchestrator`` decides
+    *when* to queue and reaches the adapter through the provider it was handed.
+    So the name may exist again -- but only as one call over the store: it may
+    not drive the workflow, may not submit a task, and must never be called from
+    inside the window, which is what used to make it a second place a history
+    run could be started from.
+    """
+
+    source = _DESKTOP.read_text(encoding="utf-8")
+    adapter = _method_source("_schedule_history")
+    assert adapter is not None, "the composition adapter must exist"
+    assert "HistoryJobStore" in adapter
+    assert "prioritized_research_symbols" in adapter
+    for forbidden in (
+        "orchestrator",
+        "worker",
+        "_start_task",
+        "Thread",
+        "request_run",
+        "request_schedule",
+    ):
+        assert forbidden not in adapter, (
+            f"_schedule_history must stay composition, found {forbidden}"
+        )
+    # Handed to the route, never invoked by the window itself.
+    assert "schedule_history=self._schedule_history," in source
+    assert "self._schedule_history(" not in source
+
+    # And the decision is the execution route's: the queueing happens on the
+    # preparation path, after the scan that preparation just adopted.
+    orchestrator = (_EXECUTION_DIR / "orchestrator.py").read_text(
+        encoding="utf-8"
+    )
+    assert "self._providers.schedule_history(" in orchestrator
+    assert "self._providers.adopt_scan(" in orchestrator
 
 
 def test_the_window_declares_no_compatibility_property() -> None:

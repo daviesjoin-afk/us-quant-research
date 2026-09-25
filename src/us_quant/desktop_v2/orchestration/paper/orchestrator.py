@@ -408,6 +408,72 @@ class PaperOrchestrator(QObject):
             ),
         )
 
+    # -- the preparation seam (G2-B) --------------------------------------
+    #
+    # The execution route builds the AutoQuant candidate shortlist, and building
+    # it happens *inside* PAPER's PREPARING phase: the session reserves the
+    # workflow before it scans, so a launch cannot begin against a list that is
+    # still being assembled.  The route may not hold the workflow to do that --
+    # a second object able to move PAPER is exactly the coupling this whole
+    # round removes -- so it asks here instead.
+    #
+    # Three transitions and three facts, and every one of them is a pure proxy
+    # of the canonical workflow: nothing is cached, no transition semantics
+    # change, and ``begin_preparation`` answers with the workflow's own refusal
+    # *message* so the caller never imports a Paper error type.
+
+    @property
+    def preparation_active(self) -> bool:
+        """Whether the canonical workflow is in its preparation step."""
+
+        return self._workflow.phase is PaperWorkflowPhase.PREPARING
+
+    @property
+    def launch_attempt_in_flight(self) -> bool:
+        """Whether an attempt currently owns the connect step.
+
+        Answered by ``queries.launch_attempt_in_flight``, the one definition of
+        "an attempt owns the connect step", rather than by a comparison here.
+        """
+
+        return queries.launch_attempt_in_flight(self._workflow.phase)
+
+    @property
+    def order_service_held(self) -> bool:
+        """Whether the order-service owner holds a candidate or active service."""
+
+        return self._paper_trading.has_order_service()
+
+    def begin_preparation(self) -> str | None:
+        """Enter PREPARING, or return the workflow's refusal message.
+
+        ``None`` means the canonical workflow moved to PREPARING and the caller
+        now owns releasing it.  A message means nothing moved and the caller must
+        claim nothing.
+        """
+
+        try:
+            self._workflow.begin_preparing()
+        except WorkflowStateError as error:
+            return str(error)
+        return None
+
+    def cancel_preparation(self) -> None:
+        """Give PREPARING back.  A no-op unless the workflow is in that step."""
+
+        if self._workflow.phase is PaperWorkflowPhase.PREPARING:
+            self._workflow.cancel_preparing()
+
+    def mark_preparation_ready(self) -> None:
+        """Hand a finished shortlist to the workflow as READY.
+
+        A no-op unless the workflow is in PREPARING, so a late scan callback
+        cannot move a phase the session has already left.
+        """
+
+        if self._workflow.phase is PaperWorkflowPhase.PREPARING:
+            self._workflow.mark_ready()
+
     def start(self) -> None:
         """Run the launch gates, freeze the attempt, acquire PAPER and connect.
 

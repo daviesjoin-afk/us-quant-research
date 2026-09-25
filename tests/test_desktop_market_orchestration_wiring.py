@@ -220,12 +220,31 @@ def test_a_snapshot_publishes_the_workflow_market_readiness(window, quiet_minute
     assert snapshot.market_ready is True
 
 
-def test_a_snapshot_reaches_the_auto_quant_preflight(window, quiet_minutes) -> None:
-    """The preflight reads the market truth, so its line must move."""
+def test_a_snapshot_reaches_the_auto_quant_preflight(
+    window, quiet_minutes, monkeypatch
+) -> None:
+    """The preflight reads the market truth, so the snapshot's fan-out must move it.
+
+    Since G2-B the window renders nothing on this route itself: the fan-out is
+    ``MainWindow._on_market_snapshot_changed`` and the repaint it performs is
+    ``execution_orchestrator.refresh_all()``.  The snapshot is driven from the
+    market orchestrator so the window's own connection is exercised, and the
+    recorder proves the fan-out reached the *route* rather than the test calling
+    a window method that no longer exists.
+    """
+
+    published: list[str] = []
+    real_refresh = window.execution_orchestrator.refresh_all
+
+    def record() -> None:
+        published.append("refresh_all")
+        real_refresh()
+
+    monkeypatch.setattr(window.execution_orchestrator, "refresh_all", record)
 
     window.market_orchestrator._on_snapshot(_snapshot())
-    window._refresh_auto_quant_preflight()
 
+    assert published == ["refresh_all"]
     line = window.execution_page.controls.preflight_label.text()
     assert "准备检查" in line
 
@@ -434,14 +453,77 @@ def test_the_market_scope_line_is_written_through_the_orchestrator(
     assert "范围分层" in window.market_page.scope_label.text()
 
 
-def test_the_market_readiness_inputs_come_from_the_window(window) -> None:
-    """The candidate shortlist is the execution route's, not the market's."""
+def _candidates():
+    """Two rows, as the execution route retains its shortlist."""
 
-    window._publish_market_readiness_inputs()
+    from us_quant.trading.runtime.models import AutoQuantCandidate
+
+    return tuple(
+        AutoQuantCandidate(
+            symbol=symbol,
+            name=f"{symbol} Inc",
+            sector="科技",
+            leader_tier=1,
+            scan_score=Decimal("80"),
+            signal="趋势候选",
+        )
+        for symbol in ("AAA", "BBB")
+    )
+
+
+def test_the_market_readiness_inputs_come_from_the_window(window) -> None:
+    """The route derives both halves; the window only bridges them.
+
+    G2-B moved the fact to its owner.  ``ExecutionOrchestrator`` derives the
+    ``MarketReadinessFact`` from its own retained shortlist (``candidates``) and
+    the *selected version's* reference symbols, and publishes it on
+    ``market_readiness_inputs_changed``; the window's remaining job is the
+    composition one -- turn that finished fact into the market layer's
+    ``MarketReadinessInputs`` and hand it to ``set_readiness_inputs``.  It
+    derives nothing, which is why it no longer holds a shortlist at all:
+    ``auto_quant_candidates`` is deleted, and a window that kept one would be a
+    second truth about the same candidates.
+    """
+
+    from us_quant.desktop_v2.orchestration.execution.models import (
+        MarketReadinessFact,
+    )
+
+    assert not hasattr(window, "auto_quant_candidates")
+
+    window.execution_orchestrator._candidates = _candidates()
+    strategy = window.execution_orchestrator.current_strategy
+    # The reference half really is the selected version's own parameter.
+    assert strategy.parameters["market_reference_symbols"] == ["SPY", "QQQ"]
+
+    facts: list[object] = []
+    window.execution_orchestrator.market_readiness_inputs_changed.connect(
+        facts.append
+    )
+
+    window.execution_orchestrator.refresh_preflight()
+
+    assert len(facts) == 1
+    fact = facts[0]
+    assert fact.candidate_symbols == ("AAA", "BBB")
+    assert fact.reference_symbols == ("SPY", "QQQ")
 
     inputs = window.market_orchestrator._render._inputs
-    assert isinstance(inputs.candidate_symbols, tuple)
-    assert isinstance(inputs.reference_symbols, tuple)
+    assert inputs.candidate_symbols == ("AAA", "BBB")
+    assert inputs.reference_symbols == ("SPY", "QQQ")
+
+    # And the window recomputes neither half: a *different* fact published by the
+    # route lands verbatim, so a window that derived the symbols itself -- or read
+    # them off a shortlist of its own -- would show its own list here instead.
+    window.execution_orchestrator.market_readiness_inputs_changed.emit(
+        MarketReadinessFact(
+            candidate_symbols=("ZZZ",), reference_symbols=("WWW",)
+        )
+    )
+
+    inputs = window.market_orchestrator._render._inputs
+    assert inputs.candidate_symbols == ("ZZZ",)
+    assert inputs.reference_symbols == ("WWW",)
 
 
 # -- shutdown ------------------------------------------------------------

@@ -229,13 +229,19 @@ def test_scanner_reads_the_updated_canonical_capital(
 def test_auto_quant_preparation_reads_the_updated_canonical_capital(
     window: MainWindow, monkeypatch
 ) -> None:
-    """The AutoQuant scan request freezes the canonical capital.
+    """The AutoQuant scan request reads the canonical capital when it runs.
 
-    Driven through the real ``_prepare_auto_quant_candidates`` with the Paper
-    workflow stubbed, then the captured task is executed against a faked
-    ``scan_market``.  Asserting the value the *worker* receives is what proves
-    the read happened on the request thread against the canonical state, not
-    against a copy.
+    Driven through the real ``request_prepare`` -- the G2-B owner of the
+    candidate preparation, the deleted window method was
+    ``_prepare_auto_quant_candidates`` -- with the Paper workflow stubbed, then
+    the captured task is executed against a faked ``scan_market``.  Asserting
+    the value the *worker* receives is what proves the read happened on the
+    request thread against the canonical state, not against a copy.
+
+    The capital the route passes for the SCAN is
+    ``providers.research_scenario_capital()``: the sizing of the *candidate*
+    shortlist is a separate, fresh-Paper-capital rule, and the scenario figure
+    must never enter it.
     """
 
     window.cross_section_page.capital_changed.emit(3300)
@@ -251,13 +257,20 @@ def test_auto_quant_preparation_reads_the_updated_canonical_capital(
     monkeypatch.setattr(
         window.paper_workflow, "cancel_preparing", lambda: None
     )
-    monkeypatch.setattr(window, "_set_launch_busy", lambda *a: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "_set_launch_busy", lambda *a: None
+    )
 
     def fake_start(task, **kwargs):
         captured["task"] = task
         return False
 
-    monkeypatch.setattr(window, "_start_task", fake_start)
+    # The orchestrator captured the task boundary when the window built it, so
+    # the stub goes on its own dependency rather than on the window attribute a
+    # late monkeypatch could no longer reach.
+    monkeypatch.setattr(
+        window.execution_orchestrator, "_submit_task", fake_start
+    )
     monkeypatch.setattr(
         "us_quant.desktop.scan_market",
         lambda universe, **kwargs: captured.setdefault(
@@ -267,7 +280,7 @@ def test_auto_quant_preparation_reads_the_updated_canonical_capital(
     )
     monkeypatch.setattr("us_quant.desktop.save_market_scan", lambda *a: None)
 
-    window._prepare_auto_quant_candidates()
+    window.execution_orchestrator.request_prepare()
 
     # The task reports the capital the scan ran with, threaded through the
     # real closure rather than a re-read of the state.

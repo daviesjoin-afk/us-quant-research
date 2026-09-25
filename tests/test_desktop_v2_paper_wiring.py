@@ -196,10 +196,15 @@ def _strategy(window: MainWindow):
 
     Read rather than invented, so the frozen plan names a version the real
     ``build_auto_rotation_config`` can consume.
+
+    G2-B moved the runtime AUTO_ROTATION selection onto ``ExecutionOrchestrator``,
+    so the version is read through ``current_strategy`` -- the same
+    ``strategy_selection.selected(...)`` answer the retired
+    ``MainWindow._selected_auto_strategy_record`` gave.
     """
 
     return window.strategies.get_version(
-        window._selected_auto_strategy_record().version_id
+        window.execution_orchestrator.current_strategy.version_id
     )
 
 
@@ -246,7 +251,10 @@ def window(monkeypatch, tmp_path):
     )
 
     # The facts the launch reads, so the gates pass without a live feed or account.
-    window.auto_quant_candidates = (_candidate(),)
+    # The shortlist is the execution route's retained candidate fact -- G2-B moved it
+    # onto ``ExecutionOrchestrator``, which the Paper launch reads through its own
+    # ``candidates_provider``, so this is the one place the tuple lives now.
+    window.execution_orchestrator._candidates = (_candidate(),)
     window._test_strategy = _strategy(window)
     window.paper_orchestrator._strategy_provider = lambda: window._test_strategy
     window.paper_orchestrator._preflight_provider = lambda: _Preflight()
@@ -898,16 +906,27 @@ def test_the_holding_gates_ask_the_capability_not_a_runtime_handle(
 def test_the_channel_probe_is_still_refused_while_a_session_is_live(
     window: MainWindow,
 ) -> None:
-    """The probe gate lost its runtime clause and must not have lost its effect."""
+    """The probe gate lost its runtime clause and must not have lost its effect.
+
+    G2-B moved the gate itself onto ``ExecutionOrchestrator.request_channel_check``,
+    so the refused flag and the unsubmitted task are read there.  The claim is the
+    unchanged one -- a live session already holds the order channel, so the probe is
+    refused *and* no probe task is admitted -- and the probe's own task boundary is
+    counted now as well, so a gate that admitted the probe would be observed rather
+    than merely failing to be observed through the Paper submitter.
+    """
 
     _launch(window)
     connects = window._test_submitter.connect_count
+    probes = _HoldingSubmitter()
+    window.execution_orchestrator._submit_task = probes
 
-    window._check_auto_order_channel()
+    window.execution_orchestrator.request_channel_check()
     _APP.processEvents()
 
-    assert window._channel_check_inflight is False
+    assert window.execution_orchestrator._channel_probe_inflight is False
     assert window._test_submitter.connect_count == connects
+    assert probes.calls == []
 
 
 # -- v2O-E3: the operator's resume confirmation --------------------------

@@ -221,13 +221,15 @@ def seed_auto_quant_preview(window) -> None:
             )
             if len(preview_candidates) == 8:
                 break
-    window.auto_quant_candidates = tuple(preview_candidates)
-    window._populate_auto_quant_candidates()
-    window.execution_page.render_context(
-        summary=(
-            f"已整理 {len(preview_candidates)} 个广域候选；"
-            "等待实时订阅与用户逐会话武装 IBKR Paper。"
-        )
+    # The shortlist has one owner now (G2-B): seeding it and repainting are the
+    # execution route's own calls, and the script reaches the same retained tuple
+    # the route does rather than a window copy that no longer exists.
+    orchestrator = window.execution_orchestrator
+    orchestrator._candidates = tuple(preview_candidates)
+    orchestrator.refresh_all()
+    orchestrator.render_launch_context(
+        f"已整理 {len(preview_candidates)} 个广域候选；"
+        "等待实时订阅与用户逐会话武装 IBKR Paper。"
     )
 
 

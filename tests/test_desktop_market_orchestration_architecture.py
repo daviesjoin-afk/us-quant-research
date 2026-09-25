@@ -26,6 +26,12 @@ _ORCHESTRATOR_PATH = _MARKET_DIR / "orchestrator.py"
 _RENDERER_PATH = _MARKET_DIR / "renderer.py"
 _MODELS_PATH = _MARKET_DIR / "models.py"
 _HEALTH_PATH = _MARKET_DIR / "health.py"
+#: G2-B's capability, read here for the two cross-round facts this file pins
+#: about it: the execution route is the snapshot bridge's candidate consumer, and
+#: it is one more declared package beside ``market``.
+_EXECUTION_ORCHESTRATOR_PATH = (
+    _SRC / "desktop_v2" / "orchestration" / "execution" / "orchestrator.py"
+)
 
 #: The base commit this round is measured against.  Recorded so the line-count
 #: guard has a fixed reference rather than "whatever main is today".
@@ -744,7 +750,13 @@ def test_the_snapshot_bridge_still_reaches_every_declared_consumer() -> None:
         "workflow_controller.market_account.update",
         "_record_minute_snapshot",
         "dashboard_orchestrator.render_current",
-        "_populate_auto_quant_candidates",
+        # G2-B: the candidate table, the preflight line and the extended-hours
+        # line moved onto the execution capability, so the bridge asks the route
+        # to repaint instead of calling the window's own
+        # ``_populate_auto_quant_candidates``.  The command, not the window's
+        # method, is what the fan-out reaches now -- asserted below to be a real
+        # member of the class it names.
+        "execution_orchestrator.refresh_all",
         # The targeted session's preflight is the capability's own command now
         # (v2O-C5B); the bridge asks for the refresh rather than doing it.
         "targeted_session_orchestrator.refresh_preflight",
@@ -759,6 +771,14 @@ def test_the_snapshot_bridge_still_reaches_every_declared_consumer() -> None:
         "shadow_orchestrator.on_market_snapshot",
     ):
         assert consumer in source, consumer
+
+    # The consumer is a *capability* command now.  ``_populate_auto_quant_candidates``
+    # was a window method, so the name in the fan-out was held to account by the
+    # window's own method set; a capability command needs the same guarantee, or
+    # the fan-out could name something that does not exist and still pass.
+    assert "refresh_all" in _public_members(
+        _EXECUTION_ORCHESTRATOR_PATH, "ExecutionOrchestrator"
+    )
 
 
 # -- Guard F: line budgets and the net reduction -------------------------
@@ -846,6 +866,14 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
     ``account``, and it owns no second truth: ``StrategyApplication`` stays the
     catalogue authority, and the governance path never touches the runtime
     selection service.
+
+    ``execution/`` arrived with G2-B: the desktop execution / AutoQuant route's
+    sequencing -- the two-step candidate preparation, the retained shortlist, the
+    order-channel probe, the launch consent and the execution page's render --
+    moved off ``MainWindow``.  It is a capability directory like ``market`` and
+    ``paper``, and it owns no second truth: ``ScannerOrchestrator`` stays the
+    scan's canonical owner, ``PaperWorkflowController`` keeps the session
+    lifecycle, and ``StrategySelectionService`` keeps the runtime selection.
     """
 
     children = {
@@ -856,6 +884,7 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
     # ``dashboard`` arrived with G1: it owns the Dashboard page's render and
     # its retained chart fact, and imports no other orchestrator.
     # ``strategy`` arrived with G2-A: the strategy governance capability.
+    # ``execution`` arrived with G2-B: the execution / AutoQuant route.
     assert children == {
         "market",
         "account",
@@ -865,6 +894,7 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
         "system",
         "dashboard",
         "strategy",
+        "execution",
     }, children
 
     # The route aggregate must stay an aggregate: a capability-level

@@ -693,6 +693,19 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
     three-branch evidence notice) and ``orchestrator.py`` the governance
     commands; it never touches the runtime selection service, so a governance
     view selection and a runtime selection stay two different things.
+
+    ``orchestration/execution/`` arrived with G2-B: the AutoQuant route's
+    sequencing -- the runtime strategy selection and its combo, the preflight,
+    the two-step candidate preparation (scan, adopt, queue history, select), the
+    order-channel probe, the launch confirmation, the control state and the whole
+    session render -- moved out of ``MainWindow`` into ``ExecutionOrchestrator``.
+    ``models.py`` holds the route's immutable facts, its dialog copy, the
+    provider group and the structural ports, ``queries.py`` the pure rules
+    (reference normalization, strategy eligibility, capital bounding, the
+    shortlist projection and the sentences the route publishes) and
+    ``orchestrator.py`` the commands and the render.  It imports no other
+    capability orchestrator and no Paper type, so it is a peer of the packages
+    above rather than an aggregate over them.
     """
 
     desktop_v2 = _SRC / "desktop_v2"
@@ -762,6 +775,10 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "orchestration/strategy/models.py",
         "orchestration/strategy/orchestrator.py",
         "orchestration/strategy/queries.py",
+        "orchestration/execution/__init__.py",
+        "orchestration/execution/models.py",
+        "orchestration/execution/orchestrator.py",
+        "orchestration/execution/queries.py",
         "orchestration/tasking.py",
         "pages/__init__.py",
         "pages/account.py",
@@ -1552,12 +1569,15 @@ RETIRED_STRATEGY_MODULES = (
     "us_quant.strategy_schema",
 )
 
-# The retired MainWindow strategy page and its controller handlers.  The two
-# combo accessors (``_selected_shadow_strategy_record`` /
-# ``_selected_auto_strategy_record``) are NOT listed: nine call sites still read
-# them, so they were re-pointed at ``StrategySelectionService`` rather than
-# deleted, and ``test_the_combo_accessors_read_the_selection_service`` below
-# pins that they no longer reach for a widget.
+# The retired MainWindow strategy page and its controller handlers.  The
+# targeted-shadow combo accessor (``_selected_shadow_strategy_record``) is NOT
+# listed: three call sites still read it, so it was re-pointed at
+# ``StrategySelectionService`` rather than deleted, and
+# ``test_the_combo_accessors_read_the_selection_service`` below pins that it no
+# longer reaches for a widget.  Its AutoQuant twin was deleted instead: G2-B
+# moved the AutoQuant route's runtime selection to
+# ``ExecutionOrchestrator.current_strategy``, and that same guard pins both
+# halves -- the surviving window reader and the new route-owned one.
 RETIRED_STRATEGY_METHODS = (
     "_strategy_manager_tab",
     "_populate_strategy_registry",
@@ -1578,6 +1598,14 @@ STRATEGY_DEFAULTS = _TRADING / "application" / "strategy_defaults.py"
 STRATEGY_SELECTION = _TRADING / "application" / "strategy_selection.py"
 STRATEGY_COMPOSITION = _TRADING / "composition" / "strategies.py"
 STRATEGY_PAGE = _SRC / "desktop_v2" / "pages" / "strategy.py"
+
+#: The execution / AutoQuant route's orchestrator (G2-B).  It is the execution
+#: page's only orchestration caller and the owner of the route's runtime
+#: selection, so the two guards below that used to read one window method each
+#: now pin their subject on whichever side owns it.
+EXECUTION_ORCHESTRATOR = (
+    _SRC / "desktop_v2" / "orchestration" / "execution" / "orchestrator.py"
+)
 
 #: Every module the strategy migration creates or rewrites.
 STRATEGY_V2_MODULES = (
@@ -1967,14 +1995,47 @@ def test_the_combo_accessors_read_the_selection_service() -> None:
     ``QComboBox.currentData()`` made "which version runs?" depend on which tab
     was on screen, and made the question unanswerable from anywhere that is
     not that widget.
+
+    G2-B split the pair: the AutoQuant accessor is gone from the window --
+    ``_selected_auto_strategy_record`` is deleted, the window may not regain it,
+    and the AutoQuant runtime selection is read on
+    ``ExecutionOrchestrator.current_strategy`` -- while
+    ``_selected_shadow_strategy_record`` stays on the window because the
+    Targeted Shadow runtime is still the window's to launch.  The guard follows
+    the subject rather than the name, and keeps its strength: one pinned reader
+    per purpose, each asking the service for *its own* purpose, and no widget,
+    registry or ``get_version`` read on either side.
     """
 
-    source = (_SRC / "desktop.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    for name in (
-        "_selected_shadow_strategy_record",
-        "_selected_auto_strategy_record",
-    ):
+    window = ast.parse((_SRC / "desktop.py").read_text(encoding="utf-8"))
+    declared = {
+        statement.name
+        for item in window.body
+        if isinstance(item, ast.ClassDef) and item.name == "MainWindow"
+        for statement in item.body
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert "_selected_auto_strategy_record" not in declared, (
+        "the AutoQuant runtime selection belongs to ExecutionOrchestrator"
+    )
+
+    cases = (
+        (
+            _SRC / "desktop.py",
+            "_selected_shadow_strategy_record",
+            "self.strategy_selection.selected(",
+            "StrategySelectionPurpose.TARGETED_SHADOW",
+        ),
+        (
+            EXECUTION_ORCHESTRATOR,
+            "current_strategy",
+            "self._selection.selected(",
+            "StrategySelectionPurpose.AUTO_ROTATION",
+        ),
+    )
+    for path, name, reader, purpose in cases:
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
         node = next(
             item
             for item in ast.walk(tree)
@@ -1997,8 +2058,11 @@ def test_the_combo_accessors_read_the_selection_service() -> None:
             )
             if segment
         )
-        assert "self.strategy_selection.selected(" in code, (
-            f"{name} must ask the selection service"
+        assert reader in code, (
+            f"{path.name}:{name} must ask the selection service"
+        )
+        assert purpose in code, (
+            f"{path.name}:{name} must ask for its own purpose"
         )
         for forbidden in (
             "currentData(",
@@ -2006,7 +2070,8 @@ def test_the_combo_accessors_read_the_selection_service() -> None:
             "strategy_registry",
         ):
             assert forbidden not in code, (
-                f"{name} still reads {forbidden} instead of the service"
+                f"{path.name}:{name} still reads {forbidden} instead of the "
+                "service"
             )
 
 
@@ -3574,11 +3639,61 @@ def test_the_execution_route_has_one_entry_point() -> None:
     assert "self.execution_page = ExecutionPage(" in source
 
 
+def _page_calls(path: pathlib.Path, attribute: str) -> set[str]:
+    """Every method this module calls on one page receiver.
+
+    The receiver is matched by attribute name *and* by the local aliases the
+    module binds to it, so a wiring method that does
+    ``page = self.execution_page`` and then ``page.render(...)`` is found as
+    well as ``self.execution_page.render(...)``: the guard must not be
+    defeatable by giving the page a shorter name.
+    """
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    receivers = {attribute}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(
+            node.value, ast.Attribute
+        ):
+            continue
+        if node.value.attr != attribute:
+            continue
+        receivers.update(
+            target.id
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        )
+    calls: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(
+            node.func, ast.Attribute
+        ):
+            continue
+        owner = node.func.value
+        name = (
+            owner.id
+            if isinstance(owner, ast.Name)
+            else owner.attr
+            if isinstance(owner, ast.Attribute)
+            else ""
+        )
+        if name in receivers:
+            calls.add(node.func.attr)
+    return calls
+
+
 def test_the_window_no_longer_names_an_execution_widget() -> None:
     """Guard E: one attribute -- the page -- is the whole of the window's view.
 
     Checked as attribute *uses* rather than as text, so a comment explaining the
     retirement does not trip it.
+
+    G2-B moved the page's orchestration caller, so the second half of the guard
+    is inverted rather than dropped: the window constructs the page and hands it
+    the palette, and that is the whole of its relationship with it -- while
+    ``ExecutionOrchestrator``, which was constructed *with* that page, calls
+    every repaint entry point.  Same claim about the same route, pinned one
+    owner further in; the route cannot stop working to make the guard pass.
     """
 
     desktop = _SRC / "desktop.py"
@@ -3593,16 +3708,66 @@ def test_the_window_no_longer_names_an_execution_widget() -> None:
             offenders.append(node.attr)
     assert not offenders, sorted(set(offenders))
 
-    # And the window still drives the page, so the guard cannot pass by the
-    # route having stopped working.
+    # The window still builds the page and serves the route, and the page is
+    # still handed the palette -- the one page call that stays composition.
     source = desktop.read_text(encoding="utf-8")
+    assert "self.execution_page = ExecutionPage(" in source
+    assert "page=self.execution_page," in source, (
+        "the orchestrator must be constructed with the page it renders"
+    )
+    assert _page_calls(desktop, "execution_page") == {"set_palette"}, sorted(
+        _page_calls(desktop, "execution_page")
+    )
+
+    # And the page is still driven: every repaint entry point is called by the
+    # single orchestration caller, whose receiver is that same page.
+    rendered = _page_calls(EXECUTION_ORCHESTRATOR, "_page")
     for required in (
-        "self.execution_page.render(",
-        "self.execution_page.set_control_state(",
-        "self.execution_page.set_strategy_options(",
-        "self.execution_page.render_preflight(",
+        "render",
+        "render_candidates",
+        "render_context",
+        "render_execution_health",
+        "render_preflight",
+        "set_arm_confirmed",
+        "set_control_state",
+        "set_strategy_options",
     ):
-        assert required in source, required
+        assert required in rendered, required
+
+
+def test_the_window_holds_no_execution_route_state() -> None:
+    """G2-B: the route's three local facts are the orchestrator's alone.
+
+    A launch-busy flag, a probe-in-flight flag and the retained candidate
+    shortlist were ``MainWindow`` state.  Each is now route-local to
+    ``ExecutionOrchestrator``, and the shortlist matters most: it has exactly one
+    home, because the candidate table, the market readiness inputs and the Paper
+    launch all read that one tuple -- a window copy is a second truth they could
+    disagree with.
+    """
+
+    desktop = _SRC / "desktop.py"
+    names = _identifier_names(desktop)
+    for retired in (
+        "auto_quant_candidates",
+        "_launch_busy",
+        "_channel_check_inflight",
+    ):
+        assert retired not in names, (
+            f"MainWindow must not hold {retired}; the route's state is "
+            "ExecutionOrchestrator's"
+        )
+
+    # And the new owner really holds them, so the guard cannot pass by the
+    # state having been dropped rather than moved.
+    orchestration = _identifier_names(EXECUTION_ORCHESTRATOR)
+    for required in (
+        "_candidates",
+        "_channel_probe_inflight",
+        "_launch_busy",
+        "candidates",
+    ):
+        assert required in orchestration, required
 
 
 def test_the_window_declares_no_retired_execution_widget() -> None:

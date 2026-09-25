@@ -3407,11 +3407,14 @@ corrupt latch       → PaperAutonomyStoreUnreadable
 corrupt timestamp   → PaperAutonomyStoreUnreadable（naive 也不行）
 blank reason        → PaperAutonomyStoreUnreadable
 corrupt event kind  → PaperAutonomyStoreUnreadable
+blank event detail  → PaperAutonomyStoreUnreadable
 corrupt event time  → PaperAutonomyStoreUnreadable
+event revision ≤ 0  → 值层拒绝；读回来同样 StoreUnreadable
 NO ROW + EVENTS     → PaperAutonomyStoreUnreadable（孤立历史 ≠ 全新 store）
-revision < 1 的行    → PaperAutonomyStoreUnreadable
-COUNT ≠ revision / MIN ≠ 1 / MAX ≠ revision
-                    → PaperAutonomyStoreUnreadable（缺口 / 少一条 / 多一条）
+revision ≤ 0 的 intent 行 → PaperAutonomyStoreUnreadable
+trail ≠ 1..n 的 intent   → PaperAutonomyStoreUnreadable（缺口 / 少一条 / 顺序错）
+latest event 与 intent 的
+  occurred_at / detail 不一致 → PaperAutonomyStoreUnreadable
 duplicate revision  → schema 唯一索引拒绝；旧库已存在重复时初始化即失败
 ```
 
@@ -3423,6 +3426,23 @@ duplicate revision  → schema 唯一索引拒绝；旧库已存在重复时初�
 这个模块自己发明历史，而轨迹的意义就在于它是记录本身。读不出来的东西永远不会被猜成
 `enabled`。
 
+**读 intent 就是读整条记录。** `load_intent()` 在同一个 read transaction 里读出 intent
+行与**完整** event 序列，逐行 `_event_from_row` 解析，再验证 revisions 恰好是 `1..n`
+且 latest event 仍然描述它旁边那个 intent（同一时刻、同一 operator reason；revision
+一致性由序列检查蕴含）。因此 `snapshot()` 的含义是"当前 intent 与它对应的完整 audit
+trail 都可信"——这正是 v1-B supervisor 会当作 operator authorization 读入的东西。
+
+早期版本只验证 revision **拓扑**（`COUNT/MIN/MAX`）：一行 `event = "BROKEN"`、
+`detail = ""`、`occurred_at = "not a timestamp"`，仍能让 `load_intent()` 返回
+`ENABLED`、让 `snapshot()` 给出 `allows_autonomous_work=True`，只有调用
+`recent_events()` 才发现轨迹坏了。这是无人值守 supervisor 之前必须堵住的 fail-closed
+漏洞，现在三个读口在同一个参数化用例里都被断言必须 `StoreUnreadable`。
+
+反之，只验证"能解析"也不够：把 `detail` 换成一个合法的非空字符串、或把 `occurred_at`
+换成一个合法的 aware 时间戳，两行都能被解析，但已经不再与当前 intent 的
+`reason` / `updated_at` 匹配。`test_t2` 正是这一组——它先断言 `recent_events()` **仍然
+成功**，以此证明这种损坏无法靠解析发现，pair 校验是必需的。
+
 SQLite adapter 的 CAS 是单个 `BEGIN IMMEDIATE` 事务（先取写锁再读 revision，然后
 UPSERT）：deferred 事务会先读后锁，两个写者可能都看到 revision *n* 并双双通过。单条
 UPSERT 表达不了"表为空才插入、否则 revision 相符才更新"——两条路径里必有一条不可达
@@ -3433,6 +3453,14 @@ UPSERT 表达不了"表为空才插入、否则 revision 相符才更新"——�
 用独立索引而不是列上的 `UNIQUE` 是为了让旧库还能打开（`CREATE TABLE IF NOT EXISTS`
 不会给已存在的表重新声明约束）；而旧库若已存在重复 revision，索引建不起来就直接
 失败，不挑一条相信。
+
+**所有存储故障都落在这个模块的 error vocabulary 里。** `connect` / `BEGIN` /
+`SELECT` / `COMMIT` / 初始化 schema 任一步的 `sqlite3.Error`，都归一为
+`PaperAutonomyRepositoryError`（若问题在已存字节，则是
+`PaperAutonomyStoreUnreadable`），绝不裸漏 `sqlite3.Error`；`PaperAutonomyConflict`
+保持具体类型，已识别的损坏不会被降级成 generic failure。理由是 fail-closed 本身：
+`snapshot()` 是无人值守读者当作授权读入的值，一个必须懂 sqlite3 才能拒绝的 caller，
+就是一个可能忘记拒绝的 caller。错误信息里不含 SQL statement 或数据库路径。
 
 #### 8.28.4 kill switch 语义
 
@@ -3484,6 +3512,14 @@ expected_revision + 1`、`event.revision == replacement.revision`、`event.occur
 replacement.updated_at`、`event.detail == replacement.reason`。这是 stored pair
 consistency（记录必须自洽），不是 lifecycle policy——repository 仍然不判断
 enable/pause/disable/kill 是否合法。
+
+**写路径同样验证存量记录。** `commit_transition()` 在取得写锁之后、修改任何东西之前，
+用与 `load_intent()` **同一个** `_read_and_validate_state()` 读取并验证当前 intent 与
+完整轨迹，然后才做 CAS、写 intent、写 event、COMMIT。canonical application 会先
+`load_intent()` 再写，所以损坏轨迹不通过它就能到达；但"caller 通常会先读"不是 storage
+guarantee——状态可能在那次读和这次锁之间变化，而一个跳过读取的写入路径会把新
+transition 追加到没人能解释的记录上。两处共用同一函数是刻意的：读写各带一份验证逻辑，
+正是"读路径知道 event 损坏、写路径不知道"这种漂移的来路。
 
 #### 8.28.6 revision / stale writer
 
@@ -3546,7 +3582,11 @@ audit event。
 | transition pair 自洽 | `SQLitePaperAutonomyRepository._require_coherent_pair` | replacement/event 的 revision、时刻、reason 不一致 | `::test_r_the_store_refuses_a_pair_that_is_not_one_transition` | A1 M17 | ✅ |
 | 一个 revision 一个 event | `ux_paper_autonomy_events_revision`（schema） | 同一 revision 第二条 event / 旧库重复静默修复 | `::test_v_the_schema_allows_one_event_per_revision`、`::test_v2_a_pre_existing_duplicate_revision_is_not_repaired` | —（schema 约束） | ✅ |
 | revision / stale writer | `PaperAutonomyRepositoryPort.commit_transition` | last-write-wins / 无 expected_revision | `::test_k_a_stale_writer_is_refused_and_changes_nothing`、`::test_n_concurrent_writers_produce_exactly_one_transition`、`::test_pa10_…` | A1 M5、M6 | ✅ |
-| 审计轨迹与 intent 同源 | `load_intent()` 的 coherence 校验 | 孤立历史读成全新 store / 缺口被当成更短的历史 | `::test_pa9b_an_orphaned_history_is_not_a_fresh_store`、`::test_u_a_gap_in_the_audit_trail_is_not_a_readable_intent`、`::test_t_a_corrupt_audit_entry_is_never_read_as_a_valid_trail` | A1 M15、M18 | ✅ |
+| 审计轨迹与 intent 同源 | `_read_and_validate_state()`（读写共用） | 孤立历史读成全新 store / 缺口被当成更短的历史 / 只有拓扑被验证而 event 内容没被解析 | `::test_pa9b_an_orphaned_history_is_not_a_fresh_store`、`::test_u_a_gap_in_the_audit_trail_is_not_a_readable_intent`、`::test_t_a_corrupt_audit_entry_poisons_every_read_of_the_store` | A1 M15、M18、M19 | ✅ |
+| latest event 仍描述其 intent | `_read_and_validate_state()` | 合法但已不对应的 detail / occurred_at | `::test_t2_a_trail_that_stopped_describing_its_intent_is_refused` | A1 M20 | ✅ |
+| event revision ≥ 1 | `PaperAutonomyEvent.__post_init__` | revision 0 的 event（等于"没有发生过 transition"） | `::test_x_an_event_cannot_describe_revision_zero` | A1 M21 | ✅ |
+| 写路径不扩展不可读轨迹 | `commit_transition()` 内的写锁校验 | 跳过读取直接把 transition 追加到损坏轨迹 | `::test_y_the_store_refuses_to_extend_a_corrupt_trail` | A1 M23 | ✅ |
+| 存储故障归一 | adapter 的 error 边界 | `sqlite3.Error` 裸漏出 port | `::test_z_a_storage_fault_on_the_write_lock_is_reported_here`、`::test_z2_…`、`::test_z3_…` | A1 M22 | ✅ |
 | 单一 persistence adapter | `SQLitePaperAutonomyRepository` | 第二份 intent store（JSON / settings / 内存） | `::test_pa5_the_sqlite_store_is_the_only_intent_persistence`、`::test_pa2b_the_two_step_write_protocol_is_gone` | A1 M8 | ✅ |
 | 单一 write authority | `PaperAutonomyApplication` | 第二处调用 `commit_transition` | `::test_pa5b_only_the_authority_commits_a_transition` | A1 M13 | ✅ |
 | intent 不持有 runtime truth | `domain/paper_autonomy.py` | 持久化 candidate / strategy / phase / lease / broker 事实 | `::test_pa6_the_intent_carries_no_runtime_truth`、`::test_pa4_…`、`::test_pa3_…` | A1 M9、M10、M11 | ✅ |
@@ -3555,13 +3595,13 @@ audit event。
 | import 方向 | §8.28.2 的分层表 | domain/ports/application 越过 allowlist | `::test_pa1_…`、`::test_pa2_…`、`::test_pa3_…`、`::test_pa11_the_new_modules_are_inside_the_guarded_layers` | A1 M9 | ✅ |
 
 ```text
-tests/test_paper_autonomy.py                        24 test function / 40 case
+tests/test_paper_autonomy.py                        30 test function / 48 case
 tests/test_paper_autonomy_architecture.py           15 test function / 17 case
-scripts/mutation_paper_autonomy_a1.ps1              18 mutant / 18 RED / 0 survived
+scripts/mutation_paper_autonomy_a1.ps1              23 mutant / 23 RED / 0 survived
                                                  / 0 harness-error
 ```
 
-v1-A mutation 里有三处捕获方式值得记下，因为它们说明"哪一道守卫真正在工作"：
+v1-A mutation 里有四处捕获方式值得记下，因为它们说明"哪一道守卫真正在工作"：
 
 - M2（kill 不移动 mode）被 domain 的 `latched ⇒ not ENABLED` invariant 直接拦住——
   值层面构造不出来，所以接住它的是守卫而不是测试断言。
@@ -3569,9 +3609,14 @@ v1-A mutation 里有三处捕获方式值得记下，因为它们说明"哪一�
   在同一读窗口内对所有写者都通过，只有 store 的 CAS 能仲裁——这正是"application 侧
   比对只是消息"这条设计的可执行证据。
 - M17（pair 校验忽略 event revision）在第一次写这个 mutant 时**存活了**，原因是那条
-  测试当时用一个会与已存 revision 撞车的编号，于是被唯一索引挡住了，而 pair 校验
-  本身从未被触发。改成"intent 永远不会到达的 revision"之后才 RED。这是本轮唯一一次
-  真实的 mutant 存活，记录在此：它暴露的是测试隔离度不够，而不是守卫无效。
+  测试当时用一个会与已存 revision 撞车的编号，于是被唯一索引挡住，而 pair 校验本身
+  从未被触发。改成"intent 永远不会到达的 revision"之后才 RED。这是测试隔离度不够，
+  不是守卫无效。
+- M22（写路径的存储故障裸漏成 `sqlite3.Error`）同样**存活过一次**，原因是那次测试用
+  "每条语句都失败"的假连接，于是失败发生在 `load_intent()`（另一个 wrapper）里，被
+  mutate 的写 wrapper 根本没被触达。改成"能读但拿不到写锁"的故障、并先断言读仍然正常
+  之后才 RED。这两次存活都记录在此：它们暴露的是测试没打到目标，而 mutation harness
+  的价值正在于把这类"看起来在测、其实没测到"变成可见。
 
 ## 9. 已删除的旧架构
 

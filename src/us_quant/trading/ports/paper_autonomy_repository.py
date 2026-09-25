@@ -128,10 +128,16 @@ class PaperAutonomyEvent:
     occurred_at: datetime
 
     def __post_init__(self) -> None:
-        if self.revision < INITIAL_REVISION:
+        # Strictly greater than the initial revision, not merely non-negative:
+        # an event exists to record the transition that *produced* a revision,
+        # and revision 0 is the state of having produced none.  An event at
+        # revision 0 would name a transition that never happened, and the trail
+        # would then claim a decision the operator never made.
+        if self.revision <= INITIAL_REVISION:
             raise PaperAutonomyRepositoryError(
-                f"an autonomy event cannot precede the first revision: "
-                f"{self.revision}"
+                f"an autonomy event cannot describe revision {self.revision}: "
+                f"it records the transition that produced its revision, and "
+                f"revision {INITIAL_REVISION} is produced by no transition"
             )
         if self.occurred_at.tzinfo is None:
             raise PaperAutonomyRepositoryError(
@@ -156,12 +162,19 @@ class PaperAutonomyRepositoryPort(Protocol):
         ``DISABLED``; it is never ``ENABLED``, because a store that has never
         been written describes an operator who has never authorised anything.
 
+        Reading the intent means reading the *record*: the whole trail is read
+        and parsed, and the latest event has to still describe the intent beside
+        it.  Returning an intent while leaving its trail unchecked would hand
+        back exactly the value an unattended reader acts on, from a store whose
+        only record of how it got there is unreadable.
+
         Raises ``PaperAutonomyStoreUnreadable`` when a row exists but cannot be
-        interpreted, and -- just as importantly -- when the stored history and
-        the stored intent do not agree: an intent at revision *n* whose trail
-        does not hold exactly revisions ``1..n``, or a trail with no intent row
-        in front of it.  An incomplete record is not a fresh one; it is a store
-        an operator has to look at.
+        interpreted, when an event cannot be interpreted, and when the trail and
+        the intent do not agree -- an intent at revision *n* whose trail is not
+        exactly ``1..n`` in order and does not end on the transition that
+        produced *n*, or a trail with no intent row in front of it.  An
+        incomplete record is not a fresh one; it is a store an operator has to
+        look at.
         """
 
     def commit_transition(
@@ -176,6 +189,14 @@ class PaperAutonomyRepositoryPort(Protocol):
         One transaction holds the compare, the intent write and the event
         write.  Any failure rolls back all of them, so there is no stored state
         in which the intent has moved and the trail has not.
+
+        Implementations must also validate the *existing* stored state inside
+        that transaction before modifying anything, to the same standard
+        :meth:`load_intent` applies.  The caller reads before it writes, so a
+        corrupt trail is not reachable through it -- but the state can change
+        between that read and this lock, and a store that appended to a trail it
+        cannot read would be extending a record nobody can interpret.  "The
+        caller usually reads first" is not a storage guarantee.
 
         The three arguments are one fact, and implementations must refuse a set
         that could not have come from a single accepted transition: the

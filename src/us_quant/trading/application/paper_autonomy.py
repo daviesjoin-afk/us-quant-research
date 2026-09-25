@@ -103,7 +103,21 @@ class PaperAutonomyApplication:
     # -- reads ----------------------------------------------------------
 
     def snapshot(self) -> PaperAutonomyIntent:
-        """The current intent, exactly as it is stored."""
+        """The current intent, on the strength of its whole record being readable.
+
+        This is a *safety* definition rather than a convenience: the result of
+        this call is what a future supervisor will treat as the operator's
+        authorisation, so "the intent is readable" is not enough.  The store
+        reads the intent and its complete audit trail together, parses every
+        event, and checks that the trail still ends on the transition that
+        produced the stored revision.  If any of that fails this raises
+        ``PaperAutonomyStoreUnreadable``.
+
+        It follows that this method can never return ``ENABLED`` from a store
+        whose record of how it got there is damaged.  Callers may therefore
+        catch ``PaperAutonomyError`` and fail closed without knowing anything
+        about the storage behind it.
+        """
 
         return self._repository.load_intent()
 

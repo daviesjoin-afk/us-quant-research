@@ -139,7 +139,7 @@ $mutations = @(
     @{
         name = 'M5  the store writes regardless of the expected revision'
         file = $adapterAutonomy
-        find = 'if stored != expected_revision:'
+        find = 'if stored_intent\.revision != expected_revision:'
         repl = 'if False:'
         tests = @($autonomyBehaviour)
         select = @("-k", "stale_writer_is_refused_and_changes_nothing or concurrent_writers_produce_exactly_one_transition")
@@ -182,7 +182,7 @@ $mutations = @(
     @{
         name = 'M15 an orphaned history reads as a fresh revision 0'
         file = $adapterAutonomy
-        find = 'if count:'
+        find = 'if events:'
         repl = 'if False:'
         tests = @($autonomyArch)
         select = @("-k", "orphaned_history_is_not_a_fresh_store")
@@ -190,8 +190,8 @@ $mutations = @(
     @{
         name = 'M18 a gap in the audit trail is accepted'
         file = $adapterAutonomy
-        find = 'if count != revision or lowest != 1 or highest != revision:'
-        repl = 'if lowest != 1 or highest != revision:'
+        find = 'if revisions != list\(range\(1, intent\.revision \+ 1\)\):'
+        repl = 'if False:'
         tests = @($autonomyBehaviour)
         select = @("-k", "a_gap_in_the_audit_trail")
     },
@@ -258,6 +258,48 @@ $mutations = @(
         repl = 'current = application._repository.load_intent()'
         tests = @($autonomyBehaviour)
         select = @("-k", "the_cli_is_a_surface_and_not_a_second_authority")
+    },
+
+    # -- the record has to be readable, not merely well shaped ------------
+    @{
+        name = 'M19 a corrupt trail does not poison load_intent'
+        file = $adapterAutonomy
+        find = 'intent, _events = _read_and_validate_state\(connection\)'
+        repl = "intent = initial_intent()`n                row = connection.execute(_INTENT_QUERY, (SINGLETON_KEY,)).fetchone()`n                if row is not None:`n                    intent = _intent_from_row(row)`n                _events = ()"
+        tests = @($autonomyBehaviour)
+        select = @("-k", "corrupt_audit_entry_poisons_every_read_of_the_store")
+    },
+    @{
+        name = 'M20 the latest event need not describe the intent'
+        file = $adapterAutonomy
+        find = 'if latest\.detail != intent\.reason:'
+        repl = 'if False:'
+        tests = @($autonomyBehaviour)
+        select = @("-k", "trail_that_stopped_describing_its_intent_is_refused")
+    },
+    @{
+        name = 'M21 an event may describe revision zero'
+        file = $portAutonomy
+        find = 'if self\.revision <= INITIAL_REVISION:'
+        repl = 'if self.revision < INITIAL_REVISION:'
+        tests = @($autonomyBehaviour)
+        select = @("-k", "an_event_cannot_describe_revision_zero")
+    },
+    @{
+        name = 'M23 the store appends to a trail it cannot read'
+        file = $adapterAutonomy
+        find = 'stored_intent, _stored_events = _read_and_validate_state\(\s+connection\s+\)'
+        repl = "row_here = connection.execute(_INTENT_QUERY, (SINGLETON_KEY,)).fetchone()`n                stored_intent = initial_intent() if row_here is None else _intent_from_row(row_here)`n                _stored_events = ()"
+        tests = @($autonomyBehaviour)
+        select = @("-k", "refuses_to_extend_a_corrupt_trail")
+    },
+    @{
+        name = 'M22 a storage fault escapes as a bare sqlite3 error'
+        file = $adapterAutonomy
+        find = 'raise PaperAutonomyRepositoryError\(\s+"the Paper autonomy transition could not be stored atomically; "\s+"no part of it was written"\s+\) from error'
+        repl = 'raise error'
+        tests = @($autonomyBehaviour)
+        select = @("-k", "storage_fault_on_the_write_lock_is_reported_here")
     }
 )
 

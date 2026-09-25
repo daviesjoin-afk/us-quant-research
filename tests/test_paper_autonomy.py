@@ -13,13 +13,20 @@ the question an operator would ask:
 * is the operator CLI a surface rather than a second authority?  (P)
 * is a transition one commit, or two writes with a gap between them?  (Q, R)
 * is a transition that did nothing recorded as one that did?  (S)
-* is a corrupt *trail* as unreadable as a corrupt row?  (T, U)
+* is a corrupt *trail* as unreadable as a corrupt row?  (T, T2, U)
+* is an event for revision 0 a transition?  (X)
+* can a write extend a trail nobody can read?  (Y)
+* does a storage fault leave the module as a sqlite3 error?  (Z, Z2, Z3)
 
-The Q-U group is the half that a two-transaction implementation cannot pass.
-Q forces the audit write to fail inside real SQLite and asserts the intent went
-with it; R refuses a pair of arguments that disagree with each other; S asserts
-that clearing a latch that is not set is not a transition; T and U assert that a
-damaged history is reported rather than shortened.
+The Q-Z group is the half that a two-transaction, parse-only-read
+implementation cannot pass.  Q forces the audit write to fail inside real SQLite
+and asserts the intent went with it; R refuses a pair of arguments that disagree
+with each other; S asserts that clearing a latch that is not set is not a
+transition; T and U assert that a damaged history is reported rather than
+shortened; T2 asserts that a *well-formed* event which has stopped describing
+its intent is caught too; Y asserts the store will not extend a broken trail;
+and Z/Z2/Z3 assert that no storage fault -- on the write lock, on a read, or on
+opening the store -- escapes as a bare sqlite3 error.
 """
 
 from __future__ import annotations
@@ -61,6 +68,9 @@ from us_quant.trading.ports.paper_autonomy_repository import (
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _CLI_PATH = _REPO_ROOT / "src" / "us_quant" / "cli.py"
 _PAPER_CONFIG = _REPO_ROOT / "configs" / "paper.toml"
+_ADAPTER_MODULE = (
+    "us_quant.trading.adapters.sqlite.paper_autonomy_repository"
+)
 
 #: A clock that advances one second per call, so the stored timestamps are
 #: deterministic *and* ordered without any test sleeping.
@@ -144,6 +154,78 @@ def _stored_event_revisions(path: pathlib.Path) -> list[int]:
     finally:
         connection.close()
     return [int(row[0]) for row in rows]
+
+
+def _stored_intent_revision(path: pathlib.Path) -> int | None:
+    """The stored intent's revision, read without going through the store.
+
+    Needed whenever the store itself is the thing that is refusing to answer.
+    """
+
+    connection = sqlite3.connect(path)
+    try:
+        row = connection.execute(
+            "SELECT revision FROM paper_autonomy_intent WHERE key = 'paper'"
+        ).fetchone()
+    finally:
+        connection.close()
+    return None if row is None else int(row[0])
+
+
+class _WriteLockUnavailableConnection:
+    """A connection that reads fine but cannot take the write lock.
+
+    Shaped after the failure it stands for -- another writer is holding the
+    database -- so the read path keeps working and the fault lands on
+    ``BEGIN IMMEDIATE`` alone.  That is what makes a test built on it a test of
+    the *write* path's error handling rather than of the load path's.
+    """
+
+    def __init__(self, inner: sqlite3.Connection) -> None:
+        self._inner = inner
+
+    @property
+    def isolation_level(self) -> object:
+        return self._inner.isolation_level
+
+    @isolation_level.setter
+    def isolation_level(self, value: object) -> None:
+        self._inner.isolation_level = value  # type: ignore[assignment]
+
+    def execute(self, statement: str, *parameters: object) -> object:
+        if statement.strip().upper().startswith("BEGIN IMMEDIATE"):
+            raise sqlite3.OperationalError("database is locked")
+        return self._inner.execute(statement, *parameters)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+class _FailingConnection:
+    """A connection on which every statement fails, as an unusable store does.
+
+    Stands in for the faults this module has to normalize -- a contended
+    database, an unreadable file, a malformed schema -- so the assertion can be
+    about which exception type leaves the module rather than about sqlite's lock
+    timer.
+    """
+
+    isolation_level: str | None = None
+
+    def __init__(self, message: str = "the database file is unavailable") -> None:
+        self._message = message
+
+    def execute(self, statement: str, *parameters: object) -> object:
+        raise sqlite3.OperationalError(self._message)
+
+    def __enter__(self) -> "_FailingConnection":
+        return self
+
+    def __exit__(self, *exc_info: object) -> bool:
+        return False
+
+    def close(self) -> None:
+        pass
 
 
 # =====================================================================
@@ -789,18 +871,29 @@ def test_s_clear_kill_is_refused_when_the_latch_is_not_set(
         ("occurred_at", "not a timestamp"),
         ("occurred_at", "2026-03-02T14:30:00"),
         ("revision", "-1"),
+        ("revision", "0"),
         ("revision", "many"),
     ),
 )
-def test_t_a_corrupt_audit_entry_is_never_read_as_a_valid_trail(
+def test_t_a_corrupt_audit_entry_poisons_every_read_of_the_store(
     tmp_path: pathlib.Path, column: str, value: str
 ) -> None:
-    """A damaged entry is refused, for the same reason a damaged row is.
+    """A damaged entry must fail *every* read, not only the trail read.
 
-    The cases split in two.  A bad kind, reason or timestamp damages the *entry*,
-    so reading the trail has to refuse even though the revision arithmetic still
-    adds up.  A bad revision damages the *sequence*, so the intent beside it
-    stops being readable at all.
+    This is the fail-closed requirement at its strongest, and it is stated this
+    way because an earlier version of this test only asserted that
+    `recent_events` refused.  That left the hole the final review found:
+    `load_intent` never parsed the trail, so a store whose only record of how
+    the intent got there was unreadable still handed back `ENABLED` -- and
+    `snapshot()` is precisely the value a supervisor will treat as the
+    operator's authorisation.
+
+    The cases split in three.  A bad kind or reason damages the *entry*; a bad
+    timestamp damages the entry too (and a naive one is not a timestamp this
+    store will order); a bad revision damages the sequence or the entry itself.
+    In every one of them the assertion is the same and it is the one that
+    matters: no read of this store may return an authorisation, so none of the
+    three is allowed to succeed.
     """
 
     store = _store(tmp_path)
@@ -812,8 +905,209 @@ def test_t_a_corrupt_audit_entry_is_never_read_as_a_valid_trail(
         (value,),
     )
 
+    readers = {
+        "recent_events": lambda: store.recent_events(10),
+        "load_intent": store.load_intent,
+        # A raise here *is* the guarantee: there is no return value, so no
+        # caller can reach `allows_autonomous_work` from a corrupt store.
+        "snapshot": application.snapshot,
+    }
+    for label, reader in readers.items():
+        with pytest.raises(PaperAutonomyStoreUnreadable):
+            reader()
+
+
+@pytest.mark.parametrize(
+    "column, value",
+    (
+        ("detail", "a decision the operator did not make"),
+        ("occurred_at", "2026-03-02T14:31:00+00:00"),
+    ),
+)
+def test_t2_a_trail_that_stopped_describing_its_intent_is_refused(
+    tmp_path: pathlib.Path, column: str, value: str
+) -> None:
+    """A well-formed event that no longer describes its intent is refused.
+
+    Both replacements parse cleanly -- the detail is a valid non-empty string
+    and the instant is a valid aware timestamp -- so "the row is readable" is
+    not the property under test.  The event is still an event; it is simply no
+    longer the one that produced the stored revision, and the trail has stopped
+    being the record of the value beside it.  That is the corruption a
+    two-transaction store could leave behind, and it is invisible to any check
+    that only reads the events.
+    """
+
+    store = _store(tmp_path)
+    application = _application(store)
+    application.enable(INITIAL_REVISION, "authorise autonomy")
+    _execute(
+        store.path,
+        f"UPDATE paper_autonomy_events SET {column} = ? WHERE revision = 1",
+        (value,),
+    )
+
+    # The trail itself still reads: this corruption cannot be found by parsing,
+    # which is why the pair check has to exist next to it.
+    assert store.recent_events(10)[0].revision == 1
+
     with pytest.raises(PaperAutonomyStoreUnreadable):
-        store.recent_events(10)
+        store.load_intent()
+    with pytest.raises(PaperAutonomyStoreUnreadable):
+        application.snapshot()
+
+
+def test_x_an_event_cannot_describe_revision_zero() -> None:
+    """Revision 0 is "no transition has been written", not a transition.
+
+    An event records the transition that *produced* a revision, so an event at
+    revision 0 names a decision that never happened -- and a trail carrying one
+    would claim a decision the operator never made.
+    """
+
+    with pytest.raises(PaperAutonomyRepositoryError):
+        PaperAutonomyEvent(
+            revision=INITIAL_REVISION,
+            kind=PaperAutonomyEventKind.ENABLED,
+            detail="a transition that produced no revision",
+            occurred_at=_BASE_INSTANT,
+        )
+
+
+def test_y_the_store_refuses_to_extend_a_corrupt_trail(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A write against an unreadable trail is refused before it modifies anything.
+
+    The application reads before it writes, so this state is not reachable
+    through it -- which is exactly why it is asserted at the store.  The port
+    promises storage integrity, and "the caller usually reads first" is not a
+    promise: a write path that skipped its read, or a state that changed between
+    the read and the lock, would otherwise append a transition to a record
+    nobody can interpret.
+    """
+
+    store = _store(tmp_path)
+    application = _application(store)
+    first = application.enable(INITIAL_REVISION, "authorise autonomy")
+    _execute(
+        store.path,
+        "UPDATE paper_autonomy_events SET event = 'AUTONOMY_BROKEN' "
+        "WHERE revision = 1",
+    )
+
+    with pytest.raises(PaperAutonomyStoreUnreadable):
+        store.commit_transition(
+            expected_revision=first.revision,
+            replacement=replace(
+                first,
+                revision=first.revision + 1,
+                mode=PaperAutonomyMode.PAUSED,
+            ),
+            event=PaperAutonomyEvent(
+                revision=first.revision + 1,
+                kind=PaperAutonomyEventKind.PAUSED,
+                detail=first.reason,
+                occurred_at=first.updated_at,
+            ),
+        )
+
+    # Refused before anything was modified: no revision 2 event, and the intent
+    # is still where it was.
+    assert _stored_event_revisions(store.path) == [1]
+    assert _stored_intent_revision(store.path) == 1
+
+
+def test_z_a_storage_fault_on_the_write_lock_is_reported_here(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No storage fault reaches a caller as a bare sqlite3 error.
+
+    The fault is shaped after the real one it stands for -- a database another
+    writer is holding -- so the store still *reads* and the failure lands
+    exactly where the review found the hole: on ``BEGIN IMMEDIATE``, which an
+    earlier version of this adapter executed outside its error handling.  A
+    caller that has to know about sqlite3 to fail closed is a caller that can
+    forget to.
+
+    The read half is asserted first on purpose.  Without it this test would pass
+    by failing at the *load* step -- which has its own wrapper -- and would
+    therefore never exercise the write path at all.  Measured, not assumed: a
+    mutation that removes the write wrapper's error handling survived until this
+    ordering was introduced.
+    """
+
+    store = _store(tmp_path)
+    application = _application(store)
+    monkeypatch.setattr(
+        _ADAPTER_MODULE + ".connect_sqlite",
+        lambda path: _WriteLockUnavailableConnection(sqlite3.connect(path)),
+    )
+
+    # A store that can be read is still a store that cannot be written.
+    assert store.recent_events(10) == ()
+    assert application.snapshot() == initial_intent()
+
+    with pytest.raises(PaperAutonomyRepositoryError) as caught:
+        application.enable(INITIAL_REVISION, "authorise autonomy")
+
+    assert not isinstance(caught.value, sqlite3.Error)
+    message = str(caught.value)
+    # Neither the statement nor the file is an operator's business.
+    assert "BEGIN" not in message.upper()
+    assert str(store.path) not in message
+
+
+def test_z2_a_storage_fault_on_a_read_is_reported_here(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read path uses the same vocabulary, so a supervisor can fail closed.
+
+    ``snapshot`` is the value an unattended reader treats as the operator's
+    authorisation.  If a storage fault escaped it as ``sqlite3.Error``, every
+    caller would have to know about sqlite3 in order to refuse -- and the one
+    that forgot would be the one running unsupervised.
+    """
+
+    store = _store(tmp_path)
+    application = _application(store)
+    monkeypatch.setattr(
+        _ADAPTER_MODULE + ".connect_sqlite",
+        lambda _path: _FailingConnection(),
+    )
+
+    readers = {
+        "snapshot": application.snapshot,
+        "load_intent": store.load_intent,
+        "recent_events": lambda: store.recent_events(10),
+    }
+    for label, reader in readers.items():
+        with pytest.raises(PaperAutonomyRepositoryError) as caught:
+            reader()
+        assert not isinstance(caught.value, sqlite3.Error), label
+        assert "SELECT" not in str(caught.value).upper(), label
+        assert str(store.path) not in str(caught.value), label
+
+
+def test_z3_a_store_that_cannot_be_prepared_fails_in_the_same_vocabulary(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opening an unusable store fails like using one, not like sqlite3.
+
+    A duplicate revision keeps its own type here (see the pre-existing duplicate
+    test): a known corruption must not be downgraded to a generic storage
+    failure, or the operator loses the one detail that says what to look at.
+    """
+
+    monkeypatch.setattr(
+        _ADAPTER_MODULE + ".connect_sqlite",
+        lambda _path: _FailingConnection(),
+    )
+
+    with pytest.raises(PaperAutonomyRepositoryError) as caught:
+        SQLitePaperAutonomyRepository(tmp_path / "paper_autonomy.sqlite3")
+    assert not isinstance(caught.value, sqlite3.Error)
+    assert "CREATE" not in str(caught.value).upper()
 
 
 def test_u_a_gap_in_the_audit_trail_is_not_a_readable_intent(

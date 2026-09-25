@@ -5,7 +5,7 @@ its transitions.  The row is addressed by a fixed key rather than by an id,
 because there is exactly one Paper autonomy intent: a table that could hold two
 would only be able to disagree with itself.
 
-Five storage decisions are deliberate.
+Six storage decisions are deliberate.
 
 * **The singleton row is not seeded.**  ``LOAD`` of an empty table returns the
   canonical initial value, and the *first* transition inserts it.  So "no row"
@@ -23,12 +23,26 @@ Five storage decisions are deliberate.
   written before the index existed can already hold a duplicate, and that case
   is *not* repaired: dropping one of the two would be this module choosing which
   half of a conflicting record to believe.
-* **The broker's own text is stored, not a re-spelling of it.**  ``mode`` keeps
-  the enum's value verbatim, so what the audit view shows is what was written,
-  and reading it back is a strict parse rather than a case-insensitive guess.
-* **Nothing is repaired on read.**  A row, an event, or a *history* that cannot
-  be believed raises.  Every failure in this module has to point the same way,
-  and the permissive direction is the one that starts trading.
+* **A stored record is only believed as a *pair*.**  Reading the intent means
+  reading its whole trail and parsing every row of it, and the latest event has
+  to still describe the intent standing beside it.  Revision arithmetic that
+  adds up over rows nobody parsed is not coherence: a trail of rows that cannot
+  be turned into events would otherwise hand back a perfectly plausible intent,
+  and an unattended reader would act on an authorisation whose record is broken.
+* **The same validation guards reads and writes.**  :func:`_read_and_validate_state`
+  is called by ``load_intent`` *and* by ``commit_transition`` before it modifies
+  anything, so the store can never extend a trail it cannot read.  Two copies of
+  this logic is how the read path ends up knowing about corruption while the
+  write path does not; R1/R11 of the final review is the record of that.
+* **Nothing is repaired on read.**  A row, an event, or a history that cannot be
+  believed raises.  Every failure in this module has to point the same way, and
+  the permissive direction is the one that starts trading.
+* **Every storage failure lands in this module's vocabulary.**  A refused write
+  lock, an unreadable file, a malformed schema and a failed ``COMMIT`` all
+  surface as :class:`PaperAutonomyRepositoryError` (or
+  :class:`PaperAutonomyStoreUnreadable` when the stored bytes are the problem),
+  never as a bare ``sqlite3.Error``.  A caller that has to catch sqlite3 to fail
+  closed is a caller that can forget to.
 """
 
 from __future__ import annotations
@@ -68,9 +82,13 @@ FROM paper_autonomy_intent
 WHERE key = ?
 """
 
-_HISTORY_QUERY = """
-SELECT COUNT(*), MIN(revision), MAX(revision)
+#: The whole trail, in the order it has to be read: revisions ascending.  The
+#: uniqueness index makes that order total, and the atomic transition commit is
+#: what keeps it identical to the order the rows were written in.
+_EVENT_QUERY = """
+SELECT revision, event, detail, occurred_at
 FROM paper_autonomy_events
+ORDER BY revision ASC
 """
 
 
@@ -87,43 +105,44 @@ class SQLitePaperAutonomyRepository:
     def load_intent(self) -> PaperAutonomyIntent:
         """The stored intent, or the canonical initial one when nothing is stored.
 
-        The two reads share one transaction.  Without it the intent row and the
-        history aggregate are two independent reads, and a transition committed
-        between them would make a perfectly healthy store look incoherent -- the
-        one failure mode a coherence check must not invent.
+        The intent, its whole trail and the coherence between them are read and
+        checked in **one** read transaction: without that, the intent row and
+        the history could be read at two different moments, and a transition
+        committed in between would make a healthy store look broken -- the one
+        failure mode a coherence check must not invent.
         """
 
-        with closing(connect_sqlite(self.path)) as connection:
-            connection.isolation_level = None
-            connection.execute("BEGIN")
-            try:
-                row = connection.execute(
-                    _INTENT_QUERY, (SINGLETON_KEY,)
-                ).fetchone()
-                history = connection.execute(_HISTORY_QUERY).fetchone()
-            finally:
-                connection.execute("COMMIT")
-
-        _require_coherent_history(row, history)
-        if row is None:
-            return initial_intent()
-        return _intent_from_row(row)
+        try:
+            return self._load_intent()
+        except PaperAutonomyError:
+            raise
+        except sqlite3.Error as error:
+            raise PaperAutonomyRepositoryError(
+                "the Paper autonomy store could not be read"
+            ) from error
 
     def recent_events(
         self, limit: int = 50
     ) -> tuple[PaperAutonomyEvent, ...]:
         if limit <= 0:
             return ()
-        with closing(connect_sqlite(self.path)) as connection:
-            rows = connection.execute(
-                """
-                SELECT revision, event, detail, occurred_at
-                FROM paper_autonomy_events
-                ORDER BY event_id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+        try:
+            with closing(connect_sqlite(self.path)) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT revision, event, detail, occurred_at
+                    FROM paper_autonomy_events
+                    ORDER BY event_id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+        except PaperAutonomyError:
+            raise
+        except sqlite3.Error as error:
+            raise PaperAutonomyRepositoryError(
+                "the Paper autonomy audit trail could not be read"
+            ) from error
         # Read newest-first so ``LIMIT`` keeps the *latest* events, then flip to
         # chronological order for the reader.
         return tuple(_event_from_row(row) for row in reversed(rows))
@@ -145,10 +164,54 @@ class SQLitePaperAutonomyRepository:
         application's decision -- the store only checks that the writer still
         holds the current one, and that the three arguments describe one
         transition.
+
+        The stored state is validated *again* inside the write lock, before
+        anything is modified.  The application reads before it writes, so a
+        corrupt trail is not reachable through it -- but "the caller usually
+        reads first" is not a storage guarantee, and the state can change
+        between that read and this lock.  Validating here is what lets the port
+        promise that this store never extends a trail it cannot read.
         """
 
         _require_coherent_pair(expected_revision, replacement, event)
 
+        try:
+            self._commit_transition(expected_revision, replacement, event)
+        except PaperAutonomyError:
+            # A refusal or an unreadable record is already the right error and
+            # the right vocabulary; it just has to reach the caller with nothing
+            # written behind it.
+            raise
+        except sqlite3.Error as error:
+            # Deliberately not a chained message: a SQL statement and a database
+            # path are not things an operator surface should print.
+            raise PaperAutonomyRepositoryError(
+                "the Paper autonomy transition could not be stored atomically; "
+                "no part of it was written"
+            ) from error
+
+    # -- internals ------------------------------------------------------
+
+    def _load_intent(self) -> PaperAutonomyIntent:
+        with closing(connect_sqlite(self.path)) as connection:
+            connection.isolation_level = None
+            connection.execute("BEGIN")
+            try:
+                intent, _events = _read_and_validate_state(connection)
+            finally:
+                # A read transaction has nothing to commit, and ending it must
+                # not be able to replace the failure being reported: the
+                # snapshot has already been consumed into Python values, and
+                # closing the connection would release it anyway.
+                _rollback_quietly(connection)
+        return intent
+
+    def _commit_transition(
+        self,
+        expected_revision: int,
+        replacement: PaperAutonomyIntent,
+        event: PaperAutonomyEvent,
+    ) -> None:
         with closing(connect_sqlite(self.path)) as connection:
             # Manual transaction control: ``isolation_level = None`` stops the
             # driver from opening an implicit deferred transaction of its own,
@@ -156,20 +219,15 @@ class SQLitePaperAutonomyRepository:
             connection.isolation_level = None
             connection.execute("BEGIN IMMEDIATE")
             try:
-                row = connection.execute(
-                    "SELECT revision FROM paper_autonomy_intent WHERE key = ?",
-                    (SINGLETON_KEY,),
-                ).fetchone()
-                stored = (
-                    INITIAL_REVISION if row is None else _revision_from_row(row)
+                stored_intent, _stored_events = _read_and_validate_state(
+                    connection
                 )
-                if stored != expected_revision:
-                    # Left to the handler below so the rollback happens exactly
-                    # once, on the one path that ends every failed write.
+                if stored_intent.revision != expected_revision:
                     raise PaperAutonomyConflict(
-                        f"the stored autonomy revision is {stored}, not the "
-                        f"expected {expected_revision}; the write was refused "
-                        f"and the stored intent is unchanged"
+                        f"the stored autonomy revision is "
+                        f"{stored_intent.revision}, not the expected "
+                        f"{expected_revision}; the write was refused and the "
+                        f"stored intent is unchanged"
                     )
                 connection.execute(
                     """
@@ -207,27 +265,27 @@ class SQLitePaperAutonomyRepository:
                     ),
                 )
                 connection.execute("COMMIT")
-            except PaperAutonomyError:
-                # A refusal or an unreadable row is already the right error and
-                # the right vocabulary; it just has to reach the caller with
-                # nothing written behind it.
-                _rollback_quietly(connection)
-                raise
-            except sqlite3.Error as error:
-                _rollback_quietly(connection)
-                # Deliberately not a chained message: a SQL statement and a
-                # database path are not things an operator surface should print.
-                raise PaperAutonomyRepositoryError(
-                    "the Paper autonomy transition could not be stored "
-                    "atomically; no part of it was written"
-                ) from error
             except BaseException:
+                # One path ends every failed write, so the rollback cannot be
+                # forgotten on a branch someone adds later.
                 _rollback_quietly(connection)
                 raise
 
     # -- schema ---------------------------------------------------------
 
     def _initialize(self) -> None:
+        try:
+            self._create_schema()
+        except PaperAutonomyError:
+            # A duplicate revision is a known corruption and keeps its own type;
+            # it must not be downgraded to a generic storage failure.
+            raise
+        except sqlite3.Error as error:
+            raise PaperAutonomyRepositoryError(
+                "the Paper autonomy store could not be prepared for use"
+            ) from error
+
+    def _create_schema(self) -> None:
         with closing(connect_sqlite(self.path)) as connection:
             with connection:
                 connection.execute(
@@ -254,6 +312,110 @@ class SQLitePaperAutonomyRepository:
                     """
                 )
                 _require_unique_event_revision(connection)
+
+
+def _read_and_validate_state(
+    connection: object,
+) -> tuple[PaperAutonomyIntent, tuple[PaperAutonomyEvent, ...]]:
+    """The stored intent and its whole trail, or a refusal.
+
+    The single place the stored state is interpreted, shared by the read path
+    and by the write path so the two cannot drift.  Everything a reader could be
+    misled by is checked here:
+
+    * every event row has to *parse* -- a kind that is not an event kind, a
+      blank reason or an unreadable timestamp is a broken record, not a shorter
+      one;
+    * the revisions have to be exactly ``1..n``, in order, for the intent's own
+      revision ``n`` -- which is also what says the latest event is the
+      transition that produced the stored value;
+    * the latest event has to still describe the intent: same instant, same
+      operator reason, and (through the sequence above) the same revision.  That
+      is the pair the atomic commit wrote, and this is the check that it is
+      still one pair on disk.
+
+    What is deliberately **not** derived here is the mode.  Reconstructing
+    ``ENABLED`` / ``PAUSED`` / ``DISABLED`` from the event kinds would put
+    lifecycle policy in the store, and transition legality belongs to
+    ``PaperAutonomyApplication`` alone.
+    """
+
+    row = connection.execute(  # type: ignore[attr-defined]
+        _INTENT_QUERY, (SINGLETON_KEY,)
+    ).fetchone()
+    event_rows = connection.execute(  # type: ignore[attr-defined]
+        _EVENT_QUERY
+    ).fetchall()
+
+    intent = None if row is None else _intent_from_row(row)
+    events = tuple(_event_from_row(event_row) for event_row in event_rows)
+    _require_coherent_history(intent, events)
+    return (initial_intent() if intent is None else intent), events
+
+
+def _require_coherent_history(
+    intent: PaperAutonomyIntent | None,
+    events: tuple[PaperAutonomyEvent, ...],
+) -> None:
+    """Refuse a history that does not describe the intent standing in front of it.
+
+    Four shapes are rejected, and each of them is a state an *earlier* version
+    of this store could actually reach, which is why none of them is treated as
+    hypothetical:
+
+    * events with no intent row -- the trail of a transition whose intent was
+      lost, which must not read as "this system was never configured";
+    * an intent row below revision 1 -- a row no accepted transition can write;
+    * an intent at revision *n* whose trail is not exactly ``1..n``;
+    * an intent whose trail no longer ends on the transition that produced it.
+
+    The comparison is positional rather than an aggregate: ``COUNT``/``MIN``/
+    ``MAX`` would prove the revision *topology* while proving nothing about the
+    rows themselves, and a trail of unparseable rows is the corruption that
+    matters most, because the intent beside it still looks perfectly plausible.
+    Operator transitions are rare, so reading the sequence is affordable and
+    correctness comes first.
+    """
+
+    if intent is None:
+        if events:
+            raise PaperAutonomyStoreUnreadable(
+                f"the Paper autonomy audit trail holds {len(events)} "
+                f"transition(s) but no intent row; the store is incomplete and "
+                f"an operator has to inspect it"
+            )
+        return
+
+    if intent.revision <= INITIAL_REVISION:
+        raise PaperAutonomyStoreUnreadable(
+            f"a stored autonomy intent is at revision {intent.revision}, which "
+            f"no accepted transition can produce"
+        )
+
+    # One comparison is the whole sequence check: the trail has to be exactly
+    # ``1..n`` for the intent's own revision ``n``, which is what makes the
+    # latest event the transition that produced the stored value.  It also
+    # covers ``latest.revision == intent.revision``, and it is what makes
+    # ``events[-1]`` below safe to take.
+    revisions = [event.revision for event in events]
+    if revisions != list(range(1, intent.revision + 1)):
+        raise PaperAutonomyStoreUnreadable(
+            f"the autonomy intent is at revision {intent.revision} but its "
+            f"audit trail holds revisions {revisions}; the trail does not "
+            f"describe the intent it belongs to"
+        )
+
+    latest = events[-1]
+    if latest.occurred_at != intent.updated_at:
+        raise PaperAutonomyStoreUnreadable(
+            "the latest audit event and the intent it produced do not share "
+            "one instant"
+        )
+    if latest.detail != intent.reason:
+        raise PaperAutonomyStoreUnreadable(
+            "the latest audit event does not record the reason the intent was "
+            "written with"
+        )
 
 
 def _require_unique_event_revision(connection: object) -> None:
@@ -318,55 +480,6 @@ def _require_coherent_pair(
         raise PaperAutonomyRepositoryError(
             "the audit event must record the operator reason the intent was "
             "written with"
-        )
-
-
-def _require_coherent_history(row: object, history: object) -> None:
-    """Refuse a history that does not describe the intent standing in front of it.
-
-    Three shapes are rejected, and each of them is a state a *previous* version
-    of this store could actually reach, which is why none of them is treated as
-    hypothetical:
-
-    * events with no intent row -- the trail of a transition whose intent was
-      lost, which must not read as "this system was never configured";
-    * an intent row below revision 1 -- a row no accepted transition can write;
-    * an intent at revision *n* whose trail is not exactly ``1..n``.
-
-    The third is checked as count, minimum and maximum rather than by walking
-    the rows.  With the revision index in place the events are distinct
-    integers, so ``COUNT == n`` together with ``MIN == 1`` and ``MAX == n``
-    leaves no room for a gap: any missing revision would have to be paid for by
-    a duplicate that the index forbids.  Any two of the three would already
-    suffice; all three are asserted because they name the three ways the trail
-    can fail to be the sequence it claims to be.
-    """
-
-    count = int(history[0]) if history[0] is not None else 0  # type: ignore[index]
-
-    if row is None:
-        if count:
-            raise PaperAutonomyStoreUnreadable(
-                f"the Paper autonomy audit trail holds {count} transition(s) "
-                f"but no intent row; the store is incomplete and an operator "
-                f"has to inspect it"
-            )
-        return
-
-    revision = _revision_from_row(row)
-    if revision < 1:
-        raise PaperAutonomyStoreUnreadable(
-            f"a stored autonomy intent is at revision {revision}, which no "
-            f"accepted transition can produce"
-        )
-
-    lowest = history[1]  # type: ignore[index]
-    highest = history[2]  # type: ignore[index]
-    if count != revision or lowest != 1 or highest != revision:
-        raise PaperAutonomyStoreUnreadable(
-            f"the autonomy intent is at revision {revision} but its audit "
-            f"trail holds {count} event(s) covering {lowest}..{highest}; the "
-            f"trail does not describe the intent it belongs to"
         )
 
 

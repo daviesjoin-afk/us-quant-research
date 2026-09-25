@@ -305,7 +305,9 @@ def test_a_successful_refresh_renders_the_page_and_appends_once(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
-    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(
+            window.dashboard_orchestrator, "render_current", lambda: None
+        )
 
     portfolio = _portfolio()
     window.broker_account._portfolio = portfolio
@@ -326,7 +328,9 @@ def test_a_successful_refresh_sets_the_account_badge(window, monkeypatch) -> Non
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
-    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(
+            window.dashboard_orchestrator, "render_current", lambda: None
+        )
 
     window.account_orchestrator._refresh_succeeded(_portfolio())
 
@@ -342,7 +346,9 @@ def test_a_successful_refresh_fans_out_to_the_preflights(
         window.runtime_events_orchestrator, "record", lambda **_: None
     )
     monkeypatch.setattr(window, "_log", lambda _message: None)
-    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(
+            window.dashboard_orchestrator, "render_current", lambda: None
+        )
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
 
     calls: list[str] = []
@@ -370,7 +376,9 @@ def test_a_wrong_result_type_is_refused(window, monkeypatch) -> None:
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
-    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(
+            window.dashboard_orchestrator, "render_current", lambda: None
+        )
 
     with pytest.raises(TypeError):
         window.account_orchestrator._refresh_succeeded(object())
@@ -393,7 +401,9 @@ def test_a_successful_refresh_does_not_touch_the_market_badge(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
-    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(
+            window.dashboard_orchestrator, "render_current", lambda: None
+        )
 
     before_text = window.market_badge.text()
     before_state = window.market_badge.property("state")

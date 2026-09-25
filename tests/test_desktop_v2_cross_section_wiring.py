@@ -556,8 +556,8 @@ def test_success_stores_the_report_and_refreshes_the_artifacts(
 
     dashboard_published: list[None] = []
     monkeypatch.setattr(
-        window,
-        "_publish_dashboard_view",
+        window.dashboard_orchestrator,
+        "render_current",
         lambda: dashboard_published.append(None),
     )
     monkeypatch.setattr(
@@ -776,7 +776,9 @@ def test_a_success_reloads_the_artifact_catalogue_through_the_bridge(
         "us_quant.desktop.load_artifact_catalog",
         lambda root: calls.append(root) or "RELOADED",
     )
-    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(
+        window.dashboard_orchestrator, "render_current", lambda: None
+    )
 
     window.cross_section_orchestrator._report_finished(_report())
 

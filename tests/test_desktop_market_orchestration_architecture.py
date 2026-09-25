@@ -743,7 +743,7 @@ def test_the_snapshot_bridge_still_reaches_every_declared_consumer() -> None:
     for consumer in (
         "workflow_controller.market_account.update",
         "_record_minute_snapshot",
-        "_publish_dashboard_view",
+        "dashboard_orchestrator.render_current",
         "_populate_auto_quant_candidates",
         # The targeted session's preflight is the capability's own command now
         # (v2O-C5B); the bridge asks for the refresh rather than doing it.
@@ -845,6 +845,8 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
         for path in (_SRC / "desktop_v2" / "orchestration").iterdir()
         if path.is_dir() and path.name != "__pycache__"
     }
+    # ``dashboard`` arrived with G1: it owns the Dashboard page's render and
+    # its retained chart fact, and imports no other orchestrator.
     assert children == {
         "market",
         "account",
@@ -852,6 +854,7 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
         "shadow",
         "paper",
         "system",
+        "dashboard",
     }, children
 
     # The route aggregate must stay an aggregate: a capability-level

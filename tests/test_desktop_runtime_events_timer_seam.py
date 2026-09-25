@@ -120,16 +120,29 @@ def test_a_coalesced_burst_reaches_the_page_through_the_real_timer(
 def test_a_task_count_change_is_repainted_by_the_real_timer(
     monkeypatch, tmp_path
 ) -> None:
-    """The same seam, for the other coalesced arrival the page draws."""
+    """The same seam, for the other coalesced arrival the page draws.
+
+    The count is registered through the task controller (G1): the collection
+    has no window-held alias, so a test raises the count the same way
+    production code does.
+    """
 
     window = _window(monkeypatch, tmp_path)
+
+    class _RegisteredWorkerStub:
+        resource_group = "research"
+
+        def isRunning(self) -> bool:
+            return True
+
     try:
         orchestrator = window.runtime_events_orchestrator
         orchestrator._last_refresh_at = None
         orchestrator.notify_task_count_changed()
         assert window.runtime_events_page.task_card.value_label.text() == "0"
 
-        window.workers.append("unit-test-worker")  # type: ignore[arg-type]
+        stub = _RegisteredWorkerStub()
+        window.task_controller.register(stub)
         orchestrator.notify_task_count_changed()
         assert window.runtime_events_page.task_card.value_label.text() == "0"
 
@@ -141,6 +154,6 @@ def test_a_task_count_change_is_repainted_by_the_real_timer(
         )
         assert window.runtime_events_page.task_card.value_label.text() == "1"
     finally:
-        window.workers.clear()
+        window.task_controller.finish(stub)
         window.close()
         window.deleteLater()

@@ -212,8 +212,15 @@ def test_task_lifecycle_republishes_active_task_count(
 
     window = _window(monkeypatch, tmp_path)
     try:
+        # The count is ``active_count`` (G1): only running workers count, so
+        # the lifecycle under test needs a worker that reports running.  The
+        # start itself is still suppressed -- the test drives the lifecycle by
+        # hand rather than racing a real thread.
         monkeypatch.setattr(
             "us_quant.desktop.TaskThread.start", lambda self: None
+        )
+        monkeypatch.setattr(
+            "us_quant.desktop.TaskThread.isRunning", lambda self: True
         )
         _force_immediate(window)
         assert window.runtime_events_page.task_card.value_label.text() == "0"
@@ -229,7 +236,7 @@ def test_task_lifecycle_republishes_active_task_count(
             window.runtime_events_page.task_card.value_label.text() == "1"
         )
 
-        worker = window.workers[0]
+        worker = window.task_controller.running_workers()[0]
         _force_immediate(window)
         window._worker_finished(worker)
         assert (

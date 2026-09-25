@@ -340,6 +340,20 @@ def _window():
     return window
 
 
+class _RegisteredWorkerStub:
+    """A duck-typed ``DesktopWorker`` the controller can register and release.
+
+    Since G1 the worker collection has no window-held alias, so a test that
+    wants a non-zero task count goes through the controller's own admission --
+    which is also the only path production code can take.
+    """
+
+    resource_group = "research"
+
+    def isRunning(self) -> bool:
+        return True
+
+
 # -- 1 / 2 / 3: no store, no sequencing state, no store call -------------
 
 
@@ -701,12 +715,26 @@ def test_the_window_still_composes_the_orchestrators_dependencies() -> None:
         orchestrator = window.runtime_events_orchestrator
         assert orchestrator._page is window.runtime_events_page
         assert orchestrator._export_bundle == window._export_runtime_bundle
-        assert orchestrator._active_task_count() == len(window.workers)
+        # The count comes from the controller (G1), not from a window-held
+        # worker list.
+        assert (
+            orchestrator._active_task_count()
+            == window.task_controller.active_count
+        )
         assert orchestrator._environment.exports_root == window.paths.exports_root
-        # A provider, not a value: the count follows the worker list.
-        window.workers.append("not-a-worker")  # type: ignore[arg-type]
-        assert orchestrator._active_task_count() == 1
-        window.workers.clear()
+        # A provider, not a value: the count follows the controller's
+        # collection, which is the only place a worker is registered or
+        # released.  The stub is released in its own finally: a registered
+        # worker left behind would make the window's close see a running task
+        # and block the suite on a dialog no offscreen run can answer.
+        stub = _RegisteredWorkerStub()
+        try:
+            window.task_controller.register(stub)
+            assert orchestrator._active_task_count() == 1
+            assert window.task_controller.finish(stub) is True
+            assert orchestrator._active_task_count() == 0
+        finally:
+            window.task_controller.finish(stub)
     finally:
         window.close()
         window.deleteLater()

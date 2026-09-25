@@ -350,7 +350,7 @@ def test_the_window_uses_the_two_named_cross_section_bridges() -> None:
     report = _method_source("_on_cross_section_report_changed")
     assert report is not None
     assert "load_artifact_catalog(" in report
-    assert "_publish_dashboard_view()" in report
+    assert "dashboard_orchestrator.render_current()" in report
 
 
 def test_the_window_never_paints_or_edits_the_cross_section_page() -> None:

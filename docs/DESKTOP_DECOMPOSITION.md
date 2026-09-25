@@ -25,7 +25,7 @@
 | `StreamWorker`（QThread，行情网络线程） | `MainWindow`（`self.stream_worker`） | `RuntimeSupervisor` 只负责**释放**，创建/重连仍在 `MainWindow`；**provider 构造**已移出，见 §7 | 中：`_stop_stream` 内含交易安全门（Paper 有持仓时拒绝停止） | `tests/test_runtime_supervisor.py`、`tests/test_desktop_market_data_wiring.py`、`tests/test_ibkr_stream.py`、`tests/test_alpaca_stream.py` |
 | `TaskThread` 集合（`self.workers`） | `DesktopTaskController` | `RuntimeSupervisor` 只负责 stop/join；准入仍在 `DesktopTaskController` | 中：`TaskThread` 无通用取消钩子，每个 task 自带 `Event` | `tests/test_desktop_tasks.py` |
 | `universe_refresh_cancel_event`（`Event`） | `MainWindow` | `MainWindow`（唯一可取消的长网络任务） | 低：已有 `_cancel_universe_refresh` 与 `_reset_universe_refresh_controls` 成对管理 | `tests/test_desktop_tasks.py` |
-| 关闭准入闸门 `_closing` | 无（本次新增） | `RuntimeSupervisor`（`closing_gate`, order=5） | 低：`_start_task` 新任务入口 | `tests/test_runtime_supervisor.py` |
+| 关闭准入闸门 `_closing` | 无（本次新增） | `RuntimeSupervisor`（`closing_gate`, order=5） | 低：`_start_task` 新任务入口 | 低-v2O-G1已退休：admission归`RuntimeSupervisor.shutting_down`，`closing_gate`组件删除（见§33.1） | `tests/test_runtime_supervisor.py` |
 | `IBKRPaperOrderService` 连接与 `disconnect()` | `MainWindow` | **不迁移** | **高**：`disconnect()` 涉及 DU 账户绑定语义（`disarm` 才能解绑） | `tests/test_ibkr_paper_orders.py` |
 | Paper 下单 / 撤单 / 对账 | `WorkflowController` + `MainWindow` | **不迁移** | **高**：交易语义 | `tests/test_paper_workflow.py`、`tests/test_workflow_controller.py` |
 | `ExecutionLease` | `WorkflowController` | **不迁移** | **高**：交易语义 | `tests/test_workflow_controller.py` |
@@ -138,6 +138,7 @@
 
 1. `closing_gate`（order=5，`drain=True`）→ `_closing = True`，此后 `_start_task()`
    一律拒绝新任务。
+     **（v2O-G1 更新：`closing_gate` 组件与 `_closing` 已删除——admission 直接由`begin_shutdown` 置位 `shutting_down`，且发生在任何 drain 之前，见 §33.1）**
 2. `background_workers`（order=200，`drain=True`）→ `_request_worker_stops()`：
    设置 `universe_refresh_cancel_event`。**只发请求，不 join、不 terminate。**
 3. 有后台任务运行 → `event.ignore()` + 弹窗，等待任务自行安全结束。
@@ -152,7 +153,8 @@
 5. `paper_order_service.disconnect()`（原有行为，未改）
 6. Shadow 引擎/工作流停止（原有行为，未改）
 7. `runtime_supervisor.shutdown()` —— 内部顺序：
-   `closing_gate`(5) → `paper_order_heartbeat`(10) → `extended_session_heartbeat`(20)
+   `paper_order_heartbeat`(10) → `extended_session_heartbeat`(20)
+     （**v2O-G1**：`closing_gate` 已删除，见 §33.1）
    → `stream_snapshot_timer`(30) → `market_data_stream`(100)
    → `background_workers`(200)
 8. 行情线程仍存活（`worker_running`，非 `is_live`）→ `event.ignore()` + 弹窗
@@ -5360,5 +5362,152 @@ System 剩余职责（Gateway probe 是否独立 F3）需重新扫描，随后�
 closure 与 Final Architecture Closure。本轮**不**声称 "v2O-F System COMPLETE" /
 "System orchestration complete" / "MainWindow decomposition complete" /
 "Architecture Closure complete"。
+
+> **结案（G1）**：重新扫描的结论写在 §33——Gateway 剩余职责没有独立的 canonical state、
+> lifecycle、状态机、worker、repository、lease 或 transaction，因此**不设 F3**，probe 作为
+> shell/composition diagnostic 归入 G1 处理。**v2O-F System 至此正式 COMPLETE**。
+> **（前向引用结束）**
+
+
+## 33. G1：MainWindow composition closure——generic runtime / shell ownership
+
+**结论：MainWindow 剩余的两份 generic runtime truth 已收敛到各自唯一 owner——worker collection
+归 `DesktopTaskController`，shutdown admission 归 `RuntimeSupervisor.shutting_down`；Dashboard
+的 render 收归极小的 `DashboardOrchestrator`；Gateway probe 定性为 shell/composition diagnostic
+留在窗口；closeEvent 明确为 composition-only。窗口没有（也不会有）总 Controller。**
+
+### 33.1 两份重复 runtime truth 的收敛
+
+**worker collection（D1）。** 退休前窗口持有 `self.workers = self.task_controller.workers`，
+而 controller 的 `workers` property 直接交出**内部可变 list**——任何人都能 append/remove，窗口
+那一份在 worker finish 的瞬间就是陈旧的。G1 之后：
+
+* `DesktopTaskController` 删除 `workers` property，新增窄查询 API：`running_workers() -> tuple`
+  （每次现算的不可变快照）、`has_running_workers() -> bool`、`active_count`（只计 `isRunning()`）；
+  register / finish 仍是 collection 唯一修改点；
+* 窗口删除 `self.workers`，消费点全部改走 controller：Runtime Events 的 task-count provider 变成
+  `lambda: self.task_controller.active_count`，`_join_background_workers` 与 closeEvent 的
+  running-task 检查读 `running_workers()`。
+
+**shutdown admission（D2）。** 退休前同时存在 `MainWindow._closing` 与
+`RuntimeSupervisor.shutting_down`：前者由注册为 drain component 的 `closing_gate` 置位，后者由
+`begin_shutdown` 置位，`_cancel_close_drain` 负责把两个 boolean 同步清掉——两个 admission truth
+靠调用顺序保持一致。G1 证明 `RuntimeSupervisor.shutting_down` 能完整覆盖既有语义后收敛：
+
+* `begin_shutdown` 直接置位（在 drain 任何 component 之前），`cancel_shutdown` 直接复位，
+  `shutdown()` 亦置位且不可逆（`_release_entered` 防止"已释放的 runtime 假装还开着"）；
+* `_closing`、`_close_admission_gate`、`closing_gate` 注册三者在窗口与 supervisor 中**全部删除**；
+* `_start_task` 的 admission 判断改为读 `self.runtime_supervisor.shutting_down`；
+* `_cancel_close_drain` 只调用 `cancel_shutdown()` 并把 `RuntimeError`（release 已进入）写日志。
+
+顺序语义逐字保留：`shutdown_essential=True` 的 Paper zero-state proof 在 admission 关闭时仍被
+接纳；MANUAL_RECOVERY_REQUIRED 的 refused close 通过 `cancel_shutdown` 重新开门，recovery task
+能启动；WAITING_FOR_FINALIZATION 与 OWNERSHIP_BLOCKED **不**自动开门（E3 的安全区别原样保留，
+各有专门 wiring 测试钉住）。
+
+### 33.2 RuntimeSupervisor 边界不动
+
+仍是 Qt-free / broker-free / capability-free / callback-driven 的 generic teardown owner：
+`begin_shutdown` / `cancel_shutdown` / `shutdown` / `snapshot` / `errors` 语义未改，两阶段
+（phase one 可逆、release 不可逆）、failure isolation、release once / failed retry 全部原样。
+`_register_runtime_components()` 现在是纯 composition registration：五个 component
+（paper_order_heartbeat、extended_session_heartbeat、stream_snapshot_timer、market_data_stream、
+background_workers）各只提供 stop/join/is_running/order；**没有** closing_gate，也没有任何 Paper
+phase 判断、lease 释放、reconciliation 决策、事件写入或 page render。
+
+### 33.3 closeEvent：合法的 composition point
+
+不为 closeEvent 建 ShutdownCoordinator。它协调六件事且只消费 PUBLIC facts/verdicts：
+
+```text
+runtime_supervisor.begin_shutdown()          （generic admission + drain）
+task_controller.running_workers()            （controller 只读 API）
+paper_orchestrator.prepare_shutdown()        （Paper 安全判定：唯一 owner）
+paper shutdown disposition                   （READY / MANUAL_RECOVERY / WAITING / OWNERSHIP）
+shadow_orchestrator.shutdown()               （Shadow 先于 generic release）
+runtime_supervisor.shutdown() → snapshot     （generic release，逐组件隔离失败）
+market_orchestrator.worker_running           （线程存活性：最终 accept/ignore）
+```
+
+closeEvent **不**读 `PaperWorkflowPhase` / Paper result 内部 / lease / broker disconnect /
+repository——guards 用 AST 逐项锁住（closeEvent 对 `paper_orchestrator` 的属性访问恰好是
+`{prepare_shutdown}`，对 `runtime_supervisor` 恰好是六个公开成员，对 `market_orchestrator`
+恰好是 `worker_running`）。
+
+### 33.4 Gateway probe 的终局分类：shell diagnostic，不设 F3
+
+F2 之后的重新扫描结论：Gateway 剩余职责只有
+`Dashboard.gateway_probe_requested → MainWindow._probe_gateway → probe_ibkr_socket(self.config.ibkr) → shell gateway badge`
+加启动恢复期的一次主动 probe。它没有独立的 canonical mutable state、lifecycle、状态机、worker、
+repository、lease 或 transaction，因此**不创建 GatewayOrchestrator、不设 F3**。`_probe_gateway`
+留在窗口并被 guard 锁死为四件事：读 `self.config.ibkr`、调 `probe_ibkr_socket`、设 badge
+text/state、repolish——不允许建 broker session、改 Settings、存第二份 gateway 结果、开 worker。
+**v2O-F System 据此正式 COMPLETE**（Runtime Events = F1，Settings = F2，Gateway probe =
+shell diagnostic）。
+
+### 33.5 Dashboard ownership
+
+`_dashboard_chart_view`（retained chart presentation fact）与 `_publish_dashboard_view`（四
+provider + chart fact 的纯投影）都由窗口持有、`DashboardPage.render` 由窗口调用——render 没有唯一
+owner。G1 新增本轮唯一允许的轻量 page owner `desktop_v2/orchestration/dashboard/`：
+
+* state 恰好三项：`_page`、`_providers`（四个 callable）、`_chart`（唯一 retained fact）；
+* `render_current()` 每次现读四个 provider（绝不缓存 account/market canonical truth）；
+* `set_chart(chart)` 采纳 chart fact 后**恰好 repaint 一次**；
+* 不 import 任何其它 orchestrator（guard 锁死），Gateway probe 不进入。
+
+窗口对 Dashboard 只剩两件合法 composition：`gateway_probe_requested` 的 intent 转发，与
+"research artifact → chart fact" 的桥（`_load_local_state` 循环选出序列后一次 `set_chart`，
+两种结果都恰好一次 repaint）。
+
+### 33.6 Architecture guards 与 mutation
+
+`tests/test_desktop_composition_closure_architecture.py` 20 条结构 guard（AST 为主）：worker
+alias 消失 / collection 只能由 controller 修改 / task-count 读 controller / `_closing` 三兄弟
+消失 / `_start_task` 读 supervisor / shutdown-essential 豁免仍在 / cancel_shutdown 只做簿记 /
+registration 只含五个 generic component / closeEvent 不读 Paper 内部、恰好问一次
+`prepare_shutdown`、只用公开 runtime/market facts / probe 不进任何 capability 包、无
+GatewayOrchestrator、probe 四件事 / Dashboard render 唯一 caller、owner 无 orchestrator import、
+state 精确三项 / F1 与 F2 无回退 / 无 aggregate System orchestrator / 无 god object 名单 /
+bridge 不 reach-through 私有成员。另收紧 Dashboard 既有 guard（窗口的 `dashboard_page` 允许面
+删除 `render`）与 F1 的 task-count 断言。
+
+`scripts/mutation_mainwindow_composition_g1.ps1`：**16 个 mutant 全部 RED**，0 survived，
+0 harness-error（M1 worker alias / M2 count 冻结 / M3 admission 失效 / M4 豁免反转 / M5 拒绝后
+不开门 / M6 全部 disposition 都开门 / M7 丢 Shadow shutdown / M8 活线程上 accept / M9
+tolerate=False / M10 不写 runtime event / M11 closeEvent 读 phase / M12 gateway 第二 state /
+M13 建 GatewayOrchestrator / M14 窗口直接 render / M15 冻结 snapshot / M16 reach-through）。
+e2/e3/e4/F1/F2 五个历史 harness 在 G1 diff 上重跑全部 0 not-caught。
+
+### 33.7 G1 后的 residual ownership inventory
+
+`MainWindow` 的持久 `self.*` state 全量分类：
+
+* **A composition dependencies**：paths / config / preferences / services / applications /
+  orchestrators / pages——合法保留；
+* **B shell presentation**：六个 badge、status label、theme、shell——合法保留（只消费 capability
+  已发布的 presentation facts，不重读 capability private state 推理业务）；
+* **C cross-capability shared canonical state**：`research_scenario_capital`（七个消费者，
+  canonical owner 是 state object 本身）——按设计保留；
+* **D generic runtime infrastructure**：`runtime_supervisor`、`task_controller`——本轮收敛完毕；
+* **E transitional / suspicious**：本轮清零（`workers`、`_closing`、`_dashboard_chart_view`）。
+
+Strategy / Risk / Execution / AutoQuant 跨 workflow preparation 逐项审视后判定为**合法
+composition**（输入是 capability 已发布的 finished fact，不做 business 推理、不持第二份 state、
+不 render source page），作为 composition bridge 保留；没有任何一项需要 G2。**G2 是否需要由
+本轮 residual audit 决定：当前 inventory 显示不需要。**
+
+### 33.8 零 diff 与判据
+
+零 diff：`trading/runtime/**`、`trading/domain/**`、RiskApplication、ExecutionApplication、
+`PaperTradingService`、`PaperActiveRelease`、`ExecutionLease`、broker adapter、Shadow 引擎、
+Paper orchestration 语义、Market start/stop/switch 业务规则、Risk、Execution、strategy
+promotion、research / scanner 算法全部未动；`RuntimeSupervisor` 的公开语义未动。
+
+判据：worker collection 与 shutdown admission 各只有一个 owner；refused close 后 admission 能
+恢复、shutdown-essential 仍可运行；closeEvent 只做 composition 且 Paper 安全判定只来自
+`prepare_shutdown()`；Dashboard render 唯一 caller；Gateway probe 定性为 shell diagnostic；F1/F2
+无回退；无 god object；无第二份 capability truth。**本轮不声称 "MainWindow Composition Closure
+COMPLETE"（G2 与否待本轮 review 后定）与 "Final Architecture Closure complete"。**
 
 

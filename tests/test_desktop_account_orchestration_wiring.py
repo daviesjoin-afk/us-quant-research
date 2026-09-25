@@ -185,7 +185,9 @@ def test_a_successful_refresh_promotes_the_shell_badges(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
-    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(
+            window.dashboard_orchestrator, "render_current", lambda: None
+        )
 
     portfolio = _portfolio()
     window.broker_account._portfolio = portfolio
@@ -210,7 +212,9 @@ def test_a_successful_refresh_does_not_touch_the_market_badge(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
-    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(
+            window.dashboard_orchestrator, "render_current", lambda: None
+        )
 
     before_text = window.market_badge.text()
     before_state = window.market_badge.property("state")
@@ -259,7 +263,9 @@ def test_a_successful_refresh_records_a_runtime_event(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
-    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(
+            window.dashboard_orchestrator, "render_current", lambda: None
+        )
 
     portfolio = _portfolio()
     window.broker_account._portfolio = portfolio
@@ -280,7 +286,9 @@ def test_a_successful_refresh_refreshes_both_preflights(
         window.runtime_events_orchestrator, "record", lambda **_: None
     )
     monkeypatch.setattr(window, "_log", lambda _message: None)
-    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(
+            window.dashboard_orchestrator, "render_current", lambda: None
+        )
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
 
     calls: list[str] = []
@@ -338,7 +346,9 @@ def test_the_targeted_preflight_reads_the_canonical_account(
     passed.
     """
 
-    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(
+            window.dashboard_orchestrator, "render_current", lambda: None
+        )
     monkeypatch.setattr(
         window.runtime_events_orchestrator, "record", lambda **_: None
     )
@@ -435,7 +445,9 @@ def test_a_successful_refresh_moves_the_execution_route_equity_card(
     monkeypatch.setattr(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
-    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(
+            window.dashboard_orchestrator, "render_current", lambda: None
+        )
 
     _retain_a_session(window)
     window.broker_account._portfolio = None
@@ -471,7 +483,9 @@ def test_a_successful_refresh_puts_a_row_in_the_real_ledger_table(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
-    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(
+            window.dashboard_orchestrator, "render_current", lambda: None
+        )
 
     portfolio = _portfolio()
     window.broker_account._portfolio = portfolio
@@ -506,7 +520,9 @@ def test_a_failed_refresh_preserves_the_last_good_truth(
         window.targeted_session_orchestrator, "refresh_preflight", lambda: None
     )
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
-    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(
+            window.dashboard_orchestrator, "render_current", lambda: None
+        )
 
     good = _portfolio()
     window.broker_account._portfolio = good

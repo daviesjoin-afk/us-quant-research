@@ -446,7 +446,9 @@ def test_a_rejected_admission_restores_the_controls(window, monkeypatch) -> None
     attribute on the window would not reach it.
     """
 
-    window._closing = True
+    # G1: the admission fact is the supervisor's; raising it is the real close
+    # path's first step, and this is how a production close sets it.
+    window.runtime_supervisor.begin_shutdown()
 
     window.backtest_orchestrator.request_selected(_draft(window))
 

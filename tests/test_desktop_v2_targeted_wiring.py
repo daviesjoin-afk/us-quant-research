@@ -580,7 +580,9 @@ def test_a_market_snapshot_refreshes_the_targeted_preflight(
         lambda: calls.append("preflight"),
     )
     monkeypatch.setattr(window, "_record_minute_snapshot", lambda _s: None)
-    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(
+            window.dashboard_orchestrator, "render_current", lambda: None
+        )
     monkeypatch.setattr(window, "_populate_auto_quant_candidates", lambda: None)
 
     window._on_market_snapshot_changed(
@@ -620,7 +622,9 @@ def test_a_market_snapshot_repaints_the_session_when_shadow_runs(
         lambda view: evidence.append(view),
     )
     monkeypatch.setattr(window, "_record_minute_snapshot", lambda _s: None)
-    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(
+            window.dashboard_orchestrator, "render_current", lambda: None
+        )
     monkeypatch.setattr(window, "_populate_auto_quant_candidates", lambda: None)
 
     class _Engine:
@@ -671,7 +675,9 @@ def test_a_market_snapshot_without_shadow_refreshes_without_the_shadow_repaint(
         lambda: paints.append("session"),
     )
     monkeypatch.setattr(window, "_record_minute_snapshot", lambda _s: None)
-    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(
+            window.dashboard_orchestrator, "render_current", lambda: None
+        )
     monkeypatch.setattr(window, "_populate_auto_quant_candidates", lambda: None)
 
     window.shadow_orchestrator._engine = None
@@ -700,7 +706,9 @@ def test_an_account_portfolio_change_refreshes_the_targeted_preflight(
         "refresh_preflight",
         lambda: calls.append("preflight"),
     )
-    monkeypatch.setattr(window, "_publish_dashboard_view", lambda: None)
+    monkeypatch.setattr(
+            window.dashboard_orchestrator, "render_current", lambda: None
+        )
     monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
     monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
 

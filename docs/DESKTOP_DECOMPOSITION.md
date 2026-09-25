@@ -5852,7 +5852,7 @@ e2（13）/ e3（41）/ e4（11）/ F1（14）/ F2（22）/ G1（17）/ G2-A（1
 
 四处改动都只换锚点与 tests 集，没有删除任何 mutant，也没有把某个 invariant
 降级为口头声称：同一 invariant 现在在新旧两处都被锁住。合计历史 130 +
-G2-B 32 = **162 个 mutant 全 RED**。
+G2-B 35 = **165 个 mutant 全 RED**。
 
 ### 35.7 MainWindow residual ownership audit（G2-B 之后）
 

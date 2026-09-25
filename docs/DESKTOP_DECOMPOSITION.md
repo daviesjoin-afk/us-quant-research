@@ -6023,8 +6023,8 @@ scanner ranking、backtest math —— 一律未改。
 ### 36.4 交付物
 
 ```text
-tests/test_final_architecture_closure.py              40 个跨层 guard case（34 function）
-scripts/mutation_final_architecture_closure.ps1       35 个跨层 mutant（全 RED）
+tests/test_final_architecture_closure.py              42 个跨层 guard case（36 function）
+scripts/mutation_final_architecture_closure.ps1       38 个跨层 mutant（全 RED）
 docs/TRADING_ARCHITECTURE_V2.md §8.27                 Final Architecture Closure + evidence matrix
 ```
 
@@ -6041,14 +6041,49 @@ controller 行为。**没有** `assert "IBKR" not in entire repo`（adapters / c
 本来就该出现），也**没有** `assert "submit(" 只出现一次`（broker adapter 与 tests 里
 合法出现）。层间 guard 用**白名单**而非黑名单 —— 理由见 §36.5。
 
+**方向规则 + symbol 规则成对（本轮最后一项 guard precision）**：package allowlist 只决定
+"能不能命名这个包"，因此它本身也会放行
+`from us_quant.ibkr import connect_ibkr_client` 与
+`from ...workflow_state import ExecutionLeaseManager` —— 这两个 module 除了 seam 真正需要的
+那一个值之外，还带着 socket/thread I/O（`connect_ibkr_client` / `probe_ibkr_socket` /
+`IBKRClientConnectError`）与 lease 机制（`ExecutionLeaseManager` /
+`validate_paper_transition` / `WorkflowSnapshot` / `WorkflowStateError` /
+`ExecutionLease`）。因此新增 FA4c：两条历史 exception 被收窄到 **exact symbol + exact
+importer**（`IBKRConnectionConfig` 只允许 `application/accounts.py`；
+`PaperWorkflowPhase` 只允许 `paper/contracts.py` 与 `paper/service.py`），任何其它
+symbol 或其它 importer 都 RED；FA4d 再堵住 `import us_quant.ibkr` / `from ... import *`
+这类"整扇门"写法（`import X` 之后可以属性访问拿到任何 symbol，symbol 检查看不到）。
+实测七种越界全部 RED。新增 mutant M6b / M6c / M6d。
+
 ### 36.5 Mutation 结果
 
 ```text
-FAC mutant        35 / 35 RED      0 survived / 0 harness-error
+FAC mutant        38 / 38 RED      0 survived / 0 harness-error
 historical mutant 165 / 165 RED    0 not-caught
                   e2 13 · e3 41 · e4 11 · F1 14 · F2 22 · G1 17 · G2-A 12 · G2-B 35
-aggregate         200 / 200 RED
+aggregate         203 / 203 RED
 ```
+
+**FAC harness 的 exact-one contract（本轮修）**：原实现用
+`[regex]::Replace($input, $pattern, $repl, 1)` —— 这个**静态 overload 的第三个参数绑定的是
+`RegexOptions`（1 == IgnoreCase），不是 replacement count**，因此"要求作者保证 pattern
+唯一"只写在注释里，0 match 能发现而 2+ match 会被静默地一次改多处，把单点 mutant 变成
+多点 mutation 且仍报 caught。现在改为实例 overload：先
+`[regex]::new($find, IgnoreCase).Matches($original)` 并**要求 Count 恰为 1**，再用
+`$regex.Replace($original, $repl, 1)`（此处第三参数才是真正的 count）。最终 contract：
+
+```text
+0 match                       -> HARNESS-ERROR
+2+ match                      -> HARNESS-ERROR
+replacement 未改变文本         -> HARNESS-ERROR
+SyntaxError                   -> HARNESS-ERROR
+pytest exit 5（未选中测试）      -> HARNESS-ERROR
+pytest 非 0/1（collection/usage/internal）-> HARNESS-ERROR
+exit 0（survived）             -> non-zero 退出
+harness-error > 0             -> non-zero 退出
+```
+
+即"唯一性由 harness 自己验证"，不再依赖注释约束作者。
 
 historical 165 全部 RED，**没有**因 Final Closure 的改动而需要重锚（没有删 mutant、
 没有把 pattern miss 当 caught、没有注释掉 mutant）。
@@ -6060,8 +6095,12 @@ historical 165 全部 RED，**没有**因 Final Closure 的改动而需要重锚
 `object.__setattr__` 边界相同）；**tuple descendants 未递归冻结**（tuple 本身
 immutable，但 `json.dumps` 接受 tuple，故其内部 dict/list 仍是可变容器，会重现 split
 identity —— 修法是 tuple 保持 tuple、只递归冻结 descendants，不改成 list 也不做
-Sequence 一刀切）；以及 FAC test 文件一个未使用的 `MappingProxyType` import。
-新增 FA26d / FA26e 与 mutant M24b / M24c / M24d。
+Sequence 一刀切。**保留 tuple 的理由是 representation 而非 hash**：`json.dumps` 对 tuple
+与 list 都编码成 JSON array，等价元素下 canonical JSON 与 hash 本来就相同，所以
+"改成 list 会改变 hash" 是**错的**；真正理由是修复只应递归冻结 descendants、不应额外
+规范化容器类型，否则会改变 Python consumer 看到的 `isinstance(..., tuple)`。hash
+兼容性由 FA26e 的 `parameter_hash_for(...) == before` 单独证明）；以及 FAC test 文件一个
+未使用的 `MappingProxyType` import。新增 FA26d / FA26e 与 mutant M24b / M24c / M24d。
 
 **FA19b 的重构（review 发现）**：初版断言"当前不存在 `live*.py`"，既 future-hostile
 （Live adapter 是路线目标，命名成 `live_execution.py` 会让 suite 因做对的事而变红）

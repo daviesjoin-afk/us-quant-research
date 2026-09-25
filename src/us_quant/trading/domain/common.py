@@ -173,16 +173,22 @@ def freeze_parameters(value: Any) -> Any:
 
     Three container kinds are handled, and only these three.  ``dict`` and
     ``list`` become the frozen subclasses above; ``tuple`` is rebuilt with frozen
-    descendants but **stays a tuple**, because ``json.dumps`` encodes a tuple as
-    a JSON array -- so a tuple is a legitimate, hashable parameter value, and
-    turning it into a list would change the canonical JSON the parameter hash is
-    taken over.  A tuple cannot be edited in place, but the dicts and lists *in*
-    it can, which is exactly the hole this branch closes.
+    descendants but **stays a tuple**.  A tuple cannot be edited in place, but the
+    dicts and lists *in* it can, which is exactly the hole this branch closes.
+
+    The tuple stays a tuple so this immutability fix does not alter the
+    Python-level parameter representation or the semantics existing consumers
+    observe -- ``isinstance(value, tuple)`` keeps holding, and nothing here
+    normalises a container type as a side effect of freezing it.  (JSON and hash
+    compatibility are a separate property, asserted by the regression rather than
+    argued here: ``json.dumps`` encodes a tuple as a JSON array, so the
+    representation change is about Python consumers, not about the canonical
+    JSON.)
 
     Anything else is returned as-is.  In particular this deliberately does not
     treat every ``Sequence`` as one case: ``str`` is a sequence too, and other
-    sequences carry their own business meaning.  Only the containers that are
-    both JSON-compatible and able to hold mutable descendants are recursed into.
+    sequences carry their own business meaning.  Only the containers that can
+    hold mutable descendants are recursed into.
     """
 
     if isinstance(value, dict):

@@ -265,9 +265,13 @@ def test_fa26e_tuple_descendants_of_governed_parameters_are_frozen() -> None:
     a dict or list *inside* it is never visited, so it stays a plain mutable
     container and the split identity this whole fix removes comes straight back.
 
-    The tuple itself must stay a tuple -- converting it to a list would change
-    the canonical JSON the hash is taken over, and would change what existing
-    consumers see.
+    The tuple stays a tuple because converting it to a list is unnecessary
+    representation normalisation -- it would change what Python consumers see
+    (``isinstance(value, tuple)``) and the fix's job is to freeze descendants, not
+    to re-shape the parameter.  JSON and hash compatibility are asserted below
+    rather than argued: ``json.dumps`` encodes a tuple as a JSON array, so the two
+    forms already hash the same, and the assertion is what proves the freeze did
+    not disturb that.
     """
 
     parameters = {
@@ -748,6 +752,156 @@ def test_fa1_to_fa4b_no_inward_layer_names_a_provider_or_a_toolkit(
             if root in FORBIDDEN_THIRD_PARTY:
                 out.append(f"{source} -> {target}")
     assert out == []
+
+
+#: The two package-level allowlist exceptions for ``trading/application``, each
+#: narrowed to the exact **symbols** production actually imports.
+#:
+#: The allowlist above is a package-prefix rule: it decides *direction*.  On its
+#: own it would also permit ``from us_quant.ibkr import connect_ibkr_client`` and
+#: ``from ...workflow_state import ExecutionLeaseManager``, because those live in
+#: modules the application layer is allowed to name.  Both modules carry far more
+#: than the one value each seam needs:
+#:
+#: * ``us_quant.ibkr`` also defines ``connect_ibkr_client`` / ``probe_ibkr_socket``
+#:   (socket/thread I/O) and ``IBKRClientConnectError``;
+#: * ``runtime/workflow_state.py`` also defines ``ExecutionLeaseManager`` /
+#:   ``validate_paper_transition`` / ``WorkflowSnapshot`` / ``WorkflowStateError``
+#:   / ``ExecutionLease``.
+#:
+#: So the direction rule is paired with a symbol rule: the package allowlist says
+#: which module may be reached, and this table says which names inside it are
+#: actually part of the seam.  Anything else is a violation, which is what keeps
+#: an "exception" from becoming a whole open door.
+#:
+#: Keyed ``(module, symbol) -> the exact importers allowed to use it``.  The
+#: importer set is enumerated rather than wildcarded for the same reason: a new
+#: application module reaching for ``IBKRConnectionConfig`` should be a decision
+#: someone makes on purpose, not one that arrives with a copy-paste.
+NARROW_APPLICATION_EXCEPTIONS: dict[tuple[str, str], frozenset[str]] = {
+    ("us_quant.ibkr", "IBKRConnectionConfig"): frozenset(
+        {"us_quant.trading.application.accounts"}
+    ),
+    ("us_quant.trading.runtime.workflow_state", "PaperWorkflowPhase"): frozenset(
+        {
+            "us_quant.trading.application.paper.contracts",
+            "us_quant.trading.application.paper.service",
+        }
+    ),
+}
+
+#: Modules whose *whole* surface the application layer may reach, if any.  Empty
+#: on purpose: every application-side exception is symbol-scoped.
+APPLICATION_MODULES_WITH_NO_SYMBOL_SCOPE: frozenset[str] = frozenset()
+
+
+def test_fa4c_the_application_layer_exceptions_are_symbol_scoped() -> None:
+    """FA4c: the two historical seams are locked to exact symbols, not modules.
+
+    FA1-FA4 answer "may this layer name that package".  This answers the
+    narrower and more useful question: given that it may, *which names* may it
+    take?  Without it, an allowlisted package is an open door -- the application
+    layer could reach ``connect_ibkr_client`` (socket I/O) or
+    ``ExecutionLeaseManager`` (the lease machinery the window and runtime own)
+    and every structural guard would stay green.
+
+    Reported per edge with the offending symbol, so the failure says what was
+    reached for rather than just that a rule broke.
+    """
+
+    application = _SRC / "trading" / "application"
+    allowed = NARROW_APPLICATION_EXCEPTIONS
+
+    offending: list[str] = []
+    seen: set[tuple[str, str]] = set()
+
+    for path in sorted(application.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        module = _module_name(path)
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ImportFrom) or not node.module:
+                continue
+            target = node.module
+            # Only the two exception packages are symbol-scoped here; the
+            # direction rule already covers everything else.
+            if not any(target == pkg for pkg, _ in allowed):
+                continue
+            for alias in node.names:
+                seen.add((target, alias.name))
+                permitted = allowed.get((target, alias.name))
+                if permitted is None:
+                    offending.append(
+                        f"{module}:{node.lineno}: {target}.{alias.name} "
+                        "(no symbol-level exception)"
+                    )
+                elif module not in permitted:
+                    offending.append(
+                        f"{module}:{node.lineno}: {target}.{alias.name} "
+                        f"(only {sorted(permitted)} may use it)"
+                    )
+
+    assert offending == [], offending
+
+    # The guard must be checking something real: both exceptions are in use, and
+    # no exception package was granted whole-module access.
+    assert seen == set(allowed), seen
+    for module, _symbol in allowed:
+        assert module not in APPLICATION_MODULES_WITH_NO_SYMBOL_SCOPE
+
+    # And the names this exists to keep out are genuinely present in those
+    # modules, so the rule is not vacuous.
+    ibkr_symbols = {
+        node.name
+        for node in ast.walk(
+            ast.parse((_SRC / "ibkr.py").read_text(encoding="utf-8"))
+        )
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+    }
+    assert {"connect_ibkr_client", "probe_ibkr_socket"} <= ibkr_symbols
+
+    workflow_symbols = {
+        node.name
+        for node in ast.walk(
+            ast.parse(
+                (
+                    _SRC / "trading" / "runtime" / "workflow_state.py"
+                ).read_text(encoding="utf-8")
+            )
+        )
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+    }
+    assert {
+        "ExecutionLeaseManager",
+        "validate_paper_transition",
+    } <= workflow_symbols
+
+
+def test_fa4d_no_application_module_imports_a_bare_provider_module() -> None:
+    """FA4d: ``import us_quant.ibkr`` with no symbol list is the same open door.
+
+    ``from us_quant.ibkr import IBKRConnectionConfig`` is symbol-scoped;
+    ``import us_quant.ibkr`` hands the whole module over and lets the caller
+    reach ``connect_ibkr_client`` through attribute access, which no symbol
+    check on the import statement can see.
+    """
+
+    application = _SRC / "trading" / "application"
+    offending: list[str] = []
+    for path in sorted(application.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        module = _module_name(path)
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "us_quant.ibkr":
+                        offending.append(f"{module}:{node.lineno}: import {alias.name}")
+            elif isinstance(node, ast.ImportFrom) and node.module == "us_quant.ibkr":
+                for alias in node.names:
+                    if alias.name == "*":
+                        offending.append(f"{module}:{node.lineno}: star import")
+    assert offending == [], offending
 
 
 def test_fa1b_the_domain_layer_is_not_empty() -> None:

@@ -90,9 +90,16 @@ function Set-Text([string]$path, [string]$text) {
     )
 }
 
-# NOTE: the trailing ``1`` in ``[regex]::Replace`` binds to ``RegexOptions``
-# (1 == IgnoreCase), NOT to a replacement count.  Every ``find`` below must
-# therefore match exactly one location in its target (case-insensitively).
+# Every ``find`` below is runtime-verified to match **exactly one** location in
+# its target (case-insensitively).  The harness does that check itself rather
+# than relying on the author to keep the patterns unique: 0 matches and 2+
+# matches are both HARNESS-ERROR.  This matters because the static
+# ``[regex]::Replace(input, pattern, replacement, 1)`` overload binds that ``1``
+# to ``RegexOptions`` (1 == IgnoreCase), **not** to a replacement count -- so a
+# duplicated pattern would silently rewrite several sites at once and turn a
+# single-point mutant into a multi-point one that still reported as caught.
+# The instance overload ``$regex.Replace(input, replacement, 1)`` used below
+# takes a real count, and the preceding match check makes it exact.
 $mutations = @(
     # -- import / layer boundaries -------------------------------------
     @{
@@ -150,6 +157,31 @@ $mutations = @(
         repl = "from us_quant.trading.domain.strategy import StrategyStatus, StrategyVersion`nfrom us_quant.desktop_v2.orchestration.paper import queries as _paper_queries"
         tests = @($fac)
         select = @("-k", "capability_orchestrators_do_not_import_each_other")
+    },
+
+    @{
+        name = 'M6b the account application reaches a second IBKR symbol'
+        file = (Join-Path $src "trading\application\accounts.py")
+        find = 'from us_quant\.ibkr import IBKRConnectionConfig'
+        repl = "from us_quant.ibkr import IBKRConnectionConfig`nfrom us_quant.ibkr import connect_ibkr_client"
+        tests = @($fac)
+        select = @("-k", "application_layer_exceptions_are_symbol_scoped")
+    },
+    @{
+        name = 'M6c the Paper application reaches the lease manager'
+        file = (Join-Path $src "trading\application\paper\service.py")
+        find = 'from us_quant\.trading\.runtime\.workflow_state import PaperWorkflowPhase'
+        repl = "from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase`nfrom us_quant.trading.runtime.workflow_state import ExecutionLeaseManager"
+        tests = @($fac)
+        select = @("-k", "application_layer_exceptions_are_symbol_scoped")
+    },
+    @{
+        name = 'M6d the application imports the whole provider module'
+        file = (Join-Path $src "trading\application\accounts.py")
+        find = 'from us_quant\.ibkr import IBKRConnectionConfig'
+        repl = "import us_quant.ibkr`nfrom us_quant.ibkr import IBKRConnectionConfig"
+        tests = @($fac)
+        select = @("-k", "no_application_module_imports_a_bare_provider_module or application_layer_exceptions_are_symbol_scoped")
     },
 
     # -- Risk -> Execution path ----------------------------------------
@@ -344,7 +376,12 @@ $mutations = @(
         select = @("-k", "tuple_descendants_of_governed_parameters_are_frozen")
     },
     @{
-        name = 'M24d a frozen mapping is re-populated through the inherited copy()'
+        name = 'M24d the copy protocol loses the frozen representation'
+        # Targets ``__copy__`` -- i.e. the ``copy.copy(...)`` protocol, which
+        # FA26b asserts preserves the frozen form.  NOT the inherited
+        # ``FrozenParameters.copy()``, which is documented and asserted to return
+        # a plain detached dict; a label saying "the inherited copy()" would
+        # contradict that and make the audit ambiguous.
         file = $domainCommon
         find = '    def __copy__\(self\) -> "FrozenParameters":\r?\n        return FrozenParameters\(dict\(self\)\)'
         repl = "    def __copy__(self) -> `"FrozenParameters`":`n        return dict(self)"
@@ -403,13 +440,29 @@ foreach ($mutation in $mutations) {
     Copy-Item -LiteralPath $path -Destination $backup -Force
     $caught = $null
     $detail = ""
+    # Reset per iteration: a stale value would let a later mutant skip
+    # its own replacement-equality check.
+    $mutated = $null
     try {
-        $mutated = [regex]::Replace($original, $mutation.find, $mutation.repl, 1)
-        if ($mutated -eq $original) {
+        $regex = [regex]::new(
+            $mutation.find,
+            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+        # ``$patternMatches``, not ``$matches``: the latter is a PowerShell
+        # automatic variable set by ``-match``.
+        $patternMatches = $regex.Matches($original)
+        if ($patternMatches.Count -ne 1) {
             $caught = "HARNESS-ERROR"
-            $detail = "the mutation applied nothing (pattern not found)"
+            $detail = "the mutation pattern matched $($patternMatches.Count) locations; expected exactly 1"
         }
         else {
+            $mutated = $regex.Replace($original, $mutation.repl, 1)
+        }
+        if ($null -eq $caught -and $mutated -eq $original) {
+            $caught = "HARNESS-ERROR"
+            $detail = "the mutation applied nothing (the replacement reproduced the original text)"
+        }
+        if ($null -eq $caught) {
             Set-Text $path $mutated
             $syntax = & $py -c "import ast, sys; ast.parse(open(sys.argv[1], encoding='utf-8').read())" $path 2>&1
             if ($LASTEXITCODE -ne 0) {
@@ -420,22 +473,27 @@ foreach ($mutation in $mutations) {
                 $arguments = @("-m", "pytest", "-q", "-p", "no:cacheprovider") + $mutation.tests + $mutation.select
                 $output = & $py @arguments 2>&1
                 $exit = $LASTEXITCODE
+                # Only exit 1 with a failure count is RED.  Exit 0 is a
+                # survivor; 5 is "no tests collected"; anything else (2
+                # collection/interrupt, 3 internal, 4 usage) means the suite
+                # never ran, which is a hole in *this script* and not evidence
+                # that the guard fired.
+                $countLine = $output | Select-String -Pattern '\d+ (passed|failed)' | Select-Object -Last 1
                 if ($exit -eq 5) {
                     $caught = "HARNESS-ERROR"
                     $detail = "no tests were selected by $($mutation.select -join ' ')"
                 }
+                elseif ($exit -notin 0, 1) {
+                    $caught = "HARNESS-ERROR"
+                    $detail = "pytest exited $exit (collection/usage/internal error), not an assertion failure"
+                }
+                elseif (-not $countLine) {
+                    $caught = "HARNESS-ERROR"
+                    $detail = "no test count in the output"
+                }
                 else {
-                    if (-not ($output | Select-String -Pattern '\d+ (passed|failed)')) {
-                        $caught = "HARNESS-ERROR"
-                        $detail = "no test count in the output"
-                    }
-                    else {
-                        $caught = ($exit -ne 0)
-                    }
-                    $detail = ($output | Select-String -Pattern '^\d+ (failed|passed)' | Select-Object -Last 1)
-                    if (-not $detail) {
-                        $detail = ($output | Select-Object -Last 1)
-                    }
+                    $caught = ($exit -ne 0)
+                    $detail = $countLine
                 }
             }
         }

@@ -16,7 +16,7 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 > 判据 A–G 合法 composition、H route-specific orchestration = 0、I duplicate
 > mutable truth = 0、J private reach-through = 0 全部成立，**G2-C = NOT
 > REQUIRED**。在此基础上本轮只做跨层 invariant 锁定，不再继续拆窗口：见 §8.24
-> 的收口落档与 §8.27 的 Final Architecture Closure（40 条跨层 guard case / 33 个
+> 的收口落档与 §8.27 的 Final Architecture Closure（42 条跨层 guard case / 38 个
 > 跨层 mutant / 一处真实 immutable-version defect 修复）。
 >
 > **Final Architecture Closure base**：`c78a27f95f482336383282b94e6c877030df6b77`
@@ -2941,7 +2941,7 @@ Strategy Evolution / AI assistance 时，不需要绕开或重写现有安全边
 
 原则是 **AUDIT FIRST**：先扫现状、再锁 invariant、只在发现真实 defect 时修。不按 LOC
 优化，不为减少文件数合并 capability，不为"统一"建立 global manager。因此本轮
-**新增 40 条跨层 guard case + 35 个跨层 mutant + 同一 immutable-version 缺陷的三个真实漏洞修复**，没有搬动任何
+**新增 42 条跨层 guard case + 38 个跨层 mutant + 同一 immutable-version 缺陷的三个真实漏洞修复**，没有搬动任何
 capability 的 owner。
 
 #### 8.27.1 Audit 1 — import / layer dependency graph
@@ -2994,6 +2994,41 @@ Guard 实现方式：`tests/test_final_architecture_closure.py` 的 FA1–FA4 �
 `import us_quant.desktop` 作 mutant，结果是**循环 import 导致 collection error**而非干净
 的 assertion failure；换成 `us_quant.desktop_workers` 后暴露出黑名单确实漏项，
 于是 guard 改成白名单。
+
+**白名单只决定方向，因此再补一层 symbol 规则（FA4c / FA4d）。** 上面两条 exception 是
+**package 级**的：它们允许 application 层命名 `us_quant.ibkr` 与
+`runtime/workflow_state`，而这两个 module 除 seam 真正需要的那一个值之外还带着更多东西：
+
+```text
+us_quant.ibkr                     IBKRConnectionConfig  <- 只有它属于 seam
+                                  connect_ibkr_client / probe_ibkr_socket（socket/thread I/O）
+                                  IBKRClientConnectError
+
+runtime/workflow_state.py         PaperWorkflowPhase    <- 只有它属于 seam
+                                  ExecutionLeaseManager / validate_paper_transition
+                                  WorkflowSnapshot / WorkflowStateError / ExecutionLease
+```
+
+所以方向规则被配对了一条 symbol 规则，键是 `(module, symbol) -> 允许的 importer 精确集合`：
+
+```text
+us_quant.ibkr.IBKRConnectionConfig              -> 仅 application/accounts.py
+runtime.workflow_state.PaperWorkflowPhase       -> 仅 application/paper/contracts.py
+                                                   application/paper/service.py
+```
+
+任何其它 symbol、或其它 importer，都 RED（实测七种越界全部 RED：
+`connect_ibkr_client` / `probe_ibkr_socket` / `IBKRClientConnectError` / 新 module 取
+`IBKRConnectionConfig` / `ExecutionLeaseManager` / `validate_paper_transition` /
+裸 `import us_quant.ibkr`）。FA4d 单独堵"整扇门"写法：`import us_quant.ibkr` 会把整个
+module 交出去，之后属性访问能拿到任何 symbol，而 import 语句上的 symbol 检查看不见；
+`from ... import *` 同理。
+
+Importer 集合是**逐个枚举**而非通配：一个新 application module 去拿
+`IBKRConnectionConfig` 应该是有人刻意做的决定，而不是 copy-paste 顺带带来的。
+`APPLICATION_MODULES_WITH_NO_SYMBOL_SCOPE` 是空集 —— application 侧每一条 exception
+都是 symbol 级的。本轮**不搬迁 module**（`IBKRConnectionConfig` 仍是
+`us_quant.ibkr` 的值类型），只锁边界。
 
 #### 8.27.2 Audit 2 — Risk → Execution 不可绕过
 
@@ -3191,8 +3226,14 @@ invariant，且行为可完全证明兼容（behavior test + mutation + migratio
    ```
 
    修复是**最小**的：tuple 分支保持 tuple 类型、只递归冻结其 descendants ——
-   不把 tuple 改成 list（那会改变 canonical JSON，进而改变 hash），不做
-   "所有 Sequence 一刀切"（`str` 也是 Sequence，其它 sequence 各有业务语义）。
+   不把 tuple 改成 list，因为 Final Closure 只修 deep immutability，不额外改变
+   Python-level parameter representation（否则会改变 consumer 看到的
+   `isinstance(value, tuple)`；修复的职责是冻结 descendants，不是重塑 parameter 形态）。
+   **注意理由不是 hash**：`json.dumps` 对 tuple 与 list 都编码成 JSON array，等价元素下
+   canonical JSON 与 `parameter_hash_for` 本来就相同，所以"改成 list 会改变 hash"是**错的**；
+   canonical JSON / hash 兼容性由 regression 单独证明保持（FA26e 的
+   `parameter_hash_for(...) == before`）。也不做"所有 Sequence 一刀切"（`str` 也是
+   Sequence，其它 sequence 各有业务语义）。
    实测：tuple 仍 `isinstance(..., tuple)`，descendants 全部 frozen，
    `parameter_hash_for` 不变。先写 failing regression（FA26e 在修复前 RED：
    `DID NOT RAISE TypeError`），新增 mutant M24c。
@@ -3251,7 +3292,9 @@ aggregate 196 → **200**。
 | Risk authority | `RiskApplication` | 第二份风险判断 / 绕过 evaluate | `tests/test_trading_risk_application.py`；FAC `test_fa8_dispatch_is_the_only_runtime_risk_execution_crossing_point` | FAC M8 | ✅ |
 | Execution authority | `ExecutionApplication` | 第二个 order identity 创建者 / 直接 broker submit | `tests/test_trading_architecture.py::test_only_the_execution_application_creates_order_identity` | FAC M8 | ✅ |
 | Proposal → Risk → Execution path | `OrderDispatch` | proposal 可提交 / dispatch 跳过 verdict | FAC `test_fa7_trade_proposal_carries_nothing_submittable`、`test_fa8b_the_dispatch_never_submits_an_unapproved_verdict` | FAC M7、M9 | ✅ |
-| Broker abstraction | `ports/broker_execution.py` | application 命名 concrete adapter | FAC `test_fa19_risk_and_execution_applications_name_no_concrete_broker`、`test_fa20_the_execution_builder_accepts_the_port_abstraction` | FAC M3、M4、M5、M20、M21 | ✅ |
+| Broker abstraction | `ports/broker_execution.py` | application 命名 concrete adapter | FAC `test_fa19_risk_and_execution_applications_name_no_concrete_broker`、`test_fa20_the_execution_builder_accepts_the_port_abstraction` | FAC M3、M4、M5、M20 | ✅ |
+| Application 层 exception 的 symbol 边界 | `application/accounts.py`（`IBKRConnectionConfig`）、`application/paper/*`（`PaperWorkflowPhase`） | application 取 `connect_ibkr_client` / `probe_ibkr_socket` / `ExecutionLeaseManager` / `validate_paper_transition`，或裸 `import us_quant.ibkr` | FAC `test_fa4c_the_application_layer_exceptions_are_symbol_scoped`、`test_fa4d_no_application_module_imports_a_bare_provider_module` | FAC M6b、M6c、M6d | ✅ |
+| Mutation harness 自身的 exact-one contract | `scripts/mutation_final_architecture_closure.ps1` | pattern 匹配 0 或 2+ 处仍被当作 caught | harness 自校验（`Matches().Count == 1`，`$regex.Replace(..., 1)`） | —（harness 自身即被测对象） | ✅ |
 | Paper / Shadow XOR lease | `WorkflowController`（单一 `ExecutionLeaseManager`） | 两个独立 lease / 本地 XOR 布尔 | FAC `test_fa11_paper_and_shadow_share_one_lease_manager`、`test_fa12_and_fa13_the_two_workflows_exclude_each_other` | FAC M14、M15 | ✅ |
 | Paper phase ownership | `PaperWorkflowController` | 窗口 / Execution 包读 phase | FAC `test_fa17_and_fa18_only_the_paper_capability_reads_the_workflow_phase` | FAC M19 | ✅ |
 | Recovery / reconciliation | `ManualReconciliation`（`runtime/recovery.py`） | HALTED 自动回 RUNNING | FAC `test_fa15_a_halted_session_has_no_automatic_route_back_to_running`、`test_fa16_manual_reconciliation_is_an_explicit_two_step_route`；`tests/test_desktop_paper_recovery_finalization_orchestrator.py` | FAC M17、M18 | ✅ |
@@ -3268,8 +3311,8 @@ aggregate 196 → **200**。
 | Future Live extension seam | `composition/execution.py` | Live 另建 risk/execution 栈（`LiveRiskApplication` / `LiveExecutionApplication` / `LiveTradingRuntime`） | FAC `test_fa20_the_execution_builder_accepts_the_port_abstraction`、`test_fa19b_a_future_live_path_must_reuse_the_single_authority_stack`、`test_fa19c_paper_and_live_differences_are_not_a_mode_branch` | FAC M20、M20b、M20c、M20d | ✅ 长期 invariant（seam 已锁；Live 未实现） |
 | Future AI boundary | 本文档 §8.27.7 | AI 拿 broker port / concrete adapter / 写 `OrderIntent` / bypass risk / 改 lease / 自签 gate | **documented boundary；executable package guard deferred until an AI integration package actually exists**（当前无 AI package，故无可针对的 module guard） | — | ✅ 仅文档化约束，未实现 |
 
-FAC collected test case 总数 **40**（34 个 test function，参数化展开后 40 个 case），
-FAC mutant 总数 **35**（全 RED），historical mutant **165**（全 RED），aggregate **200**。
+FAC test function **36**，FAC collected test case **42**（参数化展开后），
+FAC mutant **38**（全 RED），historical mutant **165**（全 RED），aggregate **203**。
 
 设计依据见 `DESKTOP_DECOMPOSITION.md` §36。
 
@@ -4224,8 +4267,9 @@ G2-C                                 NOT REQUIRED
 MainWindow Composition Closure       ✅ COMPLETE
 Final Architecture Closure           ✅ COMPLETE
 
-Architecture Closure baseline SHA    = Final Architecture Closure PR head
-                                       （base = G2-B merge commit c78a27f95f482336383282b94e6c877030df6b77）
+Final Architecture Closure base      = c78a27f95f482336383282b94e6c877030df6b77
+Closure vehicle                      = PR #58 / refactor/final-architecture-closure
+Final immutable baseline             = PR #58 merge commit recorded by Git history
 ```
 
 **下一阶段：Paper Autonomous Trading v1。** 之后依次是 Live-ready Execution Core、

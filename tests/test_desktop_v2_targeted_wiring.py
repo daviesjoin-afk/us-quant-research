@@ -566,6 +566,11 @@ def test_a_robustness_completion_asks_for_focus_and_navigates_semantically(
 # these drives the real bridge -- the window's own slot or the capability's own
 # signal -- so a rewiring that dropped a consumer fails here rather than in
 # production.
+#
+# The execution route is a *fourth* consumer of the market fan-out.  Since G2-B
+# it is repainted by ``execution_orchestrator.refresh_all`` -- the retired window
+# seam was ``_populate_auto_quant_candidates`` -- so the tests below stub that
+# call at its new owner and assert what *their* own route did.
 
 
 def test_a_market_snapshot_refreshes_the_targeted_preflight(
@@ -583,7 +588,9 @@ def test_a_market_snapshot_refreshes_the_targeted_preflight(
     monkeypatch.setattr(
             window.dashboard_orchestrator, "render_current", lambda: None
         )
-    monkeypatch.setattr(window, "_populate_auto_quant_candidates", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_all", lambda: None
+    )
 
     window._on_market_snapshot_changed(
         SimpleNamespace(
@@ -625,7 +632,9 @@ def test_a_market_snapshot_repaints_the_session_when_shadow_runs(
     monkeypatch.setattr(
             window.dashboard_orchestrator, "render_current", lambda: None
         )
-    monkeypatch.setattr(window, "_populate_auto_quant_candidates", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_all", lambda: None
+    )
 
     class _Engine:
         active = True
@@ -678,7 +687,9 @@ def test_a_market_snapshot_without_shadow_refreshes_without_the_shadow_repaint(
     monkeypatch.setattr(
             window.dashboard_orchestrator, "render_current", lambda: None
         )
-    monkeypatch.setattr(window, "_populate_auto_quant_candidates", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "refresh_all", lambda: None
+    )
 
     window.shadow_orchestrator._engine = None
 
@@ -698,7 +709,14 @@ def test_a_market_snapshot_without_shadow_refreshes_without_the_shadow_repaint(
 def test_an_account_portfolio_change_refreshes_the_targeted_preflight(
     window: MainWindow, monkeypatch
 ) -> None:
-    """Account portfolio change -> session preflight refresh."""
+    """Account portfolio change -> session preflight refresh.
+
+    The two execution halves the window used to repaint here are the route's own
+    now (G2-B): ``refresh_current`` draws the session and ``refresh_preflight``
+    the readiness line.  Both are stubbed because this test is about the
+    *targeted* preflight -- but they are still driven, so the fan-out has to
+    reach the route for the test to pass at all.
+    """
 
     calls: list[str] = []
     monkeypatch.setattr(
@@ -709,12 +727,24 @@ def test_an_account_portfolio_change_refreshes_the_targeted_preflight(
     monkeypatch.setattr(
             window.dashboard_orchestrator, "render_current", lambda: None
         )
-    monkeypatch.setattr(window, "_render_auto_quant_snapshot", lambda: None)
-    monkeypatch.setattr(window, "_refresh_auto_quant_preflight", lambda: None)
+    execution: list[str] = []
+    monkeypatch.setattr(
+        window.execution_orchestrator,
+        "refresh_current",
+        lambda: execution.append("current"),
+    )
+    monkeypatch.setattr(
+        window.execution_orchestrator,
+        "refresh_preflight",
+        lambda: execution.append("preflight"),
+    )
 
     window._on_account_portfolio_changed(SimpleNamespace(account=None))
 
     assert calls == ["preflight"], calls
+    # The route's readiness line is repainted too: an account fact is one of
+    # its preflight inputs.
+    assert execution == ["preflight"], execution
 
 
 def test_an_evidence_replay_completion_refreshes_the_minute_status(

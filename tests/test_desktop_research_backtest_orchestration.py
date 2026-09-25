@@ -116,6 +116,40 @@ def _receiver_methods(path: pathlib.Path, receiver: str) -> set[str]:
     return methods
 
 
+def _strategy_options_receivers(path: pathlib.Path) -> set[str]:
+    """Every receiver ``path`` calls ``set_strategy_options`` on."""
+
+    receivers: set[str] = set()
+    for node in ast.walk(_parse(path)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "set_strategy_options"
+        ):
+            receivers.add(ast.unparse(func.value))
+    return receivers
+
+
+def _strategy_options_callers() -> list[tuple[str, str]]:
+    """Who fills a strategy combo: every ``<owner>.set_strategy_options`` call
+    outside the page package.
+
+    The pages delegate to their own controls
+    (``self.controls.set_strategy_options``); that is the widget plumbing the
+    method exists for, not a driver of it, so the page package is filtered out.
+    What remains is exactly the set of modules that decide what a combo shows.
+    """
+
+    callers: list[tuple[str, str]] = []
+    for path in _python_files(_SRC):
+        if "pages" in path.parts:
+            continue
+        for receiver in _strategy_options_receivers(path):
+            callers.append((path.relative_to(_SRC).as_posix(), receiver))
+    return sorted(callers)
+
 
 def _class_names(path: pathlib.Path) -> set[str]:
     """Every class name declared in one file."""
@@ -584,28 +618,43 @@ def test_the_window_never_paints_the_backtest_page() -> None:
 def test_the_window_never_sets_the_backtest_strategy_options() -> None:
     """Spec 14/34: the *backtest* page's options are the capability's to set.
 
-    Scoped to the ``backtest_page`` receiver on purpose.  ``set_strategy_options``
-    is a generic page method -- the execution and targeted pages have one too,
-    and the window legitimately fills those from the same catalogue refresh --
-    so a name-wide search would be asserting something the spec never asked for.
-    What must not exist is a ``backtest_page.set_strategy_options`` call here.
+    G2-B made this guard stronger, and the scoping caveat it used to carry is gone.
+    When the *execution* page's combo moved to ``ExecutionOrchestrator`` the window
+    stopped filling any combo at all, so "the window fills the execution page's
+    options, and the targeted page's" is no longer a reason to scope the rule: the
+    window calls ``set_strategy_options`` on nothing, and each of the three combo
+    pages has exactly one driver -- its own capability.  Asserting only the absence
+    would still pass if the window had simply stopped refreshing every combo and
+    left the pages empty, so the positive half is asserted here too.
 
     ``set_palette`` is deliberately allowed: the theme is the window's, and
     repainting the page on a theme change is composition rather than backtest
     state.
     """
 
+    assert _strategy_options_receivers(_DESKTOP) == set(), sorted(
+        _strategy_options_receivers(_DESKTOP)
+    )
+
     reached = _receiver_methods(_DESKTOP, "backtest_page")
     assert "set_strategy_options" not in reached, reached
     assert "render" not in reached, reached
     assert "set_palette" in reached
 
-    # The generic pages keep their own calls: this is a scoping assertion, and
-    # without it the test above would pass even if the window had stopped
-    # refreshing every combo.
-    assert "set_strategy_options" in _receiver_methods(
-        _DESKTOP, "execution_page"
-    )
+    assert _strategy_options_callers() == [
+        (
+            "desktop_v2/orchestration/execution/orchestrator.py",
+            "self._page",
+        ),
+        (
+            "desktop_v2/orchestration/research/backtest/orchestrator.py",
+            "self._page",
+        ),
+        (
+            "desktop_v2/orchestration/research/targeted/session/orchestrator.py",
+            "self._page",
+        ),
+    ], _strategy_options_callers()
 
 
 def test_only_the_window_obtains_a_backtest_page() -> None:

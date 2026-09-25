@@ -77,11 +77,6 @@ from us_quant.desktop_settings import (
     DesktopSettingsService,
     ibkr_config_from_preferences,
 )
-from us_quant.extended_hours import (
-    USEquitySession,
-    paper_order_routing,
-    us_equity_session,
-)
 from us_quant.desktop_v2.pages.account import AccountPage
 from us_quant.desktop_v2.pages.risk import RiskPage
 from us_quant.desktop_v2.pages.strategy import (
@@ -98,7 +93,6 @@ from us_quant.desktop_v2.orchestration.dashboard import (
     DashboardProviders,
 )
 from us_quant.scanner import (
-    MarketScan,
     load_close_series,
     save_market_scan,
     scan_market,
@@ -113,7 +107,6 @@ from us_quant.trading.composition.strategies import (
 )
 from us_quant.trading.domain.strategy import (
     StrategyIdentity,
-    StrategyStatus,
     StrategyVersion,
 )
 from us_quant.runtime_events import RuntimeEvent, RuntimeEventStore
@@ -132,12 +125,6 @@ from us_quant.trading.composition.execution import (
 from us_quant.trading.composition.risk import build_risk_application
 from us_quant.trading.composition.runtime import build_trading_runtime
 from us_quant.trading.domain.risk import LayeredRiskLimits
-from us_quant.trading.runtime.models import AutoQuantCandidate
-from us_quant.trading.runtime.preflight import (
-    AutoQuantPreflight,
-    calculate_quote_readiness_breakdown,
-    evaluate_auto_quant_preflight,
-)
 from us_quant.runtime_supervisor import RuntimeSnapshot, RuntimeSupervisor
 from us_quant.paper_order_models import PaperOrderReconciliation
 from us_quant.trading.ports.broker_execution import ExecutionRefused
@@ -148,25 +135,18 @@ from us_quant.trading.runtime.health import (
 )
 from us_quant.trading.runtime.paper_models import PaperSessionResult
 from us_quant.trading.application.paper import PaperTradingService
-from us_quant.trading.runtime.workflow_state import (
-    PaperWorkflowPhase,
-    WorkflowStateError,
-)
 from us_quant.desktop_v2.orchestration.account import (
     AccountOrchestrator,
     AccountPresentationInputs,
 )
 from us_quant.desktop_v2.orchestration.paper import PaperOrchestrator
 from us_quant.desktop_v2.orchestration.paper.models import (
-    DUPLICATE_CONFIRM_MESSAGE,
-    DUPLICATE_TITLE,
     PaperAccountReading,
     PaperLaunchRequest,
     PaperOrderChannel,
     PaperSessionBuildResult,
     PaperShutdownDisposition,
 )
-from us_quant.desktop_v2.orchestration.paper.queries import launch_attempt_in_flight
 from us_quant.desktop_v2.orchestration.market import (
     MarketOrchestrator,
     MarketReadinessInputs,
@@ -187,15 +167,9 @@ from us_quant.desktop_v2.orchestration.research.backtest import (
     REFUSAL_WARNING,
 )
 from us_quant.desktop_v2.pages.execution import ExecutionPage
-from us_quant.desktop_v2.pages.execution.presenter import (
-    build_candidates_view,
-    control_state,
-)
-from us_quant.desktop_v2.pages.execution.projector import (
-    AUDIT_ROW_LIMIT,
-    LATENCY_ROW_LIMIT,
-    RECONCILIATION_ROW_LIMIT,
-    build_session_view,
+from us_quant.desktop_v2.orchestration.execution import (
+    ExecutionOrchestrator,
+    ExecutionProviders,
 )
 from us_quant.desktop_v2.pages.market import MarketPage
 from us_quant.desktop_v2.pages.research.targeted import TargetedValidationPage
@@ -271,7 +245,6 @@ from us_quant.desktop_targeted_session_service import (
 )
 from us_quant.intraday_universe import (
     select_intraday_watchlist,
-    select_paper_rotation_rows,
 )
 from us_quant.cross_sectional import (
     run_cross_sectional_research,
@@ -328,18 +301,6 @@ def runtime_shutdown_messages(
             if not any(component.last_error in message for message in messages):
                 messages.append(f"{component.name}: {component.last_error}")
     return tuple(messages)
-
-
-def _money(
-    value: Decimal | float | int | None,
-    *,
-    signed: bool = False,
-) -> str:
-    if value is None:
-        return "不可用"
-    number = float(value)
-    prefix = "+" if signed and number > 0 else ""
-    return f"{prefix}${number:,.2f}"
 
 
 def project_root() -> Path:
@@ -504,15 +465,13 @@ class MainWindow(QMainWindow):
         # Paper, Risk and Research, and moving them into Settings would force
         # every one of those to depend on Settings for the current config.
         #
-        # Two local in-flight facts the execution route's control state reads.
-        # They live here because only the window knows a local step is running;
-        # the page is told the resulting booleans, never these flags.
-        self._launch_busy = False
-        # The channel probe is a launch step too, but it is owned by its own
-        # worker rather than by the shared launch flag: the broker resource
-        # group serializes it, so an unrelated task finishing must not be able
-        # to release the route on the probe's behalf.
-        self._channel_check_inflight = False
+        # G2-B: the execution / AutoQuant route's own facts -- the local
+        # launch-busy flag, the order-channel probe flag and the retained
+        # candidate shortlist -- used to be assigned here.  They are
+        # ``execution_orchestrator``'s state now, and there is deliberately no
+        # alias and no forwarding property: a property would keep every
+        # unmigrated caller working, so "who owns the AutoQuant route?" would
+        # stop being one grep.
         # The Targeted workspace's *session* half -- the target draft, its status,
         # the local minute evidence and the preflight -- belongs to
         # ``targeted_session_orchestrator``, built below.  Note what is *not*
@@ -576,9 +535,13 @@ class MainWindow(QMainWindow):
             workflow_getter=lambda: self.paper_workflow,
             order_service_factory=build_execution_candidate,
         )
-        self.auto_quant_candidates: tuple[
-            AutoQuantCandidate, ...
-        ] = ()
+        # The AutoQuant candidate shortlist used to be retained here.  It is
+        # ``execution_orchestrator.candidates`` now -- the one retained
+        # shortlist fact on the desktop -- and the window keeps no copy of it:
+        # a window-held tuple would be a second answer to "what is the
+        # shortlist?", and the Paper launch, the readiness inputs and the
+        # candidate table would each be free to read a different one.
+        #
         # The Paper *launch* sequence -- the preflight, the frozen attempt, the
         # asynchronous candidate connect, the stale-callback decision and the
         # arm/publish/promote order -- belongs to ``paper_orchestrator``, built
@@ -594,10 +557,15 @@ class MainWindow(QMainWindow):
             build_session=self._build_paper_session,
             submit_task=self._start_task,
             health_evaluator=self._paper_execution_health_adapter,
-            preflight_provider=self._auto_quant_preflight,
-            strategy_provider=self._selected_auto_strategy_record,
-            candidates_provider=lambda: self.auto_quant_candidates,
-            capital_limit_provider=lambda: self.execution_page.capital_limit(),
+            preflight_provider=lambda: (
+                self.execution_orchestrator.current_preflight
+            ),
+            # The AUTO_ROTATION version, read from the selection service by the
+            # route that runs it.  Paper never names the service and never
+            # reads the combo: it receives the canonical value.
+            strategy_provider=lambda: self.execution_orchestrator.current_strategy,
+            candidates_provider=lambda: self.execution_orchestrator.candidates,
+            capital_limit_provider=lambda: self.execution_orchestrator.capital_limit,
             order_channel_provider=self._auto_quant_order_channel,
             shadow_is_active=lambda: self.shadow_orchestrator.is_active,
             # The market fact an orderly stop is judged against, as a provider: the
@@ -610,37 +578,35 @@ class MainWindow(QMainWindow):
             reconciliation_rows_provider=lambda session_id: (
                 self.order_repository.reconciliation_rows(session_id=session_id)
             ),
-            clear_arm_confirmation=lambda: self.execution_page.set_arm_confirmed(
-                False
+            clear_arm_confirmation=(
+                lambda: self.execution_orchestrator.clear_arm_confirmation()
             ),
-            render_launch_state=self._apply_paper_workflow_button_state,
+            render_launch_state=lambda: (
+                self.execution_orchestrator.refresh_controls()
+            ),
             render_launch_context=lambda summary: (
-                self.execution_page.render_context(summary=summary)
+                self.execution_orchestrator.render_launch_context(summary)
             ),
         )
+        # Every launch-input provider above is late-bound through ``self``: the
+        # execution orchestrator is built further down, beside the page it
+        # renders, and Paper holds only callables rather than a handle to it.
+        # The construction order is therefore explicit rather than accidental --
+        # none of these callables can run before ``__init__`` returns, because
+        # each one is reached from an operator action or a signal that no
+        # constructor emits -- and Paper never imports the execution capability.
         self.paper_orchestrator.refused.connect(self._report_paper_launch_refusal)
         self.paper_orchestrator.log_requested.connect(self._log)
-        # Every Paper result -- the launch that reached RUNNING and every later stream
-        # tick, poll, pause, resume, stop, reconciliation and finalization -- arrives here
-        # and nowhere else.  One handler means one render path, and the window publishes
-        # no result of its own any more.
-        self.paper_orchestrator.result_changed.connect(
-            self._on_paper_result_changed
-        )
+        # G2-B: ``result_changed``, ``presentation_refresh_requested`` and
+        # ``session_finalized`` are wired to ``execution_orchestrator`` below,
+        # beside the orchestrator that renders them.  The three facts that stay
+        # here are the ones only composition can route: a refusal dialog, a
+        # runtime event, and the generic close drain a manual recovery undoes.
         self.paper_orchestrator.runtime_event_requested.connect(
             self._route_runtime_event
         )
-        # The three v2O-E3 publications.  Each one replaces a decision the window used to
-        # make for itself: which controls to repaint when no result exists, whether the
-        # session needs a human, and whether a finished session's ownership is gone.
-        self.paper_orchestrator.presentation_refresh_requested.connect(
-            self._apply_paper_workflow_button_state
-        )
         self.paper_orchestrator.manual_recovery_required.connect(
             self._on_paper_manual_recovery_required
-        )
-        self.paper_orchestrator.session_finalized.connect(
-            self._on_paper_session_finalized
         )
         # Research Scenario Capital: the initial-equity figure historical
         # research, replay, scan affordability and cross-sectional portfolio
@@ -784,7 +750,11 @@ class MainWindow(QMainWindow):
             self._maybe_rotate_extended_ibkr_session
         )
         self.extended_session_timer.start()
-        self._refresh_extended_hours_status()
+        # The session line the execution route draws used to be requested here,
+        # where it was a no-op: the page did not exist yet.  It is drawn from the
+        # route's own refresh now (see ``_apply_theme`` and the market fan-out),
+        # so the call that could only ever return early is gone rather than
+        # moved somewhere it would look like it did something.
 
     def _build_v2_pages(self) -> dict[str, QWidget]:
         """Compose the eight Desktop UI v2 routes.
@@ -1232,10 +1202,83 @@ class MainWindow(QMainWindow):
             self._route_runtime_event
         )
 
-        # The execution page renders and reports intent; every decision it
-        # reports is executed here.  It holds no service and cannot arm, connect
-        # or start anything, so the launch confirmation below stays the window's.
+        # The execution page renders and reports intent.  Since G2-B every
+        # decision it reports -- the runtime strategy selection, the preflight,
+        # the candidate preparation, the channel probe, the launch confirmation,
+        # the control state and the whole session render -- is
+        # ``execution_orchestrator``'s, and that orchestrator is the page's only
+        # orchestration caller.  The window constructs the page and hands it the
+        # palette; that is the whole of its relationship with it.
         self.execution_page = ExecutionPage(palette=self.theme)
+        # Built here rather than beside the other capabilities because the page
+        # it renders must exist first, and because this must exist before
+        # ``strategy_governance_orchestrator.refresh`` below: a catalogue change
+        # is the first thing that can reach the route's strategy combo.
+        #
+        # ``paper=self.paper_orchestrator`` is passed as the *narrow port* the
+        # execution package declares -- preparation, its cancellation, the
+        # launch-attempt fact and the order-service fact.  No Paper type is
+        # imported on the other side, and the Paper orchestrator keeps every
+        # lifecycle decision.
+        self.execution_orchestrator = ExecutionOrchestrator(
+            page=self.execution_page,
+            selection=self.strategy_selection,
+            paper=self.paper_orchestrator,
+            providers=ExecutionProviders(
+                universe=lambda: self.universe_orchestrator.snapshot,
+                scan=lambda: self.scanner_orchestrator.scan,
+                run_market_scan=self._run_market_scan,
+                adopt_scan=lambda scan: (
+                    self.scanner_orchestrator.adopt_external_scan(scan)
+                ),
+                schedule_history=self._schedule_history,
+                refresh_history=(
+                    lambda: self.history_orchestrator.render_current()
+                ),
+                market_snapshot=lambda: self.market_orchestrator.snapshot,
+                market_is_live=lambda: self.market_orchestrator.is_live,
+                market_provider=lambda: (
+                    self.market_orchestrator.selected_provider()
+                ),
+                was_recently_ready=self.market_orchestrator.was_recently_ready,
+                recently_ready_symbols=(
+                    self.market_orchestrator.recently_ready_symbols
+                ),
+                account_portfolio=lambda: self.account_orchestrator.portfolio,
+                fresh_paper_capital=(
+                    self.account_orchestrator.fresh_paper_net_liquidation
+                ),
+                broker_state=self.paper_trading.broker_state,
+                reconciliation_rows=lambda session_id, limit: (
+                    self.order_repository.reconciliation_rows(
+                        session_id=session_id, limit=limit
+                    )
+                ),
+                audit_rows=lambda limit: (
+                    self.order_repository.audit_rows(limit=limit)
+                ),
+                latency_rows=lambda session_id, limit: (
+                    self.paper_trading.reconciliation_rows_with_latency(
+                        session_id=session_id, limit=limit
+                    )
+                ),
+                exposure_multipliers=self._configured_exposure_multipliers,
+                research_scenario_capital=(
+                    lambda: self.research_scenario_capital.decimal_value
+                ),
+                maximum_position_exposure_pct=(
+                    lambda: self.config.risk_limits.max_position_exposure_pct
+                ),
+                probe_order_channel=self._probe_auto_order_channel,
+                paper_capability_enabled=(
+                    lambda: self.preferences.paper_order_capability_enabled
+                ),
+                extended_hours_enabled=(
+                    lambda: self.preferences.extended_hours_paper_enabled
+                ),
+            ),
+            submit_task=self._start_task,
+        )
         self._connect_execution_page()
 
         self.dashboard_page = DashboardPage(palette=self.theme)
@@ -1366,24 +1409,30 @@ class MainWindow(QMainWindow):
         )
 
     def _connect_execution_page(self) -> None:
-        """Wire the execution page's intents to the handlers that act on them.
+        """Wire the execution page: intents to its owner, facts back to it.
 
-        Every session intent now has one owner: ``pause``, ``resume``, ``stop``,
-        ``reconcile`` and the confirmed ``resume-after-reconciliation`` all go straight to
-        ``paper_orchestrator``, which is the only thing that decides whether the request
-        may happen and what the workflow makes of it.  The rest still pass through the
-        window, because their orchestration is not Paper's: the launch confirmation and
-        the resume confirmation are presentation, and the preparation, channel probe and
-        market stop are the window's own composition.
+        Since G2-B the split is trivial to state.  Four of the page's intents are
+        *this route's own* and reach ``execution_orchestrator`` directly -- the
+        strategy selection, the preflight inputs, the candidate preparation, the
+        channel probe and the launch request.  Four are the Paper session's and
+        reach ``paper_orchestrator`` directly, exactly as they have since v2O-E4:
+        pause, resume, stop and the reconciliation request.  One is a dialog and
+        stays composition -- the resume-after-reconciliation confirmation -- and
+        one is a cross-capability market command, the stream stop, which is the
+        route's intent routed through the window's own interlock handler.
+
+        Nothing here is interpreted: every line either connects an intent to its
+        owner or connects a published fact to the bridge that routes it.
         """
 
         page = self.execution_page
-        page.strategy_selected.connect(self._auto_strategy_selected)
-        page.preflight_inputs_changed.connect(self._refresh_auto_quant_preflight)
-        page.prepare_requested.connect(self._prepare_auto_quant_candidates)
-        page.channel_check_requested.connect(self._check_auto_order_channel)
-        page.start_requested.connect(self._confirm_and_start_auto_quant)
-        page.stop_stream_requested.connect(self._stop_auto_market_data)
+        execution = self.execution_orchestrator
+        page.strategy_selected.connect(execution.select_strategy)
+        page.preflight_inputs_changed.connect(execution.refresh_preflight)
+        page.prepare_requested.connect(execution.request_prepare)
+        page.channel_check_requested.connect(execution.request_channel_check)
+        page.start_requested.connect(execution.request_start)
+        page.stop_stream_requested.connect(execution.request_stop_stream)
         page.pause_requested.connect(self.paper_orchestrator.pause)
         page.resume_requested.connect(self.paper_orchestrator.resume)
         page.stop_requested.connect(self.paper_orchestrator.stop)
@@ -1391,6 +1440,94 @@ class MainWindow(QMainWindow):
         page.resume_reconciliation_requested.connect(
             self._confirm_paper_reconciliation_resume
         )
+        # The route's published facts.  Consent is a dialog, the launch is Paper's
+        # own command, the market commands pass the window's interlocks, and the
+        # readiness fact becomes one market input.
+        execution.start_confirmation_requested.connect(
+            self._confirm_execution_start
+        )
+        execution.paper_start_requested.connect(self.paper_orchestrator.start)
+        execution.market_start_requested.connect(self._request_market_start)
+        execution.market_switch_requested.connect(self._request_market_switch)
+        execution.market_subscription_requested.connect(
+            self._apply_execution_subscription
+        )
+        execution.market_stop_requested.connect(
+            self._on_execution_market_stop_requested
+        )
+        execution.market_readiness_inputs_changed.connect(
+            self._publish_market_readiness_inputs
+        )
+        execution.information_requested.connect(self._show_runtime_information)
+        execution.warning_requested.connect(self._show_runtime_warning)
+        execution.log_requested.connect(self._log)
+        # The market route's control republication, wired here because its only
+        # consumer is this route's stop-stream control: the market page was built
+        # before this orchestrator existed, so its own wiring could not reach it.
+        self.market_orchestrator.controls_changed.connect(
+            execution.refresh_controls
+        )
+        # And the Paper publications this route renders.  Three facts, one owner:
+        # the result repaints the route, a presentation refresh repaints the
+        # controls, and a finalized session is a health line plus a cleared arm.
+        self.paper_orchestrator.result_changed.connect(
+            execution.on_paper_result_changed
+        )
+        self.paper_orchestrator.presentation_refresh_requested.connect(
+            execution.refresh_controls
+        )
+        self.paper_orchestrator.session_finalized.connect(
+            execution.on_paper_session_finalized
+        )
+
+    def _apply_execution_subscription(self, symbols: object) -> None:
+        """Hand the route's finished subscription set to the market capability."""
+
+        self.market_orchestrator.set_subscription_symbols(symbols)
+
+    def _on_execution_market_stop_requested(self) -> None:
+        """The execution route asked for a market stop; composition decides.
+
+        The one place allowed to know Paper, Shadow and Market at the same time,
+        and therefore the whole of the stop interlock: a Paper session with
+        obligations strands its positions and orders if the feed goes down, so the
+        request is refused -- with the *route's* operator copy, which the route
+        draws -- an active internal Shadow book is taken down first, and only then
+        is the market capability asked to stop.  The route never sees any of those
+        three facts; it receives the outcome and presents it.
+
+        ``_stop_market_data`` is deliberately not called here: it carries the
+        Market page's own refusal copy and serves that page's stop intent, the
+        automatic source switch and the close path.  This path has already asked
+        the Paper question above, and its refusal text is the execution route's.
+        """
+
+        if self.paper_orchestrator.has_runtime_obligations:
+            self.execution_orchestrator.on_market_stop_refused()
+            return
+        if self.shadow_orchestrator.is_active:
+            self.shadow_orchestrator.stop()
+        if self.market_orchestrator.stop():
+            self.execution_orchestrator.on_market_stopped()
+
+    def _confirm_execution_start(self, title: str, message: str) -> None:
+        """Collect the operator's launch consent and hand the answer back.
+
+        The one launch step that stays on the window, and deliberately so: it is
+        *presentation* -- a modal question -- and ``ExecutionOrchestrator`` may not
+        import ``QMessageBox``.  Every decision about whether the launch may
+        proceed is the route's, and the answer is returned to it; forwarding the
+        request to Paper is then the orchestrator's call, not this method's.
+        """
+
+        reply = QMessageBox.question(
+            self,
+            title,
+            message,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        self.execution_orchestrator.confirm_start(reply == QMessageBox.Yes)
 
     def _connect_market_page(self) -> None:
         """Wire the market page's intents and the orchestrator's publications.
@@ -1421,7 +1558,10 @@ class MainWindow(QMainWindow):
         orchestrator.shell_health_changed.connect(
             self._render_market_shell_health
         )
-        orchestrator.controls_changed.connect(self._publish_execution_controls)
+        # ``controls_changed`` is connected with the *execution* wiring rather
+        # than here: since G2-B its consumer is the execution orchestrator, which
+        # does not exist yet at this point in the pass (the execution page is
+        # built after the market page).
         # ``connection_settings_enabled_changed`` is connected with the Settings
         # wiring rather than here: its only consumer is the Settings capability,
         # which is built later in this same pass.
@@ -1551,7 +1691,7 @@ class MainWindow(QMainWindow):
         )
         self._record_minute_snapshot(snapshot)
         self.dashboard_orchestrator.render_current()
-        self._populate_auto_quant_candidates()
+        self.execution_orchestrator.refresh_all()
         self.targeted_session_orchestrator.refresh_preflight()
         # Paper and Shadow each decide for themselves whether this fact belongs to a
         # live session, so the fan-out hands it over and stops there.  The window no
@@ -1566,22 +1706,23 @@ class MainWindow(QMainWindow):
 
         self.dashboard_orchestrator.render_current()
 
-    def _publish_market_readiness_inputs(self) -> None:
-        """Hand the market layer the cross-domain symbols it must classify.
+    def _publish_market_readiness_inputs(self, fact: object) -> None:
+        """Turn the route's finished readiness fact into a market input.
 
         The readiness breakdown counts how many candidates and reference
         symbols are fresh, but the candidate shortlist is the execution route's
-        and the reference symbols come from the selected strategy.  Neither is
-        market data this window's market layer may look up, so they are pushed
-        in as finished data whenever either one changes.
+        and the reference symbols come from the selected version.  Neither is
+        market data this window's market layer may look up, so the route hands
+        both over as one finished fact and composition -- which is allowed to
+        name two capabilities at once -- turns it into the market input.  Nothing
+        is recomputed on this side: a second derivation of either half is how the
+        card and the preflight start disagreeing.
         """
 
         self.market_orchestrator.set_readiness_inputs(
             MarketReadinessInputs(
-                candidate_symbols=tuple(
-                    row.symbol for row in self.auto_quant_candidates
-                ),
-                reference_symbols=self._auto_quant_market_reference_symbols(),
+                candidate_symbols=tuple(fact.candidate_symbols),
+                reference_symbols=tuple(fact.reference_symbols),
             )
         )
 
@@ -2024,7 +2165,6 @@ class MainWindow(QMainWindow):
                 label.setWordWrap(True)
 
 
-
     def _configure_table(self, table: QTableWidget) -> None:
         """Apply the workbench's shared read-only table behaviour."""
 
@@ -2163,461 +2303,27 @@ class MainWindow(QMainWindow):
                 "30 是行情连接上限，不是广域股票池大小"
             )
 
-    def _auto_quant_preflight(self) -> AutoQuantPreflight:
-        strategy = self._selected_auto_strategy_record()
-        # Statuses are compared as enum members, not as raw strings: the
-        # vocabulary is owned by the domain now, and a comparison against
-        # "research" would keep passing if the domain renamed it.
-        strategy_eligible = (
-            strategy is not None
-            and strategy.strategy_id == "intraday-auto-rotation"
-            and strategy.status
-            in {StrategyStatus.RESEARCH, StrategyStatus.PAPER_SHADOW}
-            and (
-                strategy.status is StrategyStatus.RESEARCH
-                or strategy.gate_passed
-            )
-        )
-        strategy_detail = (
-            f"{strategy.semver} · {strategy.status}"
-            if strategy is not None
-            else "请选择自动轮动策略版本"
-        )
-        snapshot = self.market_orchestrator.snapshot
-        readiness = calculate_quote_readiness_breakdown(
-            snapshot if snapshot is not None else (),
-            candidate_symbols=(
-                row.symbol for row in self.auto_quant_candidates
-            ),
-            reference_symbols=self._auto_quant_market_reference_symbols(),
-            recently_ready_symbols=(
-                self.market_orchestrator.recently_ready_symbols()
-            ),
-        )
-        minimum_realtime_quotes = (
-            3
-            if us_equity_session() is USEquitySession.REGULAR
-            else 1
-        )
-        return evaluate_auto_quant_preflight(
-            capability_enabled=(
-                self.preferences.paper_order_capability_enabled
-            ),
-            paper_confirmed=self.execution_page.arm_confirmed(),
-            strategy_eligible=strategy_eligible,
-            strategy_detail=strategy_detail,
-            candidate_count=readiness.candidate_count,
-            realtime_ready_count=readiness.candidate_current_count,
-            paper_capital=self.account_orchestrator.fresh_paper_net_liquidation(),
-            recent_ready_count=readiness.candidate_recent_count,
-            minimum_realtime_quotes=minimum_realtime_quotes,
-        )
-
-    def _auto_quant_market_reference_symbols(self) -> tuple[str, ...]:
-        strategy = self._selected_auto_strategy_record()
-        return tuple(
-            dict.fromkeys(
-                str(symbol).strip().upper()
-                for symbol in (
-                    strategy.parameters.get("market_reference_symbols", [])
-                    if strategy is not None
-                    else []
-                )
-                if str(symbol).strip()
-            )
-        )
-
-    def _refresh_auto_quant_preflight(
-        self, *_args: object
-    ) -> None:
-        if not hasattr(self, "execution_page"):
-            return
-        # The selected strategy is what supplies the reference symbols, so this
-        # is the moment they change; the market layer needs them for its
-        # readiness card and may not look them up itself.
-        self._publish_market_readiness_inputs()
-        result = self._auto_quant_preflight()
-        displayed_checks = [
-            row
-            for row in result.checks
-            if row.name != "本次确认"
-        ]
-        ready_count = sum(row.passed for row in displayed_checks)
-        details = "  ·  ".join(
-            f"{'✓' if row.passed else '✕'} {row.name}：{row.detail}"
-            for row in displayed_checks
-        )
-        self.execution_page.render_preflight(
-            ready_count, len(displayed_checks), details
-        )
-
-    def _check_auto_order_channel(self) -> None:
-        if self._channel_check_inflight:
-            # The probe owns the route while it runs, so a second request can
-            # only come from a path that ignored the disabled control.  The
-            # broker resource group would refuse the second worker anyway, and
-            # that refusal must not clear the first probe's flag.
-            return
-        if (
-            self.paper_trading.has_order_service()
-            or self.paper_orchestrator.runtime_active
-        ):
-            QMessageBox.information(
-                self,
-                "Paper 会话正在使用",
-                "当前自动量化会话已占用订单通道，无需重复检查。",
-            )
-            return
-        self._channel_check_inflight = True
-        self._apply_paper_workflow_button_state()
-        order_config = IBKRConnectionConfig(
-            host=self.preferences.ibkr_host,
-            port=4002,
-            # P1-6: the order channel must always use a client id distinct
-            # from the read-only connection, including when the configured id
-            # sits near the 999999 cap (modulo keeps it in [0, 999999]).
-            client_id=(
-                (self.preferences.ibkr_client_id + 100) % 1_000_000
-            ),
-            api_read_only=False,
-            paper_order_submission_enabled=True,
-            connection_timeout_seconds=(
-                self.preferences.connection_timeout_seconds
-            ),
-        )
-
-        def task(progress: Callable[[str], None]):
-            progress("连接 IBKR Paper 订单通道并读取账户/订单；不下单…")
-            return self.paper_trading.probe_order_channel(
-                config=order_config,
-                repository=self.order_repository,
-                extended_hours_enabled=(
-                    self.preferences.extended_hours_paper_enabled
-                ),
-            )
-
-        started = self._start_task(
-            task,
-            on_success=self._auto_order_channel_checked,
-            on_failure=self._auto_order_channel_failed,
-            start_message="正在检查 IBKR Paper 订单通道（不下单）…",
-            resource_group="broker",
-        )
-        if not started:
-            # This attempt never owned the route: the broker group was busy or
-            # the window is closing.  Only this attempt's own flag is released.
-            self._channel_check_inflight = False
-            self._apply_paper_workflow_button_state()
-
-    def _auto_order_channel_failed(self, _message: str) -> None:
-        """Release the probe's own lock; ``_start_task`` then reports failure."""
-
-        self._channel_check_inflight = False
-        self._apply_paper_workflow_button_state()
-
-    def _auto_order_channel_checked(self, result: object) -> None:
-        try:
-            connection, broker_state = result  # type: ignore[misc]
-            account_alias = connection.account_alias
-            open_orders = connection.open_broker_orders
-            unresolved = connection.unreconciled_local_orders
-            net_liquidation = broker_state.net_liquidation
-            cash = broker_state.cash
-            positions = len(broker_state.positions)
-        except (AttributeError, TypeError, ValueError) as error:
-            raise TypeError(
-                "unexpected Paper channel check result"
-            ) from error
-        self._channel_check_inflight = False
-        self._apply_paper_workflow_button_state()
-        detail = (
-            f"{account_alias} · 净值 {_money(net_liquidation)} · "
-            f"现金 {_money(cash)} · 持仓 {positions} · "
-            f"开放 API 订单 {open_orders} · 本地待对账 {unresolved}"
-        )
-        self.execution_page.render_execution_health(
-            f"执行对账：订单通道检查通过（未下单） · {detail}"
-        )
-        self._log(f"IBKR Paper 订单通道检查通过（未下单）：{detail}")
-
-    def _prepare_auto_quant_candidates(self) -> None:
-        universe = self.universe_orchestrator.snapshot
-        if universe is None:
-            QMessageBox.information(
-                self,
-                "缺少官方标的池",
-                "请先在总览刷新官方标的池，再执行全市场扫描。",
-            )
-            return
-        if self.paper_orchestrator.runtime_active:
-            QMessageBox.information(
-                self,
-                "自动量化运行中",
-                "请先停止并完成 Paper 持仓对账，再更换候选集。",
-            )
-            return
-        try:
-            self.paper_workflow.begin_preparing()
-        except WorkflowStateError as error:
-            QMessageBox.information(self, "Paper 会话不可准备", str(error))
-            return
-        self._set_launch_busy(True)
-        self.execution_page.render_context(
-            summary=(
-                "正在扫描全部非中概研究池；只有历史数据质量达标的标的"
-                "才会进入实时轮动候选。"
-            )
-        )
-        research_capital = self.research_scenario_capital.decimal_value
-
-        def task(progress: Callable[[str], None]) -> MarketScan:
-            progress(
-                "自动量化第 1 步：扫描全部非中概研究池及已有合格日 K…"
-            )
-            result = scan_market(
-                # Execution-time read: the same timing rule the scanner's
-                # manual request uses.
-                self.universe_orchestrator.snapshot,
-                data_root=self.data_root,
-                fallback_data_root=self.bundled_data_root,
-                capital=research_capital,
-                max_position_risk_pct=(
-                    self.config.risk_limits.max_position_exposure_pct
-                ),
-                substitutions=self.config.substitutions,
-            )
-            save_market_scan(result, self.scan_path)
-            return result
-
-        started = self._start_task(
-            task,
-            on_success=self._auto_market_scan_finished,
-            on_failure=self._auto_candidate_preparation_failed,
-            start_message="全市场扫描与 Paper 候选准备中…",
-            resource_group="scan",
-        )
-        if not started:
-            self.paper_workflow.cancel_preparing()
-            self._set_launch_busy(False)
-
-    def _auto_candidate_preparation_failed(self, _message: str) -> None:
-        """Release PREPARING after an asynchronous scan failure."""
-
-        if self.paper_trading.phase() is PaperWorkflowPhase.PREPARING:
-            self.paper_workflow.cancel_preparing()
-        self._set_launch_busy(False)
-
-    def _auto_market_scan_finished(self, result: object) -> None:
-        if not isinstance(result, MarketScan):
-            raise TypeError("unexpected full-market scan result")
-        # The AutoQuant preparation path runs its own scan on purpose -- it is
-        # wired into Paper PREPARING and failure cleanup -- and then hands the
-        # finished fact to the capability that owns scan truth.  The direction
-        # is AutoQuant -> Scanner: the scanner never learns Paper exists, and no
-        # manual "扫描完成" line is written because nobody clicked 扫描.
-        self.scanner_orchestrator.adopt_external_scan(result)
-        universe = self.universe_orchestrator.snapshot
-        scheduled = HistoryJobStore(self.queue_path).schedule(
-            prioritized_research_symbols(universe, limit=None)
-            if universe is not None
-            else ()
-        )
-        self.history_orchestrator.render_current()
-        if scheduled:
-            self._log(
-                f"全市场历史缺口已自动加入数据任务队列：新增 "
-                f"{scheduled:,} 个；后续分批补齐后会自动扩大可评分覆盖。"
-            )
-        self._select_auto_quant_candidates()
-
-    def _select_auto_quant_candidates(self) -> None:
-        universe = self.universe_orchestrator.snapshot
-        scan = self.scanner_orchestrator.scan
-        if scan is None or universe is None:
-            if self.paper_trading.phase() is PaperWorkflowPhase.PREPARING:
-                self.paper_workflow.cancel_preparing()
-            self._set_launch_busy(False)
-            return
-        limit = self.execution_page.candidate_limit()
-        paper_capital = self.account_orchestrator.fresh_paper_net_liquidation()
-        if paper_capital is None:
-            if self.paper_trading.phase() is PaperWorkflowPhase.PREPARING:
-                self.paper_workflow.cancel_preparing()
-            self._set_launch_busy(False)
-            QMessageBox.information(
-                self,
-                "需要新鲜的 Paper 资金",
-                "请先在“账户与持仓”刷新 IBKR Paper 账户。"
-                "自动候选会按模拟账户资金筛选，不再套用 1500 美元"
-                "历史研究情景。",
-            )
-            return
-        requested_limit = self.execution_page.capital_limit()
-        if requested_limit > 0:
-            paper_capital = min(paper_capital, requested_limit)
-        multipliers = self._configured_exposure_multipliers()
-        selected_strategy = self._selected_auto_strategy_record()
-        market_references = tuple(
-            dict.fromkeys(
-                str(symbol).strip().upper()
-                for symbol in (
-                    selected_strategy.parameters.get(
-                        "market_reference_symbols", []
-                    )
-                    if selected_strategy is not None
-                    else []
-                )
-                if str(symbol).strip()
-            )
-        )
-        eligible = select_paper_rotation_rows(
-            scan,
-            universe,
-            capital=paper_capital,
-            max_position_fraction=(
-                self.config.risk_limits.max_position_exposure_pct
-            ),
-            limit=limit,
-            maximum_per_sector=max(
-                2, min(4, (limit + 5) // 6)
-            ),
-            risk_multipliers=multipliers,
-            liquidity_first=(
-                us_equity_session() is not USEquitySession.REGULAR
-            ),
-            excluded_symbols=market_references,
-        )
-        candidates: list[AutoQuantCandidate] = []
-        for row in eligible:
-            symbol = row.execution_symbol.strip().upper()
-            if symbol in market_references:
-                continue
-            candidates.append(
-                AutoQuantCandidate(
-                    symbol=symbol,
-                    name=row.name,
-                    sector=row.sector,
-                    leader_tier=row.leader_tier,
-                    scan_score=Decimal(str(row.score)),
-                    signal=row.signal,
-                )
-            )
-        if len(candidates) < 3:
-            if self.paper_trading.phase() is PaperWorkflowPhase.PREPARING:
-                self.paper_workflow.cancel_preparing()
-            QMessageBox.warning(
-                self,
-                "合格候选不足",
-                (
-                    f"最新扫描只有 {len(candidates)} 个满足非中概、"
-                    "龙头/优质二线、Paper 整股容量和数据门的候选；"
-                    "至少需要 3 个才启动自动轮动。"
-                ),
-            )
-            self._set_launch_busy(False)
-            return
-        self.auto_quant_candidates = tuple(candidates)
-        if self.paper_trading.phase() is PaperWorkflowPhase.PREPARING:
-            self.paper_workflow.mark_ready()
-        symbols = tuple(row.symbol for row in candidates)
-        research_count = int(
-            universe.summary()["research_eligible"]
-        )
-        self.execution_page.render_context(
-            scope=(
-                f"全市场入口：非中概研究池 {research_count:,} · "
-                f"本轮有合格日 K 并完成评分 {len(scan.results):,} · "
-                f"缺数据/不足200根 {len(scan.skipped):,} · "
-                f"Paper 实时轮动候选 {len(symbols)}。"
-            ),
-            summary=(
-                f"已从全市场扫描中整理 {len(symbols)} 个实时轮动候选。"
-                "行情订阅只承担分钟信号，不代表扫描范围只有这些代码；"
-                "全部订单仍未武装。"
-            ),
-        )
-        stream_symbols = tuple(dict.fromkeys(symbols + market_references))
-        self.market_orchestrator.set_subscription_symbols(stream_symbols)
-        self._set_launch_busy(False)
-        self._populate_auto_quant_candidates()
-        if self.market_orchestrator.is_live:
-            self.execution_page.render_context(
-                summary=f"已整理 {len(symbols)} 个候选，正在安全停止旧行情并切换。"
-            )
-            self._request_market_switch(
-                self.market_orchestrator.selected_provider() or "finnhub_trades"
-            )
-            return
-        self.market_orchestrator.start()
-
-    def _stop_auto_market_data(self) -> None:
-        if self.paper_orchestrator.has_runtime_obligations:
-            QMessageBox.information(
-                self,
-                "请先停止模拟下单",
-                "当前 Paper 模拟下单会话仍可能有持仓或在途订单。"
-                "请先点击“停止会话并请求平仓”，完成券商对账后"
-                "才能停止行情。",
-            )
-            return
-        if self._stop_market_data():
-            self.execution_page.render_context(
-                summary="当前行情已停止。可重新点击第 1 步准备新的候选。"
-            )
-
-    def _confirm_and_start_auto_quant(self) -> None:
-        """Ask the operator, then hand the launch to the orchestrator.
-
-        This is the one launch step that stays on the window, and deliberately so:
-        it is *presentation* -- a modal confirmation and the arm flag it sets -- and
-        ``PaperOrchestrator`` may not import ``QMessageBox``.  Every decision about
-        whether the launch may proceed is the orchestrator's; this method only
-        collects consent and forwards the request.
-        """
-
-        if self.paper_trading.phase() is PaperWorkflowPhase.CONNECTING:
-            QMessageBox.information(
-                self,
-                DUPLICATE_TITLE,
-                DUPLICATE_CONFIRM_MESSAGE,
-            )
-            return
-        reply = QMessageBox.question(
-            self,
-            "确认启动 IBKR Paper 模拟下单",
-            "下一步会连接唯一 DU 模拟账户，并可能向 IBKR Paper "
-            "提交整股 DAY 限价单。不会连接 Live，也不会动真实资金。\n\n"
-            "确认后，程序只会在实时行情、策略和风控检查全部通过时"
-            "提交模拟订单。是否继续？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            self.execution_page.set_arm_confirmed(False)
-            return
-        self.execution_page.set_arm_confirmed(True)
-        self.paper_orchestrator.start()
-
     def _report_paper_launch_refusal(self, title: str, message: str) -> None:
         """Surface one launch refusal the orchestrator published."""
 
         QMessageBox.warning(self, title, message)
 
-    def _auto_quant_order_channel(self) -> PaperOrderChannel:
-        """The order channel an attempt connects, composed from current settings.
+    def _paper_order_connection(self) -> tuple[IBKRConnectionConfig, bool]:
+        """The IBKR Paper order connection every attempt and probe opens.
 
-        Read once per attempt by the orchestrator and frozen into its request, so a
-        settings change mid-connect cannot redirect a launch the operator already
-        confirmed.  The config is built here -- not in the capability -- because
-        naming it reaches the IBKR connection module, which is this root's business.
+        One construction, two callers -- the launch's order channel and the
+        pre-launch probe -- because the rule it encodes is a *safety* rule: the
+        order channel must always use a client id distinct from the read-only
+        connection (P1-6), including when the configured id sits near the 999999
+        cap, and the modulo keeps it in ``[0, 999999]``.  Two copies of that
+        arithmetic is how one of them silently drifts.
 
-        The order channel must always use a client id distinct from the read-only
-        connection (P1-6), including when the configured id sits near the 999999 cap;
-        the modulo keeps it in ``[0, 999999]``.
+        It is built here rather than in a capability because naming it reaches
+        the IBKR connection module, which is this composition root's business.
         """
 
-        return PaperOrderChannel(
-            config=IBKRConnectionConfig(
+        return (
+            IBKRConnectionConfig(
                 host=self.preferences.ibkr_host,
                 port=4002,
                 client_id=(
@@ -2629,10 +2335,76 @@ class MainWindow(QMainWindow):
                     self.preferences.connection_timeout_seconds
                 ),
             ),
+            self.preferences.extended_hours_paper_enabled,
+        )
+
+    def _auto_quant_order_channel(self) -> PaperOrderChannel:
+        """The order channel an attempt connects, composed from current settings.
+
+        Read once per attempt by the orchestrator and frozen into its request, so a
+        settings change mid-connect cannot redirect a launch the operator already
+        confirmed.
+        """
+
+        config, extended_hours_enabled = self._paper_order_connection()
+        return PaperOrderChannel(
+            config=config,
             repository=self.order_repository,
-            extended_hours_enabled=(
-                self.preferences.extended_hours_paper_enabled
+            extended_hours_enabled=extended_hours_enabled,
+        )
+
+    def _probe_auto_order_channel(self) -> object:
+        """Connect to the Paper order channel and read it, submitting nothing.
+
+        The narrow adapter the execution route probes through.  It supplies the
+        concrete port, client id, timeout, extended-hours preference, repository
+        and service call; the route owns *when* a probe happens, whether a second
+        one is admitted, the in-flight flag it publishes and the sentence it
+        reports -- none of which this method decides.
+        """
+
+        config, extended_hours_enabled = self._paper_order_connection()
+        return self.paper_trading.probe_order_channel(
+            config=config,
+            repository=self.order_repository,
+            extended_hours_enabled=extended_hours_enabled,
+        )
+
+    def _run_market_scan(self, universe: object, capital: Decimal) -> object:
+        """Run and save the full-market scan the route sized.
+
+        The other narrow adapter: the data roots, the substitution table and the
+        per-position risk percentage are this root's concrete configuration,
+        while *which* capital the scan is sized on -- the research scenario figure
+        -- and *when* it runs stay in the execution orchestrator.  Saving is part
+        of running it, so the scanner's own ``restore_saved`` reads what the
+        preparation produced.
+        """
+
+        result = scan_market(
+            universe,
+            data_root=self.data_root,
+            fallback_data_root=self.bundled_data_root,
+            capital=capital,
+            max_position_risk_pct=(
+                self.config.risk_limits.max_position_exposure_pct
             ),
+            substitutions=self.config.substitutions,
+        )
+        save_market_scan(result, self.scan_path)
+        return result
+
+    def _schedule_history(self, universe: object) -> int:
+        """Queue the research pool's missing history, returning how many were added.
+
+        The queue path is composition's; the *decision* to queue after a
+        successful scan is the execution route's.
+        """
+
+        return HistoryJobStore(self.queue_path).schedule(
+            prioritized_research_symbols(universe, limit=None)
+            if universe is not None
+            else ()
         )
 
     def _build_paper_session(
@@ -2722,18 +2494,6 @@ class MainWindow(QMainWindow):
             ),
         )
 
-    def _populate_auto_quant_candidates(self) -> None:
-        """Re-render the candidate and context surfaces from current facts.
-
-        The page owns the candidate table's static-key optimisation; the window
-        only supplies the candidates and the stream facts, and re-runs the two
-        context lines that are not session state.
-        """
-
-        self._render_auto_quant_snapshot()
-        self._refresh_auto_quant_preflight()
-        self._refresh_extended_hours_status()
-
     def _paper_execution_health_adapter(self, **kwargs: object) -> PaperExecutionHealth:
         """Normalize journal dictionaries at the desktop/broker boundary."""
         reconciliations = tuple(kwargs.pop("reconciliations", ()))
@@ -2752,31 +2512,6 @@ class MainWindow(QMainWindow):
             for row in reconciliations
         )
         return evaluate_paper_execution_health(reconciliations=models, **kwargs)  # type: ignore[arg-type]
-
-    def _on_paper_result_changed(self, result: PaperSessionResult) -> None:
-        """Render one Paper result; the events were requested upstream.
-
-        The window's one result handler, and deliberately thin: presentation only.  It
-        repaints the route from the capability's retained snapshot and republishes the
-        route's control state.
-
-        Nothing here decides anything about the session, and since v2O-E4 nothing here
-        *stores* anything about it either: the snapshot this route draws is
-        ``paper_orchestrator.presentation``, which the capability refreshes from the same
-        result just before it published it.  A second cache taken here is how the window
-        becomes a second truth owner about a Paper session -- and how a page blanks out
-        when the canonical result is cleared.
-
-        Since v2O-E3 the *consequences* of a result -- whether a zero-state proof is due,
-        and whether a finished session's ownership can be released -- are
-        ``PaperOrchestrator._after_result``'s, so this handler no longer contains a second
-        copy of either decision.  It must never reach the workflow: no ``on_stream``, no
-        ``poll``, no ``set_entries_paused``, no ``request_stop``, and no risk, execution or
-        broker mutation.  A guard pins that.
-        """
-
-        self._render_auto_quant_snapshot()
-        self._apply_paper_workflow_button_state()
 
     def _confirm_paper_reconciliation_resume(self) -> None:
         """Ask the operator, then hand the confirmation to the capability.
@@ -2816,172 +2551,6 @@ class MainWindow(QMainWindow):
         """
 
         self._cancel_close_drain()
-
-    def _on_paper_session_finalized(self) -> None:
-        """Render a Paper session that has safely ended.
-
-        Presentation only.  The disconnect, the workflow's own release gate and
-        ``clear_active`` all already happened inside the capability, in that order, so
-        nothing here may repeat any of them -- an ownership that is gone could only be
-        "released" again by corrupting the record of what happened.
-        """
-
-        self.execution_page.render_execution_health(
-            "执行对账：会话已安全结束，券商持仓和订单均已核对。"
-        )
-        self.execution_page.set_arm_confirmed(False)
-        self._apply_paper_workflow_button_state()
-
-    def _apply_paper_workflow_button_state(self) -> None:
-        """Render every execution control from controller truth.
-
-        One writer, one source: the publisher turns the phase into booleans and the page
-        is handed those rather than a phase, so it cannot act on a lifecycle vocabulary it
-        does not own.
-
-        v2O-E3 took the refused-close hook out of here.  ``manual_recovery_required`` is
-        the capability's own publication for that condition, so this method no longer
-        reasons about Paper phases at all -- it only repaints.
-        """
-
-        self._publish_execution_controls()
-
-    def _render_auto_quant_snapshot(self) -> None:
-        """Hand the execution route the view it draws, and assemble none of it.
-
-        What is left of the window's part in this render is *fetching*: the ambient route
-        facts (quotes, the approved shortlist, the read-only account snapshot, the broker's
-        own account reading) and the journal rows the order tables read.  Everything that
-        used to make this method a read-model assembler moved in v2O-E4:
-
-        * the session fact is ``paper_orchestrator.presentation`` -- the capability's
-          retained, immutable projection -- not a cache the window took from a result;
-        * which broker holdings belong to the session, how the pending orders are keyed,
-          and which journal rows are the session's are pure conversions, and they live in
-          ``pages/execution/projector.py`` beside the presenter that draws them.
-
-        So this method no longer knows what a Paper session looks like; it knows which
-        facts the route needs and where to ask for them.  A guard pins that it reads no
-        phase and assembles no session view of its own.
-
-        The candidate table is drawn first and on its own, because it has content before
-        any session does: the operator approves a shortlist and only then arms it, so a
-        route that waited for a session would show an empty table at exactly the moment
-        the shortlist is the thing being approved.
-        """
-
-        if not hasattr(self, "execution_page"):
-            return
-        stream = self.market_orchestrator.snapshot
-        quotes = {
-            quote.symbol: quote
-            for quote in (stream.quotes if stream is not None else ())
-        }
-        candidates = self.auto_quant_candidates
-        self.execution_page.render_candidates(
-            build_candidates_view(
-                candidates=candidates,
-                quotes=quotes,
-                recently_ready=self.market_orchestrator.was_recently_ready,
-            )
-        )
-        session = self.paper_orchestrator.presentation
-        if session is None:
-            return
-        session_id = session.session_id
-        self.execution_page.render(
-            build_session_view(
-                session=session,
-                account=(
-                    self.account_orchestrator.portfolio.account
-                    if self.account_orchestrator.portfolio is not None
-                    else None
-                ),
-                broker_state=self.paper_trading.broker_state(),
-                quotes=quotes,
-                candidates=candidates,
-                reconciliations=(
-                    self.order_repository.reconciliation_rows(
-                        session_id=session_id,
-                        limit=RECONCILIATION_ROW_LIMIT,
-                    )
-                    if session_id
-                    else ()
-                ),
-                audit_rows=self.order_repository.audit_rows(limit=AUDIT_ROW_LIMIT),
-                latency=self.paper_trading.reconciliation_rows_with_latency(
-                    session_id=session_id,
-                    limit=LATENCY_ROW_LIMIT,
-                ),
-                recently_ready=self.market_orchestrator.was_recently_ready,
-            )
-        )
-
-    def _publish_execution_controls(self) -> None:
-        """Publish the route's control state from the workflow truth.
-
-        One writer, one source, and since v2O-E4 the *interpretation* of the source is
-        the capability's: ``paper_orchestrator.session_control_facts`` answers which
-        session controls the canonical phase makes available, so the window no longer
-        compares phase values to decide what an operator may click.  The window still
-        reads the canonical truth (through the capability, which reads the workflow and
-        the order-service owner live) and still hands the page booleans rather than a
-        phase, so the page cannot act on a lifecycle vocabulary it does not own.
-
-        ``stop_stream_enabled`` is deliberately tied to the launch lock as well as to the
-        stream: stopping the feed under a live Paper session would starve the strategy of
-        the quotes its exit gates read, which is why the legacy builder disabled it when a
-        session was armed.
-        """
-
-        if not hasattr(self, "execution_page"):
-            return
-        facts = self.paper_orchestrator.session_control_facts
-        self.execution_page.set_control_state(
-            control_state(
-                launch_locked=self._launch_locked(),
-                session_running=facts.running,
-                session_paused=facts.paused,
-                reconcile_available=facts.reconcile_available,
-                resume_ready=facts.resume_ready,
-                stream_running=self.market_orchestrator.is_live,
-            )
-        )
-
-    def _launch_locked(self) -> bool:
-        """Whether a launch attempt currently owns the route's inputs.
-
-        True while a local preflight or channel probe is in flight, while a
-        connection attempt is pending, and while a session owns an order service
-        or a runtime.  Each of those is a reason the operator must not be offered
-        a second launch from the same route.
-
-        The probe is checked as its own fact rather than through
-        ``_launch_busy``: it is released by the probe's own worker, so an
-        unrelated task failing cannot reopen the route while the broker is still
-        being probed.
-
-        "A connection attempt is pending" is read off the workflow's phase now --
-        canonically, and through the capability's own rule rather than by comparing the
-        phase here: ``queries.launch_attempt_in_flight`` is the one definition of "an
-        attempt owns the connect step", and it is equivalent to the retired
-        ``_active_auto_launch_plan is not None`` while staying correct after publication.
-        """
-
-        return bool(
-            self._launch_busy
-            or self._channel_check_inflight
-            or launch_attempt_in_flight(self.paper_trading.phase())
-            or self.paper_trading.has_order_service()
-            or self.paper_orchestrator.runtime_active
-        )
-
-    def _set_launch_busy(self, busy: bool) -> None:
-        """Mark a local launch step in flight and republish the controls."""
-
-        self._launch_busy = busy
-        self._publish_execution_controls()
-
 
     def _configured_exposure_multipliers(
         self,
@@ -3082,9 +2651,9 @@ class MainWindow(QMainWindow):
         # deliberately nothing more: no account fact may be turned into a statement about
         # a Paper session by consulting a cache.
         if self.paper_orchestrator.presentation is not None:
-            self._render_auto_quant_snapshot()
+            self.execution_orchestrator.refresh_current()
         self.targeted_session_orchestrator.refresh_preflight()
-        self._refresh_auto_quant_preflight()
+        self.execution_orchestrator.refresh_preflight()
 
     def _render_account_shell_health(self, view: object) -> None:
         """Paint the shell header from the account layer's published facts.
@@ -3140,32 +2709,11 @@ class MainWindow(QMainWindow):
             # page's ``set_strategy_options``, so the page cannot be given a
             # selection the service would refuse.
             self.targeted_session_orchestrator.refresh_strategy_options()
-        self._sync_execution_strategy_options()
-
-    def _sync_execution_strategy_options(self) -> None:
-        """G2-B transitional seam: the window still syncs the execution combo.
-
-        When Execution / AutoQuant orchestration is extracted, this method and
-        the window's preflight refresh retire with it.  Until then this is the
-        one place the execution combo is refilled from the selection service,
-        and it must never be reached for anywhere else.
-        """
-
-        if not hasattr(self, "execution_page"):
-            return
-        purpose = StrategySelectionPurpose.AUTO_ROTATION
-        # The combo is a view: it is refilled from the service's options and
-        # aimed at the service's selection, so it can never keep displaying
-        # a version the runtime will not use.
-        selected = self.strategy_selection.restore_or_default(purpose)
-        self.execution_page.set_strategy_options(
-            [
-                (strategy_option_label(version), version.version_id)
-                for version in self.strategy_selection.options(purpose)
-            ],
-            selected.version_id if selected else None,
-        )
-        self._refresh_auto_quant_preflight()
+        # The execution combo is the route's own (G2-A left this as its
+        # transitional seam): the owner refills it from the selection service
+        # and repaints the preflight, so governance still never learns that
+        # Execution exists.
+        self.execution_orchestrator.refresh_strategy_options()
 
     def _sync_strategy_combo(
         self,
@@ -3218,19 +2766,6 @@ class MainWindow(QMainWindow):
 
         QMessageBox.warning(self, title, message)
 
-    def _auto_strategy_selected(self, version_id: object) -> None:
-        """Adopt the execution page's choice as the runtime selection.
-
-        The page reports which version the operator chose; the seat of truth is
-        the selection service, so selecting here is what records it -- never the
-        combo on screen.
-        """
-
-        self._record_runtime_strategy_selection(
-            StrategySelectionPurpose.AUTO_ROTATION,
-            version_id,
-        )
-
     def _selected_shadow_strategy_record(
         self,
     ) -> StrategyVersion | None:
@@ -3244,15 +2779,6 @@ class MainWindow(QMainWindow):
 
         return self.strategy_selection.selected(
             StrategySelectionPurpose.TARGETED_SHADOW
-        )
-
-    def _selected_auto_strategy_record(
-        self,
-    ) -> StrategyVersion | None:
-        """The auto-rotation runtime version, from the selection service."""
-
-        return self.strategy_selection.selected(
-            StrategySelectionPurpose.AUTO_ROTATION
         )
 
     def _repolish_health_badges(self) -> None:
@@ -3346,8 +2872,8 @@ class MainWindow(QMainWindow):
             self.safety_badge.setText(
                 "只读 · 自动下单关闭"
             )
-        self._refresh_auto_quant_preflight()
-        self._refresh_extended_hours_status()
+        self.execution_orchestrator.refresh_preflight()
+        self.execution_orchestrator.refresh_extended_hours_status()
 
     def _show_settings_information(self, title: str, message: str) -> None:
         """Show one informational message the Settings owner published."""
@@ -3405,28 +2931,8 @@ class MainWindow(QMainWindow):
         rather than switching, so the Paper interlock below still applies.
         """
 
-        self._refresh_extended_hours_status()
+        self.execution_orchestrator.refresh_extended_hours_status()
         self.market_orchestrator.maybe_request_extended_session_rotation()
-
-    def _refresh_extended_hours_status(self) -> None:
-        if not hasattr(self, "execution_page"):
-            return
-        routing = paper_order_routing(
-            extended_hours_enabled=(
-                self.preferences.extended_hours_paper_enabled
-            )
-        )
-        if self.preferences.extended_hours_paper_enabled:
-            status = "已启用" if routing.allowed else "当前不可交易"
-        else:
-            status = "未启用（仅常规时段）"
-        self.execution_page.render_context(
-            session=(
-                f"当前美东时段：{routing.label} · 5×24 Paper：{status} · "
-                f"{routing.reason}"
-            )
-        )
-
 
 
 
@@ -3479,7 +2985,6 @@ class MainWindow(QMainWindow):
         target = self.targeted_session_orchestrator.snapshot.target_draft
         if target in symbols_to_record:
             self.targeted_session_orchestrator.refresh_minute_status(target)
-
 
 
 
@@ -3721,7 +3226,6 @@ class MainWindow(QMainWindow):
         else:
             self._log("运行期资源已全部释放。")
 
-
     def _local_history_symbol_count(self) -> int:
         symbols: set[str] = set()
         for root in {
@@ -3768,15 +3272,17 @@ class MainWindow(QMainWindow):
         # The scope line needs the universe and the scan, so the window builds
         # it; the orchestrator only draws it on the page it owns.
         self.market_orchestrator.set_scope(scope)
-        if hasattr(self, "execution_page"):
-            self.execution_page.render_context(
-                scope=(
-                    f"全市场入口：官方美股/ETF {total_count:,} · "
-                    f"非中概研究池 {research_count:,} · "
-                    f"本地已有日 K {history_count:,} · "
-                    f"最近完成评分 {scanned_count:,} · "
-                    f"当前实时候选 {len(self.auto_quant_candidates)}。"
-                )
+        if hasattr(self, "execution_orchestrator"):
+            # The sentence is composition (universe + scan + shortlist); drawing
+            # it is the execution owner's, because it is the only writer of that
+            # page's context lines.  The shortlist is read from its one owner
+            # rather than from a window copy.
+            self.execution_orchestrator.set_scope(
+                f"全市场入口：官方美股/ETF {total_count:,} · "
+                f"非中概研究池 {research_count:,} · "
+                f"本地已有日 K {history_count:,} · "
+                f"最近完成评分 {scanned_count:,} · "
+                f"当前实时候选 {len(self.execution_orchestrator.candidates)}。"
             )
 
     def _start_task(
@@ -3849,9 +3355,14 @@ class MainWindow(QMainWindow):
         """Release the worker, then let the capability update its own state.
 
         The order is the contract.  Generic lifecycle cleanup runs first, so the
-        resource group is free and the execution controls are republished before
-        anything repaints; the capability's ``on_finished`` hook runs second, so
-        it observes a released worker rather than one still registered.
+        resource group is free before anything repaints; the capability's
+        ``on_finished`` hook runs second, so it observes a released worker rather
+        than one still registered.
+
+        Since G2-B the generic half is exactly two things -- the controller's
+        release and the task-count notification.  It repaints no route: which
+        controls a *route* shows when a worker finishes is that route's business,
+        and the only route that could have been meant here was the execution one.
 
         The worker object is deliberately not passed to the hook.  A capability
         that received it could compare identity against the worker list, which is
@@ -3863,20 +3374,40 @@ class MainWindow(QMainWindow):
             on_finished()
 
     def _worker_finished(self, worker: TaskThread) -> None:
+        """Generic worker release: the controller's bookkeeping, and nothing else.
+
+        G2-B retired the ``_publish_execution_controls`` call that used to sit at
+        the end of this method.  A worker finishing is not an execution fact: a
+        History, Research, Account or Universe task completing must not repaint
+        the AutoQuant route or move its controls.  The execution route repaints
+        from the facts that are actually its own -- a local launch step, the
+        channel probe, the shortlist, a Paper control fact, a market control fact
+        -- and a task finishing is none of them.
+        """
+
         self.task_controller.finish(worker)
         if hasattr(self, "runtime_events_orchestrator"):
             self.runtime_events_orchestrator.notify_task_count_changed()
-        self._publish_execution_controls()
 
     def _task_cancelled(self) -> None:
         self._log("任务已取消；已保留上一次完整可用的研究结果。")
 
     def _task_failed(self, message: str) -> None:
-        # A failed task releases any launch step it was holding; the publish
-        # then restores exactly the controls that step had locked.
-        self._launch_busy = False
-        self.execution_page.set_arm_confirmed(False)
-        self._publish_execution_controls()
+        """Report a failed background task.  Generic, and only generic.
+
+        G2-B retired the execution reach-through this method used to carry: it
+        used to clear the AutoQuant launch flag, clear the arm confirmation and
+        republish the execution controls.  That made an unrelated failure -- a
+        History refresh, a Research task, an Account refresh -- release a route
+        lock it had never taken, which is exactly the cross-route ownership this
+        round removes.
+
+        The task that *does* own execution state releases it through its own
+        ``on_failure`` hook, which ``_start_task`` runs before this method, so
+        nothing is left behind.  What stays here is what a failure always is: a
+        log line, one persisted runtime event, and a dialog.
+        """
+
         self._log(f"任务失败：{message}")
         self.runtime_events_orchestrator.record(
             severity="error",
@@ -4023,7 +3554,7 @@ class MainWindow(QMainWindow):
         # theme switch and a tick cannot diverge.
         if hasattr(self, "execution_page"):
             self.execution_page.set_palette(self.theme)
-            self._render_auto_quant_snapshot()
+            self.execution_orchestrator.refresh_current()
         if hasattr(self, "dashboard_page"):
             self.dashboard_page.set_palette(self.theme)
 

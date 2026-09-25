@@ -51,13 +51,20 @@ def _silence_dialogs(monkeypatch):
 #: v2O-E3 moved ``reconcile_requested`` onto the same rule -- the reconciliation is the
 #: capability's -- and left the resume *confirmation* on the window, because it is a
 #: ``QMessageBox`` and the capability may not import one.
+#:
+#: G2-B moved the six route intents onto ``execution_orchestrator`` for the same reason:
+#: the runtime strategy selection, the preflight, the candidate preparation, the channel
+#: probe, the launch request and the stream stop are the AutoQuant route's own decisions,
+#: so the click now lands on the object that owns them, rather than on a window method
+#: that forwarded.  The stream stop's cross-capability interlocks are still composition's,
+#: but they are reached *through* the orchestrator's provider now, not by the click.
 EXPECTED_WIRING = (
-    ("strategy_selected", "self._auto_strategy_selected"),
-    ("preflight_inputs_changed", "self._refresh_auto_quant_preflight"),
-    ("prepare_requested", "self._prepare_auto_quant_candidates"),
-    ("channel_check_requested", "self._check_auto_order_channel"),
-    ("start_requested", "self._confirm_and_start_auto_quant"),
-    ("stop_stream_requested", "self._stop_auto_market_data"),
+    ("strategy_selected", "self.execution_orchestrator.select_strategy"),
+    ("preflight_inputs_changed", "self.execution_orchestrator.refresh_preflight"),
+    ("prepare_requested", "self.execution_orchestrator.request_prepare"),
+    ("channel_check_requested", "self.execution_orchestrator.request_channel_check"),
+    ("start_requested", "self.execution_orchestrator.request_start"),
+    ("stop_stream_requested", "self.execution_orchestrator.request_stop_stream"),
     ("pause_requested", "self.paper_orchestrator.pause"),
     ("resume_requested", "self.paper_orchestrator.resume"),
     ("stop_requested", "self.paper_orchestrator.stop"),
@@ -67,10 +74,10 @@ EXPECTED_WIRING = (
 
 #: The buttons that must reach a handler, in click order.
 CLICK_ORDER = (
-    ("prepare_button", "self._prepare_auto_quant_candidates"),
-    ("channel_check_button", "self._check_auto_order_channel"),
-    ("start_button", "self._confirm_and_start_auto_quant"),
-    ("stop_stream_button", "self._stop_auto_market_data"),
+    ("prepare_button", "self.execution_orchestrator.request_prepare"),
+    ("channel_check_button", "self.execution_orchestrator.request_channel_check"),
+    ("start_button", "self.execution_orchestrator.request_start"),
+    ("stop_stream_button", "self.execution_orchestrator.request_stop_stream"),
     ("pause_button", "self.paper_orchestrator.pause"),
     ("resume_button", "self.paper_orchestrator.resume"),
     ("stop_button", "self.paper_orchestrator.stop"),
@@ -135,8 +142,9 @@ def test_a_real_click_reaches_the_window_handler(monkeypatch) -> None:
     The handlers are recorded rather than invoked, and the connections are then
     rebuilt against the recorders -- so this asserts the page's signals and the
     window's table agree, which is the property a dead button violates.  The
-    recorders are installed on the *owner* of each target, which for the three
-    session controls is the capability itself.
+    recorders are installed on the *owner* of each target, which for the ten
+    capability controls is a capability: ``paper_orchestrator`` for the four
+    Paper ones and ``execution_orchestrator`` for the six route-owned ones.
     """
 
     window = _window()
@@ -218,9 +226,10 @@ def test_the_stop_stream_control_opens_once_the_thread_is_running() -> None:
     The control reads "is a stream worker running", so the market orchestrator
     has to publish its control state *after* ``worker.start()``: publishing
     before it would leave the button disabled for every start that did not
-    happen to be followed by another publish.  The window's
-    ``_publish_execution_controls`` is connected to the orchestrator's
-    ``controls_changed``, which is emitted right after that publish.
+    happen to be followed by another publish.  The route's
+    ``execution_orchestrator.refresh_controls`` is connected to the orchestrator's
+    ``controls_changed`` (in ``_connect_execution_page``), which is emitted right
+    after that publish.
     """
 
     import inspect
@@ -239,7 +248,13 @@ def test_the_stop_stream_control_opens_once_the_thread_is_running() -> None:
 
 
 def test_the_window_repaints_the_page_from_the_workflow_truth() -> None:
-    """The publisher is the one writer, and it reads the phase through the service."""
+    """The publisher is the one writer, and it reads the phase through the service.
+
+    G2-B moved the publisher: the route's control state is
+    ``ExecutionOrchestrator.refresh_controls``, and it reads
+    ``paper_orchestrator.session_control_facts`` -- the capability's own
+    interpretation of its phase -- instead of comparing a phase on the window.
+    """
 
     from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
 
@@ -251,7 +266,7 @@ def test_the_window_repaints_the_page_from_the_workflow_truth() -> None:
             reconciliation_evidence = None
 
         window.paper_workflow = _Phase()  # type: ignore[assignment]
-        window._apply_paper_workflow_button_state()
+        window.execution_orchestrator.refresh_controls()
 
         assert window.execution_page.details.reconcile_button.isEnabled()
         assert not window.execution_page.controls.pause_button.isEnabled()
@@ -297,13 +312,16 @@ def test_switching_the_theme_recolours_the_execution_page() -> None:
     keeps the rows it was given -- so telling the page about a new palette
     without redrawing would leave every already-drawn row on the old colours.
     This drives the real window, because the bug it guards against was a missing
-    call in ``MainWindow._apply_theme``, which no page-level test can see.
+    call in ``MainWindow._apply_theme``, which no page-level test can see.  Since
+    G2-B that call is ``execution_orchestrator.refresh_current`` -- the window no
+    longer renders the route -- so the shortlist is planted on the orchestrator
+    that retains it.
     """
 
     window = _window()
     try:
-        window.auto_quant_candidates = (_candidate("AAA"),)
-        window._render_auto_quant_snapshot()
+        window.execution_orchestrator._candidates = (_candidate("AAA"),)
+        window.execution_orchestrator.refresh_current()
 
         dark_warning = window.theme.warning
         assert _tone_cell(window) == QColor(dark_warning).name()
@@ -338,21 +356,25 @@ def test_the_probe_keeps_the_launch_controls_locked_while_it_runs(
 
     The probe runs on its own worker, so its lock is its own flag rather than the
     shared one -- and the flag has to be *read*, or the route reopens under a
-    probe that is still talking to the broker.
+    probe that is still talking to the broker.  Since G2-B both the flag and the
+    read are ``execution_orchestrator``'s: ``_channel_probe_inflight`` feeds
+    ``launch_locked``, which is what disables the controls.
     """
 
     window = _window()
     try:
-        monkeypatch.setattr(window, "_start_task", lambda *a, **k: True)
+        monkeypatch.setattr(
+            window.execution_orchestrator, "_submit_task", lambda *a, **k: True
+        )
         assert not _launch_controls_locked(window)
 
-        window._check_auto_order_channel()
+        window.execution_orchestrator.request_channel_check()
 
-        assert window._channel_check_inflight
+        assert window.execution_orchestrator._channel_probe_inflight
         assert _launch_controls_locked(window)
 
-        window._auto_order_channel_failed("broker said no")
-        assert not window._channel_check_inflight
+        window.execution_orchestrator._channel_probe_failed("broker said no")
+        assert not window.execution_orchestrator._channel_probe_inflight
         assert not _launch_controls_locked(window)
     finally:
         window.close()
@@ -362,23 +384,29 @@ def test_the_probe_keeps_the_launch_controls_locked_while_it_runs(
 def test_an_unrelated_task_cannot_release_the_probe(monkeypatch) -> None:
     """Only the probe's own lifecycle may clear the probe's lock.
 
-    A research task finishing or failing publishes the control state too, and it
-    clears the shared launch flag.  If the probe were riding on that flag, the
-    failure of an unrelated scan would silently reopen the route mid-probe.
+    A research task finishing or failing used to publish the control state too,
+    and it cleared the shared launch flag.  If the probe were riding on that
+    flag, the failure of an unrelated scan would silently reopen the route
+    mid-probe.  Since G2-B the generic lifecycle reaches no execution state at
+    all -- ``_task_failed`` logs and shows a dialog, ``_worker_finished``
+    releases the worker -- so the probe's own flag is the only thing that can
+    move, and this pins that.
     """
 
     from PySide6.QtWidgets import QMessageBox
 
     window = _window()
     try:
-        monkeypatch.setattr(window, "_start_task", lambda *a, **k: True)
+        monkeypatch.setattr(
+            window.execution_orchestrator, "_submit_task", lambda *a, **k: True
+        )
         monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
-        window._check_auto_order_channel()
+        window.execution_orchestrator.request_channel_check()
         assert _launch_controls_locked(window)
 
         # What an unrelated worker's failure does.
         window._task_failed("scan failed")
-        assert window._channel_check_inflight
+        assert window.execution_orchestrator._channel_probe_inflight
         assert _launch_controls_locked(window)
 
         # And what an unrelated worker finishing does.
@@ -390,11 +418,11 @@ def test_an_unrelated_task_cannot_release_the_probe(monkeypatch) -> None:
 
         window.task_controller._workers.append(_Worker())
         window._worker_finished(window.task_controller._workers[-1])
-        assert window._channel_check_inflight
+        assert window.execution_orchestrator._channel_probe_inflight
         assert _launch_controls_locked(window)
 
         # Only the probe itself, finishing, releases the route.
-        window._auto_order_channel_failed("done")
+        window.execution_orchestrator._channel_probe_failed("done")
         assert not _launch_controls_locked(window)
     finally:
         window.close()
@@ -404,22 +432,27 @@ def test_an_unrelated_task_cannot_release_the_probe(monkeypatch) -> None:
 def test_a_second_probe_request_does_not_release_the_first(monkeypatch) -> None:
     """A refused second worker must not clear the running probe's lock.
 
-    The broker resource group serializes probes, so a second request is refused
-    by ``_start_task`` -- and that refusal belongs to the attempt that never
-    started, not to the probe that is still running.
+    The broker resource group serializes probes, so a second request cannot be
+    admitted -- the retry path is turned away before it submits anything, and
+    that refusal belongs to the attempt that never started, not to the probe that
+    is still running.
     """
 
     window = _window()
     try:
-        monkeypatch.setattr(window, "_start_task", lambda *a, **k: True)
-        window._check_auto_order_channel()
-        assert window._channel_check_inflight
+        monkeypatch.setattr(
+            window.execution_orchestrator, "_submit_task", lambda *a, **k: True
+        )
+        window.execution_orchestrator.request_channel_check()
+        assert window.execution_orchestrator._channel_probe_inflight
 
         # The retry path: the group is busy, so no worker is admitted.
-        monkeypatch.setattr(window, "_start_task", lambda *a, **k: False)
-        window._check_auto_order_channel()
+        monkeypatch.setattr(
+            window.execution_orchestrator, "_submit_task", lambda *a, **k: False
+        )
+        window.execution_orchestrator.request_channel_check()
 
-        assert window._channel_check_inflight
+        assert window.execution_orchestrator._channel_probe_inflight
         assert _launch_controls_locked(window)
     finally:
         window.close()

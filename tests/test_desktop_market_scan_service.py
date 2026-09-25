@@ -1220,16 +1220,36 @@ def test_the_auto_quant_path_still_calls_the_scanner_directly() -> None:
 
     If this ever goes through the service, the AutoQuant/Paper chain was
     changed by a refactor that promised not to touch it.
+
+    G2-B moved the preparation's *sequencing* to ``ExecutionOrchestrator``; the
+    scan itself stayed composition's, so the direct call is pinned where it now
+    lives -- the window's narrow adapter ``_run_market_scan`` -- together with the
+    orchestrator's own use of that adapter (``run_market_scan``), which is what
+    keeps this about the AutoQuant path rather than about a method nobody calls.
     """
 
     source = (_REPO_ROOT / "src/us_quant/desktop.py").read_text(
         encoding="utf-8"
     )
-    method = _find_method(source, "_prepare_auto_quant_candidates")
+    method = _find_method(source, "_run_market_scan")
 
     assert "scan_market(" in method
     assert "save_market_scan(" in method
     assert "market_scan_service" not in method
+
+    orchestrator = (
+        _REPO_ROOT
+        / "src/us_quant/desktop_v2/orchestration/execution/orchestrator.py"
+    ).read_text(encoding="utf-8")
+    preparation = _find_method(
+        orchestrator, "_prepare_task", owner="ExecutionOrchestrator"
+    )
+
+    assert "run_market_scan" in preparation
+    assert "scan_market(" not in preparation
+    # The route reaches the scanner *library*, never the stateless service: the
+    # service's whole point is that the manual path goes through it.
+    assert "market_scan_service" not in orchestrator
 
 
 def test_the_window_keeps_the_scanner_import() -> None:

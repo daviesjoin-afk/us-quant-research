@@ -35,6 +35,12 @@ _SRC = _REPO_ROOT / "src" / "us_quant"
 _DESKTOP = _SRC / "desktop.py"
 _RESEARCH = _SRC / "desktop_v2" / "orchestration" / "research"
 _SCANNER_DIR = _RESEARCH / "scanner"
+#: G2-B's capability.  The AutoQuant preparation moved off the window, so the two
+#: guards about it read the route's orchestrator instead of a window method that
+#: no longer exists.
+_EXECUTION_ORCHESTRATOR = (
+    _SRC / "desktop_v2" / "orchestration" / "execution" / "orchestrator.py"
+)
 
 #: Spec 41: the per-file line budget.  Exceeding it means a responsibility
 #: leaked in (Paper, AutoQuant, History, Market, Account, candidate selection);
@@ -251,6 +257,16 @@ def _method_source(name: str) -> str | None:
     return None
 
 
+def _execution_method_source(name: str) -> str | None:
+    """The source text of one ``ExecutionOrchestrator`` method, or ``None``."""
+
+    source = _EXECUTION_ORCHESTRATOR.read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return ast.unparse(node)
+    return None
+
+
 def _calls_attr(path: pathlib.Path, attribute: str) -> bool:
     """Does ``path`` call ``<anything>.<attribute>(...)``?"""
 
@@ -262,17 +278,19 @@ def _calls_attr(path: pathlib.Path, attribute: str) -> bool:
     return False
 
 
-def _touches_window_scan(tree: ast.Module) -> bool:
-    """Does ``tree`` read or write the attribute ``self.scan``?
+def _touches_own_scan(tree: ast.Module) -> bool:
+    """Does ``tree`` read or write a scan attribute on ``self``?
 
     Exact on the attribute name, so ``self.scanner_orchestrator`` -- the
-    capability handle the bridge is *supposed* to use -- does not match.
+    capability handle the AutoQuant path is *supposed* to use -- does not match.
+    Both spellings are checked: the route retains its shortlist as
+    ``self._candidates``, so a scan kept beside it would be spelled ``self._scan``.
     """
 
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Attribute)
-            and node.attr == "scan"
+            and node.attr in ("scan", "_scan")
             and isinstance(node.value, ast.Name)
             and node.value.id == "self"
         ):
@@ -492,38 +510,73 @@ def test_the_autoquant_preparation_path_still_scans_directly() -> None:
     Paper ``PREPARING`` and failure cleanup.  If this ever goes through the
     scanner capability, the AutoQuant/Paper chain was changed by a refactor that
     promised not to touch it.
+
+    G2-B moved the preparation's *sequencing* onto ``ExecutionOrchestrator``, so
+    the direct call is pinned where it now lives: the window keeps only the narrow
+    adapter that runs and saves the scan, and the orchestrator's preparation task
+    reaches it through the injected ``run_market_scan`` rather than through the
+    Scanner capability.  Both halves are asserted, or the adapter could go unused
+    and this test would still pass.
     """
 
-    source = _method_source("_prepare_auto_quant_candidates")
+    source = _method_source("_run_market_scan")
     assert source is not None
     assert "scan_market" in source
     assert "save_market_scan" in source
     assert "scanner_orchestrator" not in source
+    assert not _touches_own_scan(ast.parse(source))
+
+    preparation = _execution_method_source("_prepare_task")
+    assert preparation is not None
+    assert "run_market_scan" in preparation
+    assert "scanner_orchestrator" not in preparation
 
 
 def test_the_autoquant_completion_only_publishes_into_the_capability() -> None:
     """Spec 20/21: the bridge, and only the bridge.
 
-    ``_auto_market_scan_finished`` may call ``adopt_external_scan``; it may not
-    assign the scan itself, and it may not ask the capability to render.
+    ``ExecutionOrchestrator._preparation_finished`` may hand the finished scan to
+    the capability through the injected ``adopt_scan`` provider; it may keep no
+    scan of its own, and it may not ask the capability to render.  G2-B moved the
+    method off the window, so the state check moved with it: what must be absent is
+    a scan retained *beside* the shortlist, not the provider read that adopts it.
 
-    The window-state check is an AST attribute lookup, not a substring test:
+    The state check is an AST attribute lookup, not a substring test:
     ``"self.scan" in source`` would also match ``self.scanner_orchestrator``,
     which is the very call this test requires.
     """
 
-    source = _method_source("_auto_market_scan_finished")
+    source = _execution_method_source("_preparation_finished")
     assert source is not None
-    assert "adopt_external_scan" in source
-    assert not _touches_window_scan(ast.parse(source))
+    assert "adopt_scan" in source
+    assert not _touches_own_scan(ast.parse(source))
+    # No render at all: composition wires ``refresh_history`` to the history
+    # capability's own repaint, and the Scanner page is nobody's to paint from
+    # here.  ``_publish_scanner_view`` is the retired window painter, named
+    # explicitly so a re-added one fails here rather than silently.
+    assert "render" not in source
     assert "_publish_scanner_view" not in source
-    # The cross-workflow work it owns is untouched.
-    for kept in (
-        "HistoryJobStore",
-        "prioritized_research_symbols",
-        "_select_auto_quant_candidates",
-    ):
+    # The cross-workflow work it owns is untouched: the history queue stays
+    # composition's adapter, reached through the injected command, and the
+    # shortlist build is still the route's own last step.
+    for kept in ("schedule_history", "refresh_history", "_build_shortlist"):
         assert kept in source, kept
+
+    adapter = _method_source("_schedule_history")
+    assert adapter is not None
+    assert "HistoryJobStore" in adapter
+    assert "prioritized_research_symbols" in adapter
+
+    # The provider the completion calls is the capability's own adoption entry
+    # point: without this half the finished scan could be handed to anything and
+    # "published into the capability" would no longer be what the test proves.
+    # G2-B wires it as a late-bound lambda -- so the live orchestrator is resolved
+    # per call, like every other provider -- so the claim is on the call it makes
+    # rather than on a captured bound method.
+    assert (
+        "self.scanner_orchestrator.adopt_external_scan("
+        in _DESKTOP.read_text(encoding="utf-8")
+    )
 
 
 def test_the_scanner_keeps_its_imports_for_the_autoquant_path() -> None:

@@ -66,6 +66,13 @@ _EXECUTION_DIR = _SRC / "desktop_v2" / "pages" / "execution"
 _PROJECTOR_PATH = _EXECUTION_DIR / "projector.py"
 _SERVICE_PATH = _SRC / "trading" / "application" / "paper" / "service.py"
 
+#: The execution / AutoQuant route's owner since G2-B.  The route's sequencing --
+#: the strategy selection, the preflight, the candidate preparation, the channel
+#: probe, the launch confirmation, the control state and the whole session render --
+#: left ``MainWindow`` for this file, so a guard about any of it reads here.
+_ROUTE_DIR = _SRC / "desktop_v2" / "orchestration" / "execution"
+_ROUTE_ORCHESTRATOR_PATH = _ROUTE_DIR / "orchestrator.py"
+
 #: The launch state and helpers the extraction deleted rather than shimmed.
 RETIRED_WINDOW_LAUNCH_STATE = (
     "_active_auto_launch_plan",
@@ -186,26 +193,56 @@ RETIRED_WINDOW_ACTIVE_CALLS = (
 #: event adapter is the window's single generic forwarder since v2O-F1: the Paper
 #: signal reaches ``_route_runtime_event`` and the store write is the Runtime
 #: Events capability's.
+#:
+#: G2-B renamed the confirmation once but kept it here: it used to forward to
+#: ``PaperOrchestrator.start`` itself, and it now *collects consent and hands the
+#: answer back* to the route's ``confirm_start``, which is what requests the launch.
+#: The seam is the same one and still the window's, for the same reason.
 RETAINED_WINDOW_LAUNCH_METHODS = (
-    "_confirm_and_start_auto_quant",
+    "_confirm_execution_start",
     "_auto_quant_order_channel",
     "_build_paper_session",
     "_report_paper_launch_refusal",
     "_route_runtime_event",
 )
 
-#: What legitimately stays on the window after v2O-E3: the one result render path, the
-#: two operator confirmations (they are dialogs, and the capability may not import one),
-#: the three presentation handlers for the capability's payload-free publications, and
-#: the Shadow gate that asks the capability instead of holding a runtime handle.
+#: What legitimately stays on the window after v2O-E3 and G2-B: the two operator
+#: confirmations (they are dialogs, and the capability may not import one) and the
+#: Shadow gate that asks the capability instead of holding a runtime handle.
+#:
+#: Four entries left this tuple in G2-B -- the result render, the finalized-session
+#: render, the session render and the control publisher.  They are not dropped:
+#: ``ROUTE_RENDER_SEAMS`` pins them at their new owner, and that guard fails if either
+#: half is missing.
 RETAINED_WINDOW_E2_METHODS = (
-    "_on_paper_result_changed",
-    "_confirm_and_start_auto_quant",
+    "_confirm_execution_start",
     "_confirm_paper_reconciliation_resume",
     "_on_paper_manual_recovery_required",
-    "_on_paper_session_finalized",
-    "_render_auto_quant_snapshot",
     "_paper_runtime_is_active",
+)
+
+#: The render and control seams G2-B moved onto the execution route, as
+#: ``(window name, route name)`` pairs.  Every one of them was a *presentation* seam
+#: -- it drew what another owner had already decided -- and moving the render to the
+#: route's own orchestrator is what leaves the window with no execution page to paint.
+#:
+#: Both halves are asserted, because either alone is a weaker claim: a shim re-added
+#: on the window restores the old hop, and a render that was simply deleted leaves the
+#: route drawing nothing.  ``_publish_execution_controls`` and
+#: ``_apply_paper_workflow_button_state`` were already one method wearing two names --
+#: the alias only called the publisher -- so both map to the one ``refresh_controls``.
+ROUTE_RENDER_SEAMS = (
+    # The window's one result handler, now the route's: it repaints the session view
+    # and the controls.
+    ("_on_paper_result_changed", "on_paper_result_changed"),
+    # The finalized-session render: a health line plus a cleared arm.
+    ("_on_paper_session_finalized", "on_paper_session_finalized"),
+    # The whole session render -- the candidate table, the session view, the fetch
+    # behind both.
+    ("_render_auto_quant_snapshot", "refresh_current"),
+    # The control publisher, and its button-state alias.
+    ("_publish_execution_controls", "refresh_controls"),
+    ("_apply_paper_workflow_button_state", "refresh_controls"),
 )
 
 #: What the Paper package may import.  Each entry is a capability, a shared
@@ -334,6 +371,14 @@ FORBIDDEN_QT_NAMES = (
 #: v2O-E4 added ``presentation`` -- the retained immutable view the execution route
 #: draws -- and ``session_control_facts``, which answers "which session controls may be
 #: offered?" so the window no longer compares phase values to publish them.
+#:
+#: G2-B added the six narrow delegated seams the execution route needs, and *only*
+#: those: building the AutoQuant shortlist happens inside Paper's PREPARING step, so the
+#: route must be able to enter it, give it back and mark it ready -- and it must be able
+#: to ask whether preparation is active, whether a launch attempt owns the connect step,
+#: and whether the order service is held.  Each is a pure proxy of the canonical
+#: workflow: nothing is cached, and ``begin_preparation`` answers with the workflow's own
+#: refusal *message* rather than raising a Paper type across the boundary.
 PUBLIC_SURFACE = (
     "start",
     "on_market_snapshot",
@@ -349,6 +394,12 @@ PUBLIC_SURFACE = (
     "has_runtime_obligations",
     "presentation",
     "session_control_facts",
+    "preparation_active",
+    "launch_attempt_in_flight",
+    "order_service_held",
+    "begin_preparation",
+    "cancel_preparation",
+    "mark_preparation_ready",
 )
 
 #: The Qt signals the window relies on.  ``result_changed`` carries the workflow's own
@@ -374,11 +425,15 @@ PUBLIC_SIGNALS = (
 #: Every ``self.paper_orchestrator.<name>`` the window may reach for.
 WINDOW_ALLOWED_ORCHESTRATOR_MEMBERS = set(PUBLIC_SURFACE) | set(PUBLIC_SIGNALS)
 
-#: The page intent wiring: the start signal reaches the window's confirmation gate,
-#: which forwards to the capability.  The gate is presentation; the orchestration is
-#: the capability's.
+#: The page intent wiring.  Until G2-B the start request reached the window's own
+#: launch handler, which both decided and forwarded.  It now reaches the *route's*
+#: decision -- ``request_start`` runs its gates and asks for the operator's consent --
+#: and composition shows that question and hands the answer back.  Both halves are
+#: pinned: the intent must not land on a window handler again, and the confirmation
+#: must still reach the window (it is a dialog) and go no further than the answer.
 START_INTENT_WIRING = (
-    ("start_requested", "self._confirm_and_start_auto_quant"),
+    ("start_requested", "execution.request_start"),
+    ("start_confirmation_requested", "self._confirm_execution_start"),
 )
 
 #: The session intents, which reach the capability with no window handler in
@@ -403,10 +458,13 @@ RESUME_CONFIRMATION_WIRING = (
 
 #: The three payload-free publications v2O-E3 added, and the presentation handler each
 #: reaches.  Each handler repaints from canonical truth; none of them decides anything.
+#: G2-B moved two of the three handlers onto the route -- the control repaint and the
+#: finalized-session render -- so the wiring follows them rather than being dropped with
+#: the window's handlers.
 E3_SIGNAL_WIRING = (
-    ("presentation_refresh_requested", "self._apply_paper_workflow_button_state"),
+    ("presentation_refresh_requested", "execution.refresh_controls"),
     ("manual_recovery_required", "self._on_paper_manual_recovery_required"),
-    ("session_finalized", "self._on_paper_session_finalized"),
+    ("session_finalized", "execution.on_paper_session_finalized"),
 )
 
 #: The watchdog heartbeat enters the capability directly, for the same reason.
@@ -447,15 +505,24 @@ def _matches(modules: set[str], prefixes: tuple[str, ...]) -> set[str]:
     }
 
 
-def _main_window(path: pathlib.Path) -> ast.ClassDef:
+def _class_def(path: pathlib.Path, class_name: str) -> ast.ClassDef:
+    """One class's declaration, by name.
+
+    The window is this file's usual subject, but the G2-B guards ask the same
+    questions -- "does this class declare X?" -- of ``ExecutionOrchestrator``, so the
+    lookup is by name rather than hard-coded.
+    """
+
     for node in _tree(path).body:
-        if isinstance(node, ast.ClassDef) and node.name == "MainWindow":
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
             return node
-    raise AssertionError("MainWindow not found")
+    raise AssertionError(f"{class_name} not found in {path.name}")
 
 
-def _declared_names(path: pathlib.Path) -> set[str]:
-    """Every name the window declares, including aliases and properties.
+def _declared_names(
+    path: pathlib.Path, class_name: str = "MainWindow"
+) -> set[str]:
+    """Every name one class declares, including aliases and properties.
 
     Wider than "methods" on purpose: a compatibility property or a forwarding method
     under a retired name would restore the old surface, so the guard has to fail on
@@ -463,7 +530,7 @@ def _declared_names(path: pathlib.Path) -> set[str]:
     """
 
     names: set[str] = set()
-    for node in _main_window(path).body:
+    for node in _class_def(path, class_name).body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             names.add(node.name)
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
@@ -529,6 +596,20 @@ def _function_source(path: pathlib.Path, name: str) -> str:
     """The source of one ``PaperOrchestrator`` method, for ordering assertions."""
 
     return _method_source(path, name, class_name="PaperOrchestrator")
+
+
+def _execution_source(name: str) -> str:
+    """The source of one ``ExecutionOrchestrator`` method, the route's owner since G2-B.
+
+    The assertions that read this used to read ``MainWindow``: the whole session
+    render, the control publisher, the launch gate, the channel probe and the result
+    handler all lived there.  The move is what the round claims, so the guards follow
+    the owner rather than being dropped.
+    """
+
+    return _method_source(
+        _ROUTE_ORCHESTRATOR_PATH, name, class_name="ExecutionOrchestrator"
+    )
 
 
 def _module_function_source(path: pathlib.Path, name: str) -> str:
@@ -694,29 +775,54 @@ def test_the_window_never_reaches_through_the_orchestrator() -> None:
 
 
 def test_the_start_intent_still_reaches_its_handler() -> None:
-    source = _DESKTOP_PATH.read_text(encoding="utf-8")
+    """Both halves of the G2-B launch hop, asserted where they are wired.
+
+    The intent must land on the route's own ``request_start`` -- a re-added window
+    launch handler would fail here -- and the route's confirmation request must still
+    reach the window, which is the only object allowed to show a dialog.  Matched with
+    whitespace collapsed, like the session-intent guard below, because the assertion is
+    about which signal reaches which target rather than about black's line wrapping.
+    """
+
     for signal, target in START_INTENT_WIRING:
-        assert f"{signal}.connect({target})" in source, signal
+        assert f"{signal}.connect({target})" in _dense(_DESKTOP_PATH), signal
 
 
 def test_the_confirmation_gate_forwards_to_the_capability() -> None:
-    """The page reaches the orchestrator *through* the confirmation, not instead.
+    """The page reaches the launch *through* the confirmation, not instead.
 
     §12 of the round wants the page intent to end at ``PaperOrchestrator.start``
     rather than at a launch handler.  The one hop through the confirmation is the
-    presentation step the capability may not perform, so it is pinned here: the gate
-    must actually forward, and must not itself launch.
+    presentation step the capability may not perform, so it is pinned here.
+
+    G2-B split that hop in two, and both halves are asserted because either alone is a
+    weaker claim: the window's gate must collect consent and hand the *answer* back
+    (``confirm_start``) without deciding or launching anything itself, and the route is
+    the object that records the arm and requests the launch -- which composition wires
+    to the capability's own ``start()``.
     """
 
-    source = _DESKTOP_PATH.read_text(encoding="utf-8")
-    start = source.index("def _confirm_and_start_auto_quant")
-    end = source.index("def ", start + 10)
-    gate = source[start:end]
-    assert "self.paper_orchestrator.start()" in gate
-    # It decides nothing itself: no preflight, no workflow transition.
-    assert "begin_connecting" not in gate
-    assert "connect_candidate" not in gate
-    assert "publish_armed" not in gate
+    gate = _method_source(_DESKTOP_PATH, "_confirm_execution_start")
+    assert "self.execution_orchestrator.confirm_start(" in gate
+    # It decides nothing itself: no preflight, no workflow transition, and no launch.
+    for forbidden in (
+        "begin_connecting",
+        "connect_candidate",
+        "publish_armed",
+        "paper_orchestrator.start()",
+        "paper_workflow",
+        "paper_trading",
+    ):
+        assert forbidden not in gate, forbidden
+
+    confirm = _execution_source("confirm_start")
+    assert "self._page.set_arm_confirmed(True)" in confirm
+    assert "self.paper_start_requested.emit()" in confirm
+    # And the request really does end at the capability's start.
+    assert (
+        "paper_start_requested.connect(self.paper_orchestrator.start)"
+        in _dense(_DESKTOP_PATH)
+    )
 
 
 def test_the_window_no_longer_owns_a_launch_plan_or_attempt_counter() -> None:
@@ -744,23 +850,35 @@ def test_the_window_no_longer_decides_staleness() -> None:
 
 
 def test_the_launch_gate_reads_the_workflow_phase() -> None:
-    """``_launch_locked`` reads the canonical phase, through the capability's own rule.
+    """``launch_locked`` is decided from canonical truth, and names no phase.
 
-    The window must still read the *canonical* phase -- a launch gate may not be decided
-    from a retained presentation fact -- but v2O-E4 stopped it from interpreting the phase
-    value itself: ``queries.launch_attempt_in_flight`` is the one definition of "an attempt
-    owns the connect step", and it is equivalent to the retired
-    ``_active_auto_launch_plan is not None`` while staying correct after publication.
+    The gate must not be decided from a retained presentation fact -- v2O-E4 stopped the
+    window interpreting the phase value itself, because ``queries.launch_attempt_in_flight``
+    is the one definition of "an attempt owns the connect step".
 
-    Asserted in both directions: the canonical read is present, and no phase *value* is
-    named here.  A window that compared ``PaperWorkflowPhase.CONNECTING`` again would be
-    re-implementing a Paper rule, and one that stopped reading the phase at all would let
-    a second launch through during a connect.
+    G2-B moved the gate onto ``ExecutionOrchestrator``, so the pin follows it, and the
+    claim is *stronger* there: the route reads every Paper half through the capability's
+    narrow delegated seams -- an attempt in flight, the order-service owner, the runtime
+    -- so it names neither the workflow, nor the service, nor a phase value at all.  A
+    route that compared ``PaperWorkflowPhase.CONNECTING`` again would be re-implementing
+    a Paper rule, and one that stopped consulting the attempt fact would let a second
+    launch through during a connect.
     """
 
-    gate = _method_source(_DESKTOP_PATH, "_launch_locked")
-    assert "launch_attempt_in_flight(self.paper_trading.phase())" in gate
-    assert "PaperWorkflowPhase" not in gate
+    gate = _execution_source("launch_locked")
+    assert "self._paper.launch_attempt_in_flight" in gate
+    assert "self._paper.order_service_held" in gate
+    assert "self._paper.runtime_active" in gate
+    for forbidden in ("PaperWorkflowPhase", "paper_workflow", "paper_trading"):
+        assert forbidden not in gate, forbidden
+    # The window no longer declares a gate or the busy flag behind it: both are the
+    # route's, and a property under either retired name would restore the old owner.
+    for retired in ("_launch_locked", "_set_launch_busy", "_launch_busy"):
+        assert retired not in _declared_names(_DESKTOP_PATH), retired
+
+    # The canonical read is the capability's, and it is the rule that decides.
+    seam = _function_source(_ORCHESTRATOR_PATH, "launch_attempt_in_flight")
+    assert "queries.launch_attempt_in_flight(self._workflow.phase)" in seam
     # And the rule has exactly one definition, in the capability.
     assert "return phase is PaperWorkflowPhase.CONNECTING" in _module_function_source(
         _QUERIES_PATH, "launch_attempt_in_flight"
@@ -803,14 +921,34 @@ def test_the_window_never_drives_the_active_session(call: str) -> None:
 
 @pytest.mark.parametrize("name", RETAINED_WINDOW_E2_METHODS)
 def test_the_e2_composition_and_bridge_seams_remain(name: str) -> None:
-    """What legitimately stays: one render path, and the E3 bridge inside it.
+    """What legitimately stays: the two dialogs, and the Shadow gate.
 
-    Asserted so the guard cannot pass because the window dropped the result handling
-    altogether -- something still has to render a result, and E3's two remaining
-    decisions still have to run somewhere until E3 moves them.
+    Asserted so the guard cannot pass because the window dropped its part of the
+    session altogether -- something still has to ask the operator, and something still
+    has to answer Shadow's question about whether a session is live.
     """
 
     assert name in _declared_names(_DESKTOP_PATH), name
+
+
+@pytest.mark.parametrize("window_name,route_name", ROUTE_RENDER_SEAMS)
+def test_the_route_render_seams_moved_to_their_new_owner(
+    window_name: str, route_name: str
+) -> None:
+    """The window left the render; the route owns it now, under one seam per owner.
+
+    The guard inverts rather than disappearing.  Each retired window seam must be gone
+    *and* declared on ``ExecutionOrchestrator`` under the name the route answers to, so
+    it fails in both directions: a compatibility shim re-added on the window restores
+    the old hop through a second owner, and a render that had simply been dropped
+    leaves the route drawing nothing.  The two halves together are what "the seam
+    moved" means.
+    """
+
+    assert window_name not in _declared_names(_DESKTOP_PATH), window_name
+    assert route_name in _declared_names(
+        _ROUTE_ORCHESTRATOR_PATH, "ExecutionOrchestrator"
+    ), route_name
 
 
 @pytest.mark.parametrize("signal,target", SESSION_INTENT_WIRING)
@@ -860,13 +998,20 @@ def test_the_result_handler_is_presentation_only() -> None:
     deliberately names the calls it must not make -- a substring search would fire on
     the explanation instead of on a call.
 
-    v2O-E3 removed the bridge this guard used to require, so the assertion is now the
+    v2O-E3 removed the bridge this guard used to require, so the assertion is the
     stronger one in both directions: the handler still has to do its rendering work, and
     it must no longer call *any* method that decides something about the session.
+
+    G2-B moved the handler onto ``ExecutionOrchestrator``, where the rendering work is
+    ``refresh_current`` plus ``refresh_controls``.  Both halves follow the move: the
+    route's one result handler renders the session and republishes the controls, and it
+    still names nothing that could poll, pause, stop, arm or submit.
     """
 
     used = _called_and_attributed(
-        _DESKTOP_PATH, "_on_paper_result_changed", class_name="MainWindow"
+        _ROUTE_ORCHESTRATOR_PATH,
+        "on_paper_result_changed",
+        class_name="ExecutionOrchestrator",
     )
     for forbidden in (
         "on_stream",
@@ -881,8 +1026,8 @@ def test_the_result_handler_is_presentation_only() -> None:
     ):
         assert forbidden not in used, (forbidden, sorted(used))
     # And it does the work it exists for, so it cannot pass by doing nothing.
-    assert "_render_auto_quant_snapshot" in used, sorted(used)
-    assert "_apply_paper_workflow_button_state" in used, sorted(used)
+    assert "refresh_current" in used, sorted(used)
+    assert "refresh_controls" in used, sorted(used)
 
 
 def test_the_one_result_path_is_the_only_emitter() -> None:
@@ -1839,12 +1984,17 @@ def test_the_window_publishes_no_paper_result_of_its_own() -> None:
     published.  The events loop is what made that second publication possible, so its
     absence is the claim -- checked on the window's own source, where the loop used to
     be, rather than on a docstring that explains the removal.
+
+    G2-B moved the result handler itself onto the route, so the handler half is read
+    there, and the claim is the stronger one: the route's handler renders and emits
+    nothing at all, so there is no second publication point anywhere in the desktop.
     """
 
     desktop = _DESKTOP_PATH.read_text(encoding="utf-8")
     assert "for event in result.events" not in desktop
-    handler = _method_source(_DESKTOP_PATH, "_on_paper_result_changed")
+    handler = _execution_source("on_paper_result_changed")
     assert "_record_runtime_event" not in handler
+    assert ".emit(" not in handler, handler
     # The capability still has exactly one, and the window's one writer is the
     # capability's event publication -- routed through the window's single
     # runtime-event adapter since v2O-F1.
@@ -2182,32 +2332,51 @@ def test_the_view_is_retained_before_the_result_is_published() -> None:
 
 
 def test_the_route_draws_the_capabilitys_retained_presentation() -> None:
-    """The render path reads ``paper_orchestrator.presentation``, not the workflow.
+    """The render path reads the capability's ``presentation``, not the workflow.
 
     Both halves matter.  Reading the canonical ``paper_workflow.result`` would blank the
     route the instant ``finalize_if_safe`` releases PAPER -- the regression this round
     exists to prevent -- and building the view from a window-side cache is the ownership
     the round removed.  So the reader is named, and it is the capability's property.
+
+    G2-B moved the render onto ``ExecutionOrchestrator.refresh_current``, so the reader
+    is now ``self._paper.presentation`` -- literally the injected Paper capability, which
+    is the same object the window used to reach for as ``paper_orchestrator``.  And the
+    window no longer has the method at all, so there is no second route that could
+    decide to read the workflow's result instead.
     """
 
-    render = _method_source(_DESKTOP_PATH, "_render_auto_quant_snapshot")
-    assert "self.paper_orchestrator.presentation" in render
-    for forbidden in ("paper_workflow.result", "_paper_render_snapshot", "engine_snapshot"):
+    render = _execution_source("refresh_current")
+    assert "self._paper.presentation" in render
+    for forbidden in (
+        "paper_workflow.result",
+        "paper_orchestrator.result",
+        "_paper_render_snapshot",
+        "engine_snapshot",
+    ):
         assert forbidden not in render, forbidden
+    assert "_render_auto_quant_snapshot" not in _declared_names(_DESKTOP_PATH)
 
 
 def test_the_window_does_not_interpret_the_paper_phase_to_publish_controls() -> None:
     """Which control a phase enables is a Paper rule, and it lives in the capability.
 
-    ``_publish_execution_controls`` used to compare phase values itself, which is Paper
-    phase reasoning on a presentation path.  It now asks the capability and hands the page
-    booleans; the canonical read still happens (a launch or a close may not be decided
-    from a retained view), it just is not interpreted here.
+    The publisher used to compare phase values itself, which is Paper phase reasoning on
+    a presentation path.  v2O-E4 made it ask the capability and hand the page booleans;
+    the canonical read still happens (a launch or a close may not be decided from a
+    retained view), it just is not interpreted.
+
+    G2-B moved the publisher itself onto ``ExecutionOrchestrator.refresh_controls``, so
+    the claim is read there *and* the window is checked to declare no publisher at all:
+    with the only phase-to-control mapping on the route and the only caller of it there
+    too, a second interpretation cannot exist on the window.
     """
 
-    publish = _method_source(_DESKTOP_PATH, "_publish_execution_controls")
-    assert "self.paper_orchestrator.session_control_facts" in publish
+    publish = _execution_source("refresh_controls")
+    assert "self._paper.session_control_facts" in publish
     assert "PaperWorkflowPhase" not in publish
+    for retired in ("_publish_execution_controls", "_apply_paper_workflow_button_state"):
+        assert retired not in _declared_names(_DESKTOP_PATH), retired
     # The one definition of the mapping, and it is a pure rule over the canonical phase.
     rule = _module_function_source(_QUERIES_PATH, "control_facts")
     assert "PaperWorkflowPhase.RUNNING" in rule
@@ -2216,16 +2385,19 @@ def test_the_window_does_not_interpret_the_paper_phase_to_publish_controls() -> 
 
 
 def test_the_render_path_fetches_and_delegates_rather_than_assembling() -> None:
-    """Guard 2: the window may not build a Paper session view out of raw facts.
+    """Guard 2: the route may not build a Paper session view out of raw facts.
 
     Assembling the read model is what made this method a second place that knew what a
     Paper session looks like -- which holdings belong to it, how its orders are keyed,
     which journal rows are its own.  That assembly is ``build_session_view`` now, and the
-    window's remaining part is the fetch.  So: it delegates, it does not scope, it joins
-    nothing and it names no phase.
+    remaining part is the fetch.  So: it delegates, it does not scope, it joins nothing
+    and it names no phase.
+
+    The assertion follows the method to ``ExecutionOrchestrator.refresh_current``, which
+    is what G2-B moved; the window's copy is gone rather than left as an alias.
     """
 
-    render = _method_source(_DESKTOP_PATH, "_render_auto_quant_snapshot")
+    render = _execution_source("refresh_current")
     assert "build_session_view(" in render
     assert "build_runtime_view(" not in render
     for inlined in (
@@ -2235,6 +2407,7 @@ def test_the_render_path_fetches_and_delegates_rather_than_assembling() -> None:
         "PaperWorkflowPhase",
     ):
         assert inlined not in render, inlined
+    assert "_render_auto_quant_snapshot" not in _declared_names(_DESKTOP_PATH)
 
 
 def test_the_window_declares_no_presentation_cache_under_another_name() -> None:

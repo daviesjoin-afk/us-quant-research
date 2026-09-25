@@ -234,9 +234,11 @@ def test_an_autoquant_scan_is_the_capabilitys_scan(window, monkeypatch) -> None:
 
     scan = _scan()
     window.universe_orchestrator.restore_snapshot(_universe())
-    monkeypatch.setattr(window, "_select_auto_quant_candidates", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "_build_shortlist", lambda: None
+    )
 
-    window._auto_market_scan_finished(scan)
+    window.execution_orchestrator._preparation_finished(scan)
 
     assert window.scanner_orchestrator.scan is scan
 
@@ -277,11 +279,13 @@ def test_the_window_holds_no_scan_of_its_own(window) -> None:
 def test_the_autoquant_finish_publishes_page_truth_and_follow_ups(
     window, monkeypatch
 ) -> None:
-    """Everything the old handler did, driven through the bridge.
+    """Everything the old handler did, driven through the route's completion.
 
     Asserted together on purpose: the failure mode this guards against is a
     half-migration where the truth moves but one of the follow-ups silently
-    stops happening.
+    stops happening.  The completion step moved to
+    ``ExecutionOrchestrator._preparation_finished`` in G2-B; the adopt / queue /
+    repaint / shortlist sequence it runs is the same one, still in that order.
     """
 
     scan = _scan()
@@ -295,12 +299,12 @@ def test_the_autoquant_finish_publishes_page_truth_and_follow_ups(
         lambda: history_renders.append("x"),
     )
     monkeypatch.setattr(
-        window,
-        "_select_auto_quant_candidates",
+        window.execution_orchestrator,
+        "_build_shortlist",
         lambda: candidate_selections.append("x"),
     )
 
-    window._auto_market_scan_finished(scan)
+    window.execution_orchestrator._preparation_finished(scan)
 
     # The truth moved, through the capability's adoption entry point.
     assert window.scanner_orchestrator.scan is scan
@@ -318,11 +322,13 @@ def test_the_autoquant_finish_writes_no_manual_completion_line(
     """Nobody clicked 扫描, so the manual line must not appear."""
 
     window.universe_orchestrator.restore_snapshot(_universe())
-    monkeypatch.setattr(window, "_select_auto_quant_candidates", lambda: None)
+    monkeypatch.setattr(
+        window.execution_orchestrator, "_build_shortlist", lambda: None
+    )
     logs: list[str] = []
     monkeypatch.setattr(window, "_log", logs.append)
 
-    window._auto_market_scan_finished(_scan())
+    window.execution_orchestrator._preparation_finished(_scan())
 
     assert not [line for line in logs if "扫描完成" in line], logs
 
@@ -353,10 +359,19 @@ def test_a_manual_scan_does_write_the_completion_line(
 
 
 def test_the_autoquant_finish_rejects_a_wrong_type(window) -> None:
-    """The typed guard survives the bridge."""
+    """The typed guard survives the bridge -- and runs *before* the adoption.
+
+    Asserting the adoption stayed empty is the load-bearing half: a guard that
+    ran after ``adopt_external_scan`` would have put a non-scan into the scan
+    truth and only failed later, inside the capability's own repaint.
+    """
 
     with pytest.raises(TypeError):
-        window._auto_market_scan_finished(object())
+        window.execution_orchestrator._preparation_finished(object())
+
+    assert window.scanner_orchestrator.scan is None, (
+        "the refused result must not have reached the scan truth"
+    )
 
 
 # -- 37: page filter never changes truth -------------------------------

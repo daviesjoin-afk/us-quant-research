@@ -2782,10 +2782,108 @@ service-free / 不缓存 catalogue / STATUS_CHANGE 只发布 / 无 StrategyManag
 object / notice bridge 只收 text）。行为测试 12 项（refresh 序列与读失败不伪造、clone
 四态、transition 两态、governance select 不改 runtime、缺失版本 no-op、fan-out 各恰好
 一次）。Mutation：`scripts/mutation_strategy_governance_g2a.ps1` **12 个 mutant 全部
-RED**（0 survived / 0 harness-error）。**G2-A ✅；G2-B Execution / AutoQuant ⏭
-（required，单独 PR）**。
+RED**（0 survived / 0 harness-error）。**G2-A ✅；G2-B Execution / AutoQuant 已由
+后续单独 PR 完成，见 §8.26**。
 
 设计依据见 `DESKTOP_DECOMPOSITION.md` §34。
+
+### 8.26 G2-B Execution / AutoQuant orchestration
+
+§33.7 residual inventory 里 execution / AutoQuant 那一组是最后一整块 route-specific
+窗口编排，本轮全部退休：新增 `desktop_v2/orchestration/execution/`
+（`ExecutionOrchestrator` + Qt-free `queries.py` / `models.py`）。退役清单 24 项：
+`_auto_quant_preflight`、`_auto_quant_market_reference_symbols`、
+`_refresh_auto_quant_preflight`、`_check_auto_order_channel`、
+`_auto_order_channel_failed`、`_auto_order_channel_checked`、
+`_prepare_auto_quant_candidates`、`_auto_candidate_preparation_failed`、
+`_auto_market_scan_finished`、`_select_auto_quant_candidates`、
+`_stop_auto_market_data`、`_confirm_and_start_auto_quant`、
+`_populate_auto_quant_candidates`、`_on_paper_result_changed`、
+`_on_paper_session_finalized`、`_apply_paper_workflow_button_state`、
+`_render_auto_quant_snapshot`、`_publish_execution_controls`、`_launch_locked`、
+`_set_launch_busy`、`_sync_execution_strategy_options`（G2-A 留下的 transitional
+seam）、`_auto_strategy_selected`、`_selected_auto_strategy_record`、
+`_refresh_extended_hours_status`；同时退休窗口的 `_launch_busy` /
+`_channel_check_inflight` / `auto_quant_candidates` 三个 state 与模块级 `_money`
+helper（无 alias、无 forwarding property）。
+
+**route state 恰好三项**：`_candidates`（唯一 retained shortlist）、launch-busy flag、
+channel-probe flag。市场快照、账户组合、Paper presentation、scan、universe、策略目录
+一律经 provider 现读；guard 锁死 `ExecutionOrchestrator` 的 `self.*` 赋值集合恰好是
+五个注入句柄加这三项。
+
+**两处必须修的 generic reach-through。** `_worker_finished` 原本调
+`_publish_execution_controls`，`_task_failed` 原本清 launch flag + `arm_confirmed(False)` +
+republish controls——那是一段无关的 History / Research / Account 任务失败就能解开
+AutoQuant route lock 的 cross-route ownership，本轮删除：前者只剩
+`task_controller.finish(worker)` + `notify_task_count_changed()`，后者只剩 log +
+`TASK_FAILED` runtime event + dialog。Execution 自己的 task 通过自己的
+`on_failure` 精确释放自己的 state（`_start_task` 在 `_task_failed` 之前调用它）。
+
+**Paper lifecycle 零回退。** 候选准备发生在 PAPER 的 PREPARING 之内，因此
+`PaperOrchestrator` 新增六个极窄 delegated seam：
+`begin_preparation()`（返回 canonical workflow 的拒绝**文案**，不是异常类型）/
+`cancel_preparation()` / `mark_preparation_ready()` /
+`preparation_active` / `launch_attempt_in_flight` / `order_service_held`。全部是
+`PaperWorkflowController` 的纯代理、不缓存 phase、不改 transition 语义。Execution
+包**零 Paper import**（无 `PaperWorkflowController` / `PaperWorkflowPhase` /
+`WorkflowStateError`），Paper 只以一个本地声明的结构化 `PaperFactsPort` 传入。
+
+**语义逐字保留**：候选 sizing 只用 fresh Paper net liquidation，operator 的
+capital_limit 只能缩小它（`min`，不放大），research scenario capital 只用于
+**扫描** affordability、绝不进入 Paper candidate sizing；selected strategy 的
+market reference symbols 归一化后既不进 tradable candidates、也不重复出现在
+subscription 之外的任何地方；`<3` 候选绝不 READY、绝不 start/switch 行情；
+合格候选不足 / 缺新鲜 Paper 资金 / 缺 universe / 会话已运行时一律 cancel
+preparation + 释放 busy + 不发布假 shortlist；channel probe 单飞、Paper 已占订单
+通道时只给 information、失败只回收本次自己的 flag；启动确认改为 capability 发布
+`start_confirmation_requested` + 窗口 `_confirm_execution_start`，答复经
+`confirm_start(accepted)` 返回——**确认不等于授权**，`PaperOrchestrator.start()`
+仍重跑 canonical preflight 与全部安全门。Paper 的 retained presentation 只允许
+render 读：guard 锁死整个包内只有 `refresh_current` 一个读者，launch lock 只由
+Paper 的窄 seam 加本地两个 flag 决定；Market 的 stop / switch interlock 完全在
+composition root，Execution 只发 `market_start_requested` /
+`market_switch_requested` / `market_subscription_requested` /
+`market_stop_requested` 四类请求。
+
+**PR review 发现的 ownership blocker（已修）**：初版把 stop interlock 一半留在
+provider —— `ExecutionProviders.stop_market_data` 注入窗口的
+`_stop_market_data`，而窗口和 route 又各自读一次
+`PaperFactsPort.has_runtime_obligations`，于是 capability 实际上参与了
+「Paper fact → Market command」的跨能力判定。修复后：route 的
+`request_stop_stream()` **只** `market_stop_requested.emit()`；
+`has_runtime_obligations` 从 `PaperFactsPort` 删除；`stop_market_data` 从
+provider 表面删除；新增 composition bridge
+`MainWindow._on_execution_market_stop_requested()`，它是唯一同时知道 Paper /
+Shadow / Market 的地方（Paper obligations 先判并短路 → Shadow active 先停 →
+`market_orchestrator.stop()` → 按返回值把 outcome 交回 route），route 侧只新增
+`on_market_stop_refused()` / `on_market_stopped()` 两个纯呈现方法，操作员可见
+文案与顺序逐字保留。`_stop_market_data` 本身保留（Market page 停止意图、自动
+切换、close 路径仍在用）。
+
+Guards：`tests/test_desktop_execution_architecture.py` 35 条（窗口无 route state /
+窗口只给页面 palette / orchestrator 是唯一 orchestration caller /
+`set_strategy_options` 三个 page 三个 owner / 零 capability import / 零 Paper 类型 /
+零 risk-execution-broker 词汇 / state 恰好三项 / shortlist 唯一 owner / presentation
+只读一处 / Paper port 面与 `PaperFactsPort` 声明完全一致（三个既有 delegated
+query 加本轮六个窄 seam，`has_runtime_obligations` 已不在其中）/ generic task
+不触 route / selection service
+仍是 truth / **provider 表面整体枚举冻结且不含 market 命令** /
+**`request_stop_stream` 只发一个请求** / **两个 outcome 方法只做呈现** /
+**stop bridge 必须同时命名 Paper-Shadow-Market 且顺序正确** / G1-G2A-F1-F2 零回退 /
+无 god object）。行为测试 `tests/test_desktop_execution_orchestration.py` 75 项（真实
+`ExecutionPage` + fake selection / Paper port / provider 组 / 同步 task 边界），覆盖
+selection 四态、preflight 现读与 arm 排除、reference symbol 归一化、准备六条拒绝
+路径、scan 成功/失败、capital 缩小规则、`<3` 不 READY、channel probe 五种状态、
+launch confirmation 两态、stop 请求与两种 outcome 的呈现、**composition 拒绝 /
+成功 / Shadow 先停顺序 / 失败不报成功四态**、render 路径与无缓存、Paper 三条发布、
+以及两个窗口级事实（无关 task 失败 / 无关 worker 完成都不触 route）。Mutation：
+`scripts/mutation_execution_autoquant_g2b.ps1` **35 个 mutant 全部 RED**
+（0 survived / 0 harness-error），其中 M33 / M34 / M35 分别复现 review 发现的
+「route 重新读 obligations 判定」「Market stop seam 回流 provider 表面」
+「bridge 跳过 Paper interlock」；M34 正是旧名字型 denylist 漏掉的那个 seam。
+
+设计依据见 `DESKTOP_DECOMPOSITION.md` §35。
 
 ## 9. 已删除的旧架构
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 
 from us_quant.desktop import MainWindow
+from us_quant.desktop_v2.orchestration.execution import ExecutionOrchestrator
 from us_quant.desktop_v2.orchestration.paper import PaperOrchestrator
 
 
@@ -21,6 +22,17 @@ def _orchestrator_source(name: str) -> str:
     """
 
     return inspect.getsource(getattr(PaperOrchestrator, name))
+
+
+def _execution_source(name: str) -> str:
+    """One execution-route method on its owner since G2-B.
+
+    The candidate preparation and the session render used to be ``MainWindow``
+    methods; the AutoQuant route is ``ExecutionOrchestrator``'s now, so a claim
+    about it reads there rather than being dropped with the window's copy.
+    """
+
+    return inspect.getsource(getattr(ExecutionOrchestrator, name))
 
 
 def test_normal_paper_ingress_delegates_once_to_workflow_controller() -> None:
@@ -157,17 +169,28 @@ def test_async_preparation_and_reconciliation_fail_closed() -> None:
     """Both asynchronous steps roll their own attempt back when the task is refused.
 
     v2O-E3 moved the reconciliation into the capability, so the assertions read there.
-    The two properties are the ones the window's handler had: an attempt that was never
-    admitted is failed explicitly rather than left in a phase whose only exit is a proof
-    nobody took, and a task that started and then failed fails only *its* attempt.
+    G2-B moved the candidate preparation onto ``ExecutionOrchestrator``, so its half
+    reads there -- and the claim is the fail-closed one at its new owner: an attempt
+    that was never admitted hands PREPARING back instead of leaving a phase whose only
+    exit is a task nobody ran, and a task that started and then failed gives back both
+    what the attempt claimed.  Neither path reaches the workflow or interprets a phase
+    to do it: the release goes through the capability's own delegated seam, and only
+    when the capability says the preparation is active.
     """
 
-    assert "on_failure=self._auto_candidate_preparation_failed" in _source(
-        "_prepare_auto_quant_candidates"
-    )
-    assert "paper_workflow.cancel_preparing()" in _source(
-        "_auto_candidate_preparation_failed"
-    )
+    prepare = _execution_source("request_prepare")
+    assert "on_failure=self._preparation_failed" in prepare
+    assert "if not started:" in prepare
+    assert "self._paper.cancel_preparation()" in prepare
+    failed = _execution_source("_preparation_failed")
+    assert "self._cancel_preparation_if_active()" in failed
+    assert "self._set_launch_busy(False)" in failed
+    cancel = _execution_source("_cancel_preparation_if_active")
+    assert "self._paper.preparation_active" in cancel
+    assert "self._paper.cancel_preparation()" in cancel
+    for source in (prepare, failed, cancel):
+        assert "PaperWorkflowPhase" not in source
+        assert "paper_workflow" not in source
     reconcile = _orchestrator_source("reconcile")
     assert "complete_manual_reconciliation(attempt_id)" in reconcile
     assert "self._reconciliation_failed(" in reconcile
@@ -217,12 +240,13 @@ def test_manual_resume_requires_current_evidence_and_runs_off_ui_thread() -> Non
 def test_snapshot_renderer_does_not_enable_manual_resume_from_engine_flags() -> None:
     """The render path draws facts; it never decides a recovery control.
 
-    Manual resume is opened by the control publisher from the workflow phase and
-    the presence of a proof, so a renderer that also enabled it would be a second
-    writer for the same button -- the arrangement this migration removes.
+    Manual resume is opened by the control publisher from the capability's own session
+    facts, so a renderer that also enabled it would be a second writer for the same
+    button -- the arrangement this migration removes.  G2-B moved the render onto
+    ``ExecutionOrchestrator.refresh_current``, so the claim is made at its new owner.
     """
 
-    source = _source("_render_auto_quant_snapshot")
+    source = _execution_source("refresh_current")
     assert "resume_reconciliation" not in source
     assert "set_control_state" not in source
     assert "setEnabled" not in source

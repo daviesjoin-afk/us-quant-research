@@ -26,6 +26,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from us_quant.desktop import MainWindow
+from us_quant.desktop_v2.orchestration.execution import ExecutionOrchestrator
 from us_quant.desktop_v2.orchestration.paper import PaperOrchestrator
 from us_quant.trading.application.paper import PaperTradingService
 from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
@@ -87,6 +88,17 @@ def _orchestrator_source(name: str) -> str:
     """
 
     return inspect.getsource(getattr(PaperOrchestrator, name))
+
+
+def _execution_source(name: str) -> str:
+    """The source of one method on the execution route, its owner since G2-B.
+
+    The probe's admission, the control publisher and the session render were
+    ``MainWindow`` methods; the AutoQuant route is ``ExecutionOrchestrator``'s now,
+    so a claim about them reads there rather than being dropped.
+    """
+
+    return inspect.getsource(getattr(ExecutionOrchestrator, name))
 
 
 def _install_fake_service(window: MainWindow, *, connected: bool = False):
@@ -219,16 +231,28 @@ def test_migrated_reads_no_longer_touch_the_order_service_directly() -> None:
     finalization sequencing, so the list follows the window methods that remain -- and
     the capability's own release path is checked to read through the service facade
     rather than through a raw order-service handle.
+
+    G2-B moved four of the window's entries onto ``ExecutionOrchestrator`` (the render,
+    the probe, the control publisher and the finalized-session render), so the list is
+    split by owner rather than shortened.  The claim is unchanged and now covers the
+    route's own paths too: whatever path reads a status, it reads it through the
+    service facade, never through a raw order-service handle.
     """
 
+    # The window's one remaining entry: the close.
+    assert "self.paper_order_service" not in _source("closeEvent")
+
     for name in (
-        "_render_auto_quant_snapshot",
-        "_check_auto_order_channel",
-        "_publish_execution_controls",
-        "_on_paper_session_finalized",
-        "closeEvent",
+        # Was ``MainWindow._render_auto_quant_snapshot``.
+        "refresh_current",
+        # Was ``MainWindow._check_auto_order_channel``.
+        "request_channel_check",
+        # Was ``MainWindow._publish_execution_controls``.
+        "refresh_controls",
+        # Was ``MainWindow._on_paper_session_finalized``.
+        "on_paper_session_finalized",
     ):
-        assert "self.paper_order_service" not in _source(name), name
+        assert "self.paper_order_service" not in _execution_source(name), name
 
     release = _orchestrator_source("_release_paper_ownership_if_proven")
     for forbidden in (
@@ -254,44 +278,64 @@ def test_migrated_reads_no_longer_touch_the_workflow_directly() -> None:
     render.  For all of them the claim is the stronger one: they read neither the
     workflow's phase nor the service's.
 
-    ``_publish_execution_controls`` joined that stronger group in v2O-E4, and the claim
-    there is stronger still: it still publishes from the canonical truth, but it no
-    longer *interprets* the phase -- which phase enables which control is a Paper rule,
-    and it now arrives as ``paper_orchestrator.session_control_facts``.  So the window
-    reads neither the workflow's phase nor the service's phase, and the control mapping
-    has one definition again.
+    ``_publish_execution_controls`` joined that stronger group in v2O-E4, and G2-B
+    strengthened it once more by *moving* it: the publisher, the result handler, the
+    finalized-session render and the preparation's cancel are the execution route's
+    now, and there they read the capability's own facts (``session_control_facts``,
+    ``preparation_active``) rather than a phase.  A phase read that used to be
+    interpreted on the window is not merely un-interpreted there; it is gone, so the
+    control mapping has one definition and the window holds no publisher at all.
     """
 
-    for name in ("_auto_candidate_preparation_failed",):
-        source = _source(name)
-        assert "self.paper_workflow.phase" not in source, name
-        assert "self.paper_trading.phase()" in source, name
+    for name in ("_cancel_preparation_if_active",):
+        source = _execution_source(name)
+        assert "PaperWorkflowPhase" not in source, name
+        assert "paper_workflow" not in source, name
+        assert "paper_trading" not in source, name
+        assert "self._paper.preparation_active" in source, name
+        assert "self._paper.cancel_preparation()" in source, name
 
     for name in (
-        "_publish_execution_controls",
-        "_on_paper_result_changed",
-        "_on_market_snapshot_changed",
         "closeEvent",
+        "_on_market_snapshot_changed",
         "_on_paper_manual_recovery_required",
-        "_on_paper_session_finalized",
         "_confirm_paper_reconciliation_resume",
-        "_apply_paper_workflow_button_state",
     ):
         source = _source(name)
         assert "self.paper_workflow.phase" not in source, name
         assert "self.paper_trading.phase()" not in source, name
 
-    # The publisher still publishes from canonical truth, it just asks the capability
-    # which controls that truth makes available.
-    assert "self.paper_orchestrator.session_control_facts" in _source(
-        "_publish_execution_controls"
-    )
+    for name in (
+        "refresh_controls",
+        "on_paper_result_changed",
+        "on_paper_session_finalized",
+    ):
+        source = _execution_source(name)
+        assert "self.paper_workflow.phase" not in source, name
+        assert "self.paper_trading.phase()" not in source, name
 
-    # And the render path still reaches the controls through the publisher
-    # rather than by writing them itself.
-    assert "self._publish_execution_controls()" in _source(
-        "_apply_paper_workflow_button_state"
+    # The publisher still publishes from canonical truth, it just asks the capability
+    # which controls that truth makes available -- and the window no longer declares a
+    # publisher at all, so nothing else can interpret the phase into controls.
+    assert "self._paper.session_control_facts" in _execution_source(
+        "refresh_controls"
     )
+    assert not hasattr(MainWindow, "_publish_execution_controls")
+    assert not hasattr(MainWindow, "_apply_paper_workflow_button_state")
+
+    # And the render path still reaches the controls through that one publisher
+    # rather than by writing them itself.
+    assert "self.refresh_controls()" in _execution_source(
+        "on_paper_result_changed"
+    )
+    writers = {
+        name
+        for name, member in inspect.getmembers(
+            ExecutionOrchestrator, inspect.isfunction
+        )
+        if "set_control_state(" in inspect.getsource(member)
+    }
+    assert writers == {"refresh_controls"}, writers
 
 
 # -- ownership wiring ----------------------------------------------------
@@ -399,12 +443,42 @@ def test_close_releases_ownership_only_after_a_successful_disconnect() -> None:
 
 
 def test_the_order_channel_check_never_owns_the_channel_it_probes() -> None:
-    source = _source("_check_auto_order_channel")
+    """The probe reads the channel; it never takes it.
 
-    assert "self.paper_trading.probe_order_channel(" in source
+    G2-B moved the probe's admission and sequencing onto
+    ``ExecutionOrchestrator.request_channel_check``, so the route-level half of the
+    claim reads there: the probe is made through the provider the composition root
+    supplies, and neither the creation nor the promotion of a candidate appears in the
+    path.  The concrete service call stays where it legitimately is -- the window's
+    narrow adapter -- and is pinned there with the same prohibition.
+    """
+
+    source = _execution_source("request_channel_check")
+
+    assert "self._channel_probe_task" in source
     assert "connect_candidate" not in source
     assert "reserve_candidate_promotion" not in source
     assert "commit_candidate_promotion" not in source
+
+    # The probe body reaches the channel through the provider the composition root
+    # supplies -- the route names no service -- and takes nothing while it reads.
+    probe = _execution_source("_channel_probe_task")
+    assert "self._providers.probe_order_channel()" in probe
+    for forbidden in (
+        "connect_candidate",
+        "reserve_candidate_promotion",
+        "commit_candidate_promotion",
+    ):
+        assert forbidden not in probe, forbidden
+
+    seam = _source("_probe_auto_order_channel")
+    assert "self.paper_trading.probe_order_channel(" in seam
+    for forbidden in (
+        "connect_candidate",
+        "reserve_candidate_promotion",
+        "commit_candidate_promotion",
+    ):
+        assert forbidden not in seam, forbidden
 
 
 def test_manual_reconciliation_reconnects_the_owned_service_only() -> None:
@@ -484,33 +558,47 @@ def test_the_service_is_not_rebuilt_on_every_read() -> None:
 
 
 @pytest.mark.parametrize(
-    "name",
+    "owner,name",
     [
-        "closeEvent",
-        "_on_paper_session_finalized",
-        "_on_paper_manual_recovery_required",
-        "_confirm_paper_reconciliation_resume",
-        "_release_paper_ownership_if_proven",
-        "_start_finalization",
-        "prepare_shutdown",
-        "reconcile",
+        pytest.param(MainWindow, "closeEvent", id="closeEvent"),
+        pytest.param(
+            MainWindow,
+            "_on_paper_manual_recovery_required",
+            id="_on_paper_manual_recovery_required",
+        ),
+        pytest.param(
+            MainWindow,
+            "_confirm_paper_reconciliation_resume",
+            id="_confirm_paper_reconciliation_resume",
+        ),
+        # Was ``MainWindow._on_paper_session_finalized``; G2-B moved it to the route,
+        # so the pin follows it rather than being dropped with the window's copy.
+        pytest.param(
+            ExecutionOrchestrator,
+            "on_paper_session_finalized",
+            id="on_paper_session_finalized",
+        ),
+        pytest.param(
+            PaperOrchestrator,
+            "_release_paper_ownership_if_proven",
+            id="_release_paper_ownership_if_proven",
+        ),
+        pytest.param(
+            PaperOrchestrator, "_start_finalization", id="_start_finalization"
+        ),
+        pytest.param(PaperOrchestrator, "prepare_shutdown", id="prepare_shutdown"),
+        pytest.param(PaperOrchestrator, "reconcile", id="reconcile"),
     ],
 )
-def test_no_path_hands_the_order_service_back_to_the_window(name: str) -> None:
+def test_no_path_hands_the_order_service_back_to_the_window(owner, name: str) -> None:
     """Ownership must never be reassigned onto the window again.
 
-    Read on the window for the window's methods and on the capability for the ones
-    v2O-E3 moved, so the claim follows each owner rather than being dropped for the
-    half that changed.
+    Read on whichever object owns the path now -- the window for its remaining
+    methods, the execution route for the finalized-session render it took over in
+    G2-B, and the capability for the ones v2O-E3 moved -- so the claim follows each
+    owner rather than being dropped for the half that changed.
     """
 
-    owner = (
-        MainWindow
-        if name in {"closeEvent", "_on_paper_session_finalized",
-                    "_on_paper_manual_recovery_required",
-                    "_confirm_paper_reconciliation_resume"}
-        else PaperOrchestrator
-    )
     assert "paper_order_service =" not in inspect.getsource(getattr(owner, name))
 
 

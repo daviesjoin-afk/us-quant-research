@@ -56,6 +56,25 @@ _APP = None
 
 _NOW = datetime(2025, 1, 1, 9, 0, 0, tzinfo=timezone.utc)
 
+#: The G2-A governance capability.  Announcing a catalogue change is its job;
+#: deciding which routes refill from it is composition's, so the package must
+#: never name the execution route at all.
+_GOVERNANCE_DIR = (
+    pathlib.Path(__file__).resolve().parents[1]
+    / "src"
+    / "us_quant"
+    / "desktop_v2"
+    / "orchestration"
+    / "strategy"
+)
+
+
+def _governance_source() -> str:
+    return "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(_GOVERNANCE_DIR.glob("*.py"))
+    )
+
 
 def _qapp():
     global _APP
@@ -417,7 +436,15 @@ def test_a_gate_passed_paper_shadow_version_publishes_the_second_notice(
 def test_a_catalogue_change_fans_out_to_every_refilling_route(
     monkeypatch, tmp_path
 ) -> None:
-    """The window's remaining role: route the announcement, decide nothing."""
+    """The window's remaining role: route the announcement, decide nothing.
+
+    G2-B moved the execution half of this fan-out: the deleted window seam
+    ``_sync_execution_strategy_options`` is
+    ``ExecutionOrchestrator.refresh_strategy_options`` now, which refills the
+    combo from the selection service and repaints the preflight itself.  The
+    pin moved to the new owner; the claim -- all three routes refill, exactly
+    once each, and governance never learns that Execution exists -- did not.
+    """
 
     from us_quant.desktop import MainWindow  # noqa: PLC0415
     from us_quant.paths import STATE_ROOT_ENV  # noqa: PLC0415
@@ -439,8 +466,8 @@ def test_a_catalogue_change_fans_out_to_every_refilling_route(
             lambda: calls.append("targeted"),
         )
         monkeypatch.setattr(
-            window,
-            "_sync_execution_strategy_options",
+            window.execution_orchestrator,
+            "refresh_strategy_options",
             lambda: calls.append("execution"),
         )
 
@@ -450,6 +477,16 @@ def test_a_catalogue_change_fans_out_to_every_refilling_route(
         assert calls.count("backtest") == 1
         assert calls.count("targeted") == 1
         assert calls.count("execution") == 1
+
+        # Governance publishes the fact and names no consumer: naming Execution
+        # is how the capability would acquire a route it may not know about.
+        governance = _governance_source()
+        for token in (
+            "ExecutionOrchestrator",
+            "execution_orchestrator",
+            "orchestration.execution",
+        ):
+            assert token not in governance, token
     finally:
         window.close()
         window.deleteLater()

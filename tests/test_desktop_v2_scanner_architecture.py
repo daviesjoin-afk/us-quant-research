@@ -12,6 +12,12 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _SRC = _REPO_ROOT / "src" / "us_quant"
 _DESKTOP_PATH = _SRC / "desktop.py"
 _SCANNER_DIR = _SRC / "desktop_v2" / "pages" / "research" / "scanner"
+#: The execution / AutoQuant route's orchestrator (G2-B).  It owns the shortlist
+#: build that used to be ``MainWindow._select_auto_quant_candidates``, so the
+#: "no business path reads a displayed row" guard below reads it here.
+_EXECUTION_ORCHESTRATOR_PATH = (
+    _SRC / "desktop_v2" / "orchestration" / "execution" / "orchestrator.py"
+)
 
 LEGACY_METHODS = (
     "_scanner_tab",
@@ -135,6 +141,21 @@ def _method_source(path: pathlib.Path, name: str) -> str:
     raise AssertionError(f"{name} not found")
 
 
+def _class_method_source(
+    path: pathlib.Path, owner: str, name: str
+) -> str:
+    """The source text of ``<owner>.<name>``, anywhere in ``src``."""
+
+    source = path.read_text(encoding="utf-8")
+    for node in _tree(path).body:
+        if not isinstance(node, ast.ClassDef) or node.name != owner:
+            continue
+        for item in node.body:
+            if isinstance(item, ast.FunctionDef) and item.name == name:
+                return ast.get_source_segment(source, item) or ""
+    raise AssertionError(f"{owner}.{name} not found")
+
+
 def _page_methods(path: pathlib.Path, page_name: str) -> set[str]:
     methods: set[str] = set()
     for node in ast.walk(_tree(path)):
@@ -252,13 +273,27 @@ def test_window_uses_only_scanner_page_surface() -> None:
 
 
 def test_business_paths_do_not_read_displayed_rows() -> None:
-    for method in (
-        "_apply_intraday_watchlist",
-        "_select_auto_quant_candidates",
+    """A business path reads the capability's fact, never a rendered table.
+
+    This guard used to read ``MainWindow._select_auto_quant_candidates``; G2-B
+    moved that path to ``ExecutionOrchestrator._build_shortlist``, so the guard
+    follows the subject to the new owner instead of the window.  The claim is
+    unchanged: the shortlist is built from the scanner's own adopted fact, and a
+    read of the scanner page or of its table would make the widgets the truth.
+    """
+
+    shortlist = _class_method_source(
+        _EXECUTION_ORCHESTRATOR_PATH, "ExecutionOrchestrator", "_build_shortlist"
+    )
+    for source in (
+        _method_source(_DESKTOP_PATH, "_apply_intraday_watchlist"),
+        shortlist,
     ):
-        source = _method_source(_DESKTOP_PATH, method)
         assert "scanner_page" not in source
         assert "scan_table" not in source
+    # And it still reads the adopted fact, so the guard cannot pass by the
+    # shortlist having stopped looking anywhere at all.
+    assert "self._providers.scan()" in shortlist
 
 
 def test_scanner_files_stay_inside_budgets() -> None:

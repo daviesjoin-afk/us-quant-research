@@ -333,6 +333,13 @@ def test_the_execution_stop_stream_control_follows_the_started_worker(
     route's stop-stream control disabled for every direct start -- the control
     reads "is a worker running", and at that moment none is.  Swapping the two
     lines must fail this test.
+
+    G2-B changed only the middle hop: the market fact reaches the execution
+    route through ``market_orchestrator.controls_changed`` ->
+    ``execution_orchestrator.refresh_controls``, connected in
+    ``_connect_execution_page`` rather than ``_connect_market_page``.  The
+    recorder is therefore installed on the orchestrator, and the rendered button
+    is read as well, so the control is still shown to follow the market fact.
     """
 
     window = _window()
@@ -349,13 +356,15 @@ def test_the_execution_stop_stream_control_follows_the_started_worker(
         )
 
         observed: list[bool] = []
-        real_publish = window._publish_execution_controls
+        real_publish = window.execution_orchestrator.refresh_controls
 
         def record() -> None:
             observed.append(window.market_orchestrator.is_live)
             real_publish()
 
-        monkeypatch.setattr(window, "_publish_execution_controls", record)
+        monkeypatch.setattr(
+            window.execution_orchestrator, "refresh_controls", record
+        )
 
         window.market_page.set_selected_provider("ibkr")
         window.market_page.set_subscription_symbols(("SPY",))
@@ -366,6 +375,7 @@ def test_the_execution_stop_stream_control_follows_the_started_worker(
         # Every publish happened while a worker was running.
         assert all(observed), observed
         assert window.market_orchestrator.is_live
+        assert window.execution_page.controls.stop_stream_button.isEnabled()
     finally:
         window.market_orchestrator._worker = None
         window.market_orchestrator.stop_polling()

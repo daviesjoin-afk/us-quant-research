@@ -69,12 +69,19 @@ _SERVICE_PATH = (
 #: ``_publish_history_view`` and ``_history_task_failed`` were added by the
 #: HistoryPage round and removed by v2O-C1, so they exist at no revision; they
 #: belong on this list for the same reason as the rest.
+#:
+#: ``_schedule_history`` is deliberately **not** on this list any more.  G2-B
+#: gave the name back as a *composition adapter*: the window supplies the queue
+#: path and ``ExecutionOrchestrator`` decides when to queue, so listing it here
+#: would now assert against a legitimate seam.  The strength is kept below:
+#: ``test_the_module_wide_ban_is_deliberately_not_asserted`` pins that the
+#: single direct store call survives on that adapter and that the adapter does
+#: nothing but queue -- it cannot start, drive or retry a history run.
 RETIRED_WINDOW_METHODS = (
     "_refresh_universe",
     "_cancel_universe_refresh",
     "_reset_universe_refresh_controls",
     "_universe_refreshed",
-    "_schedule_history",
     "_run_history",
     "_history_finished",
     "_run_public_history",
@@ -787,25 +794,35 @@ def test_the_module_wide_ban_is_deliberately_not_asserted() -> None:
     """AutoQuant keeps its direct job-store call on purpose.
 
     A test asserting ``desktop.py`` never mentions ``HistoryJobStore`` would
-    force a rewrite of ``_auto_market_scan_finished``, which sits on the
-    Paper-adjacent candidate-preparation path and reads the store to decide
-    whether the queue has drained.  That call is *correct*: AutoQuant is not
-    starting a history run, it is inspecting queue state to sequence its own
-    preparation.
+    force a rewrite of ``_schedule_history``, which is the adapter the
+    Paper-adjacent candidate-preparation path queues through: the window supplies
+    the queue path, and ``ExecutionOrchestrator`` decides when to queue.  That
+    call is *correct*: AutoQuant is not starting a history run, it is queuing
+    missing history to sequence its own preparation.
 
     So the retirement guard is scoped to the history entry points -- the methods
-    that could start a run -- rather than the store symbol.  This test records
-    that boundary, so a future round does not "finish the cleanup" by banning the
-    symbol and quietly breaking AutoQuant sequencing.
+    that could start a run -- rather than the store symbol.  G2-B moved the
+    decision, not the call, so the same boundary is pinned on the new owner: the
+    adapter is exactly the store call and the symbol mapping, and the window
+    never invokes it.  This test records that boundary, so a future round does
+    not "finish the cleanup" by banning the symbol and quietly breaking AutoQuant
+    sequencing.
     """
 
     source = _desktop_source()
     assert "HistoryJobStore" in source
 
     cls = _main_window_class(ast.parse(source))
-    auto = _called_names(_method(cls, "_auto_market_scan_finished"))
-    assert "HistoryJobStore" in auto
-    assert "prioritized_research_symbols" in auto
+    adapter = _called_names(_method(cls, "_schedule_history"))
+    assert adapter == {
+        "HistoryJobStore",
+        "prioritized_research_symbols",
+        "schedule",
+    }, sorted(adapter)
+    # Handed to the execution route as a provider, never called from the window:
+    # a window that called it would be a history entry point again.
+    assert "schedule_history=self._schedule_history," in source
+    assert "self._schedule_history(" not in source
 
     for path in (
         "src/us_quant/universe.py",

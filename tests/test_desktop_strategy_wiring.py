@@ -9,7 +9,11 @@ These pin the Desktop half of the migration:
 * the runtime-selection combos are filled from the service, which is also why
   the auto-rotation combo is populated at start-up at all -- the retired page
   handler ran before that tab existed, so its ``hasattr`` guard skipped it and
-  the combo started empty.
+  the combo started empty;
+* the execution route's two strategy seams moved with G2-B: the combo refill is
+  ``ExecutionOrchestrator.refresh_strategy_options`` and the runtime
+  AUTO_ROTATION reader is ``ExecutionOrchestrator.current_strategy``, so the
+  window neither refills that combo nor reads the record behind it.
 """
 
 from __future__ import annotations
@@ -47,6 +51,15 @@ _DESKTOP_PATH = (
     / "src"
     / "us_quant"
     / "desktop.py"
+)
+_EXECUTION_ORCHESTRATOR_PATH = (
+    pathlib.Path(__file__).resolve().parents[1]
+    / "src"
+    / "us_quant"
+    / "desktop_v2"
+    / "orchestration"
+    / "execution"
+    / "orchestrator.py"
 )
 
 RETIRED_METHODS = (
@@ -139,14 +152,35 @@ def test_the_legacy_strategy_builders_are_gone() -> None:
         "_strategy_version_or_none",
         "_set_strategy_account_notice",
         "_populate_strategy_selection_combos",
+        # G2-B retired the window's two execution-route seams as well: the
+        # combo refill is ``refresh_strategy_options`` on the execution
+        # orchestrator and the AUTO_ROTATION reader is its
+        # ``current_strategy``, so the window neither refills that combo nor
+        # reads the record behind it.
+        "_sync_execution_strategy_options",
+        "_selected_auto_strategy_record",
     ):
         assert removed not in methods, removed
     for still_there in (
         "_on_strategy_catalog_changed",
-        "_sync_execution_strategy_options",
         "_show_strategy_warning",
     ):
         assert still_there in methods
+    # The new owner declares both seams the window lost: the pin moved, its
+    # strength did not.
+    orchestrator_methods = {
+        node.name
+        for node in ast.walk(
+            ast.parse(
+                _EXECUTION_ORCHESTRATOR_PATH.read_text(encoding="utf-8")
+            )
+        )
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert {
+        "refresh_strategy_options",
+        "current_strategy",
+    } <= orchestrator_methods
 
 
 def test_the_window_does_not_name_the_concrete_repository() -> None:
@@ -296,16 +330,26 @@ def test_the_selection_accessors_agree_with_the_service(window) -> None:
 
     The repository decodes a row every time, so the accessor and the service
     return equal-but-distinct instances.  What matters is that they agree.
+
+    G2-B moved the AUTO_ROTATION half: the window no longer declares
+    ``_selected_auto_strategy_record``, and the runtime selection is read
+    through ``ExecutionOrchestrator.current_strategy``, which is the same
+    ``strategy_selection.selected(AUTO_ROTATION)`` answer.  The shadow reader is
+    unchanged and still lives on the window.
     """
 
-    for method, purpose in (
-        ("_selected_auto_strategy_record", StrategySelectionPurpose.AUTO_ROTATION),
+    assert not hasattr(window, "_selected_auto_strategy_record")
+    for read, purpose in (
         (
-            "_selected_shadow_strategy_record",
+            lambda: window.execution_orchestrator.current_strategy,
+            StrategySelectionPurpose.AUTO_ROTATION,
+        ),
+        (
+            window._selected_shadow_strategy_record,
             StrategySelectionPurpose.TARGETED_SHADOW,
         ),
     ):
-        from_accessor = getattr(window, method)()
+        from_accessor = read()
         from_service = window.strategy_selection.selected(purpose)
         assert from_accessor is not None
         assert from_accessor == from_service

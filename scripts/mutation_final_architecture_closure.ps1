@@ -183,6 +183,36 @@ $mutations = @(
         tests = @($fac)
         select = @("-k", "no_application_module_imports_a_bare_provider_module or application_layer_exceptions_are_symbol_scoped")
     },
+    # The three below are the relative-spelling half.  An earlier FA4c compared
+    # the raw ``node.module`` against its ``us_quant.ibkr`` key, so a relative
+    # import resolved to the right package by the layer guards but compared as
+    # ``"ibkr"`` here -- and the mutant appeared caught only because it tripped
+    # the coverage bookkeeping, which is a false pass rather than a detection.
+    # Both guards now resolve through one shared helper.
+    @{
+        name = 'M6e the account application uses a relative forbidden IBKR symbol'
+        file = (Join-Path $src "trading\application\accounts.py")
+        find = 'from us_quant\.ibkr import IBKRConnectionConfig'
+        repl = "from ...ibkr import (`n    IBKRConnectionConfig,`n    connect_ibkr_client,`n)"
+        tests = @($fac)
+        select = @("-k", "application_layer_exceptions_are_symbol_scoped")
+    },
+    @{
+        name = 'M6f the Paper application uses a relative forbidden workflow symbol'
+        file = (Join-Path $src "trading\application\paper\service.py")
+        find = 'from us_quant\.trading\.runtime\.workflow_state import PaperWorkflowPhase'
+        repl = "from ...runtime.workflow_state import (`n    PaperWorkflowPhase,`n    ExecutionLeaseManager,`n)"
+        tests = @($fac)
+        select = @("-k", "application_layer_exceptions_are_symbol_scoped")
+    },
+    @{
+        name = 'M6g the application uses a relative star import of the provider'
+        file = (Join-Path $src "trading\application\accounts.py")
+        find = 'from us_quant\.ibkr import IBKRConnectionConfig'
+        repl = "from ...ibkr import *`nfrom us_quant.ibkr import IBKRConnectionConfig"
+        tests = @($fac)
+        select = @("-k", "no_application_module_imports_a_bare_provider_module")
+    },
 
     # -- Risk -> Execution path ----------------------------------------
     @{

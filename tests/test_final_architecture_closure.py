@@ -584,6 +584,46 @@ def _module_name(path: pathlib.Path) -> str:
     return ".".join(parts)
 
 
+def _package_of(path: pathlib.Path) -> str:
+    """The package a module's relative imports are resolved against."""
+
+    name = _module_name(path)
+    if path.name == "__init__.py":
+        return name
+    return name.rsplit(".", 1)[0]
+
+
+def _resolved_import_from_module(
+    path: pathlib.Path,
+    node: ast.ImportFrom,
+) -> str | None:
+    """The absolute module an ``ImportFrom`` names, relative spelling included.
+
+    This is the **single** relative-import resolver in this file.  Both the
+    general layer guards (through :func:`_imported_modules`) and the
+    symbol-level exception guards (FA4c / FA4d) go through it, because two
+    resolvers is exactly how the two would drift: the layer guards resolved
+    ``from ...ibkr import X`` to ``us_quant.ibkr`` while FA4c compared the raw
+    ``node.module`` (``"ibkr"``) against its ``us_quant.ibkr`` key, so a
+    relative spelling walked straight past the symbol rule.
+
+    Returns ``None`` for a relative import that climbs above the package root,
+    which is not a module this tree can name.
+    """
+
+    if not node.level:
+        return node.module
+
+    parts = _package_of(path).split(".")
+    up = node.level - 1
+    if up > len(parts):
+        return None
+    base = ".".join(parts[: len(parts) - up]) if up else _package_of(path)
+    if not node.module:
+        return base
+    return f"{base}.{node.module}"
+
+
 def _imported_modules(path: pathlib.Path) -> set[str]:
     """Every module this file imports, resolved through ``ast``.
 
@@ -592,22 +632,15 @@ def _imported_modules(path: pathlib.Path) -> set[str]:
     """
 
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    package = _module_name(path)
-    if path.name != "__init__.py":
-        package = package.rsplit(".", 1)[0]
 
     found: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             found.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            if node.level:
-                parts = package.split(".")
-                up = node.level - 1
-                base = ".".join(parts[: len(parts) - up]) if up else package
-                found.add(f"{base}.{node.module}" if node.module else base)
-            elif node.module:
-                found.add(node.module)
+            resolved = _resolved_import_from_module(path, node)
+            if resolved:
+                found.add(resolved)
     return found
 
 
@@ -807,6 +840,13 @@ def test_fa4c_the_application_layer_exceptions_are_symbol_scoped() -> None:
 
     Reported per edge with the offending symbol, so the failure says what was
     reached for rather than just that a rule broke.
+
+    The target is resolved through :func:`_resolved_import_from_module`, so
+    ``from us_quant.ibkr import ...`` and ``from ...ibkr import ...`` are the
+    same edge.  Comparing the raw ``node.module`` would have made the relative
+    spelling invisible to this rule -- and would have let it *appear* caught by
+    tripping the bookkeeping assertion below instead of the symbol check, which
+    is a false pass rather than a detection.
     """
 
     application = _SRC / "trading" / "application"
@@ -820,9 +860,11 @@ def test_fa4c_the_application_layer_exceptions_are_symbol_scoped() -> None:
             continue
         module = _module_name(path)
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not isinstance(node, ast.ImportFrom) or not node.module:
+            if not isinstance(node, ast.ImportFrom):
                 continue
-            target = node.module
+            target = _resolved_import_from_module(path, node)
+            if target is None:
+                continue
             # Only the two exception packages are symbol-scoped here; the
             # direction rule already covers everything else.
             if not any(target == pkg for pkg, _ in allowed):
@@ -844,7 +886,9 @@ def test_fa4c_the_application_layer_exceptions_are_symbol_scoped() -> None:
     assert offending == [], offending
 
     # The guard must be checking something real: both exceptions are in use, and
-    # no exception package was granted whole-module access.
+    # no exception package was granted whole-module access.  This is a *coverage*
+    # check, deliberately after the violation check so a violation is always
+    # reported as a violation rather than as missing coverage.
     assert seen == set(allowed), seen
     for module, _symbol in allowed:
         assert module not in APPLICATION_MODULES_WITH_NO_SYMBOL_SCOPE
@@ -878,16 +922,26 @@ def test_fa4c_the_application_layer_exceptions_are_symbol_scoped() -> None:
 
 
 def test_fa4d_no_application_module_imports_a_bare_provider_module() -> None:
-    """FA4d: ``import us_quant.ibkr`` with no symbol list is the same open door.
+    """FA4d: the whole-module forms are the same open door as a bad symbol.
 
     ``from us_quant.ibkr import IBKRConnectionConfig`` is symbol-scoped;
     ``import us_quant.ibkr`` hands the whole module over and lets the caller
     reach ``connect_ibkr_client`` through attribute access, which no symbol
-    check on the import statement can see.
+    check on the import statement can see.  A star import is the same thing
+    spelled differently.
+
+    Both the ``import`` form and the ``ImportFrom`` form are resolved through
+    :func:`_resolved_import_from_module`, so ``from ...ibkr import *`` cannot
+    slip past on a relative spelling while ``from us_quant.ibkr import *`` is
+    caught.  The bare-``import`` half also covers the relative spelling that
+    Python actually allows there (``from . import x`` never names the provider,
+    and a plain ``import`` statement is always absolute in Python 3).
     """
 
     application = _SRC / "trading" / "application"
+    provider_modules = ("us_quant.ibkr",)
     offending: list[str] = []
+
     for path in sorted(application.rglob("*.py")):
         if "__pycache__" in path.parts:
             continue
@@ -895,13 +949,28 @@ def test_fa4d_no_application_module_imports_a_bare_provider_module() -> None:
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name == "us_quant.ibkr":
+                    if alias.name in provider_modules:
                         offending.append(f"{module}:{node.lineno}: import {alias.name}")
-            elif isinstance(node, ast.ImportFrom) and node.module == "us_quant.ibkr":
+            elif isinstance(node, ast.ImportFrom):
+                target = _resolved_import_from_module(path, node)
+                if target not in provider_modules:
+                    continue
                 for alias in node.names:
                     if alias.name == "*":
-                        offending.append(f"{module}:{node.lineno}: star import")
+                        offending.append(
+                            f"{module}:{node.lineno}: star import of {target}"
+                        )
     assert offending == [], offending
+
+    # The resolver really does fold the relative spelling onto the absolute one,
+    # so this guard is not passing because a relative star import is invisible.
+    accounts = application / "accounts.py"
+    synthetic = ast.ImportFrom(
+        module="ibkr",
+        names=[ast.alias(name="*")],
+        level=3,
+    )
+    assert _resolved_import_from_module(accounts, synthetic) == "us_quant.ibkr"
 
 
 def test_fa1b_the_domain_layer_is_not_empty() -> None:
@@ -1580,8 +1649,13 @@ def test_fa17_and_fa18_only_the_paper_capability_reads_the_workflow_phase() -> N
         offending: list[str] = []
         for path in paths:
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-                if isinstance(node, ast.ImportFrom) and node.module:
-                    if "workflow_state" in node.module:
+                if isinstance(node, ast.ImportFrom):
+                    # Resolved, not a substring of the raw ``node.module``: the
+                    # shared resolver is the one place relative spelling is
+                    # folded onto the absolute module, so this guard cannot end
+                    # up with its own third reading of what an import names.
+                    target = _resolved_import_from_module(path, node) or ""
+                    if "workflow_state" in target:
                         offending.append(f"{path.name}:{node.lineno}:import")
                     for alias in node.names:
                         if alias.name == "PaperWorkflowPhase":
@@ -1737,8 +1811,9 @@ def test_fa25c_the_execution_package_owns_no_workflow_phase_branch() -> None:
     for path in _layer_modules("desktop_v2/orchestration/execution"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module:
-                if "workflow_state" in node.module:
+            if isinstance(node, ast.ImportFrom):
+                target = _resolved_import_from_module(path, node) or ""
+                if "workflow_state" in target:
                     offending.append(f"{path.name}:{node.lineno}")
     assert offending == []
 

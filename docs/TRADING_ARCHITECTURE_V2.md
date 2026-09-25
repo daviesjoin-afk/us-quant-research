@@ -16,7 +16,7 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 > 判据 A–G 合法 composition、H route-specific orchestration = 0、I duplicate
 > mutable truth = 0、J private reach-through = 0 全部成立，**G2-C = NOT
 > REQUIRED**。在此基础上本轮只做跨层 invariant 锁定，不再继续拆窗口：见 §8.24
-> 的收口落档与 §8.27 的 Final Architecture Closure（42 条跨层 guard case / 38 个
+> 的收口落档与 §8.27 的 Final Architecture Closure（42 条跨层 guard case / 41 个
 > 跨层 mutant / 一处真实 immutable-version defect 修复）。
 >
 > **Final Architecture Closure base**：`c78a27f95f482336383282b94e6c877030df6b77`
@@ -2941,7 +2941,7 @@ Strategy Evolution / AI assistance 时，不需要绕开或重写现有安全边
 
 原则是 **AUDIT FIRST**：先扫现状、再锁 invariant、只在发现真实 defect 时修。不按 LOC
 优化，不为减少文件数合并 capability，不为"统一"建立 global manager。因此本轮
-**新增 42 条跨层 guard case + 38 个跨层 mutant + 同一 immutable-version 缺陷的三个真实漏洞修复**，没有搬动任何
+**新增 42 条跨层 guard case + 41 个跨层 mutant + 同一 immutable-version 缺陷的三个真实漏洞修复**，没有搬动任何
 capability 的 owner。
 
 #### 8.27.1 Audit 1 — import / layer dependency graph
@@ -3029,6 +3029,23 @@ Importer 集合是**逐个枚举**而非通配：一个新 application module �
 `APPLICATION_MODULES_WITH_NO_SYMBOL_SCOPE` 是空集 —— application 侧每一条 exception
 都是 symbol 级的。本轮**不搬迁 module**（`IBKRConnectionConfig` 仍是
 `us_quant.ibkr` 的值类型），只锁边界。
+
+**relative import 只有一份解析器（review 发现的最后一个 blocker）。** 初版 FA4c 直接拿
+`node.module` 去比对 `(module, symbol)` 表，而 layer guard 用的是自己的解析逻辑。于是
+`from us_quant.ibkr import connect_ibkr_client` 能被抓住，但
+`from ...ibkr import connect_ibkr_client` 解析出的 `node.module` 是 `"ibkr"`，
+对不上 `us_quant.ibkr` 这个 key，**整条 symbol 规则被绕过**。更糟的是它当时"看起来"是
+RED —— 实际失败在 `seen == set(allowed)` 这条**覆盖度记账**断言上，不是 symbol 检查，
+即**假通过**而非真检出。
+
+修法是抽出唯一一份解析器 `_resolved_import_from_module(path, node)`，
+`_imported_modules()`（layer guards）与 FA4c / FA4d（symbol guards）全部经它，
+两处此前各自读 `node.module` 的 guard（FA17/FA18、FA25c）也一并改走它，
+全文件不再有任何直接 `node.module` 比较。因此
+`from us_quant.ibkr import X` 与 `from ...ibkr import X` 是同一条边，
+FA4d 的 `from ...ibkr import *` 同样被堵。新增 mutant M6e / M6f / M6g 分别证明
+relative forbidden symbol、relative lease-manager symbol、relative star import 都是 RED，
+且三者都 syntax valid、正常 collection、最终 assertion RED（非 import error / SyntaxError）。
 
 #### 8.27.2 Audit 2 — Risk → Execution 不可绕过
 
@@ -3294,6 +3311,7 @@ aggregate 196 → **200**。
 | Proposal → Risk → Execution path | `OrderDispatch` | proposal 可提交 / dispatch 跳过 verdict | FAC `test_fa7_trade_proposal_carries_nothing_submittable`、`test_fa8b_the_dispatch_never_submits_an_unapproved_verdict` | FAC M7、M9 | ✅ |
 | Broker abstraction | `ports/broker_execution.py` | application 命名 concrete adapter | FAC `test_fa19_risk_and_execution_applications_name_no_concrete_broker`、`test_fa20_the_execution_builder_accepts_the_port_abstraction` | FAC M3、M4、M5、M20 | ✅ |
 | Application 层 exception 的 symbol 边界 | `application/accounts.py`（`IBKRConnectionConfig`）、`application/paper/*`（`PaperWorkflowPhase`） | application 取 `connect_ibkr_client` / `probe_ibkr_socket` / `ExecutionLeaseManager` / `validate_paper_transition`，或裸 `import us_quant.ibkr` | FAC `test_fa4c_the_application_layer_exceptions_are_symbol_scoped`、`test_fa4d_no_application_module_imports_a_bare_provider_module` | FAC M6b、M6c、M6d | ✅ |
+| Import 解析语义唯一 | `_resolved_import_from_module`（FAC test helper） | 某个 guard 自己读 `node.module`，使 relative spelling 绕过 symbol 规则 | FAC `test_fa4c_the_application_layer_exceptions_are_symbol_scoped`、`test_fa4d_no_application_module_imports_a_bare_provider_module`（与 `_imported_modules()` 共用同一 resolver） | FAC M6e、M6f、M6g | ✅ |
 | Mutation harness 自身的 exact-one contract | `scripts/mutation_final_architecture_closure.ps1` | pattern 匹配 0 或 2+ 处仍被当作 caught | harness 自校验（`Matches().Count == 1`，`$regex.Replace(..., 1)`） | —（harness 自身即被测对象） | ✅ |
 | Paper / Shadow XOR lease | `WorkflowController`（单一 `ExecutionLeaseManager`） | 两个独立 lease / 本地 XOR 布尔 | FAC `test_fa11_paper_and_shadow_share_one_lease_manager`、`test_fa12_and_fa13_the_two_workflows_exclude_each_other` | FAC M14、M15 | ✅ |
 | Paper phase ownership | `PaperWorkflowController` | 窗口 / Execution 包读 phase | FAC `test_fa17_and_fa18_only_the_paper_capability_reads_the_workflow_phase` | FAC M19 | ✅ |
@@ -3312,7 +3330,7 @@ aggregate 196 → **200**。
 | Future AI boundary | 本文档 §8.27.7 | AI 拿 broker port / concrete adapter / 写 `OrderIntent` / bypass risk / 改 lease / 自签 gate | **documented boundary；executable package guard deferred until an AI integration package actually exists**（当前无 AI package，故无可针对的 module guard） | — | ✅ 仅文档化约束，未实现 |
 
 FAC test function **36**，FAC collected test case **42**（参数化展开后），
-FAC mutant **38**（全 RED），historical mutant **165**（全 RED），aggregate **203**。
+FAC mutant **41**（全 RED），historical mutant **165**（全 RED），aggregate **206**。
 
 设计依据见 `DESKTOP_DECOMPOSITION.md` §36。
 

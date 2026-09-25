@@ -6024,7 +6024,7 @@ scanner ranking、backtest math —— 一律未改。
 
 ```text
 tests/test_final_architecture_closure.py              42 个跨层 guard case（36 function）
-scripts/mutation_final_architecture_closure.ps1       38 个跨层 mutant（全 RED）
+scripts/mutation_final_architecture_closure.ps1       41 个跨层 mutant（全 RED）
 docs/TRADING_ARCHITECTURE_V2.md §8.27                 Final Architecture Closure + evidence matrix
 ```
 
@@ -6055,13 +6055,23 @@ symbol 或其它 importer 都 RED；FA4d 再堵住 `import us_quant.ibkr` / `fro
 这类"整扇门"写法（`import X` 之后可以属性访问拿到任何 symbol，symbol 检查看不到）。
 实测七种越界全部 RED。新增 mutant M6b / M6c / M6d。
 
+**relative import 只有一份解析器（review 发现的最后一个 blocker）**：初版 FA4c 直接比对
+`node.module`，而 layer guard 用自己的解析逻辑，于是
+`from ...ibkr import connect_ibkr_client` 解析成 `"ibkr"`、对不上 `us_quant.ibkr` key，整条 symbol 规则被绕过；而且它当时"看起来"是 RED，实际失败在
+覆盖度记账断言 `seen == set(allowed)` 上，属于**假通过**而非真检出。修法是抽出唯一一份
+`_resolved_import_from_module(path, node)`，`_imported_modules()` 与 FA4c / FA4d
+全部经它；另外两处直接读 `node.module` 的 guard（FA17/FA18、FA25c）也一并改走它，
+全文件不再有直接 `node.module` 比较。新增 mutant M6e / M6f / M6g 证明 relative forbidden
+symbol、relative lease-manager symbol、relative star import 都是 RED，且三者都 syntax valid、
+正常 pytest collection、最终 assertion RED（非 import error / SyntaxError / collection error）。
+
 ### 36.5 Mutation 结果
 
 ```text
-FAC mutant        38 / 38 RED      0 survived / 0 harness-error
+FAC mutant        41 / 41 RED      0 survived / 0 harness-error
 historical mutant 165 / 165 RED    0 not-caught
                   e2 13 · e3 41 · e4 11 · F1 14 · F2 22 · G1 17 · G2-A 12 · G2-B 35
-aggregate         203 / 203 RED
+aggregate         206 / 206 RED
 ```
 
 **FAC harness 的 exact-one contract（本轮修）**：原实现用

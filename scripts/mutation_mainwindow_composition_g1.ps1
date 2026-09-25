@@ -257,6 +257,13 @@ foreach ($mutation in $mutations) {
     $caught = $null
     $detail = ""
     try {
+        # NOTE: the trailing ``1`` here binds to ``RegexOptions`` (1 ==
+        # IgnoreCase), NOT to a replacement count -- the static
+        # ``[regex]::Replace`` overloads have no count parameter.  Every
+        # ``find`` pattern in this file must therefore match exactly one
+        # location in its target (case-insensitively, which is how this
+        # actually runs); a future edit that duplicates a pattern's shape would
+        # mutate every copy.  Verify uniqueness when adding a mutant.
         $mutated = [regex]::Replace($original, $mutation.find, $mutation.repl, 1)
         if ($mutated -eq $original) {
             # A pattern that matches nothing is a hole in *this script*: the

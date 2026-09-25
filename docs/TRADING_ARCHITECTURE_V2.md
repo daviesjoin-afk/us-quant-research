@@ -2752,6 +2752,41 @@ Composition Closure COMPLETE 与 Final Architecture Closure complete。
 
 设计依据见 `DESKTOP_DECOMPOSITION.md` §33。
 
+### 8.25 G2-A Strategy Governance orchestration
+
+G2 按 ownership 拆成两个顺序 PR，本轮是第一个。§8.24 residual inventory 里 Strategy
+governance 那一组全部退休：新增 `desktop_v2/orchestration/strategy/`
+（`StrategyGovernanceOrchestrator` + Qt-free `queries.py` / `models.py`），public API
+恰好 `refresh` / `select_version` / `clone` / `transition` 加五个发布信号
+（`catalog_changed` / `account_notice_requested` / `warning_requested` /
+`log_requested` / `runtime_event_requested`）。
+
+**Canonical owner 不变**：`StrategyApplication` 仍是 catalogue / lifecycle authority，
+orchestrator state 恰好 `_application` / `_page`、不缓存 catalogue；**runtime selection
+truth 不变**：governance 页上点击某个 StrategyVersion 只表示"operator 正在看这个版本"，
+`select_version` 只发布 account notice 文本，从不触达 `StrategySelectionService`
+（AST guard 锁死 strategy 包内零 `StrategySelectionService` import、零 `.select(` 调用），
+AUTO_ROTATION / TARGETED_SHADOW / BACKTEST 的 runtime selection 仍只由各自 combo 经
+service 改写。clone 的 JSON adapter 迁入 Qt-free `parse_clone_parameters`，三种
+account-notice 文案迁入 `strategy_account_notice`，逐字保留；transition 经窗口的
+generic runtime-event bridge 发恰好一条 `STATUS_CHANGE`，Strategy capability 不 import
+System。窗口对 account 只剩 `account_notice_requested → AccountOrchestrator.set_notice`
+（新增极窄 seam，只收最终 text）；`catalog_changed` 的 cross-capability fan-out
+（backtest / targeted `refresh_strategy_options()`）留在窗口，Execution combo 的旧 sync
+标记为 G2-B transitional seam。
+
+Guards：`test_desktop_strategy_governance_architecture.py` 15 条（窗口不再
+render / 唯一 orchestration caller / 窗口 `self.strategies` 面恰好只剩 terminal export /
+退休 handler 消失 / 零越界 import / governance 不触 runtime selection / page
+service-free / 不缓存 catalogue / STATUS_CHANGE 只发布 / 无 StrategyManager 型 god
+object / notice bridge 只收 text）。行为测试 12 项（refresh 序列与读失败不伪造、clone
+四态、transition 两态、governance select 不改 runtime、缺失版本 no-op、fan-out 各恰好
+一次）。Mutation：`scripts/mutation_strategy_governance_g2a.ps1` **12 个 mutant 全部
+RED**（0 survived / 0 harness-error）。**G2-A ✅；G2-B Execution / AutoQuant ⏭
+（required，单独 PR）**。
+
+设计依据见 `DESKTOP_DECOMPOSITION.md` §34。
+
 ## 9. 已删除的旧架构
 
 ```text
@@ -3534,7 +3569,8 @@ v2O-F1 Runtime Events orchestration  ✅ 已完成（§8.22）
 v2O-F2 Settings orchestration        ✅ 已完成（§8.23）
 v2O-F System                         ✅ COMPLETE（Gateway probe 重审定性，见 §8.24）
 G1 MainWindow composition closure    ✅ 已完成（generic runtime / shell）
-G2 Strategy Governance + Execution/AutoQuant residual orchestration ⏭（required）
+G2-A Strategy Governance             ✅ 已完成（§8.25）
+G2-B Execution / AutoQuant           ⏭ required（单独 PR）
 Final Architecture Closure           ⏭ G2 之后
 ```
 
@@ -3677,8 +3713,9 @@ v2O-F1 Runtime Events orchestration                      ✅ 已完成（§8.22�
 v2O-F2 Settings orchestration                            ✅ 已完成（§8.23）
 v2O-F System                                             ✅ COMPLETE（Gateway probe = shell diagnostic）
 G1 MainWindow composition closure                        ✅ 已完成（§8.24）
-G2 Strategy Governance + Execution/AutoQuant residual orchestration ⏭（required）
-Final Architecture Closure                                ⏭ G2 之后
+G2-A Strategy Governance                                 ✅ 已完成（§8.25）
+G2-B Execution / AutoQuant                               ⏭ required（单独 PR）
+Final Architecture Closure                               ⏭ G2 之后
 ```
 
 Shadow Framework v2 刻意没有做的事，留给更后面：

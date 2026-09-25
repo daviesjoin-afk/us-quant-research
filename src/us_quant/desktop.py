@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
-import json
 import os
 from pathlib import Path
 import re
@@ -103,10 +102,6 @@ from us_quant.scanner import (
     load_close_series,
     save_market_scan,
     scan_market,
-)
-from us_quant.trading.application.strategies import (
-    StrategyApplicationError,
-    StrategyNotFoundError,
 )
 from us_quant.trading.application.strategy_selection import (
     StrategySelectionError,
@@ -229,6 +224,9 @@ from us_quant.desktop_v2.orchestration.research.targeted.session import (
 )
 from us_quant.desktop_v2.orchestration.shadow import ShadowOrchestrator
 from us_quant.desktop_v2.orchestration.shadow.models import ShadowCapitalFact
+from us_quant.desktop_v2.orchestration.strategy import (
+    StrategyGovernanceOrchestrator,
+)
 from us_quant.desktop_v2.orchestration.system.runtime_events import (
     RuntimeEventsEnvironment,
     RuntimeEventsOrchestrator,
@@ -1195,17 +1193,43 @@ class MainWindow(QMainWindow):
         self.account_orchestrator.render_current()
 
         # The strategy page renders and reports intent; every decision it
-        # reports is executed here by the application service.  The page holds
-        # no catalogue and cannot mutate one.
+        # reports is executed by ``StrategyGovernanceOrchestrator`` (G2-A).
+        # The page holds no catalogue and cannot mutate one, and the window's
+        # role ends at construction and wiring: the orchestrator is the one
+        # caller of the page's ``render`` and the one caller of the
+        # application's governance commands.
         self.strategy_page = StrategyPage(palette=self.theme)
+        self.strategy_governance_orchestrator = (
+            StrategyGovernanceOrchestrator(
+                application=self.strategies,
+                page=self.strategy_page,
+            )
+        )
         self.strategy_page.version_selected.connect(
-            self._strategy_version_selected
+            self.strategy_governance_orchestrator.select_version
         )
         self.strategy_page.clone_requested.connect(
-            self._strategy_clone_requested
+            self.strategy_governance_orchestrator.clone
         )
         self.strategy_page.transition_requested.connect(
-            self._strategy_transition_requested
+            self.strategy_governance_orchestrator.transition
+        )
+        # Four published facts, four window bridges -- composition only:
+        # the catalogue fan-out, the finished account notice (the account
+        # capability paints it through its own owner), the dialogs and the
+        # log, and the runtime event through the one generic router.
+        self.strategy_governance_orchestrator.catalog_changed.connect(
+            self._on_strategy_catalog_changed
+        )
+        self.strategy_governance_orchestrator.account_notice_requested.connect(
+            self.account_orchestrator.set_notice
+        )
+        self.strategy_governance_orchestrator.warning_requested.connect(
+            self._show_strategy_warning
+        )
+        self.strategy_governance_orchestrator.log_requested.connect(self._log)
+        self.strategy_governance_orchestrator.runtime_event_requested.connect(
+            self._route_runtime_event
         )
 
         # The execution page renders and reports intent; every decision it
@@ -1248,7 +1272,7 @@ class MainWindow(QMainWindow):
         # possible.  The retired page handler ran in the middle of this
         # construction, which is why the auto-rotation combo used to start up
         # empty: it had not been created yet.
-        self._refresh_strategy_page()
+        self.strategy_governance_orchestrator.refresh()
         return pages
 
     def _connect_runtime_events_page(self) -> None:
@@ -3087,46 +3111,23 @@ class MainWindow(QMainWindow):
             self.account_badge.setProperty("state", view.account_state)
         self._repolish_health_badges()
 
-    # -- strategy governance wiring -------------------------------------
+    # -- strategy governance composition ---------------------------------
     #
-    # This is the whole of the window's strategy role: read a signal from the
-    # page, call the application service, repaint.  The retired
-    # ``_strategy_manager_tab`` / ``_populate_strategy_registry`` /
-    # ``_clone_strategy_version`` / ``_transition_selected_strategy`` did the
-    # same work while also owning the widgets and the registry, which is what
-    # made the catalogue a UI concern.
+    # The governance sequencing itself moved to
+    # ``StrategyGovernanceOrchestrator`` (G2-A): the catalogue read, the page
+    # render, the clone, the transition and the account-notice explanation no
+    # longer pass through the window.  What is left here is exactly the
+    # cross-capability part -- announcing a catalogue change to the routes
+    # that refill their own strategy options.
 
-    def _strategy_version_selected(self, version_id: str) -> None:
-        """React to the page showing a different version.
+    def _on_strategy_catalog_changed(self) -> None:
+        """Fan a finished catalogue change out to the routes that refill.
 
-        This is a *governance view* selection, not a runtime selection.
-        Opening a version in the strategy page must never repoint the
-        auto-rotation or targeted-shadow runtime at it; only the combos on
-        those pages do that, and they go through ``StrategySelectionService``.
+        Which routes care about a new strategy catalogue is composition, not
+        strategy governance: the backtest and targeted capabilities refill
+        their own options from the selection service, and the execution combo
+        is still window-synced (the G2-B transitional seam below).
         """
-
-        if not version_id:
-            return
-        version = self._strategy_version_or_none(version_id)
-        if version is None:
-            return
-        self._set_strategy_account_notice(version)
-
-    def _refresh_strategy_page(self) -> None:
-        """Repaint the strategy page and resync the runtime selection views."""
-
-        if not hasattr(self, "strategy_page"):
-            return
-        try:
-            versions = self.strategies.list_versions()
-        except StrategyApplicationError as error:
-            self._log(f"策略目录读取失败：{error}")
-            return
-        self.strategy_page.render(versions)
-        self._populate_strategy_selection_combos()
-
-    def _populate_strategy_selection_combos(self) -> None:
-        """Point every runtime-selection combo at the selection service."""
 
         if hasattr(self, "backtest_orchestrator"):
             # The backtest option order is the capability's rule, not the
@@ -3139,20 +3140,32 @@ class MainWindow(QMainWindow):
             # page's ``set_strategy_options``, so the page cannot be given a
             # selection the service would refuse.
             self.targeted_session_orchestrator.refresh_strategy_options()
-        if hasattr(self, "execution_page"):
-            purpose = StrategySelectionPurpose.AUTO_ROTATION
-            # The combo is a view: it is refilled from the service's options and
-            # aimed at the service's selection, so it can never keep displaying
-            # a version the runtime will not use.
-            selected = self.strategy_selection.restore_or_default(purpose)
-            self.execution_page.set_strategy_options(
-                [
-                    (strategy_option_label(version), version.version_id)
-                    for version in self.strategy_selection.options(purpose)
-                ],
-                selected.version_id if selected else None,
-            )
-            self._refresh_auto_quant_preflight()
+        self._sync_execution_strategy_options()
+
+    def _sync_execution_strategy_options(self) -> None:
+        """G2-B transitional seam: the window still syncs the execution combo.
+
+        When Execution / AutoQuant orchestration is extracted, this method and
+        the window's preflight refresh retire with it.  Until then this is the
+        one place the execution combo is refilled from the selection service,
+        and it must never be reached for anywhere else.
+        """
+
+        if not hasattr(self, "execution_page"):
+            return
+        purpose = StrategySelectionPurpose.AUTO_ROTATION
+        # The combo is a view: it is refilled from the service's options and
+        # aimed at the service's selection, so it can never keep displaying
+        # a version the runtime will not use.
+        selected = self.strategy_selection.restore_or_default(purpose)
+        self.execution_page.set_strategy_options(
+            [
+                (strategy_option_label(version), version.version_id)
+                for version in self.strategy_selection.options(purpose)
+            ],
+            selected.version_id if selected else None,
+        )
+        self._refresh_auto_quant_preflight()
 
     def _sync_strategy_combo(
         self,
@@ -3200,113 +3213,10 @@ class MainWindow(QMainWindow):
                 f"{purpose} 运行选择未生效：{error}；运行时保持原版本"
             )
 
-    def _strategy_clone_requested(
-        self,
-        version_id: str,
-        semver: str,
-        parameters_json: str,
-    ) -> None:
-        """Execute a clone the page asked for."""
+    def _show_strategy_warning(self, title: str, message: str) -> None:
+        """Show one warning the strategy governance owner published."""
 
-        try:
-            parameters = json.loads(parameters_json)
-            if not isinstance(parameters, dict):
-                raise ValueError("参数必须是 JSON 对象")
-            created = self.strategies.clone_version(
-                version_id,
-                semver=semver,
-                parameters=parameters,
-            )
-        except json.JSONDecodeError as error:
-            QMessageBox.warning(
-                self, "创建失败", f"参数不是合法 JSON：{error}"
-            )
-            return
-        except (ValueError, StrategyApplicationError) as error:
-            QMessageBox.warning(self, "创建失败", str(error))
-            return
-        self._refresh_strategy_page()
-        self._log(
-            f"已创建 {created.strategy_id} {created.semver}；"
-            "状态回到研究，需重新验证"
-        )
-
-    def _strategy_transition_requested(
-        self,
-        version_id: str,
-        target_status: str,
-    ) -> None:
-        """Execute a lifecycle change the page asked for."""
-
-        try:
-            changed = self.strategies.transition(
-                version_id,
-                target_status,
-                reason="desktop governance action",
-            )
-        except StrategyApplicationError as error:
-            QMessageBox.warning(
-                self,
-                "晋级门阻断",
-                f"{error}\n\n自动下单仍保持关闭。",
-            )
-            self._log(f"策略状态变更被阻断：{error}")
-            return
-        self._refresh_strategy_page()
-        self._log(f"{changed.strategy_id} 已变更为 {changed.status}")
-        self.runtime_events_orchestrator.record(
-            severity="info",
-            component="strategy",
-            code="STATUS_CHANGE",
-            message=(
-                f"{changed.strategy_id} {changed.semver} -> "
-                f"{changed.status}"
-            ),
-        )
-
-    def _strategy_version_or_none(
-        self, version_id: str
-    ) -> StrategyVersion | None:
-        try:
-            return self.strategies.get_version(version_id)
-        except StrategyNotFoundError:
-            return None
-
-    def _set_strategy_account_notice(
-        self, version: StrategyVersion
-    ) -> None:
-        """Bind the account page's notice strip to the shown version.
-
-        Kept semantically identical to the retired page handler: this is
-        strategy-evidence copy displayed on the account page, and the account
-        page itself still knows nothing about strategy.
-        """
-
-        if not hasattr(self, "account_page"):
-            return
-        if (
-            version.strategy_id == "intraday-targeted-t"
-            and version.status is StrategyStatus.RESEARCH
-        ):
-            self.account_page.set_notice(
-                f"探索性影子模式：已绑定 {version.strategy_id} "
-                f"{version.semver}。可收集实时模拟证据；"
-                "不代表晋级，不会发送券商订单。"
-            )
-        elif (
-            version.gate_passed
-            and version.status is StrategyStatus.PAPER_SHADOW
-        ):
-            self.account_page.set_notice(
-                f"策略证据门：通过；已绑定 {version.strategy_id} "
-                f"{version.semver}。仍需新鲜 Paper 账户与实时行情。"
-            )
-        else:
-            self.account_page.set_notice(
-                "策略证据门：硬阻断。"
-                f"{version.strategy_id} {version.semver}："
-                f"{version.gate_reason}"
-            )
+        QMessageBox.warning(self, title, message)
 
     def _auto_strategy_selected(self, version_id: object) -> None:
         """Adopt the execution page's choice as the runtime selection.

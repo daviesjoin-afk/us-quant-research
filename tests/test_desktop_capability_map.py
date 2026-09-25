@@ -16,7 +16,7 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _MAP = _REPO_ROOT / "docs" / "DESKTOP_CAPABILITY_MAP.md"
 
 #: The map must stay a glance, not a design document.
-LINE_BUDGET = 150
+LINE_BUDGET = 160
 
 #: Every capability the desktop has, extracted or not.  A row disappearing means
 #: a maintainer's entry point went with it.
@@ -39,6 +39,7 @@ CAPABILITIES = (
     "Shadow",
     "Paper",
     "System",
+    "Strategy Governance",
 )
 
 

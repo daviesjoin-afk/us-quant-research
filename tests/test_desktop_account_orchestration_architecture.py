@@ -129,12 +129,15 @@ FORBIDDEN_ORCHESTRATOR_CALLS = (
 )
 
 #: The orchestrator's public surface, asserted exactly in both directions.
+#: ``set_notice`` is the G2-A seam: the strategy governance owner publishes the
+#: finished notice text and the account capability paints it.
 PUBLIC_READ_SURFACE = (
     "portfolio",
     "fresh_paper_net_liquidation",
     "request_refresh",
     "render_current",
     "set_presentation_inputs",
+    "set_notice",
 )
 
 #: The Qt signals the window relies on.
@@ -160,9 +163,11 @@ LINE_BUDGETS = {
 #: actually checking what it claims.
 PAGE_RENDER_ENTRY_POINTS = ("render",)
 
-#: The only temporary cross-capability presentation APIs ``MainWindow`` may
-#: still call on ``AccountPage`` directly.  ``set_notice`` is the strategy
-#: notice strip.
+#: The only direct cross-capability presentation APIs ``MainWindow`` may still
+#: call on ``AccountPage``.  ``set_notice`` was on this list until G2-A: the
+#: strategy notice now travels as finished text through
+#: ``AccountOrchestrator.set_notice``, so the window's direct page surface
+#: shrank to the refresh intent alone.
 #:
 #: ``set_research_capital`` was on this list until v2O-C4.  That round gave the
 #: research scenario scalar a canonical owner and folded its presentation into
@@ -171,7 +176,6 @@ PAGE_RENDER_ENTRY_POINTS = ("render",)
 #: orchestrator is now the Account page's only render owner, which is the
 #: property ``test_the_window_never_sets_the_research_capital_card`` pins.
 ACCOUNT_PAGE_WINDOW_WHITELIST = (
-    "set_notice",
     "refresh_requested",
 )
 

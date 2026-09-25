@@ -486,7 +486,7 @@ def test_a_catalogue_refresh_repoints_the_backtest_combo(
         lambda: calls.append("refresh"),
     )
 
-    window._populate_strategy_selection_combos()
+    window._on_strategy_catalog_changed()
 
     assert calls == ["refresh"]
 
@@ -500,7 +500,7 @@ def test_the_refresh_actually_updates_the_real_combo(
     combo.clear()
     assert combo.count() == 0
 
-    window._populate_strategy_selection_combos()
+    window._on_strategy_catalog_changed()
 
     assert combo.count() > 0
     assert all(combo.itemData(index) for index in range(combo.count()))

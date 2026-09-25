@@ -129,11 +129,22 @@ def test_the_legacy_strategy_builders_are_gone() -> None:
     }
     for removed in RETIRED_METHODS:
         assert removed not in methods, removed
-    for still_there in (
+    # G2-A retired the window's governance sequencing as well: the window
+    # neither renders the strategy page nor executes a governance command.
+    for removed in (
         "_strategy_version_selected",
         "_strategy_clone_requested",
         "_strategy_transition_requested",
         "_refresh_strategy_page",
+        "_strategy_version_or_none",
+        "_set_strategy_account_notice",
+        "_populate_strategy_selection_combos",
+    ):
+        assert removed not in methods, removed
+    for still_there in (
+        "_on_strategy_catalog_changed",
+        "_sync_execution_strategy_options",
+        "_show_strategy_warning",
     ):
         assert still_there in methods
 
@@ -265,7 +276,7 @@ def test_a_stopped_version_drops_out_of_the_combo(window) -> None:
     window.strategies.transition(
         selected.version_id, StrategyStatus.STOPPED, reason="test"
     )
-    window._refresh_strategy_page()
+    window.strategy_governance_orchestrator.refresh()
 
     combo = _auto_combo(window)
     assert combo.count() == before - 1
@@ -320,7 +331,7 @@ def test_a_clone_request_creates_a_version(window) -> None:
     source = _version_of(window, "buy-hold", "1.0.0-research")
     before = len(window.strategies.list_versions())
 
-    window._strategy_clone_requested(
+    window.strategy_governance_orchestrator.clone(
         source.version_id,
         "1.0.1-research",
         '{"whole_shares": true}',
@@ -344,7 +355,7 @@ def test_invalid_clone_json_is_reported_and_changes_nothing(
     source = _version_of(window, "buy-hold", "1.0.0-research")
     before = len(window.strategies.list_versions())
 
-    window._strategy_clone_requested(
+    window.strategy_governance_orchestrator.clone(
         source.version_id, "1.0.2-research", "{not json"
     )
 
@@ -356,7 +367,7 @@ def test_a_parameter_error_on_clone_is_reported(window, dialogs) -> None:
     source = _version_of(window, "dual-ma-trend", "1.0.0-research")
     before = len(window.strategies.list_versions())
 
-    window._strategy_clone_requested(
+    window.strategy_governance_orchestrator.clone(
         source.version_id,
         "9.9.9-research",
         '{"short_window": 200, "long_window": 20, "whole_shares": true}',
@@ -369,7 +380,9 @@ def test_a_parameter_error_on_clone_is_reported(window, dialogs) -> None:
 def test_a_blocked_gate_transition_is_reported(window, dialogs) -> None:
     source = _version_of(window, "buy-hold", "1.0.0-research")
 
-    window._strategy_transition_requested(source.version_id, "paper_shadow")
+    window.strategy_governance_orchestrator.transition(
+        source.version_id, "paper_shadow"
+    )
 
     assert (
         window.strategies.get_version(source.version_id).status
@@ -381,7 +394,9 @@ def test_a_blocked_gate_transition_is_reported(window, dialogs) -> None:
 def test_a_stop_transition_is_applied(window) -> None:
     source = _version_of(window, "buy-hold", "1.0.0-research")
 
-    window._strategy_transition_requested(source.version_id, "stopped")
+    window.strategy_governance_orchestrator.transition(
+        source.version_id, "stopped"
+    )
 
     assert (
         window.strategies.get_version(source.version_id).status
@@ -521,7 +536,7 @@ def test_a_stopped_version_drops_out_of_the_backtest_combo(window) -> None:
     window.strategies.transition(
         chosen, StrategyStatus.STOPPED, reason="test"
     )
-    window._refresh_strategy_page()
+    window.strategy_governance_orchestrator.refresh()
 
     offered = {
         window.backtest_page.controls.strategy_combo.itemData(index)

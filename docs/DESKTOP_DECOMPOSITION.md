@@ -5526,4 +5526,109 @@ G1 Generic Runtime / Shell ✅（本 PR）；G2 Strategy Governance + Execution/
 residual orchestration ⏭ required（G2 candidates 见 §33.7）。本轮不声称
 "MainWindow Composition Closure COMPLETE" 与 "Final Architecture Closure complete"。**
 
+## 34. G2-A：Strategy Governance orchestration
+
+G2 是一个里程碑，按 ownership 拆成两个顺序 PR；本节记录第一个：
+**G2-A Strategy Governance Orchestration**。它退休的正是 §33.7 列出的第一组 G2
+candidates——`_strategy_version_selected`、`_refresh_strategy_page`、
+`_strategy_clone_requested`、`_strategy_transition_requested`、
+`_strategy_version_or_none`、strategy-specific account notice 分支，以及
+`StrategyApplication → StrategyPage.render` 的窗口直 render。
+
+### 34.1 能力边界
+
+新增 `desktop_v2/orchestration/strategy/`（`orchestrator.py` / `queries.py` /
+`models.py`）：`StrategyGovernanceOrchestrator` 是 strategy governance route 的
+唯一 desktop owner，public API 恰好四个动作——`refresh()` /
+`select_version(version_id)` / `clone(version_id, semver, parameters_json)` /
+`transition(version_id, target_status)`——加五个发布信号
+（`catalog_changed` / `account_notice_requested(str)` /
+`warning_requested(str, str)` / `log_requested(str)` /
+`runtime_event_requested(object)`）。不暴露 `_application` / `_page` / 版本
+list 缓存 / repository / SQLite handle。
+
+三条 load-bearing 边界：
+
+* **没有第二份 catalogue truth。** `StrategyApplication` 仍是 strategy
+  catalogue / lifecycle application authority；orchestrator 的 state 恰好
+  `_application` / `_page`（guard 锁死），`refresh` 每次现读
+  `list_versions()`，绝不缓存。StrategyPage 仍可为展示保留自己的 screen rows，
+  但不是 catalogue truth。
+* **governance selection 与 runtime selection 分离。** governance 页上点击
+  某个 StrategyVersion 只表示"operator 正在看这个版本"：orchestrator 的
+  `select_version` 只发 account notice 文本，从不 import / 触达
+  `StrategySelectionService`（AST guard：strategy 包内没有任何
+  `StrategySelectionService` import、没有任何 `.select(` 调用）。AUTO_ROTATION
+  / TARGETED_SHADOW / BACKTEST 的 runtime selection truth 仍只在
+  `StrategySelectionService`。
+* **runtime event 走 generic owner。** `STATUS_CHANGE` 由 capability 以
+  `StrategyRuntimeEvent`（immutable 四字段 model）发布，窗口经既有
+  `_route_runtime_event` 单一 adapter 送 `RuntimeEventsOrchestrator`；窗口里
+  不再有 `code="STATUS_CHANGE"`（guard 锁死）。Strategy capability 不 import
+  System。
+
+### 34.2 语义逐字保留
+
+窗口原来的行为全部迁入，未改语义：refresh 读失败只 log（`策略目录读取失败：…`）
+不伪造 render、不发 `catalog_changed`；clone 的 JSON adapter（非法 JSON →
+`创建失败`/`参数不是合法 JSON：…`；非 object → `创建失败`/`参数必须是 JSON
+对象`）迁入 Qt-free `queries.parse_clone_parameters`，application 拒绝 →
+`创建失败`+str(error)，绝不假成功、绝不假刷新；成功 → refresh + 精确 log
+（`已创建 <id> <semver>；状态回到研究，需重新验证`），不覆盖原版本；
+transition 失败 → `晋级门阻断`+`\n\n自动下单仍保持关闭。` warning + log，无
+runtime event；成功 → refresh + log + 恰好一条 `STATUS_CHANGE`（severity=info,
+component=strategy），reason 仍为 `desktop governance action`。
+
+Account notice 迁入 Qt-free `queries.strategy_account_notice(version)`，三种
+文案逐字保留（intraday-targeted-t + RESEARCH 的探索性影子模式 / gate_passed +
+PAPER_SHADOW / 其余硬阻断 + gate_reason）。窗口对 account 的 fan-out 缩成一条
+signal 连接：`account_notice_requested → AccountOrchestrator.set_notice`——
+本轮新增的极窄 seam，只接受最终 text，不认识 `StrategyVersion`；窗口不再解释
+strategy status/gate。
+
+### 34.3 MainWindow 剩余的合法角色
+
+完成后窗口在 strategy 域只剩：construction（`self.strategies` 仍为
+composition / `StrategySelectionService` / terminal export / 其它 application
+consumers 存在）、wiring（三个 intent 进 orchestrator、五个 fact 出）、
+`catalog_changed` 的 cross-capability fan-out
+（`_on_strategy_catalog_changed`：backtest / targeted 各自
+`refresh_strategy_options()`，Execution combo 的旧 sync 暂留窗口并标记为
+**G2-B transitional seam** `_sync_execution_strategy_options`）、对话框
+（`_show_strategy_warning`）与 log/runtime-event 路由。orchestrator 不 import
+BacktestOrchestrator / TargetedSessionOrchestrator / ExecutionPage /
+ExecutionOrchestrator / 任何其它 capability。
+
+### 34.4 Guards、行为测试与 mutation
+
+`tests/test_desktop_strategy_governance_architecture.py` 15 条结构 guard
+（AST 为主）：窗口不调 `StrategyPage.render` / orchestrator 是唯一
+orchestration caller / 窗口 `self.strategies` 剩余面恰好只有 terminal export
+的 `list_versions` / 五个退休 handler 消失 / capability 零越界 import /
+governance 不触 runtime selection / page 仍 service-free / 不缓存 catalogue /
+runtime event 只发布 + generic 路由 / 无
+`StrategyManager`-`StrategyContext`-`StrategyServiceBag` / account notice
+bridge 只收 text。
+
+行为测试 `tests/test_desktop_strategy_governance_orchestration.py` 12 项：
+A initial refresh（list/render/catalog_changed 各恰好一次）、B 读失败不伪造、
+C 非法 JSON 拒绝且 application 不被调、D 非 object 拒绝、E clone 失败无成功
+发布无假刷新、F clone 成功精确 log 语义、G 晋级门阻断无 STATUS_CHANGE、
+H transition 成功恰好一条 STATUS_CHANGE、I governance row select 只发 notice
+且 runtime selection 不动（fake `select` 陷阱）、J 缺失版本 no-op、K
+catalogue fan-out（backtest / targeted / execution transitional 各恰好一次）。
+
+`scripts/mutation_strategy_governance_g2a.ps1`：**12 个 mutant 全部 RED**，
+0 survived，0 harness-error（M1 窗口重新直 render / M2 非法 JSON 仍进
+application / M3 非 object 被接受 / M4 拒绝仍发布成功 / M5 clone 成功不刷新 /
+M6 阻断仍写 STATUS_CHANGE / M7 成功不刷新 / M8 governance 选择改写 runtime
+selection / M9 缓存第二 catalogue / M10 越界 import / M11 丢
+catalog_changed / M12 strategy 逻辑回窗口）。
+
+### 34.5 路线状态
+
+**G2-A Strategy Governance ✅；G2-B Execution / AutoQuant ⏭（required，
+单独 PR）。** MainWindow Composition Closure 尚未 COMPLETE；Final Architecture
+Closure 尚未开始。
+
 

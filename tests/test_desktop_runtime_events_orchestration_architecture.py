@@ -672,11 +672,16 @@ def test_the_routing_adapter_only_forwards_the_four_fields() -> None:
 
 
 def test_every_capability_signal_reaches_the_one_adapter() -> None:
-    """Five capabilities, one adapter -- checked on the wiring itself."""
+    """Six capabilities, one adapter -- checked on the wiring itself.
+
+    Market, Account, Shadow, Paper, Targeted Evidence and (G2-A) Strategy
+    Governance all publish the same four fields; the window forwards each of
+    them through the one ``_route_runtime_event`` adapter and nothing else.
+    """
 
     source = _DESKTOP.read_text(encoding="utf-8")
-    assert source.count("runtime_event_requested.connect(") == 5
-    assert source.count("self._route_runtime_event") == 5
+    assert source.count("runtime_event_requested.connect(") == 6
+    assert source.count("self._route_runtime_event") == 6
     for name in _RETIRED_ROUTING_METHODS:
         assert name not in source, name
 

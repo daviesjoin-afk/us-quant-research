@@ -272,14 +272,29 @@ $mutations = @(
         select = @("-k", "execution_builder_accepts_the_port_abstraction")
     },
     @{
-        name = 'M21 the execution application branches on paper/live'
+        name = 'M20b a parallel Live risk authority is introduced'
+        file = $appRisk
+        find = 'class RiskApplication:'
+        repl = "class LiveRiskApplication:`n    pass`n`n`nclass RiskApplication:"
+        tests = @($fac)
+        select = @("-k", "future_live_path_must_reuse_the_single_authority_stack")
+    },
+    @{
+        name = 'M20c a parallel Live execution authority is introduced'
+        file = $appExecution
+        find = 'class ExecutionApplication:'
+        repl = "class LiveExecutionApplication:`n    pass`n`n`nclass ExecutionApplication:"
+        tests = @($fac)
+        select = @("-k", "future_live_path_must_reuse_the_single_authority_stack")
+    },
+    @{
+        name = 'M20d the execution authority branches on a paper/live mode'
         file = $appExecution
         find = '        self\._repository = repository\r?\n        self\._broker = broker'
-        repl = "        self._repository = repository`n        self._broker = broker`n        self._paper = True  # paper branch"
+        repl = "        self._repository = repository`n        self._broker = broker`n        self._mode = `"paper`""
         tests = @($fac)
-        select = @("-k", "execution_builder_accepts_the_port_abstraction")
+        select = @("-k", "paper_and_live_differences_are_not_a_mode_branch")
     },
-
     # -- Strategy immutable lifecycle ----------------------------------
     @{
         name = 'M22 a governed version stores a plain mutable parameter dict again'

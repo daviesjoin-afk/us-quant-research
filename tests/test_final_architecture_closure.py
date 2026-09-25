@@ -1476,6 +1476,12 @@ def test_fa20_the_execution_builder_accepts_the_port_abstraction() -> None:
     ``build_execution_application`` takes a ``BrokerExecutionPort`` and an
     ``OrderRepositoryPort``.  That is what lets a Live adapter be a different
     adapter behind the same seam instead of a second risk/execution stack.
+
+    The "no mode branch" half of this property lives in FA19c, which checks the
+    constructors' **AST**.  An earlier version of this test scanned their source
+    *text* for the words "paper"/"live"/"IBKR" -- which a docstring could trip
+    (``RiskApplication.__init__`` contains "lives here") and which could never
+    have caught a branch that used a variable.  The AST check replaced it.
     """
 
     import inspect
@@ -1491,14 +1497,6 @@ def test_fa20_the_execution_builder_accepts_the_port_abstraction() -> None:
     hints = inspect.get_annotations(build_execution_application, eval_str=True)
     assert hints.get("broker") is BrokerExecutionPort
     assert hints.get("repository") is OrderRepositoryPort
-
-    # The application itself is neutral: it takes the ports and has no
-    # paper/live branch, because the difference belongs to the adapter.
-    from us_quant.trading.application.execution import ExecutionApplication
-
-    source = inspect.getsource(ExecutionApplication.__init__)
-    for forbidden in ("paper", "live", "IBKR", "ibkr"):
-        assert forbidden not in source, forbidden
 
 
 # =====================================================================
@@ -1612,12 +1610,13 @@ def test_fa19b_a_future_live_path_must_reuse_the_single_authority_stack() -> Non
     ``BrokerExecutionPort`` -- it does not fork the deterministic
     ``Risk → Execution`` stack into a parallel one.
 
-    So this asserts class names, not file names: a class whose name ends in
-    ``RiskApplication`` / ``ExecutionApplication`` / ``TradingRuntime`` must be
-    the canonical one.  ``IBKRExecutionAdapter`` and a future
-    ``IBKRLiveExecutionAdapter`` are untouched by that rule -- they implement the
-    port, which is exactly the extension point this phase locked (FA20).  Adding
-    a Live adapter keeps this green; adding a ``LiveRiskApplication`` does not.
+    So this asserts class names, not file names: any class whose name *contains*
+    an authority name must be the canonical one.  ``IBKRExecutionAdapter`` and a
+    future ``IBKRLiveExecutionAdapter`` are untouched by that rule -- they
+    implement the port, which is exactly the extension point this phase locked
+    (FA20).  Adding a Live adapter keeps this green; adding a
+    ``LiveRiskApplication`` -- or a ``RiskApplicationV2`` that forks the same
+    job under a different spelling -- does not.
     """
 
     canonical = {
@@ -1635,7 +1634,12 @@ def test_fa19b_a_future_live_path_must_reuse_the_single_authority_stack() -> Non
             if not isinstance(node, ast.ClassDef):
                 continue
             for authority in canonical:
-                if node.name.endswith(authority):
+                # ``in`` rather than ``endswith``: a fork that renames itself
+                # ``RiskApplicationV2`` or wraps itself as
+                # ``LiveRiskApplication`` is the same second authority.  No
+                # non-canonical class in the tree contains an authority name
+                # today, so this is strictly stronger with no false positive.
+                if authority in node.name:
                     definitions[authority].append(f"{module}::{node.name}")
 
     for authority, owner in canonical.items():

@@ -6024,7 +6024,7 @@ scanner ranking、backtest math —— 一律未改。
 
 ```text
 tests/test_final_architecture_closure.py              40 个跨层 guard case（34 function）
-scripts/mutation_final_architecture_closure.ps1       33 个跨层 mutant（全 RED）
+scripts/mutation_final_architecture_closure.ps1       35 个跨层 mutant（全 RED）
 docs/TRADING_ARCHITECTURE_V2.md §8.27                 Final Architecture Closure + evidence matrix
 ```
 
@@ -6044,10 +6044,10 @@ controller 行为。**没有** `assert "IBKR" not in entire repo`（adapters / c
 ### 36.5 Mutation 结果
 
 ```text
-FAC mutant        33 / 33 RED      0 survived / 0 harness-error
+FAC mutant        35 / 35 RED      0 survived / 0 harness-error
 historical mutant 165 / 165 RED    0 not-caught
                   e2 13 · e3 41 · e4 11 · F1 14 · F2 22 · G1 17 · G2-A 12 · G2-B 35
-aggregate         198 / 198 RED
+aggregate         200 / 200 RED
 ```
 
 historical 165 全部 RED，**没有**因 Final Closure 的改动而需要重锚（没有删 mutant、

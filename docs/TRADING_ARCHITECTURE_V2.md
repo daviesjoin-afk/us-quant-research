@@ -2941,7 +2941,7 @@ Strategy Evolution / AI assistance 时，不需要绕开或重写现有安全边
 
 原则是 **AUDIT FIRST**：先扫现状、再锁 invariant、只在发现真实 defect 时修。不按 LOC
 优化，不为减少文件数合并 capability，不为"统一"建立 global manager。因此本轮
-**新增 40 条跨层 guard case + 33 个跨层 mutant + 同一 immutable-version 缺陷的三个真实漏洞修复**，没有搬动任何
+**新增 40 条跨层 guard case + 35 个跨层 mutant + 同一 immutable-version 缺陷的三个真实漏洞修复**，没有搬动任何
 capability 的 owner。
 
 #### 8.27.1 Audit 1 — import / layer dependency graph
@@ -3092,7 +3092,12 @@ adapter 本来就是路线目标，把它命名成 `trading/adapters/ibkr/live_e
 invariant：全树中 `RiskApplication` / `ExecutionApplication` / `TradingRuntime` 各自
 **恰好一个**定义，且就是 canonical owner（按**类名**而非文件名）。因此未来新增
 `IBKRLiveExecutionAdapter` 保持 GREEN（它实现 port，正是本轮锁定的 extension point），
-而新增 `LiveRiskApplication` 会让它 RED。`Environment.LIVE` 只是 domain 词汇值。
+而新增 `LiveRiskApplication`（或改名成 `RiskApplicationV2` / `PaperRiskApplication` 的
+同职责分叉）会让它 RED —— 匹配用的是 `in` 而非 `endswith`，因为换拼写的 fork 是同一份
+第二 authority；当前树中没有任何非 canonical 类名包含这些 authority 名，所以这个更强的
+判定没有 false positive。已实测：`LiveRiskApplication` / `RiskApplicationV2` /
+`PaperRiskApplication` → RED，合法 `IBKRLiveExecutionAdapter` → GREEN。
+`Environment.LIVE` 只是 domain 词汇值。
 
 本轮未加 Live adapter、Live port、真钱开关、Live credential 或 production scheduler ——
 这是 **PR scope fact**（`git diff --name-only` 可查），不是永久 architecture
@@ -3200,8 +3205,8 @@ invariant，且行为可完全证明兼容（behavior test + mutation + migratio
 被复制的 governed version（生产路径也没有用到它），因此本 PR 不重新设计 Python 的
 collection 语义；FA26b 把这个边界断言下来，避免 docstring 漂移。
 
-因此 FAC collected case 37 → **40**，FAC mutant 31 → **33**（全 RED），
-aggregate 196 → **198**。
+因此 FAC collected case 37 → **40**，FAC mutant 31 → **35**（全 RED），
+aggregate 196 → **200**。
 
 #### 8.27.7 Audit 7–9 — selection / desktop residual / AI boundary
 
@@ -3260,11 +3265,11 @@ aggregate 196 → **198**。
 | Runtime Events owner | `RuntimeEventsOrchestrator` | 窗口自持 runtime event 状态 | `tests/test_desktop_runtime_events_orchestration_architecture.py` | F1 M1–M14 | ✅ |
 | Settings owner | `SettingsOrchestrator` | 窗口自持 settings 呈现状态 | `tests/test_desktop_settings_orchestration_architecture.py` | F2 M1–M22 | ✅ |
 | Generic task owner | `DesktopTaskController` | 窗口保留 `workers` alias | `tests/test_desktop_composition_closure_architecture.py::test_the_window_holds_no_worker_collection_alias` | G1 M 组 | ✅ |
-| Future Live extension seam | `composition/execution.py` | Live 另建 risk/execution 栈（`LiveRiskApplication` / `LiveExecutionApplication` / `LiveTradingRuntime`） | FAC `test_fa20_the_execution_builder_accepts_the_port_abstraction`、`test_fa19b_a_future_live_path_must_reuse_the_single_authority_stack`、`test_fa19c_paper_and_live_differences_are_not_a_mode_branch` | FAC M20、M21 | ✅ 长期 invariant（seam 已锁；Live 未实现） |
+| Future Live extension seam | `composition/execution.py` | Live 另建 risk/execution 栈（`LiveRiskApplication` / `LiveExecutionApplication` / `LiveTradingRuntime`） | FAC `test_fa20_the_execution_builder_accepts_the_port_abstraction`、`test_fa19b_a_future_live_path_must_reuse_the_single_authority_stack`、`test_fa19c_paper_and_live_differences_are_not_a_mode_branch` | FAC M20、M20b、M20c、M20d | ✅ 长期 invariant（seam 已锁；Live 未实现） |
 | Future AI boundary | 本文档 §8.27.7 | AI 拿 broker port / concrete adapter / 写 `OrderIntent` / bypass risk / 改 lease / 自签 gate | **documented boundary；executable package guard deferred until an AI integration package actually exists**（当前无 AI package，故无可针对的 module guard） | — | ✅ 仅文档化约束，未实现 |
 
 FAC collected test case 总数 **40**（34 个 test function，参数化展开后 40 个 case），
-FAC mutant 总数 **33**（全 RED），historical mutant **165**（全 RED），aggregate **198**。
+FAC mutant 总数 **35**（全 RED），historical mutant **165**（全 RED），aggregate **200**。
 
 设计依据见 `DESKTOP_DECOMPOSITION.md` §36。
 

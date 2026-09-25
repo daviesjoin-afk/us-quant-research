@@ -683,6 +683,16 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
     ``models.py`` holds the immutable credential-action contract, ``queries.py``
     the pure rules (the save decision, the status line, the draft/preferences
     mappings, the storage view) and ``orchestrator.py`` the sequencing.
+
+    ``orchestration/strategy/`` arrived with G2-A: the strategy governance
+    route's sequencing -- the catalogue read that repaints the page, the clone
+    adapter, the lifecycle transition and the ``STATUS_CHANGE`` runtime event --
+    moved out of ``MainWindow`` into ``StrategyGovernanceOrchestrator``.
+    ``models.py`` holds one immutable value (the runtime event the window
+    routes), ``queries.py`` the pure rules (the clone-parameter adapter and the
+    three-branch evidence notice) and ``orchestrator.py`` the governance
+    commands; it never touches the runtime selection service, so a governance
+    view selection and a runtime selection stay two different things.
     """
 
     desktop_v2 = _SRC / "desktop_v2"
@@ -748,6 +758,10 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "orchestration/system/settings/models.py",
         "orchestration/system/settings/orchestrator.py",
         "orchestration/system/settings/queries.py",
+        "orchestration/strategy/__init__.py",
+        "orchestration/strategy/models.py",
+        "orchestration/strategy/orchestrator.py",
+        "orchestration/strategy/queries.py",
         "orchestration/tasking.py",
         "pages/__init__.py",
         "pages/account.py",

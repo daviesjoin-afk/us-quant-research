@@ -838,6 +838,14 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
     service and the credential service at once, which is the God object in a new
     costume.  That absence is asserted in
     ``tests/test_desktop_runtime_events_orchestration_architecture.py``.
+
+    ``strategy/`` arrived with G2-A: the strategy governance route's sequencing
+    -- the catalogue read that repaints the page, the clone adapter, the
+    lifecycle transition and the ``STATUS_CHANGE`` runtime event -- moved off
+    ``MainWindow``.  It is a capability directory like ``market`` and
+    ``account``, and it owns no second truth: ``StrategyApplication`` stays the
+    catalogue authority, and the governance path never touches the runtime
+    selection service.
     """
 
     children = {
@@ -847,6 +855,7 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
     }
     # ``dashboard`` arrived with G1: it owns the Dashboard page's render and
     # its retained chart fact, and imports no other orchestrator.
+    # ``strategy`` arrived with G2-A: the strategy governance capability.
     assert children == {
         "market",
         "account",
@@ -855,6 +864,7 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
         "paper",
         "system",
         "dashboard",
+        "strategy",
     }, children
 
     # The route aggregate must stay an aggregate: a capability-level

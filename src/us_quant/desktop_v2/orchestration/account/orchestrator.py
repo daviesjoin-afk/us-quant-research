@@ -137,6 +137,18 @@ class AccountOrchestrator(QObject):
 
     # -- inputs the composition root pushes in ---------------------------
 
+    def set_notice(self, text: str) -> None:
+        """Display the finished notice text another capability published.
+
+        The parameter is the *final* string: this method accepts nothing that
+        would let it interpret a capability's domain (a ``StrategyVersion``
+        here would make the account route a strategy owner).  Whoever has a
+        finished sentence for the notice strip hands it over; the account
+        page stays the only painter of it.
+        """
+
+        self._page.set_notice(text)
+
     def set_presentation_inputs(
         self, inputs: AccountPresentationInputs
     ) -> None:

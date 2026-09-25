@@ -5490,12 +5490,23 @@ e2/e3/e4/F1/F2 五个历史 harness 在 G1 diff 上重跑全部 0 not-caught。
 * **C cross-capability shared canonical state**：`research_scenario_capital`（七个消费者，
   canonical owner 是 state object 本身）——按设计保留；
 * **D generic runtime infrastructure**：`runtime_supervisor`、`task_controller`——本轮收敛完毕；
-* **E transitional / suspicious**：本轮清零（`workers`、`_closing`、`_dashboard_chart_view`）。
+* **E transitional / suspicious**：本轮清零了三处（`workers`、`_closing`、
+  `_dashboard_chart_view`）——但这**不等于**窗口只剩合法 composition。残留在窗口的
+  route-specific ownership 是真实存在的，它们构成 G2 的对象：
 
-Strategy / Risk / Execution / AutoQuant 跨 workflow preparation 逐项审视后判定为**合法
-composition**（输入是 capability 已发布的 finished fact，不做 business 推理、不持第二份 state、
-不 render source page），作为 composition bridge 保留；没有任何一项需要 G2。**G2 是否需要由
-本轮 residual audit 决定：当前 inventory 显示不需要。**
+**G2 candidates（本轮如实列出，不在 #55 实现）：**
+
+* **Strategy governance**：`_strategy_clone_requested`、`_strategy_transition_requested`、
+  `_refresh_strategy_page`，以及 `StrategyApplication → StrategyPage.render` 的窗口直 render；
+* **Execution / AutoQuant**：`_launch_busy`、`_channel_check_inflight`、`auto_quant_candidates`、
+  candidate preparation、channel probe sequencing，以及 `ExecutionPage` 的窗口直 render
+  （`render` / `render_candidates` / `render_context` / `render_execution_health` /
+  `render_preflight`）与 control presentation；
+* **Risk**：仅列为 G2 audit item——若确认只有 read-only 初始渲染且无独立 runtime / intents，
+  不预先承诺建立 `RiskOrchestrator`。
+
+因此路线状态更正为：**MainWindow Composition Closure：G1 Generic Runtime / Shell ✅；
+G2 Strategy Governance + Execution/AutoQuant residual orchestration ⏭（required）**。
 
 ### 33.8 零 diff 与判据
 
@@ -5507,7 +5518,9 @@ promotion、research / scanner 算法全部未动；`RuntimeSupervisor` 的公�
 判据：worker collection 与 shutdown admission 各只有一个 owner；refused close 后 admission 能
 恢复、shutdown-essential 仍可运行；closeEvent 只做 composition 且 Paper 安全判定只来自
 `prepare_shutdown()`；Dashboard render 唯一 caller；Gateway probe 定性为 shell diagnostic；F1/F2
-无回退；无 god object；无第二份 capability truth。**本轮不声称 "MainWindow Composition Closure
-COMPLETE"（G2 与否待本轮 review 后定）与 "Final Architecture Closure complete"。**
+无回退；无 god object；无第二份 capability truth。**MainWindow Composition Closure：
+G1 Generic Runtime / Shell ✅（本 PR）；G2 Strategy Governance + Execution/AutoQuant
+residual orchestration ⏭ required（G2 candidates 见 §33.7）。本轮不声称
+"MainWindow Composition Closure COMPLETE" 与 "Final Architecture Closure complete"。**
 
 

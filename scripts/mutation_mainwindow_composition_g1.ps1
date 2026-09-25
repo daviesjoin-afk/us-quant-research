@@ -80,6 +80,7 @@ $guards = Join-Path $projectRoot "tests/test_desktop_composition_closure_archite
 $teardown = Join-Path $projectRoot "tests/test_desktop_runtime_teardown.py"
 $tasks = Join-Path $projectRoot "tests/test_desktop_tasks.py"
 $f1 = Join-Path $projectRoot "tests/test_desktop_runtime_events_orchestration_architecture.py"
+$runtimeEventsWiring = Join-Path $projectRoot "tests/test_desktop_v2_runtime_events_wiring.py"
 $dashboard = Join-Path $projectRoot "tests/test_desktop_dashboard_orchestrator.py"
 $timerSeam = Join-Path $projectRoot "tests/test_desktop_runtime_events_timer_seam.py"
 $wiring = Join-Path $projectRoot "tests/test_desktop_v2_dashboard_wiring.py"
@@ -226,6 +227,22 @@ $mutations = @(
         repl = "        self.shadow_orchestrator.shutdown()`n        _mutant_pending = self.market_orchestrator._stop_pending"
         tests = @($guards)
         select = @("-k", "reach_no_private_member")
+    },
+    @{
+        name = "M17 the started-task notification moves back before start()"
+        file = $desktopPath
+        # The count the Runtime Events card draws is ``active_count`` (running
+        # workers), and a real QThread is not running until ``start()`` flips
+        # it.  Sending the "task started" notification before ``start()`` -- the
+        # pre-fix order this round got wrong -- repaints the card with 0 and
+        # leaves it there for the whole task, because this path sends no second
+        # notification.  The deterministic lifecycle test is the killer: its
+        # fake flips ``running`` exactly in ``start()``, so the pre-start
+        # repaint reads 0 and the ``card == 1`` assertion fails.
+        find = "        worker\.start\(\)\r?\n        if hasattr\(self, `"runtime_events_orchestrator`"\):\r?\n            self\.runtime_events_orchestrator\.notify_task_count_changed\(\)\r?\n        return True"
+        repl = '        if hasattr(self, "runtime_events_orchestrator"):' + "`n" + '            self.runtime_events_orchestrator.notify_task_count_changed()' + "`n" + '        worker.start()' + "`n" + '        return True'
+        tests = @($runtimeEventsWiring)
+        select = @("-k", "task_lifecycle_republishes_active_task_count")
     }
 )
 

@@ -3903,11 +3903,9 @@ class MainWindow(QMainWindow):
             return False
         worker = TaskThread(task, resource_group=resource_group)
         self.task_controller.register(worker)
-        # The count card is repainted through the capability that draws it.  The
-        # task's lifecycle -- admission, registration, teardown -- is unchanged
-        # and still entirely the window's.
-        if hasattr(self, "runtime_events_orchestrator"):
-            self.runtime_events_orchestrator.notify_task_count_changed()
+        # Every signal is connected before start(): an extremely short task may
+        # emit its completion before the event loop runs again, and a slot
+        # connected afterwards would miss it.
         worker.progress.connect(self._log)
         if on_failure is None:
             worker.failed.connect(self._task_failed)
@@ -3923,7 +3921,14 @@ class MainWindow(QMainWindow):
             lambda: self._finish_task(worker, on_finished)
         )
         self._log(start_message)
+        # ``start()`` first, notification second: the count the card draws is
+        # ``active_count`` (running workers), and a real QThread is not running
+        # until start() flips it.  Notifying before start would repaint the
+        # card with 0 and leave it there for the whole task -- this path sends
+        # no second notification.
         worker.start()
+        if hasattr(self, "runtime_events_orchestrator"):
+            self.runtime_events_orchestrator.notify_task_count_changed()
         return True
 
     def _finish_task(

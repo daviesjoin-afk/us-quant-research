@@ -2738,10 +2738,16 @@ shutdown 12 项（含 refused-close 后 admission 恢复、stuck worker 重试�
 
 **G1 后的 residual inventory**：A composition dependencies / B shell presentation（badges、
 status label、theme）/ C 共享 canonical state（`ResearchScenarioCapitalState`）/ D generic
-runtime（supervisor、task controller）之外，E transitional state 清零。Strategy / Risk /
-Execution / AutoQuant preparation 逐项判定为合法 composition bridge 保留。**G2 是否需要由
-residual audit 决定：当前 inventory 显示不需要；本轮不声称 MainWindow Composition Closure
-COMPLETE 与 Final Architecture Closure complete。**
+runtime（supervisor、task controller）之外，本轮移除的 E 类是 `workers` / `_closing` /
+`_dashboard_chart_view`——但窗口仍持有 route-specific ownership，如实列为 **G2 candidates**：
+Strategy governance（`_strategy_clone_requested` / `_strategy_transition_requested` /
+`_refresh_strategy_page` / `StrategyApplication → StrategyPage.render` 窗口直 render）、
+Execution / AutoQuant（`_launch_busy` / `_channel_check_inflight` / `auto_quant_candidates` /
+candidate preparation / channel probe sequencing / `ExecutionPage` 的窗口直 render 与 control
+presentation）；Risk 仅列为 G2 audit item（若只有 read-only 初始渲染且无独立 runtime /
+intents，不预先承诺 `RiskOrchestrator`）。因此 **G2 = Strategy Governance +
+Execution/AutoQuant residual orchestration，为 required**；本轮不声称 MainWindow
+Composition Closure COMPLETE 与 Final Architecture Closure complete。
 
 设计依据见 `DESKTOP_DECOMPOSITION.md` §33。
 
@@ -3527,7 +3533,8 @@ v2O-F1 Runtime Events orchestration  ✅ 已完成（§8.22）
 v2O-F2 Settings orchestration        ✅ 已完成（§8.23）
 v2O-F System                         ✅ COMPLETE（Gateway probe 重审定性，见 §8.24）
 G1 MainWindow composition closure    ✅ 已完成（generic runtime / shell）
-G2 / Final Architecture Closure      ⏭ 由 G1 residual audit 决定
+G2 Strategy Governance + Execution/AutoQuant residual orchestration ⏭（required）
+Final Architecture Closure           ⏭ G2 之后
 ```
 
 维护导航：`docs/DESKTOP_CAPABILITY_MAP.md`（capability → truth owner /
@@ -3669,7 +3676,8 @@ v2O-F1 Runtime Events orchestration                      ✅ 已完成（§8.22�
 v2O-F2 Settings orchestration                            ✅ 已完成（§8.23）
 v2O-F System                                             ✅ COMPLETE（Gateway probe = shell diagnostic）
 G1 MainWindow composition closure                        ✅ 已完成（§8.24）
-G2（是否需要）/ Final Architecture Closure                ⏭ 由 residual audit 决定
+G2 Strategy Governance + Execution/AutoQuant residual orchestration ⏭（required）
+Final Architecture Closure                                ⏭ G2 之后
 ```
 
 Shadow Framework v2 刻意没有做的事，留给更后面：

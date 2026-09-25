@@ -200,6 +200,41 @@ def test_a_real_click_resolves_by_event_id_not_row_index(
 # -- the task count is read from the live provider ----------------------
 
 
+class _FakeSignal:
+    """A Qt-signal stand-in: records slots, never emits by itself."""
+
+    def __init__(self) -> None:
+        self._slots: list = []
+
+    def connect(self, slot) -> None:
+        self._slots.append(slot)
+
+
+class _FakeTaskThread:
+    """A deterministic task lifecycle, shaped like the real ``TaskThread``.
+
+    ``running`` starts False and only ``start()`` flips it -- exactly the
+    timing of a real QThread.  No thread, no scheduling: the count transitions
+    the Runtime Events card draws are fully synchronous and reproducible.
+    """
+
+    def __init__(self, task, resource_group: str = "research") -> None:
+        self.task = task
+        self.resource_group = resource_group
+        self.running = False
+        self.progress = _FakeSignal()
+        self.failed = _FakeSignal()
+        self.cancelled = _FakeSignal()
+        self.succeeded = _FakeSignal()
+        self.finished = _FakeSignal()
+
+    def isRunning(self) -> bool:
+        return self.running
+
+    def start(self) -> None:
+        self.running = True
+
+
 def test_task_lifecycle_republishes_active_task_count(
     monkeypatch, tmp_path
 ) -> None:
@@ -208,19 +243,19 @@ def test_task_lifecycle_republishes_active_task_count(
     This drives the window's own ``_start_task`` / ``_worker_finished`` and
     reads the count back off the rendered page, so deleting either lifecycle
     notification turns the test red instead of merely asserting a call happened.
+
+    The lifecycle is a deterministic fake whose ``running`` starts False and
+    flips only in ``start()`` -- the real QThread timing.  That is the point:
+    the "task started" notification must be sent *after* ``start()``, because
+    the card draws ``active_count`` and a pre-start notification would paint 0
+    with no second notification to correct it.  The ``card == 1`` assertion
+    below fails if that notification is moved back before ``start()``.
     """
 
     window = _window(monkeypatch, tmp_path)
     try:
-        # The count is ``active_count`` (G1): only running workers count, so
-        # the lifecycle under test needs a worker that reports running.  The
-        # start itself is still suppressed -- the test drives the lifecycle by
-        # hand rather than racing a real thread.
         monkeypatch.setattr(
-            "us_quant.desktop.TaskThread.start", lambda self: None
-        )
-        monkeypatch.setattr(
-            "us_quant.desktop.TaskThread.isRunning", lambda self: True
+            "us_quant.desktop.TaskThread", _FakeTaskThread
         )
         _force_immediate(window)
         assert window.runtime_events_page.task_card.value_label.text() == "0"
@@ -234,6 +269,9 @@ def test_task_lifecycle_republishes_active_task_count(
         assert accepted is True
         assert (
             window.runtime_events_page.task_card.value_label.text() == "1"
+        ), (
+            "the started task is not on the card -- the notification was sent "
+            "before start() (active_count is still 0 there) or not sent at all"
         )
 
         worker = window.task_controller.running_workers()[0]
@@ -243,6 +281,11 @@ def test_task_lifecycle_republishes_active_task_count(
             window.runtime_events_page.task_card.value_label.text() == "0"
         )
     finally:
+        # A fake worker left registered-and-running would make the window's
+        # close path see an active task and block the suite on a dialog no
+        # offscreen run can answer -- release every straggler first.
+        for worker in window.task_controller.running_workers():
+            window.task_controller.finish(worker)
         window.close()
         window.deleteLater()
 

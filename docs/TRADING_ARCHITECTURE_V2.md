@@ -3345,6 +3345,166 @@ FAC mutant **42**（全 RED），historical mutant **165**（全 RED），aggreg
 
 设计依据见 `DESKTOP_DECOMPOSITION.md` §36。
 
+### 8.28 Paper Autonomous Trading v1-A：persistent autonomy control plane
+
+本轮的产物不是一个自动交易系统，而是一个**控制面**。它只回答一个问题——"操作者希望
+自动系统处于什么状态"——并把答案做成可持久化、可审计、crash/restart 后可恢复的事实。
+它**不**启动 Paper、**不**调用 broker、**不**下单、**不**创建 scheduler loop，也不依赖
+任何 Desktop 按钮。因此本轮只能标记为 v1-A；`Paper Autonomous Trading v1` 整体
+**NOT COMPLETE**（见 §14 路线状态）。
+
+#### 8.28.1 canonical truth
+
+| 事实 | Canonical owner | 控制面**不**拥有 |
+| --- | --- | --- |
+| operator autonomy intent | `PaperAutonomyApplication`（唯一 write authority）+ `PaperAutonomyRepositoryPort`（唯一 persistence 边界） | — |
+| Paper 会话阶段 | `PaperWorkflowController` | `PaperWorkflowPhase` |
+| Paper desktop 时序 | `PaperOrchestrator` | 启动 / 停止 / finalization 时序 |
+| 执行租约 | shared `ExecutionLeaseManager` | `ExecutionLease` |
+| 候选 shortlist | `ExecutionOrchestrator` | `candidate_symbols` / 扫描 / 打分 / 资金定量 |
+| runtime 策略选择 | `StrategySelectionService`（`AUTO_ROTATION`） | `strategy_version_id` |
+| 账户 / 券商事实 | `AccountOrchestrator` / broker adapter | positions / open orders / portfolio |
+
+允许持久化的只有 operator intent 本身：mode、kill-switch latch、revision、operator
+reason、config revision、autonomous action ledger、retry/backoff bookkeeping、
+heartbeat/checkpoint、last attempted action identity。以上第二列的任何一项都继续
+**现读** canonical owner。
+
+#### 8.28.2 目录与分层
+
+```text
+src/us_quant/trading/domain/paper_autonomy.py
+src/us_quant/trading/ports/paper_autonomy_repository.py
+src/us_quant/trading/application/paper_autonomy.py
+src/us_quant/trading/adapters/sqlite/paper_autonomy_repository.py
+src/us_quant/trading/composition/paper_autonomy.py
+```
+
+刻意**没有**新建 `trading/autonomy/` 这一层：绕过既有
+domain / ports / application / adapters / composition 的平行层会让 §8.27 的 import
+allowlist 失去意义。domain 层只 import 自身，ports 层只 import domain，application 层
+只 import domain + ports（因此 `trading/application/paper_autonomy.py` 的
+`us_quant.*` 可达面就是两个模块，由 guard 逐条断言）。operator CLI 只依赖
+domain / ports / composition，不直接 import application——与本仓库既有的
+CLI 约定一致。
+
+`domain/paper_autonomy.py` 是纯值模块：`PaperAutonomyMode`（`disabled` / `enabled` /
+`paused`）、`PaperAutonomyIntent`、`PaperAutonomyEventKind`、`initial_intent()`。
+`PaperAutonomyIntent` 的 `__post_init__` 强制三条 invariant：revision 非负、
+`updated_at` 必须带时区、reason 非空，以及**latched ⇒ mode 不是 ENABLED**。
+最后一条是防御纵深而不是文档约定——"把 latch 清掉就能复活自动交易"这个失败模式，
+在值层面就构造不出来。
+
+`application/paper_autonomy.py` 是唯一 write authority，实现 §8.28.4 / §8.28.5 的
+transition 与 revision 规则；repository **只存**，不做任何 transition 判断。
+
+#### 8.28.3 默认与 fail-closed
+
+```text
+NO ROW            → DISABLED, kill=false, revision=0
+corrupt mode      → PaperAutonomyStoreUnreadable（绝不落到 ENABLED）
+corrupt latch     → PaperAutonomyStoreUnreadable
+corrupt timestamp → PaperAutonomyStoreUnreadable（naive 也不行）
+blank reason      → PaperAutonomyStoreUnreadable
+```
+
+`missing row` 是**真实状态**而不是被构造函数悄悄写掉的状态：空表读出来就是
+`initial_intent()`，第一次 CAS 才会插入。方向只有一边——读不出来的东西永远不会被
+猜成 `enabled`。
+
+SQLite adapter 的 CAS 是单个 `BEGIN IMMEDIATE` 事务（先取写锁再读 revision，然后
+UPSERT）：deferred 事务会先读后锁，两个写者可能都看到 revision *n* 并双双通过。单条
+UPSERT 表达不了"表为空才插入、否则 revision 相符才更新"——两条路径里必有一条不可达
+（已实测）。8 个并发写者的实测结果是 1 胜 7 冲突。
+
+#### 8.28.4 kill switch 语义
+
+```text
+engage_kill_switch()  ⟶  latched=true  AND  mode=DISABLED   （任何状态均可，原子）
+clear_kill_switch()    ⟶  只清 latch，mode 原样不动
+enable() while latched ⟶  refused，且不写 revision、不写 event
+```
+
+结论是 `kill → clear` 必须停在 `DISABLED`：只有 kill 自己移动过 mode，清 latch 才
+不会把自动交易还回去。恢复自动运行需要**第二次**显式 `enable()`。kill 不是
+"跳过 finalization 安全性的权限"，它是 "stop requesting authority"；A1 阶段它只改变
+持久化事实，CLI 输出因此逐字写成 "kill switch latched; the autonomous runner will
+refuse new work"，绝不写 "positions flattened" / "session stopped"——A1 还没有执行层。
+
+#### 8.28.5 revision / stale writer
+
+所有 mutation 都必须携带 `expected_revision`，由 repository 做 compare-and-swap；
+陈旧写入被拒绝为 `PaperAutonomyConflict`，不是 last-write-wins。原因不是洁癖：这个
+值的写者将来会同时包括 Desktop、CLI、scheduler 与 operator shell，一个还停留在旧
+revision 的页面不能覆盖它之后才按下的 kill switch。application 侧的 revision 比对
+只负责**给出正确的理由**（"你的视图过期了" ≠ "这个 transition 非法"），真正使其原子
+的是 store 里的 CAS——guard 与 mutant 都按这个分工设计。
+
+#### 8.28.6 operator CLI（不依赖 Desktop 按钮）
+
+```text
+python -m us_quant paper-autonomy status
+python -m us_quant paper-autonomy enable      --reason "..."
+python -m us_quant paper-autonomy pause       --reason "..."
+python -m us_quant paper-autonomy disable     --reason "..."
+python -m us_quant paper-autonomy kill        --reason "..."
+python -m us_quant paper-autonomy clear-kill  --reason "..."
+```
+
+六个命令都是"先读当前 revision → 调 application mutation → 打印新 revision/state"。
+CLI 里没有任何到达 store 的路径：它不 import sqlite adapter，也不调用
+`load_intent` / `compare_and_swap_intent` / `append_event` / `recent_events`
+（结构 + 行为双向 guard）。拒绝返回 exit 2 且 `applied=false`，存储不可读返回 exit 9，
+并在非 paper 配置下直接拒绝。
+
+#### 8.28.7 本轮刻意不做的事
+
+- **不**把 `AutoLaunchPlan` 改造成 persistent intent：它的语义是"一次异步 Paper
+  launch attempt 的 immutable fingerprint"（attempt_id / strategy_version_id /
+  parameter_hash / candidate_symbols / requested_capital_limit），继续保持
+  launch-attempt identity。
+- **不**在 intent 里保存 `strategy_version_id` 作为 active strategy truth：未来
+  supervisor 每次准备/启动时现读 `StrategySelectionService` 的 `AUTO_ROTATION` 选择；
+  autonomy store 只保存"允许自治"，不保存"当前策略是谁"。
+- **不**设计 `TradingAutonomy(environment="paper"|"live")`，不加 `mode = PAPER|LIVE`，
+  不加 `broker_mode`：控制面带 Paper 前缀是有意的安全隔离线，未来 Live Autonomous
+  Trading 不能因为 enum 多一个成员就直接继承这套权限（guard 逐条断言三个模块里
+  不存在 `environment` / `broker_mode` 名字，且任何 `*Autonomy*` 类名必须以
+  `PaperAutonomy` / `SQLitePaperAutonomy` 开头）。
+- **不**创建 `AutonomyManager` / `TradingManager` / `GlobalSupervisorContext` /
+  `ServiceBag` / `AutomationContext`。
+- **不**在本轮做 supervisor / scheduler / recovery host / watchdog / action
+  idempotency：那是 v1-B，且必须从 v1-A merge 后的 main 重新开分支，**不**从本轮
+  feature branch 叠加。
+
+#### 8.28.8 验证
+
+| Invariant | Canonical owner | Forbidden bypass | Guard / test | Mutation | Status |
+| --- | --- | --- | --- | --- | --- |
+| autonomy intent 默认关闭 | `initial_intent()` | 缺失 / 损坏的值落到 ENABLED | `test_paper_autonomy.py::test_a_a_store_nobody_configured_is_disabled`、`::test_m_a_corrupt_stored_intent_is_never_read_as_enabled`；`test_paper_autonomy_architecture.py::test_pa9_…` | A1 M1、M12 | ✅ |
+| kill switch 是持久 latch | `PaperAutonomyApplication.engage_kill_switch` | 清 latch 即自动复活 / `enable()` 绕过 latch | `::test_h_enabling_while_latched_is_refused_and_writes_nothing`、`::test_i_clearing_the_latch_does_not_re_enable`、`::test_pa8_the_kill_switch_cannot_be_bypassed` | A1 M2、M3、M4 | ✅ |
+| revision / stale writer | `PaperAutonomyRepositoryPort.compare_and_swap_intent` | last-write-wins / 无 expected_revision | `::test_k_a_stale_writer_is_refused_and_changes_nothing`、`::test_n_concurrent_writers_produce_exactly_one_transition`、`::test_pa10_…` | A1 M5、M6 | ✅ |
+| 决策审计轨迹 | `PaperAutonomyApplication._write` → `append_event` | 接受 transition 但不记录 | `::test_b_…`、`::test_o_the_event_trail_replays_the_revisions_in_order` | A1 M7 | ✅ |
+| 单一 persistence adapter | `SQLitePaperAutonomyRepository` | 第二份 intent store（JSON / settings / 内存） | `::test_pa5_the_sqlite_store_is_the_only_intent_persistence` | A1 M8 | ✅ |
+| intent 不持有 runtime truth | `domain/paper_autonomy.py` | 持久化 candidate / strategy / phase / lease / broker 事实 | `::test_pa6_the_intent_carries_no_runtime_truth`、`::test_pa4_…`、`::test_pa3_…` | A1 M9、M10、M11 | ✅ |
+| Paper-only 隔离线 | module 命名 + 枚举成员 | 加 `environment` / `broker_mode` / LIVE 成员 | `::test_pa7_no_second_autonomy_authority_was_introduced`、`::test_pa7b_…` | —（结构 invariant） | ✅ |
+| operator CLI 只是 surface | `PaperAutonomyApplication` | CLI 直接读写 SQLite | `::test_p_the_cli_is_a_surface_and_not_a_second_authority` | A1 M13 | ✅ |
+| import 方向 | §8.28.2 的分层表 | domain/ports/application 越过 allowlist | `::test_pa1_…`、`::test_pa2_…`、`::test_pa3_…`、`::test_pa11_the_new_modules_are_inside_the_guarded_layers` | A1 M9 | ✅ |
+
+```text
+tests/test_paper_autonomy.py                        17 test function / 27 case
+tests/test_paper_autonomy_architecture.py           12 test function / 14 case
+scripts/mutation_paper_autonomy_a1.ps1              13 mutant / 13 RED / 0 survived
+                                                 / 0 harness-error
+```
+
+其中 v1-A mutation 里有两个值得记下的捕获方式：M2（kill 不移动 mode）被 domain 的
+`latched ⇒ not ENABLED` invariant 直接拦住——值层面构造不出来，所以是守卫而不是测试
+断言接住的；M8（store 自己决定存什么 mode）会被 restart 测试接住，因为读回来的
+latched+enabled 组合同样无法构造。M5（store 无视 expected_revision）由**并发**测试
+接住：application 的 revision 比对在同一读窗口内对所有写者都通过，只有 store 的 CAS
+能仲裁——这也正是"application 侧比对只是消息"这条设计的可执行证据。
+
 ## 9. 已删除的旧架构
 
 ```text
@@ -4301,7 +4461,28 @@ Closure vehicle                      = PR #58 / refactor/final-architecture-clos
 Final immutable baseline             = PR #58 merge commit recorded by Git history
 ```
 
-**下一阶段：Paper Autonomous Trading v1。** 之后依次是 Live-ready Execution Core、
+**下一阶段：Paper Autonomous Trading v1，已从 v1-A 开始（§8.28）。**
+
+```text
+Paper Autonomous Trading v1-A    ✅ 已完成（§8.28）persistent autonomy control plane
+Paper Autonomous Trading v1-B    ⏭ next  unattended supervisor / scheduler / recovery host
+Paper Autonomous Trading v1      NOT COMPLETE
+```
+
+`Paper Autonomous Trading v1` **不是** COMPLETE。v1-A 只建立了一个持久化控制面：它让
+"操作者希望自动系统处于什么状态"变成可持久化、可审计、crash/restart 后可恢复的事实，
+但**没有自动执行任何东西**——不启动 Paper、不连 broker、不下单、不创建 scheduler loop。
+因此文档里不会出现 "autonomous Paper trading COMPLETE"。
+
+v1-B 才把 operator intent 变成真正的 no-human-button Paper autonomous execution，且
+**不能复制** Paper lifecycle：supervisor 必须 Qt-free，只做 deterministic decision，
+通过窄 `PaperAutonomyExecutorPort` 请求既有 owner（`ExecutionOrchestrator` /
+`PaperOrchestrator` / `StrategySelectionService` / `MarketOrchestrator` /
+`AccountOrchestrator`）执行，最终仍必须走 canonical `PaperOrchestrator.start()` 并重跑
+它的 preflight；autonomous authorization 必须与 UI arm 分离，不能假装人点过确认框。
+v1-B 必须从 v1-A merge 之后的 main 重新开分支，不从 v1-A feature branch 叠加。
+
+之后依次是 Live-ready Execution Core、
 Small-capital Live Canary、Multi-strategy Portfolio Runtime、Strategy Lifecycle /
 Autonomous Evolution、AI Information & Decision Assistance、AI-assisted Strategy
 Evolution、Autonomous Quant Platform。
@@ -4316,6 +4497,8 @@ deterministic candidate refresh、safe pause/stop/shutdown、watchdog/health
 supervision、no human button dependency、full audit/event trail、operator kill
 switch、Paper-only hard gate。它仍然必须走
 `RiskApplication → ExecutionApplication → BrokerExecutionPort`，不绕开现有安全链。
+其中 **persistent autonomous intent/state 与 operator kill switch 已在 v1-A 完成**
+（§8.28）；其余仍属 v1-B 及以后，v1-A 一项都没有替它们做决定。
 
 Shadow Framework v2 刻意没有做的事，留给更后面：
 

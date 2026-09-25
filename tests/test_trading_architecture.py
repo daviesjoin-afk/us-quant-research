@@ -300,6 +300,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "common.py",
         "market.py",
         "orders.py",
+        "paper_autonomy.py",
         "risk.py",
         "session.py",
         "strategy.py",
@@ -311,6 +312,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "broker_execution.py",
         "market_data.py",
         "order_repository.py",
+        "paper_autonomy_repository.py",
         "strategy_repository.py",
     }
 
@@ -917,12 +919,12 @@ MARKET_DATA_ADAPTERS = _TRADING / "adapters"
 
 #: Adapter modules under ``trading/adapters`` that do NOT implement
 #: ``MarketDataPort``: the package inits, the shared transport state, the
-#: read-only account chain, the SQLite strategy repository, and -- since
-#: Execution v2 -- the execution chain (the IBKR order adapter, its gateway
-#: bridge, the SQLite order store and the two shared helpers the execution
-#: adapters use).  Listed by relative path so a new module in any of those
-#: packages cannot slip through the market-data surface guard by sharing a
-#: filename.
+#: read-only account chain, the SQLite strategy repository, the SQLite Paper
+#: autonomy store, and -- since Execution v2 -- the execution chain (the IBKR
+#: order adapter, its gateway bridge, the SQLite order store and the two shared
+#: helpers the execution adapters use).  Listed by relative path so a new module
+#: in any of those packages cannot slip through the market-data surface guard by
+#: sharing a filename.
 NON_MARKET_DATA_ADAPTER_MODULES = {
     "__init__.py",
     "market_data_state.py",
@@ -933,6 +935,7 @@ NON_MARKET_DATA_ADAPTER_MODULES = {
     "ibkr/execution.py",
     "ibkr/execution_gateway.py",
     "ibkr/support.py",
+    "sqlite/paper_autonomy_repository.py",
     "alpaca/__init__.py",
     "finnhub/__init__.py",
     "sqlite/__init__.py",
@@ -1472,6 +1475,7 @@ def test_only_composition_roots_wire_adapters_into_applications() -> None:
         "trading/composition/accounts.py",
         "trading/composition/execution.py",
         "trading/composition/market_data.py",
+        "trading/composition/paper_autonomy.py",
         "trading/composition/strategies.py",
     ], wiring_modules
 

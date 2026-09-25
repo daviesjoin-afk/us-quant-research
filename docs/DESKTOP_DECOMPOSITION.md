@@ -5472,11 +5472,14 @@ state 精确三项 / F1 与 F2 无回退 / 无 aggregate System orchestrator / �
 bridge 不 reach-through 私有成员。另收紧 Dashboard 既有 guard（窗口的 `dashboard_page` 允许面
 删除 `render`）与 F1 的 task-count 断言。
 
-`scripts/mutation_mainwindow_composition_g1.ps1`：**16 个 mutant 全部 RED**，0 survived，
+`scripts/mutation_mainwindow_composition_g1.ps1`：**17 个 mutant 全部 RED**，0 survived，
 0 harness-error（M1 worker alias / M2 count 冻结 / M3 admission 失效 / M4 豁免反转 / M5 拒绝后
 不开门 / M6 全部 disposition 都开门 / M7 丢 Shadow shutdown / M8 活线程上 accept / M9
 tolerate=False / M10 不写 runtime event / M11 closeEvent 读 phase / M12 gateway 第二 state /
-M13 建 GatewayOrchestrator / M14 窗口直接 render / M15 冻结 snapshot / M16 reach-through）。
+M13 建 GatewayOrchestrator / M14 窗口直接 render / M15 冻结 snapshot / M16 reach-through /
+M17 started-task notification 移回 `worker.start()` 之前——确定性 fake lifecycle regression
+RED：notification 在 start 前发布会把 Runtime Events 卡片刷成 `active_count == 0` 并保持到任务
+结束，fake 在 `start()` 里精确翻转 running，故计数断言失败）。
 e2/e3/e4/F1/F2 五个历史 harness 在 G1 diff 上重跑全部 0 not-caught。
 
 ### 33.7 G1 后的 residual ownership inventory

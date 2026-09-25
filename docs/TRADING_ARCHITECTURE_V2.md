@@ -2731,8 +2731,9 @@ orchestrator；Gateway probe 不进入（它是 shell badge，不是 Dashboard t
 
 **guards 与 mutation。**
 `tests/test_desktop_composition_closure_architecture.py` 20 条结构 guard +
-`scripts/mutation_mainwindow_composition_g1.ps1` 16 个 mutant 全部 RED（0 survived /
-0 harness-error）；e2/e3/e4/F1/F2 五个既有 harness 重跑 0 not-caught。行为测试：
+`scripts/mutation_mainwindow_composition_g1.ps1` 17 个 mutant 全部 RED（0 survived /
+0 harness-error）。M17：started-task notification 必须观察 `worker.start()` 之后的
+`active_count`——提前发布会把 task-count 卡片刷成 0 并保持到任务结束。e2/e3/e4/F1/F2 五个既有 harness 重跑 0 not-caught。行为测试：
 shutdown 12 项（含 refused-close 后 admission 恢复、stuck worker 重试且不 terminate、组件失败
 隔离且写 RUNTIME_SHUTDOWN_PARTIAL）、TaskController 8 项、DashboardOrchestrator 8 项。
 

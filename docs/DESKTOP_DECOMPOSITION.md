@@ -6050,6 +6050,12 @@ aggregate         196 / 196 RED
 historical 165 全部 RED，**没有**因 Final Closure 的改动而需要重锚（没有删 mutant、
 没有把 pattern miss 当 caught、没有注释掉 mutant）。
 
+**OCR review 发现的两个真实缺陷（同一修复内，已修）**：\dict.__init__\ 继承导致
+frozen mapping 可被 \__init__\ 重新填充（与 \list.__init__\ 在 frozen list 上打开的洞相同，
+现改为 \__new__\ 填充 + 首次 \__init__\ seal；刻意不防显式基类调用
+\dict.__setitem__\，那与 frozen dataclass 的 \object.__setattr__\ 边界相同）；
+以及 FAC test 文件一个未使用的 \MappingProxyType\ import。新增 FA26d + mutant M24b。
+
 FAC harness 的两个 harness-error 修复值得记录，因为它们是「脚本缺陷」而非「guard
 通过」的例子：M18 的初版替换删掉了 `if` 的 body，产生 SyntaxError；M1 的初版用
 `import us_quant.desktop` 作 forbidden target，结果触发**循环 import 导致 collection

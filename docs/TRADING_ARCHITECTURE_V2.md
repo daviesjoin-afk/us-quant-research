@@ -3135,6 +3135,23 @@ parameter_hash_for(version.parameters) != version.parameter_hash   # True
 invariant，且行为可完全证明兼容（behavior test + mutation + migration 证据齐备）。
 它**不是** Class C：不改变任何 trading safety 语义。
 
+**OCR review 发现并已修的两个真实缺陷（同一修复内）**：
+
+1. **`dict.__init__` 继承导致 frozen mapping 可被重新填充。** 只覆盖 mutating 方法不够：
+   `params.__init__({...})` 会重新填充一个本应 immutable 的 mapping —— 与
+   `list.__init__` 在 frozen list 上打开的洞完全相同。两个 frozen 类型现在都在
+   `__new__` 里填充、在第一次 `__init__` 时 seal，从而关闭该路径，同时
+   `copy.copy` / `copy.deepcopy` / `pickle` 与正常构造全部照旧。**刻意不防**的是
+   显式调用基类方法（`dict.__setitem__(params, k, v)` 仍会写入）：这与 frozen
+   dataclass 的边界相同（`object.__setattr__` 同样绕过 `frozen=True`），二者都是
+   对该类型契约的**故意逃逸**，而非本类型要挡的意外原地编辑；已写进 class docstring。
+   新增 FA26d 与 mutant M24b（锚在 `__new__` 的 `dict.__init__` 上，因此只匹配
+   `FrozenParameters` 的 seal —— `FrozenList` 的 seal 除该行外逐字节相同，
+   匹配两者的模式会同时变异两个类）。
+2. **FAC test 文件里一个未使用的 `MappingProxyType` import。**
+
+因此 guard 37 → **38**，FAC mutant 30 → **31**（全 RED），aggregate 195 → **196**。
+
 #### 8.27.7 Audit 7–9 — selection / desktop residual / AI boundary
 
 * **Audit 7（governance vs runtime selection）**：`StrategyApplication` 是 catalogue /

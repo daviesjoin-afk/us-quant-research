@@ -156,3 +156,5 @@ A capability owns its own state and its own page. `MainWindow` composes it,
 routes its published facts, and composes the generic task lifecycle through
 `DesktopTaskController` (the worker collection) and `RuntimeSupervisor` (shutdown
 admission and generic teardown) — nothing else.
+
+**Closure:** Composition Closure ✅ COMPLETE · Final Architecture Closure ✅ COMPLETE · G2-C NOT REQUIRED (§8.27).

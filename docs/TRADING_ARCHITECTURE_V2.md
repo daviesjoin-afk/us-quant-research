@@ -11,6 +11,20 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 > 为 `shadow/{models,store,engine,trade_logic}.py` + `config.py`；唯一 state
 > owner 仍是 `ShadowPaperEngine`，`ShadowTradeLogic` 只提供行为。见 §10.7 与 §14。
 >
+> **进度更新（MainWindow Composition Closure ✅ COMPLETE / Final Architecture
+> Closure ✅ COMPLETE）**：G2-A（§8.25）与 G2-B（§8.26）合并后，residual audit
+> 判据 A–G 合法 composition、H route-specific orchestration = 0、I duplicate
+> mutable truth = 0、J private reach-through = 0 全部成立，**G2-C = NOT
+> REQUIRED**。在此基础上本轮只做跨层 invariant 锁定，不再继续拆窗口：见 §8.24
+> 的收口落档与 §8.27 的 Final Architecture Closure（37 条跨层 guard / 30 个
+> 跨层 mutant / 一处真实 immutable-version defect 修复）。
+>
+> **Architecture Closure baseline SHA**：Final Architecture Closure PR 的 head
+> commit（见该 PR 描述；其 base 为 G2-B merge commit
+> `c78a27f95f482336383282b94e6c877030df6b77`）。**下一阶段**：
+> Paper Autonomous Trading v1。**尚未开始**：Live ready、autonomous trading、
+> strategy evolution、AI decision —— 本轮均未实现，也不声称完成。
+>
 > **进度更新（Trading Framework Closure v2C）**：正式 Trading Runtime 已完全
 > 脱离内部 Shadow 模拟器，正式 session config 与 Shadow overlay 分离，
 > 五个过渡 root module 已删除。见 §10.6 与 §14。
@@ -2747,8 +2761,33 @@ Execution / AutoQuant（`_launch_busy` / `_channel_check_inflight` / `auto_quant
 candidate preparation / channel probe sequencing / `ExecutionPage` 的窗口直 render 与 control
 presentation）；Risk 仅列为 G2 audit item（若只有 read-only 初始渲染且无独立 runtime /
 intents，不预先承诺 `RiskOrchestrator`）。因此 **G2 = Strategy Governance +
-Execution/AutoQuant residual orchestration，为 required**；本轮不声称 MainWindow
-Composition Closure COMPLETE 与 Final Architecture Closure complete。
+Execution/AutoQuant residual orchestration，为 required**。
+
+**收口结果（G2-B 合并后正式落档）。** G2-A（Strategy Governance，§8.25）与
+G2-B（Execution / AutoQuant，§8.26）均已合并，G2 residual inventory 已清空。
+按 residual audit 的 A–J 判据：
+
+```text
+A–G  合法 composition                                  ✅
+H    route-specific orchestration = 0                  ✅
+I    duplicate mutable truth = 0                       ✅
+J    private reach-through = 0                         ✅
+```
+
+因此 **MainWindow Composition Closure ✅ COMPLETE**，且 **G2-C = NOT REQUIRED**：
+residual audit 未发现任何仍由窗口拥有的 capability truth，也没有缺失的 owner，所以
+再拆一层只会是为拆分而拆分。特别地：
+
+* `_minute_recorded_keys` **不是** capability truth 的第二份 copy，而是 minute
+  persistence ingress 的 write-dedup 实现细节（`desktop.py` 内的一处去重集合，
+  上限 5000 条后整体清空），因此它不构成 residual；
+* `_sync_strategy_combo` / `_configure_combo_width` / `_configure_table_view` /
+  `_apply_legacy_style` 四个 helper 当前无 caller，记录为 **technical-debt cleanup**，
+  不属于 missing owner，**不因此创建 G2-C**。Final Architecture Closure 也不顺手删除
+  它们：它们不影响任何 invariant，删除属于另一轮 cleanup。
+
+Final Architecture Closure（§8.27）在此基线上只做**跨层 invariant 锁定**，
+不再继续拆窗口。
 
 设计依据见 `DESKTOP_DECOMPOSITION.md` §33。
 
@@ -2884,6 +2923,276 @@ launch confirmation 两态、stop 请求与两种 outcome 的呈现、**composit
 「bridge 跳过 Paper interlock」；M34 正是旧名字型 denylist 漏掉的那个 seam。
 
 设计依据见 `DESKTOP_DECOMPOSITION.md` §35。
+
+### 8.27 Final Architecture Closure
+
+前两轮（Composition Closure G1/G2）把 capability ownership 拆干净；本轮**不继续拆代码**，
+目标是证明现有架构已具备稳定、可维护、可审计的基础：之后新增 Paper autonomy / Live /
+Strategy Evolution / AI assistance 时，不需要绕开或重写现有安全边界。
+
+原则是 **AUDIT FIRST**：先扫现状、再锁 invariant、只在发现真实 defect 时修。不按 LOC
+优化，不为减少文件数合并 capability，不为"统一"建立 global manager。因此本轮
+**新增 37 条跨层 guard + 30 个跨层 mutant + 一处真实 defect 修复**，没有搬动任何
+capability 的 owner。
+
+#### 8.27.1 Audit 1 — import / layer dependency graph
+
+用 `ast.Import` / `ast.ImportFrom` 真实扫描 `src/us_quant/**`（284 个模块，相对 import
+按文件所属 package 解析），构建 `module -> imported module` 图，再按 package prefix
+判定方向。**没有**用 `grep "Manager"` 或 grep 几个 import 字符串来代替图。
+
+层间实际边（内部边计数）：
+
+```text
+trading.domain       -> trading.domain 10
+trading.ports        -> trading.domain 5
+trading.application  -> application 10, domain 14, ports 5, runtime.workflow_state 2
+trading.runtime      -> runtime 35, domain 16, application 4, ports 2
+trading.composition  -> adapters 7, application 7, runtime 5, domain 3, ports 3
+trading.adapters     -> adapters 15, domain 10, ports 6
+desktop_v2.pages     -> pages 93, domain 7
+desktop_v2.orch.     -> orch. 67, pages 28, domain 21, runtime 18, application 7, ports 3
+desktop_v2           -> orch. 67, pages 121, domain 28, runtime 20, application 7, ports 3
+desktop              -> orch. 20, pages 19, composition 7, domain 4, application 3, runtime 2
+```
+
+**结论：0 条 forbidden-import 违例。** 三条值得写明的边界事实：
+
+1. **domain 只 import domain**（10 条内部边，0 条向外）。Domain 不知道 IBKR、SQLite、
+   GUI、Desktop、Market capability 或 Paper orchestrator。
+2. **ports 只 import domain**（5 条边）。`BrokerExecutionPort` /
+   `BrokerAccountPort` / `OrderRepositoryPort` / `StrategyRepositoryPort` /
+   `MarketDataPort` 均未偷 import concrete adapter。
+3. **concrete adapter 只在 composition 装配**：`us_quant.trading.composition.{accounts,
+   execution,market_data,strategies}` 是唯一同时知道 application 与 adapter 的地方；
+   唯一的例外是 `us_quant.cli` / `us_quant.ibkr_history` 直接 import
+   `trading.adapters.ibkr.support`（一个无状态 helper，不是 execution 通道），
+   以及 `application/accounts.py` import `us_quant.ibkr`（`IBKRConnectionConfig`
+   这个连接契约值类型，既有文档化例外，见 `test_the_account_application_does_not_import_the_ibkr_config_module`）。
+
+`runtime -> application` 的 crossing point 恰为两个模块：`runtime/dispatch.py` 与
+`runtime/trading.py`。`application -> runtime` 存在**一条**反向边：
+`application/paper/{contracts,service}.py` import `runtime/workflow_state.py`。这条边是
+刻意的：`PaperWorkflowPhase` 词汇随 Runtime v2B 迁入 runtime 且其迁移表已冻结，Paper
+application service 读该枚举来描述自己的 lifecycle；它只命名一个 enum 与 port-shaped
+protocol（无 broker、无 store、无 execution surface），因此不可能成为 bypass。
+
+Guard 实现方式：`tests/test_final_architecture_closure.py` 的 FA1–FA4 用**白名单**而非
+黑名单——黑名单必须穷举每个禁名，于是没人想到的模块（例如 `us_quant.desktop_workers`，
+既不是 `us_quant.desktop` 也不是 `us_quant.desktop_v2`）会直接漏过去，而且每加一个新
+文件都要改某个清单。白名单下新文件在写下的那一刻就被覆盖，失败信息直接报出
+`source module -> target module`。这个差别不是理论：本轮 M1 的初版正是用
+`import us_quant.desktop` 作 mutant，结果是**循环 import 导致 collection error**而非干净
+的 assertion failure；换成 `us_quant.desktop_workers` 后暴露出黑名单确实漏项，
+于是 guard 改成白名单。
+
+#### 8.27.2 Audit 2 — Risk → Execution 不可绕过
+
+Canonical path 保持不变：
+
+```text
+StrategyRuntime  → TradeProposal
+TradingRuntime   → OrderDispatch
+OrderDispatch.evaluate()  → RiskApplication.evaluate()
+RiskDecision.approved 才能继续
+OrderDispatch.submit()    → ExecutionApplication.submit_approved()
+ExecutionApplication      → BrokerExecutionPort → concrete adapter
+```
+
+逐条证据：
+
+* **Strategy 不能生成 OrderIntent、不能拿 broker port。** `TradeProposal` 的字段经
+  `dataclasses.fields` 断言，无 `order_id` / `broker_order_id` / `client_order_id` /
+  `tif` / `outsideRth` / `transmit` / `risk_approved`（FA7）。`OrderIntent.create`
+  在整个 production 代码中只被 `application/execution.py` 调用。
+* **`OrderDispatch` 是 runtime 里唯一的 risk/execution 交界。** AST call-graph 断言
+  runtime 包内调用 `RiskApplication.evaluate` / `ExecutionApplication.submit_approved`
+  的模块集合恰好是 `{dispatch.py}`；且 session 侧不得出现
+  `self.execution.submit_approved(...)`（FA8，覆盖整个 runtime 包而非只看 `trading.py`）。
+* **TradingRuntime 持注入引用但交易提交走 `self.dispatch`**：`trading.py` 只有
+  `self.dispatch.run_entries(...)` / `self.dispatch.exit(...)` / `self.dispatch.policy()`，
+  提交路径唯一。
+* **`ExecutionApplication` 自己 fail closed**（第二道防线）：`_validate` 拒绝
+  `approved=False`、`approved_quantity <= 0`、`approved_quantity > proposal.desired_quantity`、
+  `requested_quantity != proposal.desired_quantity`（FA9）。**不因为 OrderDispatch 已检查
+  approved 就删 `_validate`** —— dispatch 只是 caller，caller 会错。FA9 用
+  `object.__new__` + `object.__setattr__` 构造 domain 自身拒绝的 verdict：其中
+  「`approved=False` 但 `approved_quantity=10`」与「超量批准」在
+  `RiskDecision.__post_init__` 就被拒，因此它们只能来自绕过 domain 的 caller ——
+  这正是这一层要挡的威胁，也让 FA9 成为该路径上唯一的防线。
+* **durable intent 顺序不变**：`reserve → record_intent → submit`，以共享 trace 的
+  **行为测试**断言（FA10），不靠字符串顺序。
+* **Submission uncertain 不自动 retry**：`ExecutionSubmissionUncertain` 被
+  `dispatch.submit` 捕获后转为 `halt=True` + 保留 pending intent，等待券商对账。
+
+#### 8.27.3 Audit 3 — Paper / Shadow execution XOR
+
+`WorkflowController.__init__` **只创建一个** `ExecutionLeaseManager()`，并把**同一个实例**
+交给 `ShadowWorkflowController` 与 `PaperWorkflowController`（FA11：断言
+`shadow._leases is paper._leases`，并 AST 断言 `ExecutionLeaseManager(...)` 构造恰好一处）。
+因此 SHADOW XOR PAPER 是**结构性互斥**，不是 UI convention。行为断言（FA12/FA13）：
+
+```text
+shadow.start() 取得 SHADOW → Paper begin_connecting 必须 WorkflowStateError
+Paper begin_connecting 取得 PAPER → shadow.start() 必须 WorkflowStateError
+```
+
+`release_paper(finalized=False)` 必须拒绝，且拒绝后 lease 仍为 PAPER；只有
+`finalized=True` 才允许释放（FA14）。窗口 / ExecutionOrchestrator / ShadowOrchestrator
+都**没有**自维护 `paper_active`/`shadow_active` XOR 布尔来替代 shared lease
+（FA25：窗口不持有 `ExecutionLease`）。
+
+#### 8.27.4 Audit 4 — Paper lifecycle / recovery / finalization / shutdown
+
+* **phase ownership**：`PaperWorkflowController` 是 Paper phase canonical owner；
+  `PaperOrchestrator` 是 desktop sequencing owner；`MainWindow` 只做 composition。
+  `desktop.py` 零 `PaperWorkflowPhase`（含 import alias 形式），Execution 包零
+  `workflow_state` import（FA17/FA18）。
+* **HALTED 无自动回 RUNNING 路径**：`_PAPER_TRANSITIONS[HALTED] == frozenset()`，
+  且 `HALTED -> RECONCILING` 与 `RECONCILING_READY -> RUNNING` 都必须
+  `explicit_reconciliation=True`；`RECONCILING -> RUNNING` 即使带 flag 也被拒
+  （必须先发布 evidence 到 RECONCILING_READY）（FA15/FA16）。
+* **finalization 先于 release**：`release_paper(finalized=...)` 的 finalized 门是唯一
+  释放路径；`finalize_if_safe()` 的证明逻辑与 lease release 顺序不变。
+* **shutdown 顺序不变**：`closeEvent` 依次
+  `RuntimeSupervisor.begin_shutdown` → 等 generic workers →
+  `PaperOrchestrator.prepare_shutdown` → safe 才 Shadow shutdown →
+  `RuntimeSupervisor.shutdown` → Market worker final exit check → `accept`。
+  `MANUAL_RECOVERY_REQUIRED` 时 `_cancel_close_drain()` 放开 admission（否则恢复任务
+  永远起不来）；`WAITING_FOR_FINALIZATION` / `OWNERSHIP_BLOCKED` **不** reopen
+  admission，也不强制释放 lease、不吞掉拒绝。仍禁 `QThread.terminate()`。
+
+#### 8.27.5 Audit 5 — Broker abstraction / future Live readiness
+
+本轮**不实现 Live**，只证明现有架构允许未来 Live adapter 复用同一 business path。
+`ExecutionApplication.__init__(repository: OrderRepositoryPort, broker: BrokerExecutionPort)`
+的抽象保持不变（FA20 用 `inspect.get_annotations(..., eval_str=True)` 断言参数注解**就是**
+这两个 port），且 `ExecutionApplication.__init__` 内无 `paper` / `live` / `IBKR`
+分支（FA20 后半）。具体 adapter construction 在 composition：
+`build_execution_candidate() -> IBKRExecutionAdapter`，
+`build_execution_application() -> ExecutionApplication(port)`。未来 Paper / Live 差异应是
+**不同 adapter / config / permissions**，而不是复制一套 risk/execution。FA19 断言
+`application/risk.py` 与 `application/execution.py` 零 concrete broker import；
+FA19b 断言当前不存在 `live*.py` 实现（`Environment.LIVE` 只是 domain 词汇值）。
+本轮未加 Live adapter、Live port、真钱开关、Live credential 或 production scheduler。
+
+#### 8.27.6 Audit 6 — Strategy immutable lifecycle（含 deep immutability defect）
+
+`StrategyApplication` 仍是 governance authority；repository 只存储、不判断 transition
+合法性 / gate 通过 / clone 许可。FA21：`register(gate_passed=True)` 被拒且**未写入任何
+版本**（当前无独立 gate evaluator，所以 self-attestation 必须拒绝）。FA22：clone 生成
+new `version_id` / new semver / `RESEARCH` / `gate_passed=False`。FA23：`STOPPED` 与
+`LEGACY_INVALIDATED` 的 `ALLOWED_TRANSITIONS` 均为空集；进入 `PAPER_SHADOW` 必须
+`gate_passed=True`；`LEGACY_INVALIDATED` 不能 clone。FA24：governance 行选择不能写
+runtime selection（`StrategySelectionService` 的写面只有自己的 `_selected`）。
+
+**本轮发现的真实 defect（Class B）：`StrategyVersion.parameters` 名义 immutable 实际可变。**
+`StrategyVersion` 是 `@dataclass(frozen=True, slots=True)`，但 `frozen=True` 只拒绝
+**属性重绑定**；`parameters` 是一个普通 `dict`，可以原地修改，而 `parameter_hash` 读自
+governed identity 而非重算。实测：
+
+```text
+type(version.parameters) -> dict
+version.parameters["fast"] = 999      # 成功
+parameter_hash_for(version.parameters) != version.parameter_hash   # True
+```
+
+即：一个已治理版本会变成"declared hash 不再描述自己 parameters"的**分裂身份**，
+而 governance audit trail 与 backtest artifacts 都以该 hash 为证据。这不是文档措辞问题，
+是 `frozen dataclass + mutable dict` ≠ immutable version。
+
+修复（窄、只动 representation，不动语义）：
+
+* `domain/common.py` 新增 `FrozenParameters(dict)` / `FrozenList(list)` /
+  `freeze_parameters(value)`。二者是 **dict/list 子类**，不是 `MappingProxyType`、也不是
+  tuple —— 现有消费方 `isinstance(value, dict)` / `isinstance(value, list)`、
+  与字面量 `==` 比较、`json.dumps` 都要继续工作，而 `MappingProxyType` 会破坏
+  `copy.deepcopy` 与 `pickle`（实测 `TypeError: cannot pickle 'mappingproxy' object`），
+  tuple 则会改变消费方看到的东西。
+* 递归冻结：浅冻结会仍然 alias strategy runtime 读取的
+  `market_reference_symbols` 列表，那正是 scalar-only 检查漏掉的一半。
+* 副本仍是冻结的（`__deepcopy__` / `__reduce__` 都返回 frozen 类型），否则不可变性
+  只持续到有人复制一次为止 —— 而 `strategy_launch_fact` 正是先 `copy.deepcopy` 再冻结。
+* `StrategyVersion.__post_init__` 的 `dict(self.parameters)` 改为
+  `freeze_parameters(dict(self.parameters))`。
+
+**兼容性证据**（不是只改类型注解）：
+
+* `canonical_parameters_json` / `parameter_hash_for`：`json.dumps(dict(params), sort_keys=True,
+  separators=(",", ":"))` 对子类输出与对 plain dict 完全一致，已治理版本的 hash 不变；
+  FA26c 用真实 `SQLiteStrategyRepository` round-trip 断言
+  `read_back.parameter_hash == version.parameter_hash` 且
+  `parameter_hash_for(read_back.parameters) == version.parameter_hash`。
+* repository serialization：`insert_version` 走 `canonical_parameters_json(version.parameters)`，
+  `_row_to_version` 读回后再经 `__post_init__` 冻结；FA26c 断言读回对象仍不可原地改。
+* strategy runtime reads：`validate_strategy_parameters` 先 `dict(parameters)` 再归一化，
+  因此拿到 frozen 输入也正常；`reference_symbols` / `build_auto_rotation_config` /
+  `build_targeted_shadow_config` 均只读。
+* 既有 `contains_embedded_symbol` 用 `isinstance(value, dict)` —— 子类满足该判断。
+* 先写 failing regression（FA26 在修复前 RED：`DID NOT RAISE TypeError`），再改产品代码。
+
+**修法允许进入 Final Closure 的理由**：它直接属于 immutable-version architecture
+invariant，且行为可完全证明兼容（behavior test + mutation + migration 证据齐备）。
+它**不是** Class C：不改变任何 trading safety 语义。
+
+#### 8.27.7 Audit 7–9 — selection / desktop residual / AI boundary
+
+* **Audit 7（governance vs runtime selection）**：`StrategyApplication` 是 catalogue /
+  lifecycle truth，`StrategySelectionService` 是 runtime purpose selection truth
+  （AUTO_ROTATION / TARGETED_SHADOW / BACKTEST）。`StrategyGovernanceOrchestrator`
+  包内零 `StrategySelectionService` import、零 `.select(` 调用（既有 G2-A guard 继续持有）；
+  FA24 断言 selection 自己的写面不触达 catalogue 写方法。Execution combo / Targeted combo /
+  Backtest combo 都只是该 service 的 view。
+* **Audit 8（desktop ownership closure）**：不重做 G1/G2，只复核高层 invariant。
+  FA25：窗口不持有 `PaperWorkflowPhase` / `ExecutionLease` /
+  `PaperSessionCoordinator` / `StrategyApplication` / `SQLiteOrderRepository` /
+  `IBKRExecutionAdapter`，无 `self.workers` alias，同时**仍**持有
+  `ExecutionOrchestrator` / `PaperOrchestrator` / `ShadowOrchestrator` /
+  `MarketOrchestrator`（guard 不能因为窗口不再 compose 任何东西而通过）。
+  FA25b：零 `DesktopCoordinator` / `DesktopManager` / `GlobalOrchestrator` / `EventBus`
+  新类。FA25c：Execution 包零 workflow phase branch。跨 capability bridge
+  （Paper ↔ Market、Shadow ↔ Market、strategy catalogue fan-out、account/market facts
+  fan-out、Paper manual recovery ↔ RuntimeSupervisor、runtime event routing、terminal
+  export）继续留在 composition root。
+* **Audit 9（AI future boundary）**：本轮不实现 AI，只在本文档记录边界。AI 未来可以提供
+  external information extraction / news-event features / research hypotheses /
+  strategy proposals / parameter proposals / explanation / confidence-evidence
+  annotations。AI **不允许**：直接拿 `BrokerExecutionPort`、直接拿 IBKR adapter、直接写
+  `OrderIntent`、直接 bypass `RiskApplication`、直接改 `ExecutionLease`、直接把
+  `StrategyVersion` 标 `gate_passed`、直接 promotion 到 Live。AI 输出必须进入
+  Strategy / Research evidence path，或进入 deterministic Risk → Execution path。
+  FA19b 记录本轮未新增 AI module。
+
+#### 8.27.8 Evidence matrix
+
+| Invariant | Canonical owner | Forbidden bypass | Guard / test | Mutation | Status |
+| --- | --- | --- | --- | --- | --- |
+| Desktop capability ownership | 各 capability orchestrator | 窗口持有 capability truth | `tests/test_desktop_composition_closure_architecture.py::test_a_real_window_holds_only_the_surviving_runtime_facts`；FAC `test_fa25_the_window_still_holds_no_capability_truth` | G1 M1–M17；FAC M19 | ✅ |
+| MainWindow composition boundary | `MainWindow`（仅 composition） | 新 global manager / event bus | FAC `test_fa25b_no_aggregate_manager_or_event_bus_was_introduced` | FAC M19 | ✅ |
+| Risk authority | `RiskApplication` | 第二份风险判断 / 绕过 evaluate | `tests/test_trading_risk_application.py`；FAC `test_fa8_dispatch_is_the_only_runtime_risk_execution_crossing_point` | FAC M8 | ✅ |
+| Execution authority | `ExecutionApplication` | 第二个 order identity 创建者 / 直接 broker submit | `tests/test_trading_architecture.py::test_only_the_execution_application_creates_order_identity` | FAC M8 | ✅ |
+| Proposal → Risk → Execution path | `OrderDispatch` | proposal 可提交 / dispatch 跳过 verdict | FAC `test_fa7_trade_proposal_carries_nothing_submittable`、`test_fa8b_the_dispatch_never_submits_an_unapproved_verdict` | FAC M7、M9 | ✅ |
+| Broker abstraction | `ports/broker_execution.py` | application 命名 concrete adapter | FAC `test_fa19_risk_and_execution_applications_name_no_concrete_broker`、`test_fa20_the_execution_builder_accepts_the_port_abstraction` | FAC M3、M4、M5、M20、M21 | ✅ |
+| Paper / Shadow XOR lease | `WorkflowController`（单一 `ExecutionLeaseManager`） | 两个独立 lease / 本地 XOR 布尔 | FAC `test_fa11_paper_and_shadow_share_one_lease_manager`、`test_fa12_and_fa13_the_two_workflows_exclude_each_other` | FAC M14、M15 | ✅ |
+| Paper phase ownership | `PaperWorkflowController` | 窗口 / Execution 包读 phase | FAC `test_fa17_and_fa18_only_the_paper_capability_reads_the_workflow_phase` | FAC M19 | ✅ |
+| Recovery / reconciliation | `ManualReconciliation`（`runtime/recovery.py`） | HALTED 自动回 RUNNING | FAC `test_fa15_a_halted_session_has_no_automatic_route_back_to_running`、`test_fa16_manual_reconciliation_is_an_explicit_two_step_route`；`tests/test_desktop_paper_recovery_finalization_orchestrator.py` | FAC M17、M18 | ✅ |
+| Finalization / release | `PaperWorkflowController.finalize_if_safe` | finalization 前释放 PAPER | FAC `test_fa14_the_paper_lease_cannot_be_released_before_finalization` | FAC M16 | ✅ |
+| Shutdown ordering | `MainWindow.closeEvent` + `RuntimeSupervisor` | 强制释放未证明安全的 Paper ownership | `tests/test_desktop_runtime_teardown.py`；`tests/test_desktop_composition_closure_architecture.py::test_close_event_reads_no_paper_internal` | E3 M40、M41 | ✅ |
+| Strategy immutable versions | `StrategyVersion`（`domain/strategy.py`） | 原地修改 parameters | FAC `test_fa26_a_governed_versions_parameters_cannot_be_edited_in_place`、`test_fa26b_a_copy_of_a_governed_version_is_still_frozen`、`test_fa26c_the_repository_round_trip_still_reproduces_the_same_hash` | FAC M22、M23、M24 | ✅ |
+| Strategy governance gate | `StrategyApplication` | caller self-attest `gate_passed` | FAC `test_fa21_register_refuses_a_callers_own_gate_attestation`、`test_fa23b_entering_paper_shadow_requires_the_gate` | FAC M25、M27 | ✅ |
+| Strategy lifecycle terminality | `ALLOWED_TRANSITIONS`（domain） | STOPPED / LEGACY_INVALIDATED 复活 | FAC `test_fa23_stopped_and_legacy_invalidated_are_terminal`、`test_fa23c_a_retired_version_cannot_be_cloned` | FAC M28、M29 | ✅ |
+| Clone evidence reset | `StrategyApplication.clone_version` | clone 继承 gate / status | FAC `test_fa22_cloning_a_version_resets_its_evidence_state` | FAC M26 | ✅ |
+| Runtime selection | `StrategySelectionService` | governance 选择写 runtime selection | `tests/test_desktop_strategy_governance_architecture.py`；FAC `test_fa24_governance_selection_cannot_write_the_runtime_selection` | G2-A M 组 | ✅ |
+| Runtime Events owner | `RuntimeEventsOrchestrator` | 窗口自持 runtime event 状态 | `tests/test_desktop_runtime_events_orchestration_architecture.py` | F1 M1–M14 | ✅ |
+| Settings owner | `SettingsOrchestrator` | 窗口自持 settings 呈现状态 | `tests/test_desktop_settings_orchestration_architecture.py` | F2 M1–M22 | ✅ |
+| Generic task owner | `DesktopTaskController` | 窗口保留 `workers` alias | `tests/test_desktop_composition_closure_architecture.py::test_the_window_holds_no_worker_collection_alias` | G1 M 组 | ✅ |
+| Future Live extension seam | `composition/execution.py` | Live 另建 risk/execution 栈 | FAC `test_fa20_the_execution_builder_accepts_the_port_abstraction`、`test_fa19b_no_live_adapter_exists_yet` | FAC M20、M21 | ✅（仅 seam，未实现） |
+| Future AI boundary | 本文档 §8.27.7 | AI 拿 broker port / bypass risk | FAC `test_fa19b_no_live_adapter_exists_yet`（本轮无 AI module） | — | ✅（仅边界，未实现） |
+
+FAC guard 总数 **37**，FAC mutant 总数 **30**（全 RED），historical mutant **165**
+（全 RED），aggregate **195**。
+
+设计依据见 `DESKTOP_DECOMPOSITION.md` §36。
 
 ## 9. 已删除的旧架构
 
@@ -3812,9 +4121,49 @@ v2O-F2 Settings orchestration                            ✅ 已完成（§8.23�
 v2O-F System                                             ✅ COMPLETE（Gateway probe = shell diagnostic）
 G1 MainWindow composition closure                        ✅ 已完成（§8.24）
 G2-A Strategy Governance                                 ✅ 已完成（§8.25）
-G2-B Execution / AutoQuant                               ⏭ required（单独 PR）
-Final Architecture Closure                               ⏭ G2 之后
+G2-B Execution / AutoQuant                               ✅ 已完成（§8.26）
+G2-C                                                     ❌ NOT REQUIRED（residual audit A–J 已清零）
+MainWindow Composition Closure                           ✅ COMPLETE
+Final Architecture Closure                               ✅ COMPLETE（§8.27）
 ```
+
+架构闭环状态：
+
+```text
+v2O-A Market                         ✅
+v2O-B Account                        ✅
+v2O-C Research / Shadow              ✅
+v2O-D Shadow                         ✅
+v2O-E Paper                          ✅
+v2O-F System                         ✅
+
+G1 Generic Runtime / Shell           ✅
+G2-A Strategy Governance             ✅
+G2-B Execution / AutoQuant           ✅
+G2-C                                 NOT REQUIRED
+
+MainWindow Composition Closure       ✅ COMPLETE
+Final Architecture Closure           ✅ COMPLETE
+
+Architecture Closure baseline SHA    = Final Architecture Closure PR head
+                                       （base = G2-B merge commit c78a27f95f482336383282b94e6c877030df6b77）
+```
+
+**下一阶段：Paper Autonomous Trading v1。** 之后依次是 Live-ready Execution Core、
+Small-capital Live Canary、Multi-strategy Portfolio Runtime、Strategy Lifecycle /
+Autonomous Evolution、AI Information & Decision Assistance、AI-assisted Strategy
+Evolution、Autonomous Quant Platform。
+
+本轮**没有**声称完成：Live ready complete、Autonomous trading complete、Strategy
+evolution complete、AI decision complete —— 这些一项都还没开始。
+
+Paper Autonomous Trading v1 的核心会是：unattended Paper session lifecycle、
+market-session-aware scheduler、deterministic startup preflight、crash/restart
+recovery、persistent autonomous intent/state、bounded automatic preparation、
+deterministic candidate refresh、safe pause/stop/shutdown、watchdog/health
+supervision、no human button dependency、full audit/event trail、operator kill
+switch、Paper-only hard gate。它仍然必须走
+`RiskApplication → ExecutionApplication → BrokerExecutionPort`，不绕开现有安全链。
 
 Shadow Framework v2 刻意没有做的事，留给更后面：
 

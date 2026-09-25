@@ -5929,10 +5929,144 @@ H / I / J 清零，唯一记录的 I 项（`_minute_recorded_keys`）不是第�
 ### 35.8 路线状态
 
 **G2-A Strategy Governance ✅；G2-B Execution / AutoQuant ✅；
-G2-C：residual audit（§35.7）判定 not required，待 review 确认。**
+G2-C：residual audit（§35.7）判定 not required。**
 
-MainWindow Composition Closure 按 §35.7 的 evidence 已具备 COMPLETE 的条件，
-但**正式标记留到 review 通过之后**（先 audit → 再 evidence → 再结论，不反过来）；
-Final Architecture Closure 尚未开始。
+MainWindow Composition Closure 按 §35.7 的 evidence 已具备 COMPLETE 的条件；
+**该正式标记已在 G2-B 合并后落档（§36）**。Final Architecture Closure 见 §36。
+
+## 36. Final Architecture Closure
+
+G2-B（PR #57）以 merge commit `c78a27f95f482336383282b94e6c877030df6b77` 合并后，
+架构路线正式变为：
+
+```text
+v2O-A Market                         ✅
+v2O-B Account                        ✅
+v2O-C Research / Shadow              ✅
+v2O-D Shadow                         ✅
+v2O-E Paper                          ✅
+v2O-F System                         ✅
+
+G1 Generic Runtime / Shell           ✅
+G2-A Strategy Governance             ✅
+G2-B Execution / AutoQuant           ✅
+G2-C                                 NOT REQUIRED
+
+MainWindow Composition Closure       ✅ COMPLETE
+Final Architecture Closure           ✅ COMPLETE
+```
+
+### 36.1 这一阶段不是什么
+
+不是「继续拆 MainWindow」，不是「再建一层 manager」，也不是「顺手开始 Live / AI /
+自动交易新功能」。目标是**证明当前架构已具备稳定、可维护、可审计的基础**，之后新增
+Paper autonomy / Live / Strategy Evolution / AI assistance 时不需要绕开或重写现有
+安全边界。原则是 AUDIT FIRST：找现状 → 锁 invariant → 发现真实 defect 才修 →
+没 defect 不为形式改代码。不按 LOC 优化，不为减少文件数合并 capability，不为「统一」
+建立 global manager。
+
+### 36.2 MainWindow Composition Closure 正式 COMPLETE
+
+G2-A / G2-B 合并后，§35.7 的 residual audit 判据正式成立：
+
+```text
+A–G  合法 composition                      ✅
+H    route-specific orchestration = 0      ✅
+I    duplicate mutable truth = 0           ✅
+J    private reach-through = 0             ✅
+```
+
+因此 **MainWindow Composition Closure ✅ COMPLETE**，且 **G2-C = NOT REQUIRED**。
+特别保留两条说明：
+
+* `_minute_recorded_keys` 是 minute persistence ingress 的 **write-dedup 实现细节**，
+  不是 capability truth 的第二份 copy；
+* `_sync_strategy_combo` / `_configure_combo_width` / `_configure_table_view` /
+  `_apply_legacy_style` 四个 dead helper 记录为 **technical-debt cleanup**，
+  不属于 missing owner，**不因此创建 G2-C**，Final Closure 也不顺手删除它们
+  （它们不影响任何 invariant）。
+
+### 36.3 本轮实际做了什么
+
+**只做三件事：audit、跨层 guard、一处真实 defect 修复。** 没有搬动任何 capability 的
+owner，没有新增 orchestrator / manager / service bag。
+
+**Audit（9 项）**：import / layer dependency graph（AST，284 模块）；
+Risk → Execution 不可绕过；Paper / Shadow execution XOR；Paper lifecycle /
+recovery / finalization / shutdown；Broker abstraction / future Live seam；
+Strategy immutable lifecycle（含 deep immutability）；governance vs runtime
+selection；desktop ownership closure；AI future boundary。结论与证据见
+`TRADING_ARCHITECTURE_V2.md` §8.27。
+
+**发现的真实 defect（Class B，已修）**：`StrategyVersion.parameters` 名义 immutable
+实际可变 —— `frozen=True` 只拒绝属性重绑定，`parameters` 是普通 `dict`，可原地修改，
+而 `parameter_hash` 读自 governed identity 而非重算，于是一个已治理版本会变成
+「declared hash 不再描述自己 parameters」的分裂身份。修复是窄的 representation 改动：
+`domain/common.py` 新增 `FrozenParameters(dict)` / `FrozenList(list)` /
+`freeze_parameters()`（递归冻结；副本仍冻结；`isinstance` / `==` / `json` / deepcopy /
+pickle 全部兼容），`StrategyVersion.__post_init__` 改用它。先写 failing regression
+再改产品代码；兼容性由真实 `SQLiteStrategyRepository` round-trip 的 hash 相等断言证明。
+
+**Class C（trading safety semantics 需要改变）**：**本轮未发现**。Risk bypass、
+broker ordering、reconciliation、finalization proof、order retry、Paper workflow
+transition 六项审计全部落在既有安全语义内，无需另开窄 safety PR。
+
+**Frozen areas 未动**：candidate scoring、strategy signal、risk limits 数值、
+commission / whole-share / order pricing / DAY limit / extended-hours 语义、
+IBKR client-id allocation、account identity policy、reconciliation proof algorithm、
+Paper finalization algorithm、Shadow trading algorithm、Market source behavior、
+scanner ranking、backtest math —— 一律未改。
+
+### 36.4 交付物
+
+```text
+tests/test_final_architecture_closure.py              37 条跨层 guard
+scripts/mutation_final_architecture_closure.ps1       30 个跨层 mutant（全 RED）
+docs/TRADING_ARCHITECTURE_V2.md §8.27                 Final Architecture Closure + evidence matrix
+```
+
+这个 test 文件刻意**不**复制各 capability 已有的几百条 guard：细粒度 owner 仍由
+Market / Account / Research / Paper / System / G1 / G2-A / G2-B 各自现有测试负责，
+这里只放**跨层 / 跨子系统** invariant。同理，mutation harness 只覆盖跨层安全边界，
+不复制已有 165 个 mutant。
+
+Guard 实现方式遵守 PART Q：import boundary 用 AST（`ast.Import` / `ast.ImportFrom`
+构建 `module -> imported module` 再按 package prefix 判定，错误信息报出
+source module / forbidden target / violated rule）；class field 用 `dataclasses.fields`
+或 AST；runtime behavior 用真实 / fake object 行为测试；workflow transition 用真实
+controller 行为。**没有** `assert "IBKR" not in entire repo`（adapters / composition
+本来就该出现），也**没有** `assert "submit(" 只出现一次`（broker adapter 与 tests 里
+合法出现）。层间 guard 用**白名单**而非黑名单 —— 理由见 §36.5。
+
+### 36.5 Mutation 结果
+
+```text
+FAC mutant        30 / 30 RED      0 survived / 0 harness-error
+historical mutant 165 / 165 RED    0 not-caught
+                  e2 13 · e3 41 · e4 11 · F1 14 · F2 22 · G1 17 · G2-A 12 · G2-B 35
+aggregate         195 / 195 RED
+```
+
+historical 165 全部 RED，**没有**因 Final Closure 的改动而需要重锚（没有删 mutant、
+没有把 pattern miss 当 caught、没有注释掉 mutant）。
+
+FAC harness 的两个 harness-error 修复值得记录，因为它们是「脚本缺陷」而非「guard
+通过」的例子：M18 的初版替换删掉了 `if` 的 body，产生 SyntaxError；M1 的初版用
+`import us_quant.desktop` 作 forbidden target，结果触发**循环 import 导致 collection
+error**（pytest exit 2），不是干净的 assertion failure。后者暴露出层间 guard 的
+黑名单确实漏项（`us_quant.desktop_workers` 既不是 `us_quant.desktop` 也不是
+`us_quant.desktop_v2`），于是 guard 改成白名单形式。
+
+### 36.6 下一阶段
+
+**Paper Autonomous Trading v1。** 只记录，不执行：unattended Paper session
+lifecycle、market-session-aware scheduler、deterministic startup preflight、
+crash/restart recovery、persistent autonomous intent/state、bounded automatic
+preparation、deterministic candidate refresh、safe pause/stop/shutdown、
+watchdog/health supervision、no human button dependency、full audit/event trail、
+operator kill switch、Paper-only hard gate。仍然走
+`RiskApplication → ExecutionApplication → BrokerExecutionPort`，不绕开现有安全链。
+
+本轮**没有**声称完成：Live ready、autonomous trading、strategy evolution、AI decision。
 
 

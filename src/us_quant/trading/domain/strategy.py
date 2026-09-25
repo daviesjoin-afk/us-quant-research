@@ -27,7 +27,7 @@ from hashlib import sha256
 import json
 from typing import Any, Mapping
 
-from us_quant.trading.domain.common import ZERO
+from us_quant.trading.domain.common import ZERO, freeze_parameters
 
 #: A strategy risk budget may never exceed 10% of the account.
 MAX_RISK_BUDGET_PCT = Decimal("0.10")
@@ -140,7 +140,16 @@ class StrategyVersion:
         # Normalise to a real ``dict``.  The declared type is ``Mapping`` so
         # callers can hand in anything mapping-shaped, but JSON serialisation
         # (and therefore the parameter hash) requires a concrete dict.
-        object.__setattr__(self, "parameters", dict(self.parameters))
+        #
+        # Frozen, not merely copied.  ``frozen=True`` refuses attribute
+        # rebinding but a plain dict field can still be edited in place, and
+        # ``parameter_hash`` is read off the identity rather than recomputed --
+        # so an in-place edit would leave a governed version whose declared hash
+        # no longer describes its own parameters.  ``freeze_parameters`` also
+        # freezes the nested lists, which is the half a shallow copy misses.
+        object.__setattr__(
+            self, "parameters", freeze_parameters(dict(self.parameters))
+        )
         if not isinstance(self.risk_budget_pct, Decimal):
             raise TypeError("risk_budget_pct must be a Decimal")
         if not ZERO < self.risk_budget_pct <= MAX_RISK_BUDGET_PCT:

@@ -24,13 +24,14 @@ in its tests, so a text scan would be both over- and under-sensitive.
 from __future__ import annotations
 
 import ast
+import copy
 from collections.abc import Mapping
 from dataclasses import fields, is_dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 import pathlib
+import pickle
 import sys
-from types import MappingProxyType
 
 import pytest
 
@@ -135,9 +136,6 @@ def test_fa26b_a_copy_of_a_governed_version_is_still_frozen() -> None:
     the copy exists to prevent would come straight back.
     """
 
-    import copy
-    import pickle
-
     version = _governed_version(
         {"short_window": "5", "lookbacks": ["63", "126"]}
     )
@@ -199,6 +197,45 @@ def test_fa26c_the_repository_round_trip_still_reproduces_the_same_hash(
     assert isinstance(read_back.parameters["lookbacks"], list)
     with pytest.raises(TypeError):
         read_back.parameters["short_window"] = "999"
+
+
+def test_fa26d_a_frozen_mapping_cannot_be_re_populated_through_init() -> None:
+    """FA26d: overriding the mutating methods is not enough on its own.
+
+    ``dict.__init__`` is inherited, so ``params.__init__({...})`` would
+    re-populate a mapping that is supposed to be immutable -- the same hole
+    ``list.__init__`` opens on a frozen list.  Both types seal on the first
+    ``__init__``, which closes that route while leaving normal construction
+    working.
+    """
+
+    from us_quant.trading.domain.common import FrozenList, FrozenParameters
+
+    params = FrozenParameters({"a": "1"})
+    with pytest.raises(TypeError):
+        params.__init__({"a": "999"})
+    with pytest.raises(TypeError):
+        params.__init__(a="777")
+    assert dict(params) == {"a": "1"}
+
+    # An empty frozen mapping is sealed too -- otherwise the first later
+    # ``__init__`` would be treated as construction.
+    empty = FrozenParameters({})
+    with pytest.raises(TypeError):
+        empty.__init__({"x": "1"})
+    assert dict(empty) == {}
+
+    items = FrozenList([1, 2])
+    with pytest.raises(TypeError):
+        items.__init__([9, 9])
+    assert list(items) == [1, 2]
+
+    # Construction and the copy protocol still work, so the seal is not simply
+    # "this type cannot be built".
+    assert dict(FrozenParameters({"b": "2"})) == {"b": "2"}
+    assert list(FrozenList([3])) == [3]
+    assert dict(copy.copy(params)) == {"a": "1"}
+    assert list(copy.deepcopy(items)) == [1, 2]
 
 
 def test_fa21_register_refuses_a_callers_own_gate_attestation() -> None:

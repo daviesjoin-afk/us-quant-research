@@ -16,7 +16,7 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 > 判据 A–G 合法 composition、H route-specific orchestration = 0、I duplicate
 > mutable truth = 0、J private reach-through = 0 全部成立，**G2-C = NOT
 > REQUIRED**。在此基础上本轮只做跨层 invariant 锁定，不再继续拆窗口：见 §8.24
-> 的收口落档与 §8.27 的 Final Architecture Closure（37 条跨层 guard / 30 个
+> 的收口落档与 §8.27 的 Final Architecture Closure（38 条跨层 guard / 31 个
 > 跨层 mutant / 一处真实 immutable-version defect 修复）。
 >
 > **Architecture Closure baseline SHA**：Final Architecture Closure PR 的 head
@@ -2932,7 +2932,7 @@ Strategy Evolution / AI assistance 时，不需要绕开或重写现有安全边
 
 原则是 **AUDIT FIRST**：先扫现状、再锁 invariant、只在发现真实 defect 时修。不按 LOC
 优化，不为减少文件数合并 capability，不为"统一"建立 global manager。因此本轮
-**新增 37 条跨层 guard + 30 个跨层 mutant + 一处真实 defect 修复**，没有搬动任何
+**新增 38 条跨层 guard + 31 个跨层 mutant + 一处真实 defect 修复**，没有搬动任何
 capability 的 owner。
 
 #### 8.27.1 Audit 1 — import / layer dependency graph
@@ -3189,8 +3189,8 @@ invariant，且行为可完全证明兼容（behavior test + mutation + migratio
 | Future Live extension seam | `composition/execution.py` | Live 另建 risk/execution 栈 | FAC `test_fa20_the_execution_builder_accepts_the_port_abstraction`、`test_fa19b_no_live_adapter_exists_yet` | FAC M20、M21 | ✅（仅 seam，未实现） |
 | Future AI boundary | 本文档 §8.27.7 | AI 拿 broker port / bypass risk | FAC `test_fa19b_no_live_adapter_exists_yet`（本轮无 AI module） | — | ✅（仅边界，未实现） |
 
-FAC guard 总数 **37**，FAC mutant 总数 **30**（全 RED），historical mutant **165**
-（全 RED），aggregate **195**。
+FAC guard 总数 **38**，FAC mutant 总数 **31**（全 RED），historical mutant **165**
+（全 RED），aggregate **196**。
 
 设计依据见 `DESKTOP_DECOMPOSITION.md` §36。
 

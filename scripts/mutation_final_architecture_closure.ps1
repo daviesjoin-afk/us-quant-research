@@ -306,6 +306,18 @@ $mutations = @(
         select = @("-k", "governed_versions_parameters_cannot_be_edited_in_place")
     },
     @{
+        name = 'M24b a frozen mapping can be re-populated through __init__'
+        file = $domainCommon
+        # Anchored on ``dict.__init__`` in ``__new__`` so it matches the
+        # FrozenParameters seal only -- the FrozenList seal is byte-identical
+        # apart from that line, and a pattern matching both would mutate two
+        # classes at once.
+        find = '        dict\.__init__\(instance, \*args, \*\*kwargs\)\r?\n        return instance\r?\n\r?\n    def __init__\(self, \*args: Any, \*\*kwargs: Any\) -> None:\r?\n        if getattr\(self, "_sealed", False\):\r?\n            raise TypeError\(\r?\n                "[^"]*"\r?\n            \)\r?\n        object\.__setattr__\(self, "_sealed", True\)'
+        repl = "        dict.__init__(instance, *args, **kwargs)`n        return instance`n`n    def __init__(self, *args: Any, **kwargs: Any) -> None:`n        object.__setattr__(self, `"_sealed`", True)"
+        tests = @($fac)
+        select = @("-k", "frozen_mapping_cannot_be_re_populated_through_init or governed_versions_parameters_cannot_be_edited_in_place")
+    },
+    @{
         name = 'M25 register accepts a callers own gate attestation'
         file = $appStrategies
         find = '        if gate_passed:\r?\n            raise StrategyApplicationError\(\r?\n                "[^"]*"\r?\n            \)'

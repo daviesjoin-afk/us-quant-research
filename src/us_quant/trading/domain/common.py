@@ -52,9 +52,33 @@ class FrozenParameters(dict):
 
     Built through :func:`freeze_parameters`, which is what guarantees the nested
     values are frozen too.
+
+    Population happens in ``__new__`` and ``__init__`` only *seals* the result.
+    Overriding the mutating methods alone is not enough: ``dict.__init__`` is
+    inherited, so ``params.__init__({...})`` would silently re-populate a mapping
+    that is supposed to be immutable.  Sealing on the first ``__init__`` closes
+    that route while leaving normal construction working.
+
+    What this deliberately does not defend against is calling a base-class method
+    *explicitly* -- ``dict.__setitem__(params, key, value)`` still writes.  That
+    is the same boundary a frozen dataclass draws: ``object.__setattr__`` also
+    bypasses ``frozen=True``.  Both are deliberate escapes from the type's
+    contract, not the accidental in-place edit this type exists to prevent.
     """
 
-    __slots__ = ()
+    __slots__ = ("_sealed",)
+
+    def __new__(cls, *args: Any, **kwargs: Any) -> "FrozenParameters":
+        instance = super().__new__(cls)
+        dict.__init__(instance, *args, **kwargs)
+        return instance
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if getattr(self, "_sealed", False):
+            raise TypeError(
+                "strategy parameters are immutable once a version is governed"
+            )
+        object.__setattr__(self, "_sealed", True)
 
     def _refuse(self, *args: Any, **kwargs: Any) -> Any:
         raise TypeError(
@@ -83,9 +107,26 @@ class FrozenParameters(dict):
 
 
 class FrozenList(list):
-    """A ``list`` that refuses every in-place mutation."""
+    """A ``list`` that refuses every in-place mutation.
 
-    __slots__ = ()
+    Sealed on first ``__init__`` for the same reason as
+    :class:`FrozenParameters`: ``list.__init__`` is inherited, so
+    ``items.__init__([...])`` would otherwise re-populate a frozen list.
+    """
+
+    __slots__ = ("_sealed",)
+
+    def __new__(cls, *args: Any, **kwargs: Any) -> "FrozenList":
+        instance = super().__new__(cls)
+        list.__init__(instance, *args, **kwargs)
+        return instance
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if getattr(self, "_sealed", False):
+            raise TypeError(
+                "strategy parameters are immutable once a version is governed"
+            )
+        object.__setattr__(self, "_sealed", True)
 
     def _refuse(self, *args: Any, **kwargs: Any) -> Any:
         raise TypeError(

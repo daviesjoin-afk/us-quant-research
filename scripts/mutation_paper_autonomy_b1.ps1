@@ -78,10 +78,12 @@ if ($LASTEXITCODE -ne 0) {
 
 $src = Join-Path $projectRoot "src\us_quant"
 $domainSupervisor = Join-Path $src "trading\domain\paper_autonomy_supervisor.py"
+$supervisorApplication = Join-Path $src "trading\application\paper_autonomy_supervisor.py"
 $portAction = Join-Path $src "trading\ports\paper_autonomy_action_repository.py"
 $adapterAction = Join-Path $src "trading\adapters\sqlite\paper_autonomy_action_repository.py"
 
 $behaviour = Join-Path $projectRoot "tests/test_paper_autonomy_supervisor.py"
+$tickBehaviour = Join-Path $projectRoot "tests/test_paper_autonomy_supervisor_tick.py"
 $architecture = Join-Path $projectRoot "tests/test_paper_autonomy_supervisor_architecture.py"
 
 function Get-Text([string]$path) { [System.IO.File]::ReadAllText($path) }
@@ -294,6 +296,36 @@ $mutations = @(
         repl = 'if False:'
         tests = @($architecture)
         select = @("-k", "detector_catches_every_shape")
+    },
+
+    # -- the tick: claim, ask, record ------------------------------------
+    @{
+        # Anchored on the racing test, not the sequential one: sequentially the
+        # *unresolved* clause stops the repeat before the claim is reached, so a
+        # mutant that ignores the claim changes nothing there.  Measured -- the
+        # first version of this entry targeted the sequential test and survived.
+        name = 'M23 the claim is not consulted before the owner is asked'
+        file = $supervisorApplication
+        find = 'if not claimed:'
+        repl = 'if False:'
+        tests = @($tickBehaviour)
+        select = @("-k", "two_ticks_racing_ask_the_owner_once")
+    },
+    @{
+        name = 'M24 an accepted request is recorded as a success'
+        file = $supervisorApplication
+        find = 'self\._actions\.mark_requested\(\s+action_key=decision\.action_key, detail=outcome\.detail\s+\)'
+        repl = "self._actions.complete(action_key=decision.action_key, status=PaperAutonomyActionStatus.SUCCEEDED, completed_at=moment, detail=outcome.detail)"
+        tests = @($tickBehaviour)
+        select = @("-k", "accepted_start_is_never_recorded_as_a_success or a_prepare_tick_claims_before_it_asks")
+    },
+    @{
+        name = 'M25 a failed owner call leaves the action unknown'
+        file = $supervisorApplication
+        find = 'self\._actions\.complete\(\s+action_key=decision\.action_key,\s+status=PaperAutonomyActionStatus\.FAILED,'
+        repl = "if False:`n                self._actions.complete(`n                    action_key=decision.action_key,`n                    status=PaperAutonomyActionStatus.FAILED,"
+        tests = @($tickBehaviour)
+        select = @("-k", "owner_that_raises_is_recorded_as_failed")
     }
 )
 

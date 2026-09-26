@@ -59,6 +59,7 @@ _SRC = _REPO_ROOT / "src" / "us_quant"
 
 _SUPERVISOR_DOMAIN = "trading/domain/paper_autonomy_supervisor.py"
 _SUPERVISOR_PORTS = "trading/ports/paper_autonomy_supervisor.py"
+_SUPERVISOR_APPLICATION = "trading/application/paper_autonomy_supervisor.py"
 _ACTION_PORT = "trading/ports/paper_autonomy_action_repository.py"
 _ACTION_ADAPTER = (
     "trading/adapters/sqlite/paper_autonomy_action_repository.py"
@@ -830,3 +831,117 @@ def test_b_a12_the_executor_seam_cannot_express_completion() -> None:
 
     preparation = {field.name for field in fields(PaperAutonomyPreparationRequest)}
     assert preparation == {"candidate_limit", "capital_limit"}
+
+
+def test_b_a15_the_supervisor_reaches_no_authority_and_no_toolkit() -> None:
+    """The tick core may name the vocabulary, the seams and nothing else.
+
+    Checked as imported *symbols* as well as module prefixes: the application
+    layer is already allowed to name ``us_quant.trading.ports``, and
+    ``BrokerExecutionPort`` lives there -- so without a symbol rule a supervisor
+    could reach the execution seam and stay "architecturally correct" while
+    becoming a second route to an order.
+    """
+
+    offending = _violations(
+        _SUPERVISOR_APPLICATION,
+        (
+            "PySide6",
+            "us_quant.desktop",
+            "us_quant.desktop_v2",
+            "us_quant.trading.adapters",
+            "us_quant.trading.composition",
+            "us_quant.trading.runtime",
+            "us_quant.ibkr",
+            "us_quant.broker",
+            "sqlite3",
+            "ibapi",
+        ),
+    )
+    assert offending == []
+
+    symbols = {
+        alias.name
+        for node in ast.walk(
+            ast.parse(
+                (_SRC / _SUPERVISOR_APPLICATION).read_text(encoding="utf-8")
+            )
+        )
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    for forbidden in (
+        "RiskApplication",
+        "ExecutionApplication",
+        "BrokerExecutionPort",
+        "OrderRepositoryPort",
+        "PaperOrchestrator",
+        "ExecutionOrchestrator",
+        "PaperWorkflowPhase",
+        "PaperWorkflowController",
+        "ExecutionLeaseManager",
+        "PaperTradingService",
+        "StrategySelectionService",
+        "IBKRExecutionAdapter",
+    ):
+        assert forbidden not in symbols, forbidden
+
+    # And the capability discovery sees it, which is what makes the boundary
+    # checks above run against it at all.
+    assert "paper_autonomy_supervisor.py" in {
+        path.name for path in _autonomy_module_paths(_SRC)
+    }
+
+
+def test_b_a16_the_supervisor_retains_no_runtime_truth() -> None:
+    """Its collaborators, and one startup classification.  Nothing else.
+
+    An exact set rather than a denylist, so a new retained field has to be argued
+    for here.  The startup facts are the only fact held across ticks and they are
+    held on purpose: they describe *this process's* beginning, and re-reading them
+    later would answer a different question.
+
+    Everything else -- runtime facts, the schedule verdict, the operator intent,
+    the action state -- is read inside a tick and must not survive it: a scheduler
+    deciding on a previous tick's facts is deciding on a session that may since
+    have stopped.
+    """
+
+    tree = ast.parse(
+        (_SRC / _SUPERVISOR_APPLICATION).read_text(encoding="utf-8")
+    )
+    node = next(
+        item
+        for item in ast.walk(tree)
+        if isinstance(item, ast.ClassDef)
+        and item.name == "PaperAutonomySupervisor"
+    )
+    assigned: set[str] = set()
+    for member in node.body:
+        if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for child in ast.walk(member):
+            target = None
+            if isinstance(child, ast.Assign) and len(child.targets) == 1:
+                target = child.targets[0]
+            elif isinstance(child, ast.AnnAssign):
+                target = child.target
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
+            ):
+                assigned.add(target.attr)
+
+    assert assigned == {
+        "_actions",
+        "_clock",
+        "_emit",
+        "_executor",
+        "_intent",
+        "_policy",
+        "_runtime_facts",
+        "_schedule",
+        "_startup",
+        "_startup_facts",
+    }, sorted(assigned)

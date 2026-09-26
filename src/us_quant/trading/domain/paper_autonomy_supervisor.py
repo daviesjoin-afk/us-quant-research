@@ -249,6 +249,82 @@ MINIMUM_TICK_INTERVAL_SECONDS = 1
 MAXIMUM_TICK_INTERVAL_SECONDS = 3600
 
 
+class PaperAutonomyEventCode(StrEnum):
+    """The audit vocabulary for one supervisor tick.
+
+    A code per *outcome*, not per action, because the interesting question in a
+    review is almost always "why did it not act" -- a scheduler that only logged
+    its successes would be indistinguishable from one that had stopped running.
+
+    The severities are the three the runtime event store already accepts, so a
+    desktop bridge forwards these without translating anything.
+    """
+
+    TICK_BLOCKED = "AUTONOMY_TICK_BLOCKED"
+    PREPARE_REQUESTED = "AUTONOMY_PREPARE_REQUESTED"
+    START_REQUESTED = "AUTONOMY_START_REQUESTED"
+    PAUSE_REQUESTED = "AUTONOMY_PAUSE_REQUESTED"
+    RESUME_REQUESTED = "AUTONOMY_RESUME_REQUESTED"
+    STOP_REQUESTED = "AUTONOMY_STOP_REQUESTED"
+    ACTION_REFUSED = "AUTONOMY_ACTION_REFUSED"
+    ACTION_FAILED = "AUTONOMY_ACTION_FAILED"
+    RECOVERY_REQUIRED = "AUTONOMY_RECOVERY_REQUIRED"
+
+
+#: The severity each code is recorded at.  Kept beside the codes rather than in
+#: the supervisor so a bridge cannot disagree with the vocabulary about which
+#: outcomes are warnings.
+EVENT_SEVERITIES: dict[PaperAutonomyEventCode, str] = {
+    PaperAutonomyEventCode.TICK_BLOCKED: "warning",
+    PaperAutonomyEventCode.PREPARE_REQUESTED: "info",
+    PaperAutonomyEventCode.START_REQUESTED: "info",
+    PaperAutonomyEventCode.PAUSE_REQUESTED: "info",
+    PaperAutonomyEventCode.RESUME_REQUESTED: "info",
+    PaperAutonomyEventCode.STOP_REQUESTED: "info",
+    PaperAutonomyEventCode.ACTION_REFUSED: "warning",
+    PaperAutonomyEventCode.ACTION_FAILED: "error",
+    PaperAutonomyEventCode.RECOVERY_REQUIRED: "warning",
+}
+
+#: The code each executable action is recorded under when an owner accepts it.
+REQUESTED_EVENT_CODES: dict[PaperAutonomyAction, PaperAutonomyEventCode] = {
+    PaperAutonomyAction.PREPARE: PaperAutonomyEventCode.PREPARE_REQUESTED,
+    PaperAutonomyAction.START: PaperAutonomyEventCode.START_REQUESTED,
+    PaperAutonomyAction.PAUSE_ENTRIES: PaperAutonomyEventCode.PAUSE_REQUESTED,
+    PaperAutonomyAction.RESUME_ENTRIES: PaperAutonomyEventCode.RESUME_REQUESTED,
+    PaperAutonomyAction.STOP: PaperAutonomyEventCode.STOP_REQUESTED,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class PaperAutonomySupervisorEvent:
+    """One thing the supervisor decided, in the shape an audit surface wants.
+
+    Deliberately not a runtime event: the core does not import the desktop's
+    event orchestrator, it hands this to whatever sink composition gave it.  No
+    credential, no account identifier and no order detail appears here -- the
+    fields are the decision's own identity and the reason the vocabulary wrote.
+    """
+
+    code: PaperAutonomyEventCode
+    severity: str
+    detail: str
+    trading_day: date | None
+    intent_revision: int
+    action_key: str | None
+
+    def __post_init__(self) -> None:
+        if self.severity not in {"info", "warning", "error"}:
+            raise PaperAutonomySupervisorViolation(
+                f"an autonomy event must use a known severity, not "
+                f"{self.severity!r}"
+            )
+        if not str(self.detail).strip():
+            raise PaperAutonomySupervisorViolation(
+                "an autonomy event must say what was decided and why"
+            )
+
+
 class PaperAutonomySessionProvenance(StrEnum):
     """Who started the Paper session that is currently up.
 

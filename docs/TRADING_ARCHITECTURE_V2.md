@@ -4609,18 +4609,25 @@ Closure vehicle                      = PR #58 / refactor/final-architecture-clos
 Final immutable baseline             = PR #58 merge commit recorded by Git history
 ```
 
-**下一阶段：Paper Autonomous Trading v1，已从 v1-A 开始（§8.28）。**
+**下一阶段：Paper Autonomous Trading v1。v1-A 已完成（§8.28）。**
 
 ```text
-Paper Autonomous Trading v1-A    ✅ 已完成（§8.28）persistent autonomy control plane
-Paper Autonomous Trading v1-B    ⏭ next  unattended supervisor / scheduler / recovery host
-Paper Autonomous Trading v1      NOT COMPLETE
+Final Architecture Closure                          ✅ COMPLETE（§8.27）
+
+Paper Autonomous Trading v1-A
+Persistent Autonomous Control Plane                 ✅ COMPLETE（§8.28）
+
+Paper Autonomous Trading v1-B
+Unattended Supervisor / Scheduler / Recovery Host   🔄 IN PROGRESS
+                                                       （feat/paper-autonomy-supervisor）
+
+Paper Autonomous Trading v1                          ❌ NOT COMPLETE
 ```
 
-`Paper Autonomous Trading v1` **不是** COMPLETE。v1-A 只建立了一个持久化控制面：它让
-"操作者希望自动系统处于什么状态"变成可持久化、可审计、crash/restart 后可恢复的事实，
-但**没有自动执行任何东西**——不启动 Paper、不连 broker、不下单、不创建 scheduler loop。
-因此文档里不会出现 "autonomous Paper trading COMPLETE"。
+`Paper Autonomous Trading v1` **不是** COMPLETE，而且本 PR 也不会把它变成 COMPLETE：
+v1-A 只建立了一个持久化控制面——"操作者希望自动系统处于什么状态"变成可持久化、
+可审计、crash/restart 后可恢复的事实——但**没有自动执行任何东西**。因此文档里不会
+出现 "autonomous Paper trading COMPLETE"。
 
 v1-B 才把 operator intent 变成真正的 no-human-button Paper autonomous execution，且
 **不能复制** Paper lifecycle：supervisor 必须 Qt-free，只做 deterministic decision，
@@ -4628,7 +4635,8 @@ v1-B 才把 operator intent 变成真正的 no-human-button Paper autonomous exe
 `PaperOrchestrator` / `StrategySelectionService` / `MarketOrchestrator` /
 `AccountOrchestrator`）执行，最终仍必须走 canonical `PaperOrchestrator.start()` 并重跑
 它的 preflight；autonomous authorization 必须与 UI arm 分离，不能假装人点过确认框。
-v1-B 必须从 v1-A merge 之后的 main 重新开分支，不从 v1-A feature branch 叠加。
+v1-B 从 v1-A merge 之后的 main（`b8e660c`）重新开分支，没有从 v1-A
+feature branch 叠加。
 
 之后依次是 Live-ready Execution Core、
 Small-capital Live Canary、Multi-strategy Portfolio Runtime、Strategy Lifecycle /

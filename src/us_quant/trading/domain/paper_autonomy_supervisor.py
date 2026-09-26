@@ -249,6 +249,33 @@ MINIMUM_TICK_INTERVAL_SECONDS = 1
 MAXIMUM_TICK_INTERVAL_SECONDS = 3600
 
 
+class PaperAutonomySessionProvenance(StrEnum):
+    """Who started the Paper session that is currently up.
+
+    The fact the whole control boundary rests on.  The operator's autonomy
+    authorisation says a supervisor may drive the sessions *it* started; it says
+    nothing about a session somebody launched from the Execution route by hand,
+    and a supervisor that paused or stopped one of those would be changing the
+    semantics of a feature the operator never put under automation.
+
+    An ephemeral per-tick fact, never persisted: a restart loses it, and that
+    loss is the point -- after a restart the supervisor has no claim on whatever
+    session it finds, which is exactly what ``UNKNOWN`` says.  It is deliberately
+    not a field on the intent (the operator's authorisation is not a session
+    fact) and not a field on the action ledger (the ledger records requests).
+
+    ``UNKNOWN`` is not a synonym for ``MANUAL``: a manual session is one the
+    supervisor knows it must leave alone, while an unknown one is a session
+    nobody can currently account for.  The first is a no-op, the second is a
+    reason to stop and ask a human.
+    """
+
+    NONE = "none"
+    AUTONOMOUS = "autonomous"
+    MANUAL = "manual"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class PaperAutonomyRuntimeFacts:
     """What the Paper capability is doing, projected for one tick.
@@ -261,6 +288,12 @@ class PaperAutonomyRuntimeFacts:
 
     Nothing here is retained.  Each tick reads these again, so a value cannot
     outlive the observation that produced it.
+
+    The invariants below are enforced at construction so that a self-contradictory
+    observation can never reach the decision function.  A fact set that says "a
+    session is running" and "no session was ever started" at once is not a
+    situation for the precedence order to resolve -- it is a caller that has lost
+    track, and the decision function must not be the place that finds out.
     """
 
     shutting_down: bool
@@ -269,15 +302,49 @@ class PaperAutonomyRuntimeFacts:
     launch_in_flight: bool
     session_running: bool
     session_paused: bool
+    session_provenance: PaperAutonomySessionProvenance
     manual_recovery_required: bool
     finalization_pending: bool
-    paper_ownership_clear: bool
+    paper_ownership_consistent: bool
+
+    def __post_init__(self) -> None:
+        if self.session_running and self.session_paused:
+            raise PaperAutonomySupervisorViolation(
+                "a Paper session cannot be running and paused at once"
+            )
+        if self.session_active and (
+            self.session_provenance is PaperAutonomySessionProvenance.NONE
+        ):
+            raise PaperAutonomySupervisorViolation(
+                "an active Paper session must have a provenance; 'none' means "
+                "no session is up"
+            )
+        if not self.session_active and (
+            self.session_provenance is not PaperAutonomySessionProvenance.NONE
+        ):
+            raise PaperAutonomySupervisorViolation(
+                f"no Paper session is active, so its provenance cannot be "
+                f"'{self.session_provenance.value}'"
+            )
 
     @property
     def session_active(self) -> bool:
         """Whether a Paper session is up in either of its two live shapes."""
 
         return self.session_running or self.session_paused
+
+    @property
+    def autonomous_session_active(self) -> bool:
+        """Whether the live session is one this supervisor started.
+
+        The only condition under which it may pause, resume or stop a session.
+        """
+
+        return (
+            self.session_active
+            and self.session_provenance
+            is PaperAutonomySessionProvenance.AUTONOMOUS
+        )
 
     @property
     def idle(self) -> bool:
@@ -309,6 +376,38 @@ class PaperAutonomyScheduleFacts:
     start_allowed: bool
     orderly_stop_due: bool
     exceptional_schedule_uncertain: bool
+
+    def __post_init__(self) -> None:
+        # The window limits are enforced on the *value*, not left to whoever
+        # builds it.  While ``start_allowed`` was the only thing the decision
+        # read, "regular only" was a promise the adapter made; a fact carrying
+        # ``session=after_hours, start_allowed=True`` would have launched a
+        # session outside the one window v1 permits, and nothing would have
+        # objected.  A schedule that cannot be expressed cannot be acted on.
+        if self.start_allowed and (
+            self.session not in AUTONOMOUS_START_WINDOWS
+        ):
+            raise PaperAutonomySupervisorViolation(
+                f"autonomous starts are not permitted in the "
+                f"'{self.session.value}' window"
+            )
+        if self.preparation_allowed and (
+            self.session not in AUTONOMOUS_PREPARE_WINDOWS
+        ):
+            raise PaperAutonomySupervisorViolation(
+                f"autonomous preparation is not permitted in the "
+                f"'{self.session.value}' window"
+            )
+        # A mandatory wind-down and a permission to add work are opposites.  The
+        # decision function must not be asked which of two contradictory facts
+        # to believe -- and it would believe whichever branch came first.
+        if self.orderly_stop_due and (
+            self.start_allowed or self.preparation_allowed
+        ):
+            raise PaperAutonomySupervisorViolation(
+                "the orderly stop boundary has arrived, so the same schedule "
+                "cannot also permit starting or preparing"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -478,22 +577,39 @@ def decide_paper_autonomy(
     The order is:
 
     1.  the control-plane store cannot be read -- nothing else can be trusted;
-    2.  the kill switch is latched -- the operator has already said stop;
-    3.  the process is shutting down;
-    4.  an action from a previous tick (or a previous process) is unresolved;
-    5.  startup could not be proven safe;
-    6.  the Paper capability needs a human;
-    7.  finalization is still pending -- the session is not safely gone yet;
-    8.  the operator disabled autonomy;
-    9.  the operator paused autonomy;
-    10. an active session (its own or a manual one) is already up;
-    11. the day's orderly stop boundary has arrived;
+    2.  the Paper ownership observed does not match the canonical lifecycle;
+    3.  the kill switch is latched -- the operator has already said stop;
+    4.  the process is shutting down;
+    5.  an action from a previous tick (or a previous process) is unresolved;
+    6.  startup could not be proven safe;
+    7.  the Paper capability needs a human;
+    8.  finalization is still pending -- the session is not safely gone yet;
+    9.  the operator disabled autonomy;
+    10. the operator paused autonomy;
+    11. an autonomous session is up under this intent;
     12. an autonomous start was already attempted today;
     13. preparation is in flight or done;
     14. the schedule cannot be trusted;
     15. it is time to prepare;
     16. it is time to start;
     17. nothing to do.
+
+    Two things about a *live session* are decided in more than one branch, and
+    both are load-bearing rather than incidental.
+
+    **Provenance decides authority.**  Every branch that would touch a running
+    session first asks whether the session is one this supervisor started.  A
+    session launched by hand is not under automation: pausing or stopping it
+    because an autonomy switch moved would change the semantics of a feature the
+    operator never enrolled.  The manual cases are therefore no-ops carrying a
+    reason that says so, and an unattributable session blocks.
+
+    **The orderly stop boundary outranks the intent.**  Inside an autonomous
+    session the wind-down is checked before the operator's mode is, because a
+    session that has to be flat by a deadline is not a session that should keep
+    opening entries or be resumed into the close.  An earlier version read the
+    active session first and returned from it, so a paused session at the
+    boundary was *resumed* -- the one action the boundary exists to prevent.
     """
 
     day = schedule.trading_day
@@ -505,11 +621,20 @@ def decide_paper_autonomy(
             intent_revision,
         )
 
+    if not runtime.paper_ownership_consistent:
+        return _blocked(
+            "the Paper ownership observed does not match the canonical Paper "
+            "lifecycle; a human has to establish what owns it",
+            day,
+            intent_revision,
+        )
+
     if kill_switch_latched:
         # The kill switch is a stop-requesting authority, not a finalization
-        # authority.  If the session is live it is asked to wind down through
-        # the canonical stop; if a human is already required, that outranks a
-        # stop this process may not be able to complete.
+        # authority.  If the session is one this supervisor started it is asked
+        # to wind down through the canonical stop; if a human is already
+        # required, that outranks a stop this process may not be able to
+        # complete.
         if runtime.manual_recovery_required:
             return _blocked(
                 "the kill switch is latched and the Paper session needs manual "
@@ -517,11 +642,22 @@ def decide_paper_autonomy(
                 day,
                 intent_revision,
             )
+        foreign = _not_our_session(
+            runtime,
+            day,
+            intent_revision,
+            manual_reason=(
+                "the kill switch is latched, but the active Paper session is "
+                "manual and is not controlled by the supervisor"
+            ),
+        )
+        if foreign is not None:
+            return foreign
         if runtime.session_active:
             return _act(
                 PaperAutonomyAction.STOP,
-                "the kill switch is latched; winding the session down through "
-                "the canonical stop",
+                "the kill switch is latched; winding the autonomous session "
+                "down through the canonical stop",
                 day,
                 intent_revision,
             )
@@ -571,6 +707,17 @@ def decide_paper_autonomy(
         )
 
     if intent_mode is PaperAutonomyMode.DISABLED:
+        foreign = _not_our_session(
+            runtime,
+            day,
+            intent_revision,
+            manual_reason=(
+                "autonomy is disabled, but the active Paper session is manual "
+                "and is not controlled by the supervisor"
+            ),
+        )
+        if foreign is not None:
+            return foreign
         if runtime.session_active:
             return _act(
                 PaperAutonomyAction.STOP,
@@ -586,11 +733,37 @@ def decide_paper_autonomy(
         )
 
     if intent_mode is PaperAutonomyMode.PAUSED:
-        if runtime.session_running:
-            return _act(
-                PaperAutonomyAction.PAUSE_ENTRIES,
-                "the operator paused autonomy; closing new entries through the "
-                "canonical pause",
+        foreign = _not_our_session(
+            runtime,
+            day,
+            intent_revision,
+            manual_reason=(
+                "autonomy is paused, but the active Paper session is manual and "
+                "is not controlled by the supervisor"
+            ),
+        )
+        if foreign is not None:
+            return foreign
+        if runtime.session_active:
+            if schedule.orderly_stop_due:
+                return _act(
+                    PaperAutonomyAction.STOP,
+                    "the orderly stop boundary has arrived while the operator's "
+                    "intent is paused; winding the autonomous session down "
+                    "through the canonical stop",
+                    day,
+                    intent_revision,
+                )
+            if runtime.session_running:
+                return _act(
+                    PaperAutonomyAction.PAUSE_ENTRIES,
+                    "the operator paused autonomy; closing new entries through "
+                    "the canonical pause",
+                    day,
+                    intent_revision,
+                )
+            return _noop(
+                "the operator paused autonomy and its session is already paused",
                 day,
                 intent_revision,
             )
@@ -600,10 +773,28 @@ def decide_paper_autonomy(
             intent_revision,
         )
 
-    # From here the operator has authorised autonomous work.  Everything above
-    # had to be clear first, and everything below is a question about the market
-    # and the day rather than about the authorisation.
+    # From here the operator has authorised autonomous work.
+    foreign = _not_our_session(
+        runtime,
+        day,
+        intent_revision,
+        manual_reason=(
+            "autonomy is enabled, but the active Paper session is manual and is "
+            "not controlled by the supervisor"
+        ),
+    )
+    if foreign is not None:
+        return foreign
+
     if runtime.session_active:
+        if schedule.orderly_stop_due:
+            return _act(
+                PaperAutonomyAction.STOP,
+                "the orderly stop boundary has arrived; winding the autonomous "
+                "session down through the canonical stop",
+                day,
+                intent_revision,
+            )
         if runtime.session_paused:
             return _act(
                 PaperAutonomyAction.RESUME_ENTRIES,
@@ -614,14 +805,6 @@ def decide_paper_autonomy(
             )
         return _noop(
             "an autonomous Paper session is already running under this intent",
-            day,
-            intent_revision,
-        )
-
-    if schedule.orderly_stop_due:
-        return _noop(
-            "the orderly stop boundary has arrived; no new session is started "
-            "this trading day",
             day,
             intent_revision,
         )
@@ -657,7 +840,10 @@ def decide_paper_autonomy(
         )
 
     if runtime.preparation_ready:
-        if schedule.start_allowed:
+        if (
+            schedule.start_allowed
+            and schedule.session in AUTONOMOUS_START_WINDOWS
+        ):
             return _act(
                 PaperAutonomyAction.START,
                 "candidates are ready and the session is open for an "
@@ -672,7 +858,10 @@ def decide_paper_autonomy(
             intent_revision,
         )
 
-    if schedule.preparation_allowed:
+    if (
+        schedule.preparation_allowed
+        and schedule.session in AUTONOMOUS_PREPARE_WINDOWS
+    ):
         return _act(
             PaperAutonomyAction.PREPARE,
             f"the operator authorised autonomy and this session "
@@ -687,6 +876,42 @@ def decide_paper_autonomy(
         day,
         intent_revision,
     )
+
+
+def _not_our_session(
+    runtime: PaperAutonomyRuntimeFacts,
+    day: date,
+    intent_revision: int,
+    *,
+    manual_reason: str,
+) -> PaperAutonomyDecision | None:
+    """The verdict for a live session this supervisor did not start, or ``None``.
+
+    ``None`` means the session is the supervisor's and the caller should go on to
+    control it.  The two other answers are deliberately different, because the
+    situations are: a **manual** session is one the supervisor knows it must
+    leave alone -- a no-op, with a reason that says exactly that rather than
+    implying an autonomy switch acted on it -- while an **unattributable** one is
+    a session nobody can currently account for, which is a reason to stop and ask
+    rather than to guess a provenance and act on it.
+    """
+
+    if not runtime.session_active:
+        return None
+    if (
+        runtime.session_provenance
+        is PaperAutonomySessionProvenance.AUTONOMOUS
+    ):
+        return None
+    if runtime.session_provenance is PaperAutonomySessionProvenance.UNKNOWN:
+        return _blocked(
+            "a Paper session is active but cannot be attributed to the autonomy "
+            "supervisor; a human has to establish what it is before the "
+            "scheduler may act",
+            day,
+            intent_revision,
+        )
+    return _noop(manual_reason, day, intent_revision)
 
 
 def _noop(

@@ -81,7 +81,25 @@ class SQLitePaperAutonomyActionRepository:
     # -- the claim ------------------------------------------------------
 
     def claim(self, record: PaperAutonomyActionRecord) -> bool:
-        """Take the right to perform ``record``, atomically."""
+        """Take the right to perform ``record``, atomically.
+
+        Only an opening state may be claimed.  The check is here rather than
+        trusted from the caller because the ledger's whole value is that its rows
+        correspond to actions that really happened: a claim that accepted
+        ``SUCCEEDED`` would let a caller skip the state machine, and the row it
+        wrote would be indistinguishable from one a canonical owner reported.
+        """
+
+        if record.status is not PaperAutonomyActionStatus.CLAIMED:
+            raise PaperAutonomyActionRepositoryError(
+                f"a claim opens an action as 'claimed', not "
+                f"'{record.status.value}'"
+            )
+        if record.completed_at is not None:
+            raise PaperAutonomyActionRepositoryError(
+                "a claim cannot carry a completion time; nothing has been "
+                "requested yet"
+            )
 
         try:
             return self._claim(record)
@@ -128,6 +146,75 @@ class SQLitePaperAutonomyActionRepository:
                 _rollback_quietly(connection)
                 raise
 
+    def mark_requested(self, *, action_key: str, detail: str) -> None:
+        """Move a claimed action to ``REQUESTED``, exactly once."""
+
+        if not str(detail).strip():
+            raise PaperAutonomyActionRepositoryError(
+                "a requested action must say what the owner accepted"
+            )
+        try:
+            self._mark_requested(action_key, detail)
+        except PaperAutonomyActionRepositoryError:
+            raise
+        except sqlite3.Error as error:
+            raise PaperAutonomyActionRepositoryError(
+                "the Paper autonomy action could not be marked as requested"
+            ) from error
+
+    def _mark_requested(self, action_key: str, detail: str) -> None:
+        with closing(connect_sqlite(self.path)) as connection:
+            connection.isolation_level = None
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                # The update is unconditional on status, because the status was
+                # read inside this same write lock: no other writer can change
+                # the row between the two statements.  Carrying the status in the
+                # ``WHERE`` as well made the property have *two* independent
+                # carriers, and a property defended twice cannot be shown to be
+                # tested -- a mutant that removed either one left the other to
+                # catch it, so neither could be demonstrated load-bearing.
+                # Measured, not assumed: both sites were tried.
+                claimed_row = connection.execute(
+                    _SELECT_ONE, (action_key,)
+                ).fetchone()
+                if claimed_row is None:
+                    raise PaperAutonomyActionRepositoryError(
+                        f"no action is stored under {action_key!r}"
+                    )
+                claimed = _record_from_row(claimed_row)
+                if claimed.is_terminal:
+                    raise PaperAutonomyActionRepositoryError(
+                        f"the action under {action_key!r} already has a "
+                        f"terminal outcome ({claimed.status.value})"
+                    )
+                if claimed.status is not PaperAutonomyActionStatus.CLAIMED:
+                    raise PaperAutonomyActionRepositoryError(
+                        f"the action under {action_key!r} is already "
+                        f"'{claimed.status.value}'; a request is accepted once"
+                    )
+                cursor = connection.execute(
+                    f"""
+                    UPDATE {TABLENAME}
+                    SET status = ?, detail = ?
+                    WHERE action_key = ?
+                    """,
+                    (
+                        str(PaperAutonomyActionStatus.REQUESTED),
+                        detail,
+                        action_key,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise PaperAutonomyActionRepositoryError(
+                        f"the action under {action_key!r} changed while its "
+                        f"request was being recorded"
+                    )
+                connection.execute("COMMIT")
+            except BaseException:
+                _rollback_quietly(connection)
+                raise
+
     # -- the outcome ----------------------------------------------------
 
     def complete(
@@ -138,7 +225,7 @@ class SQLitePaperAutonomyActionRepository:
         completed_at: datetime,
         detail: str,
     ) -> None:
-        """Record a terminal outcome for an already-claimed action."""
+        """Record a terminal outcome for an action in progress."""
 
         if status in NON_TERMINAL_ACTION_STATUSES:
             raise PaperAutonomyActionRepositoryError(
@@ -168,37 +255,59 @@ class SQLitePaperAutonomyActionRepository:
         completed_at: datetime,
         detail: str,
     ) -> None:
-        guard = ", ".join("?" for _ in NON_TERMINAL_ACTION_STATUSES)
         with closing(connect_sqlite(self.path)) as connection:
             connection.isolation_level = None
             connection.execute("BEGIN IMMEDIATE")
             try:
+                # The existing row is read *and fully parsed* under the write
+                # lock before anything is changed.  The guard alone would be
+                # enough to make the update atomic, but it would also let this
+                # method modify a row whose other columns nobody can read --
+                # and an action this repository cannot fully read is not one it
+                # may leave behind in a new state.
+                row = connection.execute(
+                    _SELECT_ONE, (action_key,)
+                ).fetchone()
+                if row is None:
+                    raise PaperAutonomyActionRepositoryError(
+                        f"no action is stored under {action_key!r}"
+                    )
+                stored = _record_from_row(row)
+                if stored.is_terminal:
+                    raise PaperAutonomyActionRepositoryError(
+                        f"the action under {action_key!r} already has a "
+                        f"terminal outcome ({stored.status.value})"
+                    )
+                if (
+                    status is PaperAutonomyActionStatus.SUCCEEDED
+                    and stored.status is PaperAutonomyActionStatus.CLAIMED
+                ):
+                    raise PaperAutonomyActionRepositoryError(
+                        "an action cannot succeed before its request was "
+                        "accepted; success comes from a canonical completion "
+                        "the owner published"
+                    )
+                # Unconditional on status for the same reason as
+                # ``_mark_requested``: the row was read under this same write
+                # lock, so the checks above are the single carriers of their
+                # rules rather than one of two.
                 cursor = connection.execute(
                     f"""
                     UPDATE {TABLENAME}
                     SET status = ?, completed_at = ?, detail = ?
-                    WHERE action_key = ? AND status IN ({guard})
+                    WHERE action_key = ?
                     """,
                     (
                         str(status),
                         to_stored_text(completed_at),
                         detail,
                         action_key,
-                        *[str(row) for row in NON_TERMINAL_ACTION_STATUSES],
                     ),
                 )
                 if cursor.rowcount != 1:
-                    # Either there is no such action or it already finished.
-                    # Both are refusals, and they are different operator
-                    # problems, so they are told apart before raising.
-                    existing = connection.execute(
-                        _SELECT_ONE, (action_key,)
-                    ).fetchone()
                     raise PaperAutonomyActionRepositoryError(
-                        f"no open action under {action_key!r}"
-                        if existing is None
-                        else f"the action under {action_key!r} already has a "
-                        f"terminal outcome"
+                        f"the action under {action_key!r} changed while its "
+                        f"outcome was being recorded"
                     )
                 connection.execute("COMMIT")
             except BaseException:
@@ -234,27 +343,26 @@ class SQLitePaperAutonomyActionRepository:
         """Whether an autonomous start was already attempted on that day.
 
         Asked as "does any start row exist for the day", not "did one succeed".
-        The distinction is the whole of PHASE 47's rule: a launch that was
-        requested and whose outcome is unknown -- because the process died while
-        the broker was connecting -- must not be retried, and a query that only
-        looked for successes could not see it.
+        The distinction is the whole of the one-start-per-day rule: a launch that
+        was requested and whose outcome is unknown -- because the process died
+        while the broker was connecting -- must not be retried, and a query that
+        only looked for successes could not see it.
+
+        Read through the full ledger, and therefore through the full parser,
+        rather than filtered in SQL.  An earlier version selected the matching
+        row directly, which meant a row whose ``action`` column had been damaged
+        stopped matching -- and the query then answered ``False``, which reads as
+        "no start was attempted today" and is the one answer that must never be
+        invented.  The ledger gains a few rows a day; the safety is worth more
+        than the query.
         """
 
-        try:
-            with closing(connect_sqlite(self.path)) as connection:
-                row = connection.execute(
-                    f"""
-                    SELECT 1 FROM {TABLENAME}
-                    WHERE trading_day = ? AND action = ?
-                    LIMIT 1
-                    """,
-                    (trading_day.isoformat(), str(PaperAutonomyActionType.START)),
-                ).fetchone()
-        except sqlite3.Error as error:
-            raise PaperAutonomyActionRepositoryError(
-                "the Paper autonomy action ledger could not be read"
-            ) from error
-        return row is not None
+        records = self._read(_SELECT_ALL, ())
+        return any(
+            record.trading_day == trading_day
+            and record.action is PaperAutonomyActionType.START
+            for record in records
+        )
 
     def _read(
         self, statement: str, parameters: tuple

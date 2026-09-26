@@ -47,6 +47,7 @@ from us_quant.trading.domain.paper_autonomy_supervisor import (
     PaperAutonomyPolicy,
     PaperAutonomyRuntimeFacts,
     PaperAutonomyScheduleFacts,
+    PaperAutonomySessionProvenance,
     PaperAutonomySessionWindow,
     PaperAutonomyStartupFacts,
     PaperAutonomySupervisorViolation,
@@ -70,21 +71,53 @@ _NOW = datetime(2026, 9, 28, 13, 45, tzinfo=timezone.utc)
 # =====================================================================
 
 
-def _runtime(**overrides: bool) -> PaperAutonomyRuntimeFacts:
-    """Runtime facts for an idle, healthy Paper capability."""
+def _runtime(**overrides: object) -> PaperAutonomyRuntimeFacts:
+    """Runtime facts for an idle, healthy, attributable Paper capability.
 
-    base = {
+    ``session_provenance`` is deliberately **not** inferred from the session
+    flags.  A helper that filled it in would be the one place a test could forget
+    that provenance is a fact in its own right, and every case about a manual or
+    unattributable session would then be testing the helper instead.
+    """
+
+    base: dict = {
         "shutting_down": False,
         "preparation_active": False,
         "preparation_ready": False,
         "launch_in_flight": False,
         "session_running": False,
         "session_paused": False,
+        "session_provenance": PaperAutonomySessionProvenance.NONE,
         "manual_recovery_required": False,
         "finalization_pending": False,
-        "paper_ownership_clear": True,
+        "paper_ownership_consistent": True,
     }
     return PaperAutonomyRuntimeFacts(**{**base, **overrides})
+
+
+def _autonomous(**overrides: object) -> PaperAutonomyRuntimeFacts:
+    """Facts for a session this supervisor started."""
+
+    return _runtime(
+        session_provenance=PaperAutonomySessionProvenance.AUTONOMOUS,
+        **overrides,
+    )
+
+
+def _manual(**overrides: object) -> PaperAutonomyRuntimeFacts:
+    """Facts for a session an operator started from the Execution route."""
+
+    return _runtime(
+        session_provenance=PaperAutonomySessionProvenance.MANUAL, **overrides
+    )
+
+
+def _unattributable(**overrides: object) -> PaperAutonomyRuntimeFacts:
+    """Facts for a session nobody can currently account for."""
+
+    return _runtime(
+        session_provenance=PaperAutonomySessionProvenance.UNKNOWN, **overrides
+    )
 
 
 def _schedule(**overrides: object) -> PaperAutonomyScheduleFacts:
@@ -151,11 +184,33 @@ def test_the_control_plane_outranks_everything() -> None:
     decision = _decide(
         control_plane_readable=False,
         kill_switch_latched=True,
-        runtime=_runtime(session_running=True, shutting_down=True),
+        runtime=_autonomous(session_running=True, shutting_down=True),
         unresolved_action="paper:2026-09-28:r4:start:session",
     )
     assert decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
     assert "control-plane store" in decision.reason
+
+
+def test_inconsistent_ownership_blocks_before_anything_acts() -> None:
+    """A lifecycle and an ownership that disagree is a question, not a state.
+
+    Checked above every automated action -- including the ones that would remove
+    work -- because "the Paper capability says nothing is running and something
+    holds a candidate/service/lease" is precisely the situation where an orderly
+    stop might be aimed at the wrong thing.
+    """
+
+    decision = _decide(
+        runtime=_runtime(paper_ownership_consistent=False),
+    )
+    assert decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
+    assert "ownership" in decision.reason
+
+    killing = _decide(
+        kill_switch_latched=True,
+        runtime=_autonomous(session_running=True, paper_ownership_consistent=False),
+    )
+    assert killing.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
 
 
 def test_the_kill_switch_outranks_shutdown_and_everything_below() -> None:
@@ -164,7 +219,7 @@ def test_the_kill_switch_outranks_shutdown_and_everything_below() -> None:
     assert "kill switch" in decision.reason
 
 
-def test_a_kill_switch_with_a_live_session_asks_for_the_canonical_stop() -> None:
+def test_a_kill_switch_with_an_autonomous_session_asks_for_the_canonical_stop() -> None:
     """The kill switch stops asking; it does not skip finalization.
 
     An orderly stop is a request to flatten and finalize through the same path a
@@ -176,8 +231,27 @@ def test_a_kill_switch_with_a_live_session_asks_for_the_canonical_stop() -> None
         {"session_running": True},
         {"session_paused": True},
     ):
-        decision = _decide(kill_switch_latched=True, runtime=_runtime(**facts))
+        decision = _decide(kill_switch_latched=True, runtime=_autonomous(**facts))
         assert decision.action is PaperAutonomyAction.STOP
+
+
+def test_a_kill_switch_leaves_a_manual_session_alone() -> None:
+    """The boundary the provenance fact exists for.
+
+    An autonomy kill switch is not a global Paper stop.  The operator's autonomy
+    authorisation covers the sessions automation started; a session they launched
+    by hand is not enrolled in it, and stopping it because an autonomy switch
+    moved would change the semantics of a feature nobody put under automation.
+    The reason says exactly that rather than implying the kill acted on it.
+    """
+
+    decision = _decide(
+        kill_switch_latched=True, runtime=_manual(session_running=True)
+    )
+    assert decision.action is PaperAutonomyAction.NOOP
+    assert decision.action_key is None
+    assert "manual" in decision.reason
+    assert "not controlled by the supervisor" in decision.reason
 
 
 def test_a_kill_switch_never_reconciles() -> None:
@@ -185,7 +259,9 @@ def test_a_kill_switch_never_reconciles() -> None:
 
     decision = _decide(
         kill_switch_latched=True,
-        runtime=_runtime(session_running=True, manual_recovery_required=True),
+        runtime=_autonomous(
+            session_running=True, manual_recovery_required=True
+        ),
     )
     assert decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
     assert "recovery" in decision.reason
@@ -236,12 +312,13 @@ def test_finalization_pending_outranks_the_intent_and_waits() -> None:
     assert "finalizing" in decision.reason
 
 
-def test_a_disabled_intent_stops_its_own_session_and_starts_nothing() -> None:
+def test_a_disabled_intent_stops_its_autonomous_session_and_starts_nothing() -> None:
     idle = _decide(intent_mode=PaperAutonomyMode.DISABLED)
     assert idle.action is PaperAutonomyAction.NOOP
 
     running = _decide(
-        intent_mode=PaperAutonomyMode.DISABLED, runtime=_runtime(session_running=True)
+        intent_mode=PaperAutonomyMode.DISABLED,
+        runtime=_autonomous(session_running=True),
     )
     assert running.action is PaperAutonomyAction.STOP
 
@@ -251,34 +328,186 @@ def test_a_paused_intent_closes_new_entries_and_never_starts() -> None:
     assert idle.action is PaperAutonomyAction.NOOP
 
     running = _decide(
-        intent_mode=PaperAutonomyMode.PAUSED, runtime=_runtime(session_running=True)
+        intent_mode=PaperAutonomyMode.PAUSED,
+        runtime=_autonomous(session_running=True),
     )
     assert running.action is PaperAutonomyAction.PAUSE_ENTRIES
 
     already = _decide(
-        intent_mode=PaperAutonomyMode.PAUSED, runtime=_runtime(session_paused=True)
+        intent_mode=PaperAutonomyMode.PAUSED,
+        runtime=_autonomous(session_paused=True),
     )
     assert already.action is PaperAutonomyAction.NOOP
 
 
-def test_an_enabled_intent_resumes_its_own_paused_session() -> None:
-    decision = _decide(runtime=_runtime(session_paused=True))
+def test_an_enabled_intent_resumes_its_autonomous_paused_session() -> None:
+    decision = _decide(runtime=_autonomous(session_paused=True))
     assert decision.action is PaperAutonomyAction.RESUME_ENTRIES
 
 
-def test_an_enabled_intent_leaves_a_running_session_alone() -> None:
-    decision = _decide(runtime=_runtime(session_running=True))
+def test_an_enabled_intent_leaves_its_running_session_alone() -> None:
+    decision = _decide(runtime=_autonomous(session_running=True))
     assert decision.action is PaperAutonomyAction.NOOP
     assert "already running" in decision.reason
 
 
-def test_the_orderly_stop_boundary_outranks_starting_a_new_session() -> None:
+# =====================================================================
+# A manual session is not under automation
+# =====================================================================
+
+
+@pytest.mark.parametrize(
+    "mode",
+    (PaperAutonomyMode.ENABLED, PaperAutonomyMode.DISABLED, PaperAutonomyMode.PAUSED),
+)
+def test_the_supervisor_never_touches_a_manual_session(
+    mode: PaperAutonomyMode,
+) -> None:
+    """No autonomy switch changes what happens to a hand-launched session.
+
+    Asserted across all three modes at once, because the guarantee is the same
+    one in each: the supervisor's authority is over the sessions it started, so
+    disabling autonomy, pausing it or enabling it must all be no-ops while a
+    manual session is up.  A test per mode would let one of them quietly start
+    stopping somebody else's session.
+    """
+
+    decision = _decide(intent_mode=mode, runtime=_manual(session_running=True))
+    assert decision.action is PaperAutonomyAction.NOOP
+    assert decision.action_key is None
+    assert "manual" in decision.reason
+
+
+def test_a_manual_session_is_not_resumed_either() -> None:
+    decision = _decide(runtime=_manual(session_paused=True))
+    assert decision.action is PaperAutonomyAction.NOOP
+    assert decision.action_key is None
+
+
+def test_a_manual_session_does_not_become_a_double_start() -> None:
+    """Ready candidates plus somebody else's session is still not a launch.
+
+    The manual session returns before the start block is ever reached, so the
+    scheduler cannot start a second Paper session alongside one it does not own.
+    """
+
     decision = _decide(
-        runtime=_runtime(preparation_ready=True),
-        schedule=_schedule(orderly_stop_due=True),
+        runtime=_manual(session_running=True, preparation_ready=True)
     )
     assert decision.action is PaperAutonomyAction.NOOP
-    assert "orderly stop boundary" in decision.reason
+    assert decision.action_key is None
+
+
+def test_an_unattributable_session_blocks_and_is_never_controlled() -> None:
+    """Unknown is not manual: nobody can account for the session at all.
+
+    A manual session is one the supervisor knows to leave alone.  A session whose
+    provenance is unknown is one that might be the previous process's, and the
+    safe reading is that a human has to establish what it is -- never to pause,
+    resume, stop or start on the strength of a guess.
+    """
+
+    for facts in ({"session_running": True}, {"session_paused": True}):
+        for mode in (
+            PaperAutonomyMode.ENABLED,
+            PaperAutonomyMode.DISABLED,
+            PaperAutonomyMode.PAUSED,
+        ):
+            decision = _decide(
+                intent_mode=mode, runtime=_unattributable(**facts)
+            )
+            assert (
+                decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
+            ), (facts, mode)
+            assert decision.action_key is None
+
+    killing = _decide(
+        kill_switch_latched=True, runtime=_unattributable(session_running=True)
+    )
+    assert killing.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
+
+
+# =====================================================================
+# The orderly stop boundary
+# =====================================================================
+
+
+def _at_the_boundary() -> PaperAutonomyScheduleFacts:
+    """A schedule at the mandatory wind-down: nothing may be added."""
+
+    return _schedule(
+        preparation_allowed=False,
+        start_allowed=False,
+        orderly_stop_due=True,
+    )
+
+
+def test_an_autonomous_running_session_stops_at_the_boundary() -> None:
+    decision = _decide(
+        runtime=_autonomous(session_running=True), schedule=_at_the_boundary()
+    )
+    assert decision.action is PaperAutonomyAction.STOP
+
+
+def test_an_autonomous_paused_session_stops_at_the_boundary() -> None:
+    """The bug this replaced: a paused session at the boundary was *resumed*.
+
+    Reading the active session before the clock meant the paused branch reached
+    ``RESUME_ENTRIES`` first, and the wind-down was never consulted -- the
+    scheduler would have opened entries into the close on the one day it had
+    already decided to be flat by a deadline.
+    """
+
+    decision = _decide(
+        runtime=_autonomous(session_paused=True), schedule=_at_the_boundary()
+    )
+    assert decision.action is PaperAutonomyAction.STOP
+
+
+def test_a_manual_session_at_the_boundary_is_left_alone() -> None:
+    decision = _decide(
+        runtime=_manual(session_running=True), schedule=_at_the_boundary()
+    )
+    assert decision.action is PaperAutonomyAction.NOOP
+
+
+def test_an_unattributable_session_at_the_boundary_blocks() -> None:
+    decision = _decide(
+        runtime=_unattributable(session_running=True),
+        schedule=_at_the_boundary(),
+    )
+    assert decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
+
+
+def test_the_boundary_outranks_the_intent_but_not_a_kill() -> None:
+    """Within an autonomous session, the clock beats the mode, and both beat nothing.
+
+    A kill switch already stops, so the boundary cannot matter there; a paused
+    intent at the boundary stops rather than pausing, because a session being
+    wound down has nothing left to pause for.
+    """
+
+    paused_at_boundary = _decide(
+        intent_mode=PaperAutonomyMode.PAUSED,
+        runtime=_autonomous(session_running=True),
+        schedule=_at_the_boundary(),
+    )
+    assert paused_at_boundary.action is PaperAutonomyAction.STOP
+
+    killed_at_boundary = _decide(
+        kill_switch_latched=True,
+        runtime=_autonomous(session_running=True),
+        schedule=_at_the_boundary(),
+    )
+    assert killed_at_boundary.action is PaperAutonomyAction.STOP
+
+
+def test_the_boundary_stops_a_new_session_being_prepared_or_started() -> None:
+    decision = _decide(
+        runtime=_runtime(preparation_ready=True), schedule=_at_the_boundary()
+    )
+    assert decision.action is PaperAutonomyAction.NOOP
+    assert decision.action_key is None
 
 
 def test_one_autonomous_start_per_trading_day() -> None:
@@ -345,7 +574,15 @@ def test_ready_candidates_outside_the_start_window_do_not_start() -> None:
     ):
         decision = _decide(
             runtime=_runtime(preparation_ready=True),
-            schedule=_schedule(session=window, start_allowed=False),
+            schedule=_schedule(
+                session=window,
+                # Premarket legitimately permits preparation; the others permit
+                # nothing, and the schedule type refuses to pretend otherwise.
+                preparation_allowed=(
+                    window in AUTONOMOUS_PREPARE_WINDOWS
+                ),
+                start_allowed=False,
+            ),
         )
         assert decision.action is PaperAutonomyAction.NOOP, window
 
@@ -623,11 +860,169 @@ def test_unknown_is_not_the_same_as_zero() -> None:
 
 def test_runtime_facts_derive_activity() -> None:
     assert _runtime().idle is True
-    assert _runtime(session_running=True).idle is False
-    assert _runtime(session_paused=True).session_active is True
+    assert _autonomous(session_running=True).idle is False
+    assert _autonomous(session_paused=True).session_active is True
     assert _runtime(preparation_ready=True).session_active is False
     assert _runtime(preparation_ready=True).idle is False
     assert _runtime(finalization_pending=True).idle is False
+
+
+def test_only_an_autonomous_session_is_the_supervisors_to_control() -> None:
+    assert _autonomous(session_running=True).autonomous_session_active is True
+    assert _manual(session_running=True).autonomous_session_active is False
+    assert _unattributable(session_running=True).autonomous_session_active is False
+    assert _runtime().autonomous_session_active is False
+
+
+# =====================================================================
+# Facts that contradict themselves cannot be constructed
+# =====================================================================
+
+
+def test_a_session_cannot_be_running_and_paused_at_once() -> None:
+    with pytest.raises(PaperAutonomySupervisorViolation):
+        _autonomous(session_running=True, session_paused=True)
+
+
+def test_a_live_session_must_be_attributed() -> None:
+    """A session with provenance ``NONE`` is a caller that forgot to look.
+
+    ``NONE`` means "no session is up".  A fact set that also says one is running
+    is not a situation for the precedence order to resolve: by the time it could,
+    it would already be choosing an action for a session it cannot attribute.
+    """
+
+    with pytest.raises(PaperAutonomySupervisorViolation):
+        _runtime(session_running=True)
+    with pytest.raises(PaperAutonomySupervisorViolation):
+        _runtime(session_paused=True)
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    (
+        PaperAutonomySessionProvenance.AUTONOMOUS,
+        PaperAutonomySessionProvenance.MANUAL,
+        PaperAutonomySessionProvenance.UNKNOWN,
+    ),
+)
+def test_an_idle_capability_is_not_attributed(
+    provenance: PaperAutonomySessionProvenance,
+) -> None:
+    """The other direction: a provenance with nothing to attribute it to.
+
+    An idle capability carrying a provenance is a caller working from a stale
+    reading, and the direction matters -- the decision would otherwise be free to
+    act on a session that is not there.
+    """
+
+    with pytest.raises(PaperAutonomySupervisorViolation):
+        _runtime(session_provenance=provenance)
+
+
+# =====================================================================
+# Regular hours only, structurally
+# =====================================================================
+
+
+@pytest.mark.parametrize(
+    "window",
+    (
+        PaperAutonomySessionWindow.PREMARKET,
+        PaperAutonomySessionWindow.AFTER_HOURS,
+        PaperAutonomySessionWindow.OVERNIGHT,
+        PaperAutonomySessionWindow.CLOSED,
+        PaperAutonomySessionWindow.MAINTENANCE,
+    ),
+)
+def test_no_window_outside_regular_can_permit_a_start(
+    window: PaperAutonomySessionWindow,
+) -> None:
+    """The schedule cannot *express* an autonomous start outside regular hours.
+
+    While ``start_allowed`` was the only thing the decision read, "regular only"
+    was a promise the adapter made: a fact carrying ``after_hours`` with
+    ``start_allowed=True`` would have launched a session in a window v1 does not
+    permit, and nothing would have objected.  Now it cannot be built -- manual
+    Paper keeps every window, and the autonomy vocabulary simply has no way to
+    describe the permission.
+    """
+
+    with pytest.raises(PaperAutonomySupervisorViolation):
+        _schedule(session=window, start_allowed=True)
+
+
+@pytest.mark.parametrize(
+    "window",
+    (
+        PaperAutonomySessionWindow.AFTER_HOURS,
+        PaperAutonomySessionWindow.OVERNIGHT,
+        PaperAutonomySessionWindow.CLOSED,
+        PaperAutonomySessionWindow.MAINTENANCE,
+    ),
+)
+def test_no_window_outside_the_prepare_set_can_permit_preparation(
+    window: PaperAutonomySessionWindow,
+) -> None:
+    """Isolated from the start rule on purpose.
+
+    ``start_allowed`` is set to ``False`` here so the *start* invariant cannot be
+    the reason the construction fails.  Without that, every case below would pass
+    for the wrong rule and the preparation limit would be untested -- measured,
+    not assumed: a mutation that removes this invariant survived until the cases
+    were narrowed this way.
+    """
+
+    with pytest.raises(PaperAutonomySupervisorViolation):
+        _schedule(
+            session=window, preparation_allowed=True, start_allowed=False
+        )
+
+
+def test_premarket_may_prepare_and_may_not_start() -> None:
+    """The one window outside regular hours that keeps a permission."""
+
+    allowed = _schedule(
+        session=PaperAutonomySessionWindow.PREMARKET,
+        preparation_allowed=True,
+        start_allowed=False,
+    )
+    assert allowed.preparation_allowed is True
+    with pytest.raises(PaperAutonomySupervisorViolation):
+        _schedule(
+            session=PaperAutonomySessionWindow.PREMARKET,
+            preparation_allowed=True,
+            start_allowed=True,
+        )
+
+
+def test_regular_hours_permit_both() -> None:
+    allowed = _schedule(
+        session=PaperAutonomySessionWindow.REGULAR,
+        preparation_allowed=True,
+        start_allowed=True,
+    )
+    assert (allowed.preparation_allowed, allowed.start_allowed) == (True, True)
+
+
+def test_a_wind_down_cannot_also_permit_work() -> None:
+    """Ordering a session flat while permitting a new one is not a schedule.
+
+    The decision function would have believed whichever branch it read first, so
+    the contradiction is refused where it is built rather than resolved later.
+    """
+
+    with pytest.raises(PaperAutonomySupervisorViolation):
+        _schedule(orderly_stop_due=True, start_allowed=True)
+    with pytest.raises(PaperAutonomySupervisorViolation):
+        _schedule(orderly_stop_due=True, preparation_allowed=True)
+
+    clean = _schedule(
+        orderly_stop_due=True,
+        preparation_allowed=False,
+        start_allowed=False,
+    )
+    assert clean.orderly_stop_due is True
 
 
 # =====================================================================
@@ -734,6 +1129,7 @@ def test_a_claim_is_unresolved_until_it_gets_an_outcome(
 def test_an_outcome_is_written_exactly_once(tmp_path: pathlib.Path) -> None:
     store = _ledger(tmp_path)
     _claim(store, "k")
+    store.mark_requested(action_key="k", detail="the owner accepted the request")
     store.complete(
         action_key="k",
         status=PaperAutonomyActionStatus.SUCCEEDED,
@@ -785,18 +1181,40 @@ def test_an_outcome_must_be_terminal(tmp_path: pathlib.Path) -> None:
 def test_every_terminal_status_can_be_recorded(
     tmp_path: pathlib.Path,
 ) -> None:
+    """All three terminal outcomes are reachable, from a legal state.
+
+    ``SUCCEEDED`` goes through ``REQUESTED``, and only through it: a success
+    comes from a completion the canonical owner published, and an owner that was
+    never recorded as having accepted the request cannot have published one.
+    ``REFUSED`` and ``FAILED`` are reachable both straight from ``CLAIMED`` (the
+    owner refused, or the call raised) and after a request was accepted (the
+    owner later published a failure).
+    """
+
     store = _ledger(tmp_path)
-    for index, status in enumerate(TERMINAL_ACTION_STATUSES):
+    terminal_outcomes = (
+        (PaperAutonomyActionStatus.REFUSED, False),
+        (PaperAutonomyActionStatus.FAILED, False),
+        (PaperAutonomyActionStatus.REFUSED, True),
+        (PaperAutonomyActionStatus.FAILED, True),
+        (PaperAutonomyActionStatus.SUCCEEDED, True),
+    )
+    for index, (status, through_request) in enumerate(terminal_outcomes):
         key = f"k{index}"
         _claim(store, key)
+        if through_request:
+            store.mark_requested(action_key=key, detail="the owner accepted it")
         store.complete(
             action_key=key,
             status=status,
             completed_at=_NOW,
             detail="terminal",
         )
+
     assert store.unresolved() == ()
-    assert {row.status for row in store.recent()} == set(TERMINAL_ACTION_STATUSES)
+    assert {row.status for row in store.recent()} == {
+        status for status, _ in terminal_outcomes
+    }
 
 
 def test_a_start_attempt_is_remembered_whatever_became_of_it(
@@ -961,3 +1379,291 @@ def test_the_ledger_and_the_intent_store_are_separate(
     actions = _ledger(tmp_path)
     assert intent.path != actions.path
     assert intent.path.exists() and actions.path.exists()
+
+
+# =====================================================================
+# The action state machine
+# =====================================================================
+
+
+def _record(
+    key: str,
+    *,
+    status: PaperAutonomyActionStatus,
+    completed_at: datetime | None = None,
+) -> PaperAutonomyActionRecord:
+    return PaperAutonomyActionRecord(
+        action_key=key,
+        intent_revision=4,
+        trading_day=_DAY,
+        action=PaperAutonomyActionType.PREPARE,
+        status=status,
+        claimed_at=_NOW,
+        completed_at=completed_at,
+        detail="assembled by hand",
+    )
+
+
+def test_an_accepted_request_is_recorded_once(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``CLAIMED`` to ``REQUESTED``, and the step happens once.
+
+    The two states mean different things to a restart: a claim whose request
+    never reached an owner is a request that certainly did not execute, while an
+    accepted one may have.  Repeating the step would erase that difference.
+    """
+
+    store = _ledger(tmp_path)
+    _claim(store, "k")
+    store.mark_requested(action_key="k", detail="the owner accepted the request")
+    assert store.recent()[0].status is PaperAutonomyActionStatus.REQUESTED
+
+    with pytest.raises(PaperAutonomyActionRepositoryError):
+        store.mark_requested(action_key="k", detail="and again")
+    assert store.recent()[0].detail == "the owner accepted the request"
+
+
+def test_an_accepted_request_survives_a_restart(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _ledger(tmp_path)
+    _claim(store, "k")
+    store.mark_requested(action_key="k", detail="the owner accepted the request")
+
+    restarted = _ledger(tmp_path)
+    assert [row.status for row in restarted.unresolved()] == [
+        PaperAutonomyActionStatus.REQUESTED
+    ]
+
+
+def test_marking_an_unknown_action_requested_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _ledger(tmp_path)
+    with pytest.raises(PaperAutonomyActionRepositoryError):
+        store.mark_requested(action_key="never-claimed", detail="nothing there")
+    assert store.recent() == ()
+
+
+def test_marking_a_finished_action_requested_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _ledger(tmp_path)
+    _claim(store, "k")
+    store.complete(
+        action_key="k",
+        status=PaperAutonomyActionStatus.REFUSED,
+        completed_at=_NOW,
+        detail="the owner refused it",
+    )
+    with pytest.raises(PaperAutonomyActionRepositoryError):
+        store.mark_requested(action_key="k", detail="too late")
+    assert store.recent()[0].status is PaperAutonomyActionStatus.REFUSED
+
+
+def test_a_success_cannot_be_claimed_before_the_request_was_accepted(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The transition that keeps "accepted" and "completed" apart.
+
+    A success has to come from a completion the canonical owner published, and an
+    owner that was never recorded as having accepted the request cannot have
+    published one.  Everything else -- refusal and failure straight from a claim
+    -- stays legal, because an owner can refuse a request or the call can raise.
+    """
+
+    store = _ledger(tmp_path)
+    _claim(store, "k")
+    with pytest.raises(PaperAutonomyActionRepositoryError):
+        store.complete(
+            action_key="k",
+            status=PaperAutonomyActionStatus.SUCCEEDED,
+            completed_at=_NOW,
+            detail="claimed success",
+        )
+    assert store.recent()[0].status is PaperAutonomyActionStatus.CLAIMED
+    assert store.unresolved()[0].is_terminal is False
+
+
+@pytest.mark.parametrize(
+    "status",
+    (
+        PaperAutonomyActionStatus.REQUESTED,
+        PaperAutonomyActionStatus.REFUSED,
+        PaperAutonomyActionStatus.FAILED,
+        PaperAutonomyActionStatus.SUCCEEDED,
+    ),
+)
+def test_a_claim_can_only_open_an_action(
+    tmp_path: pathlib.Path, status: PaperAutonomyActionStatus
+) -> None:
+    """A claim writes an opening state or it writes nothing.
+
+    Accepting any status would let a caller skip the state machine the ledger
+    exists to record, and the row it wrote would be indistinguishable from one a
+    canonical owner reported.
+    """
+
+    store = _ledger(tmp_path)
+    with pytest.raises(PaperAutonomyActionRepositoryError):
+        store.claim(
+            _record(
+                "k",
+                status=status,
+                completed_at=(
+                    None
+                    if status is PaperAutonomyActionStatus.REQUESTED
+                    else _NOW
+                ),
+            )
+        )
+    assert store.recent() == ()
+
+
+def test_a_claim_cannot_carry_a_completion_time(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _ledger(tmp_path)
+    record = PaperAutonomyActionRecord(
+        action_key="k",
+        intent_revision=4,
+        trading_day=_DAY,
+        action=PaperAutonomyActionType.PREPARE,
+        status=PaperAutonomyActionStatus.CLAIMED,
+        claimed_at=_NOW,
+        completed_at=None,
+        detail="a claim",
+    )
+    assert store.claim(record) is True
+    # The value type refuses the contradictory pair outright, so the storage
+    # boundary is never reached with one.
+    with pytest.raises(PaperAutonomySupervisorViolation):
+        PaperAutonomyActionRecord(
+            action_key="k2",
+            intent_revision=4,
+            trading_day=_DAY,
+            action=PaperAutonomyActionType.PREPARE,
+            status=PaperAutonomyActionStatus.CLAIMED,
+            claimed_at=_NOW,
+            completed_at=_NOW,
+            detail="a claim with a completion time",
+        )
+
+
+def test_an_action_record_refuses_a_negative_revision() -> None:
+    with pytest.raises(PaperAutonomySupervisorViolation):
+        PaperAutonomyActionRecord(
+            action_key="k",
+            intent_revision=-1,
+            trading_day=_DAY,
+            action=PaperAutonomyActionType.PREPARE,
+            status=PaperAutonomyActionStatus.CLAIMED,
+            claimed_at=_NOW,
+            completed_at=None,
+            detail="a revision no operator intent produced",
+        )
+
+
+def test_marking_requested_refuses_a_corrupt_row(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A record this repository cannot fully read is not moved into a new state."""
+
+    store = _ledger(tmp_path)
+    _claim(store, "k")
+    _corrupt(store, "trading_day = ?", "not a date")
+    with pytest.raises(PaperAutonomyActionStoreUnreadable):
+        store.mark_requested(action_key="k", detail="the owner accepted it")
+
+
+def test_completing_refuses_a_corrupt_row(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _ledger(tmp_path)
+    _claim(store, "k")
+    _corrupt(store, "intent_revision = ?", "many")
+    with pytest.raises(PaperAutonomyActionStoreUnreadable):
+        store.complete(
+            action_key="k",
+            status=PaperAutonomyActionStatus.REFUSED,
+            completed_at=_NOW,
+            detail="completed anyway",
+        )
+
+
+def _corrupt(
+    store: SQLitePaperAutonomyActionRepository,
+    assignment: str,
+    value: str,
+    *,
+    key: str = "k",
+) -> None:
+    connection = sqlite3.connect(store.path)
+    try:
+        connection.execute(
+            f"UPDATE paper_autonomy_action SET {assignment} WHERE action_key = ?",
+            (value, key),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    "assignment, value",
+    (
+        ("action = ?", "BROKEN"),
+        ("status = ?", "BROKEN"),
+        ("trading_day = ?", "not a date"),
+        ("claimed_at = ?", "not a timestamp"),
+        ("intent_revision = ?", "many"),
+    ),
+)
+def test_a_corrupt_row_makes_the_start_query_unreadable(
+    tmp_path: pathlib.Path, assignment: str, value: str
+) -> None:
+    """The query that decides whether today's start already happened, fail closed.
+
+    This is the defect the query was restructured for.  While it selected the
+    matching row directly, damaging the ``action`` column stopped the row from
+    matching -- and the query then answered ``False``, which reads as "no start
+    was attempted today" and is the one answer that must never be invented.  The
+    end of the day has to be that the ledger is unreadable, not that it is empty.
+    """
+
+    store = _ledger(tmp_path)
+    _claim(store, "s", action=PaperAutonomyActionType.START)
+    _corrupt(store, assignment, value, key="s")
+
+    with pytest.raises(PaperAutonomyActionStoreUnreadable):
+        store.start_attempted(_DAY)
+
+
+def test_a_corrupt_unrelated_row_also_makes_the_start_query_unreadable(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The whole ledger is unreadable, so the scheduler does not act on any of it.
+
+    A damaged preparation row says nothing about today's start on its own, but it
+    does say that this ledger can no longer be trusted to answer the question --
+    and the scheduler's response to an untrustworthy ledger is to stop.
+    """
+
+    store = _ledger(tmp_path)
+    _claim(store, "p", action=PaperAutonomyActionType.PREPARE)
+    _claim(store, "s", action=PaperAutonomyActionType.START)
+    connection = sqlite3.connect(store.path)
+    try:
+        connection.execute(
+            "UPDATE paper_autonomy_action SET status = 'BROKEN' "
+            "WHERE action_key = 'p'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(PaperAutonomyActionStoreUnreadable):
+        store.start_attempted(_DAY)
+    with pytest.raises(PaperAutonomyActionStoreUnreadable):
+        store.unresolved()

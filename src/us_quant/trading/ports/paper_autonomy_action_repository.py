@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Protocol, runtime_checkable
 
+from us_quant.trading.domain.paper_autonomy import INITIAL_REVISION
 from us_quant.trading.domain.paper_autonomy_supervisor import (
     NON_TERMINAL_ACTION_STATUSES,
     PaperAutonomyActionStatus,
@@ -80,6 +81,16 @@ class PaperAutonomyActionRecord:
             raise PaperAutonomySupervisorViolation(
                 "an action record needs the deterministic key it was claimed under"
             )
+        # A negative revision is not a revision any operator intent could have.
+        # The decision layer already refuses to build a key from one, and a
+        # record that names one could only be produced by a caller reaching past
+        # that -- so the value type refuses it too rather than relying on the
+        # layer above.
+        if self.intent_revision < INITIAL_REVISION:
+            raise PaperAutonomySupervisorViolation(
+                f"an action record cannot name revision {self.intent_revision}; "
+                f"no operator intent has produced it"
+            )
         if self.claimed_at.tzinfo is None:
             raise PaperAutonomySupervisorViolation(
                 "an action record needs a timezone-aware claimed_at"
@@ -125,17 +136,39 @@ class PaperAutonomyActionRepositoryPort(Protocol):
     """The ledger of requested actions and their observed outcomes."""
 
     def claim(self, record: PaperAutonomyActionRecord) -> bool:
-        """Take the right to perform ``record``, atomically.
+        """Take the right to perform ``record``, atomically, as a *new* claim.
 
         Returns ``True`` when *this* caller won and ``False`` when the key was
         already claimed.  The uniqueness is enforced by the store, not by a read
         followed by a write: two ticks that both read "not claimed" must still
         produce exactly one winner, and a two-step check would produce two.
 
+        ``record`` must carry the opening state of an action --
+        ``CLAIMED`` with no completion time.  Implementations must refuse
+        anything else rather than trusting the caller: a claim that accepted
+        ``SUCCEEDED`` would let a caller skip the state machine the ledger exists
+        to record, and the resulting row would be indistinguishable from one the
+        canonical owner had actually reported.
+
         A claim is persisted *before* the owner is asked.  That ordering is what
         makes a crash recoverable at all -- a claim written afterwards would
         leave an action that happened and was never recorded, which is the one
         state a crash analysis cannot detect.
+        """
+
+    def mark_requested(self, *, action_key: str, detail: str) -> None:
+        """Record that the owner accepted a claimed action's request.
+
+        The ``CLAIMED`` to ``REQUESTED`` step, exactly once.  It exists because
+        the two states mean different things to a restart: a claim whose request
+        never reached an owner is a request that certainly did not execute,
+        while an accepted one may have.  Without this step the ledger could not
+        distinguish them, and the transition was reachable in the enum but not
+        through any legal API.
+
+        Raises ``PaperAutonomyActionRepositoryError`` for an unknown key, a key
+        that is already ``REQUESTED``, and a key that already holds a terminal
+        outcome -- the step happens once or it does not happen.
         """
 
     def complete(
@@ -146,12 +179,26 @@ class PaperAutonomyActionRepositoryPort(Protocol):
         completed_at: datetime,
         detail: str,
     ) -> None:
-        """Record a terminal outcome for an already-claimed action.
+        """Record a terminal outcome for an action in progress.
 
-        ``status`` must be terminal.  Raises
-        ``PaperAutonomyActionRepositoryError`` for an unknown key and for a key
-        that already holds a terminal outcome -- a decision the crash analysis
-        has already reasoned about cannot be quietly rewritten.
+        ``status`` must be terminal.  Which transitions are legal is part of the
+        contract, because it is what keeps "the owner accepted the request" and
+        "the action succeeded" apart:
+
+        * ``CLAIMED`` may go to ``REFUSED`` or ``FAILED`` -- an owner can refuse
+          a request, or the call can raise, without the request ever being
+          accepted;
+        * ``REQUESTED`` may go to any terminal state, including ``SUCCEEDED``,
+          because that is the only state from which a canonical finished fact
+          can have been observed;
+        * ``CLAIMED`` may **not** go straight to ``SUCCEEDED``.  A success has to
+          come from a completion the owner published, and an owner that was
+          never recorded as having accepted the request cannot have published
+          one.
+
+        Raises ``PaperAutonomyActionRepositoryError`` for an unknown key, for a
+        key that already holds a terminal outcome, and for a transition the
+        rules above forbid.
         """
 
     def unresolved(self) -> tuple[PaperAutonomyActionRecord, ...]:
@@ -160,6 +207,11 @@ class PaperAutonomyActionRepositoryPort(Protocol):
         Read once at startup and once per tick.  A non-empty answer is not a
         problem to be worked around: it means the previous attempt's outcome is
         genuinely unknown, and no retry can establish it.
+
+        An implementation must parse the whole ledger rather than filter in the
+        query.  A row it cannot interpret is a row whose status nobody knows,
+        and "I could not read one of today's attempts" is the stricter answer,
+        not the same one as "nothing is outstanding".
         """
 
     def start_attempted(self, trading_day: date) -> bool:

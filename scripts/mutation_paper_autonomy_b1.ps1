@@ -266,6 +266,34 @@ $mutations = @(
         repl = 'if False:'
         tests = @($behaviour)
         select = @("-k", "uncertain_schedule_cannot_advertise_start_or_prepare")
+    },
+
+    # -- the capability-boundary guard itself ----------------------------
+    # These three mutate the guard, not the product: what they have to prove is
+    # that the coverage the review asked for is real rather than claimed.
+    @{
+        name = 'M20 the desktop autonomy subtree is not discovered'
+        file = $architecture
+        find = 'desktop = list\(autonomy_root\.rglob\("\*\.py"\)\) if autonomy_root\.exists\(\) else \[\]'
+        repl = 'desktop = []'
+        tests = @($architecture)
+        select = @("-k", "discovery_covers_both_subtrees_and_nothing_else")
+    },
+    @{
+        name = 'M21 function parameters are not inspected'
+        file = $architecture
+        find = 'if isinstance\(node, ast\.arg\):\s+return node\.arg'
+        repl = "if False:`n        return None"
+        tests = @($architecture)
+        select = @("-k", "detector_catches_every_shape")
+    },
+    @{
+        name = 'M22 a LIVE enum member is accepted'
+        file = $architecture
+        find = 'if target\.id in _AUTHORITY_WIDENING_MEMBERS:'
+        repl = 'if False:'
+        tests = @($architecture)
+        select = @("-k", "detector_catches_every_shape")
     }
 )
 

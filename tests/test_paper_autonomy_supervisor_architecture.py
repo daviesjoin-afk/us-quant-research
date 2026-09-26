@@ -17,6 +17,7 @@ from __future__ import annotations
 import ast
 from dataclasses import fields
 import pathlib
+import re
 
 import pytest
 
@@ -394,30 +395,23 @@ def test_b_a10_the_autonomy_capability_cannot_express_live_authority() -> None:
     already owns them, and one invariant has one owner.
     """
 
-    modules = _autonomy_modules()
+    modules = _autonomy_module_paths(_SRC)
     assert modules, "the autonomy modules must exist"
 
-    widening = {
-        "environment",
-        "broker_mode",
-        "live_account",
-        "live_mode",
-        "real_money",
-    }
     offending: list[str] = []
     for path in modules:
-        for node in ast.walk(
-            ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        ):
-            if isinstance(node, ast.Name) and node.id.casefold() in widening:
-                offending.append(f"{_module_name(path)}:{node.lineno}:{node.id}")
-            elif (
-                isinstance(node, ast.Attribute)
-                and node.attr.casefold() in widening
-            ):
-                offending.append(
-                    f"{_module_name(path)}:{node.lineno}:{node.attr}"
-                )
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        label = path.name
+        offending += [f"{label}: arg/name {name}" for name in _authority_widening(tree)]
+        offending += [
+            f"{label}: enum {member}" for member in _enum_authority_members(tree)
+        ]
+        offending += [
+            f"{label}: definition {name}" for name in _live_definitions(tree)
+        ]
+        offending += [
+            f"{label}: method {name}" for name in _forbidden_public_methods(tree)
+        ]
     assert offending == []
 
     # Provenance answers "which session", never "which environment".
@@ -440,25 +434,361 @@ def test_b_a10_the_autonomy_capability_cannot_express_live_authority() -> None:
         "blocked_requires_operator",
     }
 
-    # And the executor seam offers no live request.
-    executor = _class_methods(_SRC / _SUPERVISOR_PORTS)["PaperAutonomyExecutorPort"]
-    for name in executor:
-        assert "live" not in name.casefold(), name
+
+#: Identifiers that would widen this capability's authority beyond Paper.
+#:
+#: An exact vocabulary rather than a substring search: ``liveness`` and
+#: ``delivery`` are legitimate words, and a rule that banned the substring
+#: ``live`` would reject them while still missing a spelling nobody thought of.
+#: The list is not meant to grow without limit -- the structural protection is
+#: the enum and port checks below, which cannot be spelled around.
+_AUTHORITY_WIDENING_NAMES = frozenset(
+    {
+        "account_mode",
+        "broker_mode",
+        "environment",
+        "execution_environment",
+        "live_account",
+        "live_enabled",
+        "live_mode",
+        "real_money",
+        "real_money_enabled",
+        "trading_environment",
+    }
+)
+
+#: Enum member names, and member values, that would describe live authority.
+_AUTHORITY_WIDENING_MEMBERS = frozenset({"LIVE", "REAL_MONEY"})
+_AUTHORITY_WIDENING_VALUES = frozenset({"live", "real_money"})
+
+#: Public method spellings that would offer a live or environment-scoped request.
+_FORBIDDEN_METHOD_PREFIXES = (
+    "enable_live",
+    "request_live",
+    "set_environment",
+    "start_live",
+)
+
+#: Whole words in a definition name that announce a live authority, and the one
+#: adjacent pair that does.  Whole words because the alternative is worse in both
+#: directions: ``liveness`` and ``delivery`` must survive, and ``build_live_autonomy``
+#: and ``LivePaperAutonomyHost`` must not.
+_LIVE_WORDS = frozenset({"live"})
+_LIVE_SEQUENCES = (("real", "money"),)
+
+_WORD_BOUNDARY = re.compile(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])")
 
 
-def _autonomy_modules() -> list[pathlib.Path]:
-    """Every module of this capability, discovered rather than listed.
+def _autonomy_module_paths(root: pathlib.Path) -> list[pathlib.Path]:
+    """Every module of the Paper autonomy capability under ``root``.
 
-    Globbed so a later slice -- the supervisor application, the composition
-    builders, the desktop host -- is covered the moment it is written, instead of
-    relying on someone remembering to extend a list.
+    Two subtrees, discovered rather than listed:
+
+    * the trading-side modules, matched by name -- domain, ports, application,
+      adapters and composition all live under ``trading``;
+    * the desktop autonomy capability, matched by package path, because a host
+      there is legitimately called ``host.py`` and no filename pattern would find
+      it.
+
+    A root that does not have the desktop subtree yields a list without it rather
+    than failing, so this runs before the host exists and covers it the moment it
+    does.  The scan is deliberately **not** over the whole source tree: the claim
+    is about this capability, not about the repository, and a global scan is how
+    a Paper phase ends up vetoing a future Live one.
     """
 
+    trading_root = root / "trading"
+    trading = (
+        list(trading_root.rglob("paper_autonomy*.py"))
+        if trading_root.exists()
+        else []
+    )
+    autonomy_root = root / "desktop_v2" / "orchestration" / "autonomy"
+    desktop = list(autonomy_root.rglob("*.py")) if autonomy_root.exists() else []
     return sorted(
         path
-        for path in _SRC.rglob("paper_autonomy*.py")
+        for path in {*trading, *desktop}
         if "__pycache__" not in path.parts
     )
+
+
+def _identifier_name(node: ast.AST) -> str | None:
+    """The authority-relevant identifier ``node`` spells, if it spells one.
+
+    ``ast.arg`` is here because a function parameter is exactly where an
+    environment or a real-money flag would arrive: checking only ``Name`` and
+    ``Attribute`` would let ``def build(environment: str)`` through untouched.
+    Definition names are here too, since an authority is as likely to arrive as
+    ``build_live_autonomy`` as it is as a field.
+    """
+
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.arg):
+        return node.arg
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return node.name
+    return None
+
+
+def _authority_widening(tree: ast.AST) -> list[str]:
+    """Every identifier in ``tree`` that names a wider authority."""
+
+    found: list[str] = []
+    for node in ast.walk(tree):
+        name = _identifier_name(node)
+        if name is not None and name.casefold() in _AUTHORITY_WIDENING_NAMES:
+            found.append(name)
+    return found
+
+
+def _name_words(name: str) -> list[str]:
+    """``name`` as lowercase whole words, camel case included."""
+
+    return [
+        word.casefold() for word in _WORD_BOUNDARY.split(name) if word
+    ]
+
+
+def _live_definitions(tree: ast.AST) -> list[str]:
+    """Definition names that announce a live authority, as whole words.
+
+    Deliberately not a substring rule.  ``liveness`` and ``delivery`` contain the
+    letters of ``live`` and mean nothing of the sort, while
+    ``build_live_autonomy`` and ``LivePaperAutonomyHost`` are exactly what this
+    is for -- and a split on word boundaries, camel case included, separates the
+    two cases that a naive ``"live" in name`` cannot.
+    """
+
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        words = _name_words(node.name)
+        if _LIVE_WORDS.intersection(words):
+            found.append(node.name)
+            continue
+        for first, second in _LIVE_SEQUENCES:
+            if any(
+                words[index] == first and words[index + 1] == second
+                for index in range(len(words) - 1)
+            ):
+                found.append(node.name)
+                break
+    return found
+
+
+def _enum_authority_members(tree: ast.AST) -> list[str]:
+    """Enum member names and values in ``tree`` that describe live authority.
+
+    Only enum members are inspected, and that is the point: prose in this
+    capability legitimately discusses the Live route it must never implement, so
+    a text search would reject the documentation.  An enum member cannot be
+    prose -- it is an authority the code can express.
+    """
+
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        bases = {ast.unparse(base) for base in node.bases}
+        if not any(base.endswith("Enum") for base in bases):
+            continue
+        for member in node.body:
+            if not isinstance(member, ast.Assign) or len(member.targets) != 1:
+                continue
+            target = member.targets[0]
+            if not isinstance(target, ast.Name):
+                continue
+            if target.id in _AUTHORITY_WIDENING_MEMBERS:
+                found.append(f"{node.name}.{target.id}")
+            value = member.value
+            if (
+                isinstance(value, ast.Constant)
+                and isinstance(value.value, str)
+                and value.value.casefold() in _AUTHORITY_WIDENING_VALUES
+            ):
+                found.append(f"{node.name}.{target.id} = {value.value!r}")
+    return found
+
+
+def _forbidden_public_methods(tree: ast.AST) -> list[str]:
+    """Method names in ``tree`` that would offer a live request."""
+
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        lowered = node.name.casefold()
+        if lowered.startswith(_FORBIDDEN_METHOD_PREFIXES):
+            found.append(node.name)
+    return found
+
+
+# =====================================================================
+# The detector itself, and the discovery contract
+# =====================================================================
+
+
+@pytest.mark.parametrize(
+    "label, source",
+    (
+        (
+            "a function argument named environment",
+            "def build(environment: str) -> None: ...",
+        ),
+        (
+            "a function argument named real_money",
+            "def start(real_money: bool) -> None: ...",
+        ),
+        (
+            "an annotated method argument named broker_mode",
+            "class X:\n    def run(self, broker_mode: str) -> None: ...",
+        ),
+        (
+            "an attribute named live_mode",
+            "def read(settings: object) -> object:\n    return settings.live_mode",
+        ),
+        (
+            # The value is deliberately innocuous, so only the *member name*
+            # check can catch this one.  A fixture that used ``LIVE = 'live'``
+            # would be caught by the value rule as well, and a mutant removing
+            # the name rule would survive -- measured, not assumed.
+            "an enum member named LIVE",
+            "class Mode(StrEnum):\n    PAPER = 'paper'\n    LIVE = 'paper'",
+        ),
+        (
+            "an enum member whose value is real_money",
+            "class Mode(StrEnum):\n    PAPER = 'paper'\n    SOLVENT = 'real_money'",
+        ),
+        (
+            "a definition that announces a live authority",
+            "def build_live_autonomy() -> None: ...",
+        ),
+        (
+            "a class that announces a live authority",
+            "class LivePaperAutonomyHost:\n    pass",
+        ),
+        (
+            "a method that would request a live launch",
+            "class X:\n    def request_live_start(self) -> None: ...",
+        ),
+    ),
+)
+def test_b_a13_the_detector_catches_every_shape(label: str, source: str) -> None:
+    """The detector is exercised on its own, through the same functions the tree
+    check uses.
+
+    One parser, two callers.  A fixture copy of the detection would prove only
+    that the copy works, and the thing that actually needs proving is that the
+    guard reading the production tree would notice a widening -- including the
+    shapes an earlier version missed entirely, where the authority arrives as a
+    *parameter* rather than as a field.
+    """
+
+    tree = ast.parse(source)
+    found = (
+        _authority_widening(tree)
+        + _enum_authority_members(tree)
+        + _live_definitions(tree)
+        + _forbidden_public_methods(tree)
+    )
+    assert found, label
+
+
+@pytest.mark.parametrize(
+    "label, source",
+    (
+        (
+            "a provenance field",
+            "class Facts:\n    session_provenance: str",
+        ),
+        (
+            "a legal enum",
+            "class Mode(StrEnum):\n    PAPER_AUTONOMOUS = 'autonomous'\n"
+            "    MANUAL = 'manual'\n    NONE = 'none'",
+        ),
+        (
+            "words that merely contain live",
+            "def check(liveness: str, delivery: str) -> None: ...",
+        ),
+        (
+            "a definition about Paper autonomy",
+            "def build_paper_autonomy_supervisor() -> None: ...",
+        ),
+    ),
+)
+def test_b_a13b_the_detector_leaves_legitimate_names_alone(
+    label: str, source: str
+) -> None:
+    """The other half of a detector, and the half that costs more to get wrong.
+
+    ``liveness`` and ``delivery`` contain the letters of ``live``; a guard that
+    flagged them would be turned off within a week, and a turned-off guard
+    protects nothing.  So the rule is whole words, and it is asserted.
+    """
+
+    tree = ast.parse(source)
+    found = (
+        _authority_widening(tree)
+        + _enum_authority_members(tree)
+        + _live_definitions(tree)
+        + _forbidden_public_methods(tree)
+    )
+    assert found == [], label
+
+
+def test_b_a14_discovery_covers_both_subtrees_and_nothing_else(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The coverage contract, checked without inventing a production file.
+
+    Both halves have to be found -- a trading-side module by name, and a desktop
+    host by package path, because ``host.py`` matches no filename pattern.  And
+    a sibling tree that has nothing to do with this capability has to stay
+    unscanned: the guard is about Paper autonomy, not about the repository, and
+    the difference is the whole reason it is scoped this way.
+    """
+
+    root = tmp_path / "us_quant"
+    (root / "trading" / "application").mkdir(parents=True)
+    (
+        root / "trading" / "application" / "paper_autonomy_supervisor.py"
+    ).write_text("", encoding="utf-8")
+    (root / "desktop_v2" / "orchestration" / "autonomy").mkdir(parents=True)
+    (root / "desktop_v2" / "orchestration" / "autonomy" / "host.py").write_text(
+        "", encoding="utf-8"
+    )
+    (root / "trading" / "live").mkdir(parents=True)
+    (root / "trading" / "live" / "canary.py").write_text("", encoding="utf-8")
+
+    discovered = {path.name for path in _autonomy_module_paths(root)}
+    assert discovered == {"paper_autonomy_supervisor.py", "host.py"}
+
+
+def test_b_a14b_discovery_tolerates_a_missing_desktop_subtree(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The guard has to run before the host exists.
+
+    An earlier version of the naming rule claimed "the desktop host is covered
+    the moment it is written" while matching only filenames beginning
+    ``paper_autonomy`` -- so a host at ``autonomy/host.py`` would have been
+    invisible, and the claim would have been false.  This is the regression that
+    keeps the claim honest, and it runs on a tree with no desktop subtree at all.
+    """
+
+    root = tmp_path / "us_quant"
+    (root / "trading" / "domain").mkdir(parents=True)
+    (root / "trading" / "domain" / "paper_autonomy.py").write_text(
+        "", encoding="utf-8"
+    )
+
+    assert {path.name for path in _autonomy_module_paths(root)} == {
+        "paper_autonomy.py"
+    }
 
 
 def test_b_a11_the_supervisor_errors_share_the_feature_root() -> None:

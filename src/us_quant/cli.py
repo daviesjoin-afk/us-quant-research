@@ -28,6 +28,19 @@ from us_quant.optimization import (
     MovingAverageCandidate,
     walk_forward_moving_average,
 )
+from us_quant.paths import ApplicationPaths
+from us_quant.trading.domain.paper_autonomy import (
+    PaperAutonomyError,
+    PaperAutonomyIntent,
+)
+from us_quant.trading.composition.paper_autonomy import (
+    build_paper_autonomy_application,
+)
+from us_quant.trading.ports.paper_autonomy_repository import (
+    PaperAutonomyConflict,
+    PaperAutonomyEvent,
+    PaperAutonomyStoreUnreadable,
+)
 from us_quant.strategy import MovingAverageTrendStrategy
 from us_quant.market_data import (
     build_aligned_market_slices,
@@ -822,6 +835,206 @@ def research_cross_sectional(
     return 0
 
 
+#: The operator verbs, and the application method each one invokes.
+#:
+#: This table is the command's whole write surface, and it is a table of
+#: *application* methods on purpose.  The CLI is an operator surface, not a
+#: second authority: it reads the current revision, asks the application for one
+#: legal transition against it, and prints what came back.  Nothing here opens
+#: the autonomy database, so a CLI bug cannot write an intent the application
+#: would have refused -- there is no code path from here to the store.
+_OPERATOR_TRANSITIONS = {
+    "enable": "enable",
+    "pause": "pause",
+    "disable": "disable",
+    "kill": "engage_kill_switch",
+    "clear-kill": "clear_kill_switch",
+}
+
+#: What each verb means to an operator, printed by ``--help``.
+_OPERATOR_HINTS = {
+    "enable": "authorise unsupervised Paper trading",
+    "pause": "stop opening new autonomous Paper work",
+    "disable": "withdraw the authorisation entirely",
+    "kill": "latch the kill switch off, from any state",
+    "clear-kill": "release the kill-switch latch (does not re-enable)",
+}
+
+
+def _default_autonomy_database() -> Path:
+    """Where the autonomy intent lives when the operator names no database.
+
+    Derived from ``ApplicationPaths`` rather than from the trading config's
+    ``database_path``.  The autonomy intent is its own fact and gets its own
+    file, the way strategies, shadow state and runtime events each do -- and it
+    must resolve to the same file the desktop uses, which is exactly what
+    going through the shared state root guarantees.
+    """
+
+    return ApplicationPaths.discover().runtime_root / "paper_autonomy.sqlite3"
+
+
+def _require_paper_environment(config_path: Path) -> int | None:
+    """The autonomy surface is Paper-only, and the config has to agree.
+
+    The intent's vocabulary is Paper-only by construction (there is no
+    environment field to widen), so this is defence in depth rather than the
+    boundary itself: a machine configured for live trading must not be able to
+    latch or clear a Paper autonomy switch through this command either.
+    """
+
+    config = load_config(config_path)
+    if config.environment.value != "paper" or config.live_trading_enabled:
+        print(
+            json.dumps(
+                {
+                    "applied": False,
+                    "error": (
+                        "Paper autonomy requires the paper environment with "
+                        "live trading disabled"
+                    ),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 2
+    return None
+
+
+def _autonomy_payload(
+    intent: PaperAutonomyIntent,
+    events: tuple[PaperAutonomyEvent, ...],
+) -> dict:
+    """The operator's view of the intent: the state, then how it got there."""
+
+    return {
+        "revision": intent.revision,
+        "mode": intent.mode.value,
+        "kill_switch_latched": intent.kill_switch_latched,
+        "allows_autonomous_work": intent.allows_autonomous_work,
+        "updated_at": intent.updated_at.isoformat(),
+        "reason": intent.reason,
+        "recent_events": [
+            {
+                "revision": event.revision,
+                "event": event.kind.value,
+                "detail": event.detail,
+                "occurred_at": event.occurred_at.isoformat(),
+            }
+            for event in events
+        ],
+    }
+
+
+def paper_autonomy_status(
+    *,
+    config_path: Path,
+    database_path: Path | None,
+) -> int:
+    """Print the stored intent and the transitions that produced it."""
+
+    refused = _require_paper_environment(config_path)
+    if refused is not None:
+        return refused
+
+    application = build_paper_autonomy_application(
+        database_path=database_path or _default_autonomy_database()
+    )
+    try:
+        intent = application.snapshot()
+        events = application.history(10)
+    except PaperAutonomyError as error:
+        # This command only reads, so every failure it can meet is the store
+        # refusing to be believed -- which is exactly what an operator should be
+        # told, rather than a plausible-looking default.
+        print(
+            json.dumps(
+                {"readable": False, "error": str(error)},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 9
+    print(
+        json.dumps(
+            {"readable": True, **_autonomy_payload(intent, events)},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
+def paper_autonomy_transition(
+    *,
+    config_path: Path,
+    database_path: Path | None,
+    action: str,
+    reason: str,
+) -> int:
+    """Ask for one operator transition, and report what actually happened."""
+
+    refused = _require_paper_environment(config_path)
+    if refused is not None:
+        return refused
+
+    application = build_paper_autonomy_application(
+        database_path=database_path or _default_autonomy_database()
+    )
+    try:
+        current = application.snapshot()
+        transition = getattr(application, _OPERATOR_TRANSITIONS[action])
+        intent = transition(current.revision, reason)
+    except PaperAutonomyStoreUnreadable as error:
+        print(
+            json.dumps(
+                {"applied": False, "action": action, "error": str(error)},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 9
+    except PaperAutonomyError as error:
+        # Two failures reach here and neither wrote anything: the transition is
+        # not legal for the state the operator's view described (a refusal), or
+        # the view was already stale when it arrived (a conflict).  They are
+        # separated in the payload because the operator response differs --
+        # re-decide, versus re-read and then re-decide -- and the type is the
+        # only honest way to tell them apart here.
+        print(
+            json.dumps(
+                {
+                    "applied": False,
+                    "action": action,
+                    "conflict": isinstance(error, PaperAutonomyConflict),
+                    "error": str(error),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 2
+
+    payload: dict = {"applied": True, "action": action}
+    payload.update(_autonomy_payload(intent, application.history(10)))
+    if action == "kill":
+        # Said precisely, because the imprecise version is a lie: this process
+        # has latched a permission, it has not touched a running session, an
+        # order or a position.  Until a supervisor exists to read the latch,
+        # claiming otherwise would be the most dangerous kind of reassurance.
+        payload["effect"] = (
+            "kill switch latched; the autonomous runner will refuse new work"
+        )
+    elif action == "clear-kill":
+        payload["effect"] = (
+            "kill switch released; autonomy stays disabled until it is "
+            "enabled explicitly"
+        )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="us-quant")
     parser.add_argument(
@@ -980,6 +1193,34 @@ def build_parser() -> argparse.ArgumentParser:
             "research/results/cross_sectional_research.json"
         ),
     )
+    autonomy_parser = subparsers.add_parser(
+        "paper-autonomy",
+        help=(
+            "the operator's standing intent for unsupervised Paper trading "
+            "(this command does not start or stop a Paper session)"
+        ),
+    )
+    autonomy_parser.add_argument(
+        "--database",
+        type=Path,
+        default=None,
+        help=(
+            "autonomy state database "
+            "(default: <state root>/runtime/paper_autonomy.sqlite3)"
+        ),
+    )
+    autonomy_commands = autonomy_parser.add_subparsers(
+        dest="autonomy_command",
+        required=True,
+    )
+    autonomy_commands.add_parser("status")
+    for verb, hint in _OPERATOR_HINTS.items():
+        verb_parser = autonomy_commands.add_parser(verb, help=hint)
+        verb_parser.add_argument(
+            "--reason",
+            required=True,
+            help="why the operator is making this decision (recorded)",
+        )
     return parser
 
 
@@ -1053,6 +1294,18 @@ def main() -> int:
             universe_path=args.universe,
             data_root=args.data_root,
             output_path=args.output,
+        )
+    if args.command == "paper-autonomy":
+        if args.autonomy_command == "status":
+            return paper_autonomy_status(
+                config_path=args.config,
+                database_path=args.database,
+            )
+        return paper_autonomy_transition(
+            config_path=args.config,
+            database_path=args.database,
+            action=args.autonomy_command,
+            reason=args.reason,
         )
     raise AssertionError(f"unhandled command: {args.command}")
 

@@ -301,6 +301,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "market.py",
         "orders.py",
         "paper_autonomy.py",
+        "paper_autonomy_supervisor.py",
         "risk.py",
         "session.py",
         "strategy.py",
@@ -312,7 +313,9 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "broker_execution.py",
         "market_data.py",
         "order_repository.py",
+        "paper_autonomy_action_repository.py",
         "paper_autonomy_repository.py",
+        "paper_autonomy_supervisor.py",
         "strategy_repository.py",
     }
 
@@ -935,6 +938,7 @@ NON_MARKET_DATA_ADAPTER_MODULES = {
     "ibkr/execution.py",
     "ibkr/execution_gateway.py",
     "ibkr/support.py",
+    "sqlite/paper_autonomy_action_repository.py",
     "sqlite/paper_autonomy_repository.py",
     "alpaca/__init__.py",
     "finnhub/__init__.py",

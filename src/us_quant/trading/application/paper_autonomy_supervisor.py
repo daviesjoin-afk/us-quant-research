@@ -58,10 +58,12 @@ from us_quant.trading.domain.paper_autonomy_supervisor import (
 )
 from us_quant.trading.ports.paper_autonomy_action_repository import (
     PaperAutonomyActionRecord,
+    PaperAutonomyActionRepositoryError,
     PaperAutonomyActionRepositoryPort,
 )
 from us_quant.trading.ports.paper_autonomy_supervisor import (
     PaperAutonomyExecutorPort,
+    PaperAutonomyIntentReaderPort,
     PaperAutonomyPreparationRequest,
     PaperAutonomyRequestOutcome,
     PaperAutonomyRuntimeFactsPort,
@@ -103,7 +105,7 @@ class PaperAutonomySupervisor:
     def __init__(
         self,
         *,
-        intent,
+        intent: PaperAutonomyIntentReaderPort,
         actions: PaperAutonomyActionRepositoryPort,
         runtime_facts: PaperAutonomyRuntimeFactsPort,
         startup_facts: PaperAutonomyStartupFactsPort,
@@ -135,11 +137,26 @@ class PaperAutonomySupervisor:
 
         moment = now if now is not None else self._clock()
 
-        intent_revision, mode, latched, readable = self._read_intent()
+        readable, intent_revision, mode, latched = self._read_intent()
+        if not readable:
+            # Short-circuit, and this is an *operational* precedence rather than
+            # a documented one: nothing else is read, nothing else is touched.
+            # Continuing would ask the runtime, the schedule and the ledger about
+            # a system whose authorisation cannot be read -- and the ledger
+            # failing too would then surface as an exception instead of as the
+            # one reason that outranks every other.  The trading day is
+            # deliberately left unknown rather than fetched for the sake of
+            # filling a field.
+            return self._blocked_without_reading(
+                reason="the Paper autonomy control-plane store could not be read",
+                intent_revision=intent_revision,
+            )
+
         runtime = self._runtime_facts.facts()
         schedule = self._schedule.schedule(now=moment)
-        unresolved = self._first_unresolved()
-        attempted = self._start_attempted(schedule.trading_day)
+        action_store_readable, unresolved, attempted = self._read_action_state(
+            schedule.trading_day
+        )
 
         decision = decide_paper_autonomy(
             intent_mode=mode,
@@ -150,17 +167,24 @@ class PaperAutonomySupervisor:
             startup=self._startup,
             unresolved_action=unresolved,
             start_already_attempted_today=attempted,
-            control_plane_readable=readable,
+            control_plane_readable=True,
+            action_store_readable=action_store_readable,
         )
 
-        if not decision.is_executable:
+        if decision.action is PaperAutonomyAction.NOOP:
+            # A quiet tick says nothing.  A scheduler reporting every healthy
+            # no-op would emit thousands of entries a day and teach its operator
+            # to ignore the log -- which is the same as having no log.
+            return PaperAutonomyTickResult(
+                decision=decision, claimed=False, status=None, outcome=None
+            )
+
+        if decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR:
             self._report(
                 decision,
                 code=(
                     PaperAutonomyEventCode.RECOVERY_REQUIRED
-                    if decision.action
-                    is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
-                    and (unresolved is not None or runtime.manual_recovery_required)
+                    if unresolved is not None or runtime.manual_recovery_required
                     else PaperAutonomyEventCode.TICK_BLOCKED
                 ),
             )
@@ -169,6 +193,23 @@ class PaperAutonomySupervisor:
             )
 
         return self._execute(decision, moment=moment)
+
+    def _blocked_without_reading(
+        self, *, reason: str, intent_revision: int
+    ) -> PaperAutonomyTickResult:
+        """The one block that is produced without consulting anything else."""
+
+        decision = PaperAutonomyDecision(
+            action=PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR,
+            reason=reason,
+            trading_day=None,
+            intent_revision=intent_revision,
+            action_key=None,
+        )
+        self._report(decision, code=PaperAutonomyEventCode.TICK_BLOCKED)
+        return PaperAutonomyTickResult(
+            decision=decision, claimed=False, status=None, outcome=None
+        )
 
     # -- the claim, the ask, the record ---------------------------------
 
@@ -201,18 +242,34 @@ class PaperAutonomySupervisor:
 
         try:
             outcome = self._invoke(decision.action)
-        except Exception as error:  # noqa: BLE001 - the owner may raise anything
-            self._actions.complete(
-                action_key=decision.action_key,
-                status=PaperAutonomyActionStatus.FAILED,
-                completed_at=moment,
-                detail=f"the owner raised while the request was made: {error}",
+        except Exception:  # noqa: BLE001 - the owner may raise anything
+            # The claim is left exactly as it is -- ``CLAIMED``, unresolved --
+            # and that is the whole point.  A call that raised proves nothing
+            # about whether the effect happened: a launch can have changed the
+            # workflow, emitted a signal and started connecting a broker before
+            # something later in the same call failed.  Recording a terminal
+            # ``FAILED`` would turn "the outcome is unknown" into "it is known
+            # not to have happened", which is the one direction an unattended
+            # system must never take -- and the next tick then sees an async
+            # outcome where there is an unknown one.
+            #
+            # The exception's own text is deliberately not persisted.  It can
+            # carry a broker message, an account alias or a path, none of which
+            # belong in a durable autonomy audit; a caller that needs it has the
+            # traceback it caught.
+            self._report(
+                decision,
+                code=PaperAutonomyEventCode.ACTION_OUTCOME_UNKNOWN,
+                detail=(
+                    "the owner request raised before its outcome could be "
+                    "established; the action remains unresolved and no retry is "
+                    "attempted"
+                ),
             )
-            self._report(decision, code=PaperAutonomyEventCode.ACTION_FAILED)
             return PaperAutonomyTickResult(
                 decision=decision,
                 claimed=True,
-                status=PaperAutonomyActionStatus.FAILED,
+                status=PaperAutonomyActionStatus.CLAIMED,
                 outcome=None,
             )
 
@@ -282,32 +339,42 @@ class PaperAutonomySupervisor:
         first clause is exactly that state, and turning it into a return value
         keeps the precedence order in one place instead of splitting it between
         the supervisor and the decision function.  The placeholder revision and
-        mode are never read -- ``control_plane_readable=False`` returns before
-        them -- and ``DISABLED`` is the placeholder because it is the answer that
-        fails closed even if that coupling were ever broken.
+        mode are never read -- ``readable=False`` returns before them -- and
+        ``DISABLED`` is the placeholder because it is the answer that fails
+        closed even if that coupling were ever broken.
         """
 
         try:
             intent = self._intent.snapshot()
         except PaperAutonomyError:
-            return (0, PaperAutonomyMode.DISABLED, False, False)
+            return (False, 0, PaperAutonomyMode.DISABLED, False)
         if intent is None:
-            raise PaperAutonomySupervisorError(
-                "the intent application returned no snapshot"
-            )
+            # A port that answers ``None`` is a port that cannot be read; there is
+            # no such thing as an absent intent, so this is a failure and not a
+            # default.
+            return (False, 0, PaperAutonomyMode.DISABLED, False)
+        return (True, intent.revision, intent.mode, intent.kill_switch_latched)
+
+    def _read_action_state(self, trading_day):
+        """The ledger's view, or the fact that it could not be read.
+
+        The one place the ledger's failures are turned into a fact.  Letting
+        ``PaperAutonomyActionRepositoryError`` escape would make the fail-closed
+        answer depend on a host that has not been written yet, and the question
+        the ledger answers -- "has this already been attempted" -- has no safe
+        default: an unreadable ledger is not an empty one.
+        """
+
+        try:
+            unresolved = self._actions.unresolved()
+            attempted = self._actions.start_attempted(trading_day)
+        except PaperAutonomyActionRepositoryError:
+            return (False, None, False)
         return (
-            intent.revision,
-            intent.mode,
-            intent.kill_switch_latched,
             True,
+            unresolved[0].action_key if unresolved else None,
+            attempted,
         )
-
-    def _first_unresolved(self) -> str | None:
-        unresolved = self._actions.unresolved()
-        return unresolved[0].action_key if unresolved else None
-
-    def _start_attempted(self, trading_day) -> bool:
-        return self._actions.start_attempted(trading_day)
 
     # -- reporting ------------------------------------------------------
 

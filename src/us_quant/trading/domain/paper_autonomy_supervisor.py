@@ -268,6 +268,7 @@ class PaperAutonomyEventCode(StrEnum):
     STOP_REQUESTED = "AUTONOMY_STOP_REQUESTED"
     ACTION_REFUSED = "AUTONOMY_ACTION_REFUSED"
     ACTION_FAILED = "AUTONOMY_ACTION_FAILED"
+    ACTION_OUTCOME_UNKNOWN = "AUTONOMY_ACTION_OUTCOME_UNKNOWN"
     RECOVERY_REQUIRED = "AUTONOMY_RECOVERY_REQUIRED"
 
 
@@ -283,6 +284,7 @@ EVENT_SEVERITIES: dict[PaperAutonomyEventCode, str] = {
     PaperAutonomyEventCode.STOP_REQUESTED: "info",
     PaperAutonomyEventCode.ACTION_REFUSED: "warning",
     PaperAutonomyEventCode.ACTION_FAILED: "error",
+    PaperAutonomyEventCode.ACTION_OUTCOME_UNKNOWN: "error",
     PaperAutonomyEventCode.RECOVERY_REQUIRED: "warning",
 }
 
@@ -656,6 +658,7 @@ def decide_paper_autonomy(
     unresolved_action: str | None,
     start_already_attempted_today: bool,
     control_plane_readable: bool,
+    action_store_readable: bool = True,
 ) -> PaperAutonomyDecision:
     """The one precedence order, evaluated top to bottom.
 
@@ -668,24 +671,31 @@ def decide_paper_autonomy(
     The order is:
 
     1.  the control-plane store cannot be read -- nothing else can be trusted;
-    2.  the Paper ownership observed does not match the canonical lifecycle;
-    3.  the kill switch is latched -- the operator has already said stop;
-    4.  the process is shutting down;
-    5.  an action from a previous tick (or a previous process) is unresolved;
-    6.  startup could not be proven safe;
-    7.  the Paper capability needs a human;
-    8.  finalization is still pending -- the session is not safely gone yet;
-    9.  the operator disabled autonomy;
-    10. the operator paused autonomy;
-    11. an autonomous session is up under this intent -- the wind-down first,
+    2.  the action ledger cannot be read -- "has this already happened" is
+        unanswerable, so nothing may be attempted;
+    3.  the Paper ownership observed does not match the canonical lifecycle;
+    4.  the kill switch is latched -- the operator has already said stop;
+    5.  the process is shutting down;
+    6.  an action from a previous tick (or a previous process) is unresolved;
+    7.  startup could not be proven safe;
+    8.  the Paper capability needs a human;
+    9.  finalization is still pending -- the session is not safely gone yet;
+    10. the operator disabled autonomy;
+    11. the operator paused autonomy;
+    12. an autonomous session is up under this intent -- the wind-down first,
         then an unreadable calendar, then the operator's mode;
-    12. an autonomous start was already attempted today;
-    13. preparation is in flight or done;
-    14. the schedule cannot be trusted -- so no new session is prepared or
+    13. an autonomous start was already attempted today;
+    14. preparation is in flight or done;
+    15. the schedule cannot be trusted -- so no new session is prepared or
         started;
-    15. it is time to prepare;
-    16. it is time to start;
-    17. nothing to do.
+    16. it is time to prepare;
+    17. it is time to start;
+    18. nothing to do.
+
+    The first two clauses are facts only the *caller* can report: an unreadable
+    store is not something this function can inspect, and a scheduler that let it
+    become an exception would be a scheduler whose fail-closed behaviour depended
+    on whoever caught it.
 
     Two things about a *live session* are decided in more than one branch, and
     both are load-bearing rather than incidental.
@@ -718,6 +728,14 @@ def decide_paper_autonomy(
     if not control_plane_readable:
         return _blocked(
             "the Paper autonomy control-plane store could not be read",
+            day,
+            intent_revision,
+        )
+
+    if not action_store_readable:
+        return _blocked(
+            "the Paper autonomy action ledger could not be read, so whether an "
+            "autonomous action has already been attempted cannot be established",
             day,
             intent_revision,
         )

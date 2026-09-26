@@ -289,15 +289,6 @@ $mutations = @(
         tests = @($architecture)
         select = @("-k", "detector_catches_every_shape")
     },
-    @{
-        name = 'M22 a LIVE enum member is accepted'
-        file = $architecture
-        find = 'if target\.id in _AUTHORITY_WIDENING_MEMBERS:'
-        repl = 'if False:'
-        tests = @($architecture)
-        select = @("-k", "detector_catches_every_shape")
-    },
-
     # -- the tick: claim, ask, record ------------------------------------
     @{
         # Anchored on the racing test, not the sequential one: sequentially the
@@ -319,13 +310,56 @@ $mutations = @(
         tests = @($tickBehaviour)
         select = @("-k", "accepted_start_is_never_recorded_as_a_success or a_prepare_tick_claims_before_it_asks")
     },
+    # -- the authority detector, again -----------------------------------
     @{
-        name = 'M25 a failed owner call leaves the action unknown'
+        name = 'M26 an annotated enum member is ignored'
+        file = $architecture
+        find = 'if isinstance\(node, ast\.AnnAssign\) and isinstance\(node\.target, ast\.Name\):\s+return \(node\.target\.id, node\.value\)'
+        repl = "if False:`n        return None"
+        tests = @($architecture)
+        select = @("-k", "detector_catches_every_shape")
+    },
+    @{
+        name = 'M27 an enum member name is matched exactly'
+        file = $architecture
+        find = 'if _announces_live_authority\(name\):'
+        repl = 'if name in {"LIVE", "REAL_MONEY"}:'
+        tests = @($architecture)
+        select = @("-k", "detector_catches_every_shape")
+    },
+
+    # -- the tick's fail-closed semantics ---------------------------------
+    @{
+        name = 'M28 a raised owner call is recorded as a terminal failure'
         file = $supervisorApplication
-        find = 'self\._actions\.complete\(\s+action_key=decision\.action_key,\s+status=PaperAutonomyActionStatus\.FAILED,'
-        repl = "if False:`n                self._actions.complete(`n                    action_key=decision.action_key,`n                    status=PaperAutonomyActionStatus.FAILED,"
+        find = 'except Exception:  # noqa: BLE001 - the owner may raise anything'
+        repl = "except Exception:  # noqa: BLE001 - the owner may raise anything`n            self._actions.complete(`n                action_key=decision.action_key,`n                status=PaperAutonomyActionStatus.FAILED,`n                completed_at=moment,`n                detail=`"the owner raised`",`n            )"
         tests = @($tickBehaviour)
-        select = @("-k", "owner_that_raises_is_recorded_as_failed")
+        select = @("-k", "owner_exception_leaves_the_claim_unresolved or a_start_that_raised_is_never_replayed")
+    },
+    @{
+        name = 'M29 an unreadable intent still reads the other ports'
+        file = $supervisorApplication
+        find = 'if not readable:'
+        repl = 'if False:'
+        tests = @($tickBehaviour)
+        select = @("-k", "unreadable_intent_does_not_touch_any_other_port")
+    },
+    @{
+        name = 'M30 an unreadable action ledger is treated as empty'
+        file = $supervisorApplication
+        find = 'return \(False, None, False\)'
+        repl = 'return (True, None, False)'
+        tests = @($tickBehaviour)
+        select = @("-k", "unreadable_action_ledger_blocks or unreadable_ledger_blocks_even_when_only_the_day_query_fails")
+    },
+    @{
+        name = 'M31 a routine no-op is reported as a warning'
+        file = $supervisorApplication
+        find = 'if decision\.action is PaperAutonomyAction\.NOOP:'
+        repl = "if decision.action is PaperAutonomyAction.NOOP:`n            self._report(decision, code=PaperAutonomyEventCode.TICK_BLOCKED)"
+        tests = @($tickBehaviour)
+        select = @("-k", "a_tick_that_decides_nothing_asks_nobody or only_a_block_or_a_request_is_reported")
     }
 )
 

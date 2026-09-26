@@ -379,6 +379,11 @@ def test_b_a9_no_repairing_action_exists() -> None:
     assert surfaces["PaperAutonomyRuntimeFactsPort"] == {"facts"}
     assert surfaces["PaperAutonomyStartupFactsPort"] == {"startup_facts"}
     assert surfaces["PaperAutonomySchedulePort"] == {"schedule"}
+    # The intent is read-only here, and the exact surface is the guard: a
+    # scheduler that could call ``enable`` or ``engage_kill_switch`` would hold
+    # the authority ``PaperAutonomyApplication`` exists to keep separate from the
+    # machinery that acts.
+    assert surfaces["PaperAutonomyIntentReaderPort"] == {"snapshot"}
 
 
 def test_b_a10_the_autonomy_capability_cannot_express_live_authority() -> None:
@@ -458,8 +463,10 @@ _AUTHORITY_WIDENING_NAMES = frozenset(
     }
 )
 
-#: Enum member names, and member values, that would describe live authority.
-_AUTHORITY_WIDENING_MEMBERS = frozenset({"LIVE", "REAL_MONEY"})
+#: Enum member *values* that would describe live authority.  The member *names*
+#: are judged by the same whole-word rule as definition names, so ``LIVE``,
+#: ``live``, ``PAPER_LIVE`` and ``RealMoney`` are all one case rather than four
+#: spellings somebody has to keep adding.
 _AUTHORITY_WIDENING_VALUES = frozenset({"live", "real_money"})
 
 #: Public method spellings that would offer a live or environment-scoped request.
@@ -553,32 +560,59 @@ def _name_words(name: str) -> list[str]:
     ]
 
 
-def _live_definitions(tree: ast.AST) -> list[str]:
-    """Definition names that announce a live authority, as whole words.
+def _announces_live_authority(name: str) -> bool:
+    """Whether ``name`` announces a live authority, as whole words.
 
     Deliberately not a substring rule.  ``liveness`` and ``delivery`` contain the
     letters of ``live`` and mean nothing of the sort, while
-    ``build_live_autonomy`` and ``LivePaperAutonomyHost`` are exactly what this
-    is for -- and a split on word boundaries, camel case included, separates the
-    two cases that a naive ``"live" in name`` cannot.
+    ``build_live_autonomy``, ``LivePaperAutonomyHost`` and ``PAPER_LIVE`` are
+    exactly what this is for -- and a split on word boundaries, camel case
+    included, separates the two cases that a naive ``"live" in name`` cannot.
+
+    One helper for definition names and enum member names both: they are the same
+    question asked of two node kinds, and two copies is how one of them ends up
+    stricter than the other.
     """
 
-    found: list[str] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue
-        words = _name_words(node.name)
-        if _LIVE_WORDS.intersection(words):
-            found.append(node.name)
-            continue
-        for first, second in _LIVE_SEQUENCES:
-            if any(
-                words[index] == first and words[index + 1] == second
-                for index in range(len(words) - 1)
-            ):
-                found.append(node.name)
-                break
-    return found
+    words = _name_words(name)
+    if _LIVE_WORDS.intersection(words):
+        return True
+    return any(
+        words[index] == first and words[index + 1] == second
+        for first, second in _LIVE_SEQUENCES
+        for index in range(len(words) - 1)
+    )
+
+
+def _live_definitions(tree: ast.AST) -> list[str]:
+    """Definition names that announce a live authority."""
+
+    return [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and _announces_live_authority(node.name)
+    ]
+
+
+def _enum_member_assignment(node: ast.AST) -> tuple[str, ast.expr | None] | None:
+    """The name and value of an enum member assignment, annotated or not.
+
+    ``LIVE = "paper"`` is an ``ast.Assign`` and ``LIVE: str = "paper"`` is an
+    ``ast.AnnAssign``.  An earlier version of this detector knew only the first,
+    so the annotated spelling -- which is the one a typed codebase actually
+    writes -- walked straight past it, and the guard reported success over a hole
+    it had been asked to close.
+    """
+
+    if isinstance(node, ast.Assign) and len(node.targets) == 1:
+        target = node.targets[0]
+        if isinstance(target, ast.Name):
+            return (target.id, node.value)
+        return None
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        return (node.target.id, node.value)
+    return None
 
 
 def _enum_authority_members(tree: ast.AST) -> list[str]:
@@ -598,20 +632,18 @@ def _enum_authority_members(tree: ast.AST) -> list[str]:
         if not any(base.endswith("Enum") for base in bases):
             continue
         for member in node.body:
-            if not isinstance(member, ast.Assign) or len(member.targets) != 1:
+            assignment = _enum_member_assignment(member)
+            if assignment is None:
                 continue
-            target = member.targets[0]
-            if not isinstance(target, ast.Name):
-                continue
-            if target.id in _AUTHORITY_WIDENING_MEMBERS:
-                found.append(f"{node.name}.{target.id}")
-            value = member.value
+            name, value = assignment
+            if _announces_live_authority(name):
+                found.append(f"{node.name}.{name}")
             if (
                 isinstance(value, ast.Constant)
                 and isinstance(value.value, str)
                 and value.value.casefold() in _AUTHORITY_WIDENING_VALUES
             ):
-                found.append(f"{node.name}.{target.id} = {value.value!r}")
+                found.append(f"{node.name}.{name} = {value.value!r}")
     return found
 
 
@@ -659,6 +691,26 @@ def _forbidden_public_methods(tree: ast.AST) -> list[str]:
             # the name rule would survive -- measured, not assumed.
             "an enum member named LIVE",
             "class Mode(StrEnum):\n    PAPER = 'paper'\n    LIVE = 'paper'",
+        ),
+        (
+            "an annotated enum member named LIVE",
+            "class Mode(StrEnum):\n    PAPER: str = 'paper'\n    LIVE: str = 'paper'",
+        ),
+        (
+            "a lowercase enum member",
+            "class Mode(StrEnum):\n    live = 'paper'",
+        ),
+        (
+            "an enum member with live as a suffix",
+            "class Mode(StrEnum):\n    PAPER_LIVE = 'paper'",
+        ),
+        (
+            "an enum member with live as a prefix",
+            "class Mode(StrEnum):\n    LIVE_PAPER = 'paper'",
+        ),
+        (
+            "an annotated camel-case enum member",
+            "class Mode(StrEnum):\n    RealMoney: bool = False",
         ),
         (
             "an enum member whose value is real_money",
@@ -714,6 +766,11 @@ def test_b_a13_the_detector_catches_every_shape(label: str, source: str) -> None
         (
             "words that merely contain live",
             "def check(liveness: str, delivery: str) -> None: ...",
+        ),
+        (
+            "an enum whose members merely contain live",
+            "class Mode(StrEnum):\n    DELIVERY = 'paper'\n"
+            "    LIVENESS = 'paper'",
         ),
         (
             "a definition about Paper autonomy",

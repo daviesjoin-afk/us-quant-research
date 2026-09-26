@@ -28,6 +28,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
+from us_quant.trading.domain.paper_autonomy import PaperAutonomyIntent
 from us_quant.trading.domain.paper_autonomy_supervisor import (
     PaperAutonomyRuntimeFacts,
     PaperAutonomyScheduleFacts,
@@ -82,6 +83,25 @@ class PaperAutonomyRequestOutcome:
             raise PaperAutonomySupervisorViolation(
                 "a request outcome must say what the owner reported"
             )
+
+
+@runtime_checkable
+class PaperAutonomyIntentReaderPort(Protocol):
+    """The operator's intent, read-only.
+
+    One method, and no write method at all.  ``PaperAutonomyApplication`` remains
+    the only authority that may *change* the intent; what a scheduler needs is the
+    reading, so giving it the whole application would hand it
+    ``enable``/``pause``/``disable``/``engage_kill_switch`` by accident -- and the
+    authority it would then hold is precisely the one the control plane exists to
+    keep separate from the machinery that acts.
+
+    A read may raise: the store can be unreadable, and the caller must be able to
+    turn that into the decision's first clause rather than into an exception.
+    """
+
+    def snapshot(self) -> PaperAutonomyIntent:
+        """The current intent, or a failure that says it cannot be read."""
 
 
 @runtime_checkable
@@ -168,6 +188,7 @@ class PaperAutonomyExecutorPort(Protocol):
 
 __all__ = [
     "PaperAutonomyExecutorPort",
+    "PaperAutonomyIntentReaderPort",
     "PaperAutonomyPreparationRequest",
     "PaperAutonomyRequestOutcome",
     "PaperAutonomyRuntimeFactsPort",

@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 import pathlib
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -118,6 +119,183 @@ class _Schedule:
     def schedule(self, *, now: datetime) -> PaperAutonomyScheduleFacts:
         self.reads += 1
         return self._facts
+
+
+class _ExplodingRuntime:
+    """A runtime facts port that fails the test if it is asked anything.
+
+    Used to prove the *operational* precedence rather than the documented one:
+    when the authorisation cannot be read, the runtime must not be consulted at
+    all, and an assertion is the only way to assert a non-observation.
+    """
+
+    def facts(self):
+        raise AssertionError("the runtime facts must not be read")
+
+
+def _corrupt_ledger(path: pathlib.Path) -> None:
+    """Add a row with a status no reader can interpret."""
+
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO paper_autonomy_action(
+                action_key, intent_revision, trading_day, action, status,
+                claimed_at, completed_at, detail
+            ) VALUES ('corrupt', 1, '2026-09-28', 'prepare', 'BROKEN',
+                      '2026-09-28T13:45:00+00:00', NULL, 'unreadable')
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+# =====================================================================
+# Operational precedence: an unreadable store stops the tick
+# =====================================================================
+
+
+def test_an_unreadable_intent_does_not_touch_any_other_port(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The first clause has to be an execution order, not only a policy order.
+
+    ``decide_paper_autonomy`` checks the control plane first, but that is worth
+    nothing if the supervisor has already read the runtime, the schedule and the
+    ledger on the way there -- and it is worth less than nothing when one of them
+    is broken too, because the tick then raises instead of reporting the reason
+    that outranks every other.
+    """
+
+    harness = _Harness(tmp_path, intent=_Intent(unreadable=True))
+    harness.runtime_port = _ExplodingRuntime()
+
+    result = harness.tick()
+
+    assert result.decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
+    assert "control-plane store" in result.decision.reason
+    assert result.decision.trading_day is None
+    assert harness.executor.calls == []
+    assert harness.schedule_port.reads == 0
+    assert harness.codes() == ["AUTONOMY_TICK_BLOCKED"]
+
+
+def test_an_unreadable_intent_outranks_an_unreadable_ledger(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Both broken, and the operator is told about the authorisation first."""
+
+    harness = _Harness(tmp_path, intent=_Intent(unreadable=True))
+    _corrupt_ledger(harness.ledger.path)
+
+    result = harness.tick()
+
+    assert result.decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
+    assert "control-plane store" in result.decision.reason
+
+
+def test_an_unreadable_action_ledger_blocks(tmp_path: pathlib.Path) -> None:
+    """The ledger answers "has this already happened", and it has no safe default.
+
+    An unreadable ledger is not an empty one: treating it as empty would let the
+    supervisor ask for a second launch on the strength of a failed read.
+    """
+
+    harness = _Harness(tmp_path)
+    _corrupt_ledger(harness.ledger.path)
+
+    result = harness.tick()
+
+    assert result.decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
+    assert "action ledger" in result.decision.reason
+    assert result.claimed is False
+    assert harness.executor.calls == []
+    assert harness.codes() == ["AUTONOMY_TICK_BLOCKED"]
+
+
+def test_an_unreadable_ledger_blocks_even_when_only_the_day_query_fails(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Same conclusion from the other read, because it is the same question."""
+
+    harness = _Harness(tmp_path, runtime=_runtime_facts(preparation_ready=True))
+    _corrupt_ledger(harness.ledger.path)
+
+    result = harness.tick()
+
+    assert result.decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
+    assert result.claimed is False
+    assert harness.executor.calls == []
+
+
+# =====================================================================
+# What may and may not be emitted
+# =====================================================================
+
+
+def test_only_a_block_or_a_request_is_reported(tmp_path: pathlib.Path) -> None:
+    """Signal, not noise.
+
+    A tick every thirty seconds is 2880 ticks a day; a scheduler that reported
+    each healthy no-op would bury its own warnings, and the modes below are all
+    healthy ones.
+    """
+
+    quiet = _Harness(tmp_path, intent=_Intent(PaperAutonomyMode.DISABLED))
+    assert quiet.tick().decision.action is PaperAutonomyAction.NOOP
+    assert quiet.events == []
+
+    # Already running under this intent.
+    running = _Harness(
+        tmp_path / "running",
+        runtime=_runtime_facts(
+            session_running=True,
+            session_provenance=PaperAutonomySessionProvenance.AUTONOMOUS,
+        ),
+    )
+    assert running.tick().decision.action is PaperAutonomyAction.NOOP
+    assert running.events == []
+
+    # A manual session, which autonomy must never touch.
+    manual = _Harness(
+        tmp_path / "manual",
+        runtime=_runtime_facts(
+            session_running=True,
+            session_provenance=PaperAutonomySessionProvenance.MANUAL,
+        ),
+    )
+    assert manual.tick().decision.action is PaperAutonomyAction.NOOP
+    assert manual.events == []
+
+    # The day's one start already attempted and finished.
+    done = _Harness(
+        tmp_path / "done", runtime=_runtime_facts(preparation_ready=True)
+    )
+    first = done.tick()
+    done.ledger.complete(
+        action_key=first.decision.action_key,
+        status=PaperAutonomyActionStatus.SUCCEEDED,
+        completed_at=_MOMENT,
+        detail="the session ran and ended",
+    )
+    done.events.clear()
+    assert done.tick().decision.action is PaperAutonomyAction.NOOP
+    assert done.events == []
+
+
+def test_a_block_is_reported_exactly_once(tmp_path: pathlib.Path) -> None:
+    harness = _Harness(tmp_path, intent=_Intent(unreadable=True))
+
+    harness.tick()
+    harness.tick()
+
+    assert harness.codes() == [
+        "AUTONOMY_TICK_BLOCKED",
+        "AUTONOMY_TICK_BLOCKED",
+    ]
+    assert [event.severity for event in harness.events] == ["warning", "warning"]
 
 
 class _Executor:
@@ -316,7 +494,10 @@ def test_a_tick_that_decides_nothing_asks_nobody(
     assert result.claimed is False
     assert harness.executor.calls == []
     assert harness.rows() == ()
-    assert harness.codes() == ["AUTONOMY_TICK_BLOCKED"]
+    # A quiet tick says nothing.  A scheduler that reported every healthy no-op
+    # would emit thousands of entries a day and teach its operator to ignore the
+    # log, which is the same as having no log.
+    assert harness.codes() == []
 
 
 # =====================================================================
@@ -435,26 +616,79 @@ def test_an_owner_refusal_is_terminal_and_recorded_as_a_refusal(
     assert harness.codes() == ["AUTONOMY_ACTION_REFUSED"]
 
 
-def test_an_owner_that_raises_is_recorded_as_failed(tmp_path: pathlib.Path) -> None:
-    """A raised exception is a completed outcome, not an unknown one.
+def test_an_owner_exception_leaves_the_claim_unresolved(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A call that raised proves nothing about whether the effect happened.
 
-    The request *did* reach the owner and the owner failed, which is a different
-    state from "we do not know whether it was attempted" -- and the second is the
-    one a retry must not be built on.
+    This is the semantics the whole crash story rests on.  A production bridge
+    calling ``PaperOrchestrator.start(AUTONOMOUS)`` can have changed the workflow,
+    emitted a signal and begun connecting a broker before something later in the
+    same call fails; a terminal ``FAILED`` would then say "it is known not to have
+    happened" about a session that may be starting.  So the claim is left exactly
+    as it is -- ``CLAIMED``, unresolved -- and the next tick blocks on it.
     """
 
-    harness = _Harness(
-        tmp_path, executor=_Executor(raises=RuntimeError("the channel died"))
-    )
+    harness = _Harness(tmp_path)
+    harness.executor.raises = RuntimeError("the channel died")
 
     result = harness.tick()
 
-    assert result.status is PaperAutonomyActionStatus.FAILED
+    assert result.status is PaperAutonomyActionStatus.CLAIMED
     assert result.outcome is None
-    assert [row.status for row in harness.rows()] == [
-        PaperAutonomyActionStatus.FAILED
+    rows = harness.rows()
+    assert [row.status for row in rows] == [PaperAutonomyActionStatus.CLAIMED]
+    assert rows[0].is_terminal is False
+    assert rows[0].completed_at is None
+    assert [row.action_key for row in harness.ledger.unresolved()] == [
+        rows[0].action_key
     ]
-    assert harness.codes() == ["AUTONOMY_ACTION_FAILED"]
+    assert harness.codes() == ["AUTONOMY_ACTION_OUTCOME_UNKNOWN"]
+
+    # The exception's own text never reaches the durable audit, and no retry is
+    # attempted: the next tick blocks and asks a human.
+    assert "channel died" not in rows[0].detail
+    assert "channel died" not in harness.events[-1].detail
+
+    second = harness.tick()
+    assert second.decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
+    assert second.claimed is False
+    assert [name for name, _ in harness.executor.calls] == ["request_prepare"]
+
+    # And a restart reaches the same conclusion from the ledger alone.
+    harness.executor.raises = None
+    harness.rebuild()
+    third = harness.tick()
+    assert third.decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
+    assert [name for name, _ in harness.executor.calls] == ["request_prepare"]
+
+
+def test_a_start_that_raised_is_never_replayed(tmp_path: pathlib.Path) -> None:
+    """The highest-risk action, on its own.
+
+    A launch whose request raised is the case where "retry once, it is probably
+    fine" is most tempting and most dangerous: the broker may already be
+    connecting, and a second attempt would race the first.
+    """
+
+    harness = _Harness(
+        tmp_path, runtime=_runtime_facts(preparation_ready=True)
+    )
+    harness.executor.raises = RuntimeError("connect failed late")
+
+    first = harness.tick()
+    assert first.decision.action is PaperAutonomyAction.START
+    assert first.status is PaperAutonomyActionStatus.CLAIMED
+
+    restart = _Harness(tmp_path, runtime=_runtime_facts(preparation_ready=True))
+    restart.executor.raises = None
+    second = restart.tick()
+
+    assert second.decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
+    assert second.claimed is False
+    assert restart.executor.calls == []
+    assert len(restart.rows()) == 1
+    assert restart.rows()[0].status is PaperAutonomyActionStatus.CLAIMED
 
 
 def test_an_accepted_start_is_never_recorded_as_a_success(

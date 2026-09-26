@@ -267,7 +267,9 @@ class PaperAutonomySessionProvenance(StrEnum):
     ``UNKNOWN`` is not a synonym for ``MANUAL``: a manual session is one the
     supervisor knows it must leave alone, while an unknown one is a session
     nobody can currently account for.  The first is a no-op, the second is a
-    reason to stop and ask a human.
+    reason to block automated control and ask a human -- block, not stop: the
+    supervisor has no authority over a session it cannot attribute, not even the
+    authority to wind it down.
     """
 
     NONE = "none"
@@ -280,11 +282,13 @@ class PaperAutonomySessionProvenance(StrEnum):
 class PaperAutonomyRuntimeFacts:
     """What the Paper capability is doing, projected for one tick.
 
-    Booleans only, and that is the design rather than a simplification.  The
-    phase vocabulary belongs to the Paper capability; a supervisor that received
-    it would be a supervisor that could branch on it, and the whole point of the
-    facts port is that the sequencing decisions have already been made by the
-    owner.  Whatever the phase is, this is what it *means* to a scheduler.
+    Narrow per-tick facts only: no Paper phase and no session object is
+    exposed.  The phase vocabulary belongs to the Paper capability; a supervisor
+    that received it would be a supervisor that could branch on it, and the whole
+    point of the facts port is that the sequencing decisions have already been
+    made by the owner.  ``session_provenance`` is the one non-boolean, and it
+    earns its place because "which session is this" is not a question any
+    boolean can answer.
 
     Nothing here is retained.  Each tick reads these again, so a value cannot
     outlive the observation that produced it.
@@ -407,6 +411,17 @@ class PaperAutonomyScheduleFacts:
             raise PaperAutonomySupervisorViolation(
                 "the orderly stop boundary has arrived, so the same schedule "
                 "cannot also permit starting or preparing"
+            )
+        # Same reasoning for uncertainty: a calendar nobody can read cannot also
+        # be one that *permits* something.  Left representable, the pair would
+        # hand the decision a fact that says "I do not know" and "yes" at once,
+        # and the answer would depend on which branch happened to be read first.
+        if self.exceptional_schedule_uncertain and (
+            self.start_allowed or self.preparation_allowed
+        ):
+            raise PaperAutonomySupervisorViolation(
+                "a schedule that could not be read cannot also permit starting "
+                "or preparing"
             )
 
 
@@ -586,10 +601,12 @@ def decide_paper_autonomy(
     8.  finalization is still pending -- the session is not safely gone yet;
     9.  the operator disabled autonomy;
     10. the operator paused autonomy;
-    11. an autonomous session is up under this intent;
+    11. an autonomous session is up under this intent -- the wind-down first,
+        then an unreadable calendar, then the operator's mode;
     12. an autonomous start was already attempted today;
     13. preparation is in flight or done;
-    14. the schedule cannot be trusted;
+    14. the schedule cannot be trusted -- so no new session is prepared or
+        started;
     15. it is time to prepare;
     16. it is time to start;
     17. nothing to do.
@@ -610,6 +627,14 @@ def decide_paper_autonomy(
     opening entries or be resumed into the close.  An earlier version read the
     active session first and returned from it, so a paused session at the
     boundary was *resumed* -- the one action the boundary exists to prevent.
+
+    **An unreadable calendar is the second such check, and it closes entries
+    rather than opening them.**  It sits below the wind-down (a session that must
+    stop should stop) and above the operator's mode, so an autonomous running
+    session is paused, a paused one stays paused, and neither is resumed on the
+    strength of a calendar nobody could read.  The exits, the risk logic and the
+    stop path keep running throughout: ``PAUSE_ENTRIES`` is the narrowest
+    fail-closed action available, and it is deliberately not a stop.
     """
 
     day = schedule.trading_day
@@ -795,6 +820,8 @@ def decide_paper_autonomy(
                 day,
                 intent_revision,
             )
+        if schedule.exceptional_schedule_uncertain:
+            return _uncertain_active_session(runtime, day, intent_revision)
         if runtime.session_paused:
             return _act(
                 PaperAutonomyAction.RESUME_ENTRIES,
@@ -878,6 +905,39 @@ def decide_paper_autonomy(
     )
 
 
+def _uncertain_active_session(
+    runtime: PaperAutonomyRuntimeFacts,
+    day: date,
+    intent_revision: int,
+) -> PaperAutonomyDecision:
+    """What an unreadable calendar does to a session that is already up.
+
+    The narrowest fail-closed action available once a session exists.  Not a
+    stop: the exits, the risk logic and the stop path keep running, and a session
+    that has to flatten by a deadline still can.  What stops is *adding* -- new
+    entries are the one thing an unreadable calendar makes unsafe to open, and
+    resuming them would be the same decision in the other direction.
+
+    A session that is already paused stays that way, which is the point: the
+    uncertainty must never be the reason new entries are opened.
+    """
+
+    if runtime.session_running:
+        return _act(
+            PaperAutonomyAction.PAUSE_ENTRIES,
+            "the trading calendar could not be read; closing new entries while "
+            "the existing exits and risk logic keep running",
+            day,
+            intent_revision,
+        )
+    return _noop(
+        "the trading calendar could not be read and the autonomous session is "
+        "already paused; no entries are opened",
+        day,
+        intent_revision,
+    )
+
+
 def _not_our_session(
     runtime: PaperAutonomyRuntimeFacts,
     day: date,
@@ -892,8 +952,8 @@ def _not_our_session(
     situations are: a **manual** session is one the supervisor knows it must
     leave alone -- a no-op, with a reason that says exactly that rather than
     implying an autonomy switch acted on it -- while an **unattributable** one is
-    a session nobody can currently account for, which is a reason to stop and ask
-    rather than to guess a provenance and act on it.
+    a session nobody can currently account for, which is a reason to block
+    automated control and ask rather than to guess a provenance and act on it.
     """
 
     if not runtime.session_active:

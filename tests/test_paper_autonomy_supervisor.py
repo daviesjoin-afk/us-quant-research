@@ -442,6 +442,21 @@ def _at_the_boundary() -> PaperAutonomyScheduleFacts:
     )
 
 
+def _uncertain() -> PaperAutonomyScheduleFacts:
+    """A schedule whose calendar could not be read: it permits nothing.
+
+    Both permissions have to be off, and the type enforces that: a schedule that
+    says "I could not be read" and "starting is permitted" at once is a
+    contradiction, not a fact the decision should have to arbitrate.
+    """
+
+    return _schedule(
+        exceptional_schedule_uncertain=True,
+        preparation_allowed=False,
+        start_allowed=False,
+    )
+
+
 def test_an_autonomous_running_session_stops_at_the_boundary() -> None:
     decision = _decide(
         runtime=_autonomous(session_running=True), schedule=_at_the_boundary()
@@ -510,6 +525,118 @@ def test_the_boundary_stops_a_new_session_being_prepared_or_started() -> None:
     assert decision.action_key is None
 
 
+# =====================================================================
+# An unreadable calendar
+# =====================================================================
+
+
+def test_an_uncertain_calendar_is_not_acted_on() -> None:
+    """No new session is prepared or started on a schedule nobody can read."""
+
+    assert _decide(schedule=_uncertain()).action is PaperAutonomyAction.NOOP
+    assert (
+        _decide(
+            runtime=_runtime(preparation_ready=True), schedule=_uncertain()
+        ).action
+        is PaperAutonomyAction.NOOP
+    )
+
+
+def test_an_uncertain_calendar_pauses_an_autonomous_running_session() -> None:
+    """Uncertainty closes entries; it does not open them.
+
+    The narrowest fail-closed action available once a session exists.  A stop
+    would be more than the situation calls for -- the exits, the risk logic and
+    the stop path are all still working -- and a no-op would leave the session
+    opening new positions on a calendar nobody could read.
+    """
+
+    decision = _decide(
+        runtime=_autonomous(session_running=True), schedule=_uncertain()
+    )
+    assert decision.action is PaperAutonomyAction.PAUSE_ENTRIES
+    assert decision.action is not PaperAutonomyAction.STOP
+    assert "calendar" in decision.reason
+
+
+def test_an_uncertain_calendar_does_not_resume_an_autonomous_paused_session(
+) -> None:
+    """The fail-closed property the review found missing.
+
+    Reading the operator's mode before the calendar meant an uncertain schedule
+    *resumed* a paused autonomous session -- the uncertainty itself was the
+    reason new entries were opened.  Now the calendar is consulted first and the
+    only answer it can give a paused session is "stay paused".
+    """
+
+    decision = _decide(
+        runtime=_autonomous(session_paused=True), schedule=_uncertain()
+    )
+    assert decision.action is PaperAutonomyAction.NOOP
+    assert decision.action_key is None
+
+
+def test_an_uncertain_calendar_never_controls_a_manual_session() -> None:
+    for facts in ({"session_running": True}, {"session_paused": True}):
+        decision = _decide(runtime=_manual(**facts), schedule=_uncertain())
+        assert decision.action is PaperAutonomyAction.NOOP, facts
+        assert decision.action_key is None, facts
+
+
+def test_an_uncertain_calendar_with_unknown_provenance_blocks() -> None:
+    for facts in ({"session_running": True}, {"session_paused": True}):
+        decision = _decide(
+            runtime=_unattributable(**facts), schedule=_uncertain()
+        )
+        assert (
+            decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
+        ), facts
+
+
+def test_the_stop_boundary_outranks_an_uncertain_calendar() -> None:
+    """A session that must be flat by a deadline still stops.
+
+    Both facts can hold at once, and when they do the known wind-down wins: a
+    pause would leave a session that has to be closed by a deadline merely
+    not opening new positions.
+    """
+
+    decision = _decide(
+        runtime=_autonomous(session_running=True),
+        schedule=_schedule(
+            orderly_stop_due=True,
+            exceptional_schedule_uncertain=True,
+            preparation_allowed=False,
+            start_allowed=False,
+        ),
+    )
+    assert decision.action is PaperAutonomyAction.STOP
+
+
+def test_an_uncertain_calendar_pauses_under_a_paused_intent_too() -> None:
+    """The paused-intent branch already fails closed, and stays that way."""
+
+    decision = _decide(
+        intent_mode=PaperAutonomyMode.PAUSED,
+        runtime=_autonomous(session_running=True),
+        schedule=_uncertain(),
+    )
+    assert decision.action is PaperAutonomyAction.PAUSE_ENTRIES
+
+
+def test_an_uncertain_schedule_cannot_advertise_start_or_prepare() -> None:
+    """The contradiction is refused where it is built, not arbitrated later."""
+
+    with pytest.raises(PaperAutonomySupervisorViolation):
+        _schedule(exceptional_schedule_uncertain=True, start_allowed=True)
+    with pytest.raises(PaperAutonomySupervisorViolation):
+        _schedule(exceptional_schedule_uncertain=True, preparation_allowed=True)
+
+    allowed = _uncertain()
+    assert allowed.exceptional_schedule_uncertain is True
+    assert (allowed.start_allowed, allowed.preparation_allowed) == (False, False)
+
+
 def test_one_autonomous_start_per_trading_day() -> None:
     """The day's first attempt closes the day, whatever became of it.
 
@@ -540,15 +667,6 @@ def test_a_launch_in_flight_is_not_started_twice() -> None:
     )
     assert decision.action is PaperAutonomyAction.NOOP
     assert "launch is already in flight" in decision.reason
-
-
-def test_an_uncertain_calendar_is_not_acted_on() -> None:
-    decision = _decide(
-        runtime=_runtime(preparation_ready=True),
-        schedule=_schedule(exceptional_schedule_uncertain=True),
-    )
-    assert decision.action is PaperAutonomyAction.NOOP
-    assert "calendar" in decision.reason
 
 
 def test_ready_candidates_with_an_open_start_window_start() -> None:

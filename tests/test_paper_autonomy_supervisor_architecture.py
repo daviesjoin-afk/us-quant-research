@@ -371,42 +371,94 @@ def test_b_a9_no_repairing_action_exists() -> None:
         "request_stop",
     }
 
+    # The reading seams are one method each.  A second method is a wider door,
+    # and every one of these exists to answer a single question.
+    surfaces = _class_methods(_SRC / _SUPERVISOR_PORTS)
+    assert surfaces["PaperAutonomyRuntimeFactsPort"] == {"facts"}
+    assert surfaces["PaperAutonomyStartupFactsPort"] == {"startup_facts"}
+    assert surfaces["PaperAutonomySchedulePort"] == {"schedule"}
 
-def test_b_a10_no_live_autonomy_vocabulary_exists() -> None:
-    """I. Autonomy speaks about Paper and only about Paper.
 
-    Asserted over the class names this layer defines and over the imported
-    symbols it uses, so a future ``LiveAutonomy`` or a ``REAL_MONEY`` member has
-    to fail a guard rather than arrive with a copy-paste.
+def test_b_a10_the_autonomy_capability_cannot_express_live_authority() -> None:
+    """The boundary is this capability's, not a repository-wide naming rule.
+
+    An earlier version of this guard banned a set of future Live class names
+    across the whole tree.  That mixed two different invariants and made v1-B a
+    standing veto over the route: the roadmap still has a Live-ready Execution
+    Core and a small-capital Live canary, and neither may be blocked by a naming
+    rule a Paper phase happened to write.  What this capability has to prove is
+    narrower and checkable -- *it* cannot describe live or real-money authority.
+
+    The Risk and Execution fork rules are deliberately **not** restated here.
+    FAC's ``test_fa19b_a_future_live_path_must_reuse_the_single_authority_stack``
+    already owns them, and one invariant has one owner.
     """
 
-    banned = {
-        "LiveAutonomy",
-        "TradingAutonomy",
-        "LiveRiskApplication",
-        "LiveExecutionApplication",
-        "LiveTradingRuntime",
+    modules = _autonomy_modules()
+    assert modules, "the autonomy modules must exist"
+
+    widening = {
+        "environment",
+        "broker_mode",
+        "live_account",
+        "live_mode",
+        "real_money",
     }
-    for path in _SRC.rglob("*.py"):
-        if "__pycache__" in path.parts:
-            continue
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.ClassDef):
-                assert node.name not in banned, f"{_module_name(path)}::{node.name}"
+    offending: list[str] = []
+    for path in modules:
+        for node in ast.walk(
+            ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        ):
+            if isinstance(node, ast.Name) and node.id.casefold() in widening:
+                offending.append(f"{_module_name(path)}:{node.lineno}:{node.id}")
+            elif (
+                isinstance(node, ast.Attribute)
+                and node.attr.casefold() in widening
+            ):
+                offending.append(
+                    f"{_module_name(path)}:{node.lineno}:{node.attr}"
+                )
+    assert offending == []
 
-    for relative in (_SUPERVISOR_DOMAIN, _SUPERVISOR_PORTS, _ACTION_PORT):
-        source = (_SRC / relative).read_text(encoding="utf-8")
-        for forbidden in ("REAL_MONEY", "LIVE_ORDER", "production_account"):
-            assert forbidden not in source, (relative, forbidden)
+    # Provenance answers "which session", never "which environment".
+    assert {member.name for member in PaperAutonomySessionProvenance} == {
+        "NONE",
+        "AUTONOMOUS",
+        "MANUAL",
+        "UNKNOWN",
+    }
 
-    # The ports are structural, so a second implementation cannot pass as one.
-    for port in (
-        PaperAutonomyRuntimeFactsPort,
-        PaperAutonomyStartupFactsPort,
-        PaperAutonomySchedulePort,
-        PaperAutonomyExecutorPort,
-    ):
-        assert isinstance(port, type)
+    # The action vocabulary is an exact set, so a live action has to fail this
+    # rather than arrive as one more member.
+    assert {member.value for member in PaperAutonomyAction} == {
+        "noop",
+        "prepare",
+        "start",
+        "pause_entries",
+        "resume_entries",
+        "stop",
+        "blocked_requires_operator",
+    }
+
+    # And the executor seam offers no live request.
+    executor = _class_methods(_SRC / _SUPERVISOR_PORTS)["PaperAutonomyExecutorPort"]
+    for name in executor:
+        assert "live" not in name.casefold(), name
+
+
+def _autonomy_modules() -> list[pathlib.Path]:
+    """Every module of this capability, discovered rather than listed.
+
+    Globbed so a later slice -- the supervisor application, the composition
+    builders, the desktop host -- is covered the moment it is written, instead of
+    relying on someone remembering to extend a list.
+    """
+
+    return sorted(
+        path
+        for path in _SRC.rglob("paper_autonomy*.py")
+        if "__pycache__" not in path.parts
+    )
 
 
 def test_b_a11_the_supervisor_errors_share_the_feature_root() -> None:

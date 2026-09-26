@@ -240,6 +240,32 @@ $mutations = @(
         repl = 'if False:'
         tests = @($behaviour)
         select = @("-k", "inconsistent_ownership_blocks_before_anything_acts")
+    },
+
+    # -- an unreadable calendar never opens anything ----------------------
+    @{
+        name = 'M17 an uncertain calendar resumes a paused session'
+        file = $domainSupervisor
+        find = 'if schedule\.exceptional_schedule_uncertain:\s+return _uncertain_active_session\('
+        repl = "if schedule.exceptional_schedule_uncertain and runtime.session_running:`n            return _uncertain_active_session("
+        tests = @($behaviour)
+        select = @("-k", "uncertain_calendar_does_not_resume_an_autonomous_paused_session or uncertain_calendar_pauses_an_autonomous_running_session")
+    },
+    @{
+        name = 'M18 an uncertain calendar leaves entries running'
+        file = $domainSupervisor
+        find = 'return _act\(\s+PaperAutonomyAction\.PAUSE_ENTRIES,\s+"the trading calendar could not be read; closing new entries while "'
+        repl = "return _noop(`n            `"the trading calendar could not be read; closing new entries while `""
+        tests = @($behaviour)
+        select = @("-k", "uncertain_calendar_pauses_an_autonomous_running_session")
+    },
+    @{
+        name = 'M19 an uncertain schedule may advertise a start'
+        file = $domainSupervisor
+        find = 'if self\.exceptional_schedule_uncertain and \(\s+self\.start_allowed or self\.preparation_allowed\s+\):'
+        repl = 'if False:'
+        tests = @($behaviour)
+        select = @("-k", "uncertain_schedule_cannot_advertise_start_or_prepare")
     }
 )
 

@@ -351,9 +351,13 @@ def test_a_refused_close_lowers_the_gate_through_cancel_shutdown_only() -> None:
     body = _method_source(_tree(_DESKTOP), "_cancel_close_drain")
     assert "cancel_shutdown()" in body
     assert "self._closing" not in body
-    # It is a bookkeeping undo: no restart, no I/O.
-    for forbidden in ("start(", "open(", "connect(", "disconnect("):
-        assert forbidden not in body, forbidden
+    # The autonomy host is re-admitted only after the shutdown gate is lowered.
+    assert body.index("cancel_shutdown()") < body.index(
+        "paper_autonomy_host.start()"
+    )
+    assert "open(" not in body
+    assert "connect(" not in body
+    assert "disconnect(" not in body
 
 
 def test_the_registration_is_generic_lifecycle_only() -> None:

@@ -3566,6 +3566,9 @@ revision 的页面不能覆盖它之后才按下的 kill switch。application �
 
 ```text
 python -m us_quant paper-autonomy status
+python -m us_quant paper-autonomy unresolved
+python -m us_quant paper-autonomy resolve-action --key "<action-key>" --expected-status requested --reason "..."
+python -m us_quant paper-autonomy seal-action --key "<action-key>"
 python -m us_quant paper-autonomy enable      --reason "..."
 python -m us_quant paper-autonomy pause       --reason "..."
 python -m us_quant paper-autonomy disable     --reason "..."
@@ -3573,12 +3576,17 @@ python -m us_quant paper-autonomy kill        --reason "..."
 python -m us_quant paper-autonomy clear-kill  --reason "..."
 ```
 
-六个命令都是"先读当前 revision → 调 application mutation → 打印新 revision/state"。
+六个意图变更命令都是"先读当前 revision → 调 application mutation → 打印新 revision/state"。
 CLI 里没有任何到达 store 的路径：它不 import sqlite adapter，也不调用
 `load_intent` / `commit_transition` / `recent_events`（结构 + 行为双向 guard）。
 拒绝返回 exit 2 且 `applied=false`，存储不可读返回 exit 9，非 paper 配置下直接拒绝。
 `clear-kill` 作用在未置位的 latch 上同样是 exit 2 / `applied=false`，且不产生任何
 audit event。
+
+`unresolved`、`resolve-action` 和 `seal-action` 通过独立的 recovery application 读取和更新
+action ledger；CLI 不 import 其 SQLite adapter。resolution 仍受 Paper-only 配置检查，并要求
+`--key`、`--expected-status claimed|requested` 和非空 `--reason`。`seal-action` 仅用于进程在
+resolution 已提交、authorization floor 尚未写入时恢复；它要求 intent 当前为 DISABLED。
 
 #### 8.28.8 本轮刻意不做的事
 
@@ -3596,9 +3604,9 @@ audit event。
   `PaperAutonomy` / `SQLitePaperAutonomy` 开头）。
 - **不**创建 `AutonomyManager` / `TradingManager` / `GlobalSupervisorContext` /
   `ServiceBag` / `AutomationContext`。
-- **不**在本轮做 supervisor / scheduler / recovery host / watchdog / action
-  idempotency：那是 v1-B，且必须从 v1-A merge 后的 main 重新开分支，**不**从本轮
-  feature branch 叠加。
+- 本轮 v1-B 在独立分支实现 supervisor、scheduler、Desktop host、startup gate、
+  action completion 与幂等账本；这些模块仍调用既有 Paper / Execution owner。Live、
+  实盘资金、AI 与策略演化不属于 v1-B。
 
 #### 8.28.9 验证
 
@@ -3652,6 +3660,117 @@ v1-A mutation 里有几处捕获方式值得记下，因为它们说明"哪一�
 
 这些存活记录都留在文档里：它们暴露的是测试没打到目标或守卫互补，而 mutation 的价值
 正在于把"看起来在测、其实没测到"变成可见。
+
+#### 8.28.10 v1-B 监督与所有权
+
+v1-B 的生产路径如下：
+
+```text
+PaperAutonomyApplication (持久意图 A1)
+        │ fresh snapshot
+        ▼
+PaperAutonomySupervisor ──► PaperAutonomyActionRepository (claim-before-effect)
+        │                          │
+        │ ExecutorPort             └── CompletionObserver ◄── canonical Paper signals
+        ▼
+PaperAutonomyDesktopExecutor
+  ├── ExecutionOrchestrator.request_prepare_with(PaperPreparationRequest)
+  └── PaperOrchestrator.start(AUTONOMOUS) / pause / resume / stop
+        │
+        ▼
+RiskApplication → ExecutionApplication → Paper order service
+```
+
+Supervisor、schedule adapter、intent 与 action repository 都不依赖 Qt。只有
+`desktop_v2/orchestration/autonomy/host.py` 使用 `QTimer`；它每次只调用一次
+`tick()`，不作业务判断。Schedule adapter 每次调用既有
+`us_quant.extended_hours.us_equity_session()`，用纽约时区分类，不缓存时段，也不另建
+节假日或早收市日历。输入时间必须带时区；分类异常时不允许准备或启动。
+
+PREPARE 使用共享值对象 `PaperPreparationRequest(candidate_limit, capital_limit)`；人工按钮
+与 supervisor 最终进入同一个 `request_prepare_with()`。启动也只有
+`PaperOrchestrator.start(authorization=...)` 一条路径。`MANUAL` 保留现有 UI arm 与确认行为；
+`AUTONOMOUS` 在首次和异步连接后的二次预检都重新读取 A1，未能读取时按未授权拒绝。
+自治启动不设置人工 arm。活动会话的来源只在 runtime facts adapter 中短暂记录；进程重启后
+无法证明来源时归类为 `UNKNOWN`，需要人工恢复。
+
+首次启动时，Desktop 在 broker worker 上调用既有只读 Paper 通道探测；探测需读出账号、持仓、
+开放 API 订单和本地未对账数量。探测失败或数据不完整时不启动 host。Supervisor 初始化时只
+缓存这一份 startup classification；后续 tick 则重读 A1、runtime、schedule 与 action ledger。
+有未结订单、持仓、未对账记录、未知所有权或人工恢复标记时，自动工作保持关闭。
+
+Supervisor 在调用 owner 前先原子 claim action。请求接受只记 `REQUESTED`；只有 canonical
+Paper 发布 `READY`、`RUNNING`、暂停/恢复或 `session_finalized` 后，completion observer 才写
+成功。若完成信号先于请求返回，observer 仅将一个进程内 pending completion 暂存，等 ledger
+转到 `REQUESTED` 再提交；进程崩溃则未完成 action 留在 unresolved 状态，重启后 fail closed。
+只有存在同类型 unresolved autonomy action 时，publication 才能归属该 action。`CLAIMED` 时暂存，
+`REQUESTED` 时完成；没有匹配 action 的 publication 无法区分人工操作与旧自治请求，因此忽略。
+同一个 unresolved action 收到冲突 publication 会报错。owner 调用抛异常时 action 保持 `CLAIMED`，
+不推断为失败。
+
+日历不可读时 schedule facts 保留 `trading_day=None`，另带 Eastern civil `action_day`，后者只用于
+安全动作的 key 与 ledger 分桶。它不授权准备或启动。暂停、恢复和停止的 action attempt 根据该日
+完整 ledger 中的成功结果计数计算，具体为：
+
+```text
+pause_attempt  = 当日 SUCCEEDED 的 PAUSE_ENTRIES 数量
+resume_attempt = 当日 SUCCEEDED 的 RESUME_ENTRIES 数量
+stop_attempt   = 当日 SUCCEEDED 的 STOP 数量
+```
+
+失败、拒绝和人工关闭未知结果都不推进这些周期计数。因此一个
+pause→resume→pause 周期会得到不同 pause key，同一周期并发 tick 仍竞争同一个原子 claim。
+日历不可读且自治会话仍在运行时仍能请求暂停新开仓。
+
+如果启动探测不能证明安全，Desktop 记录一次 `AUTONOMY_STARTUP_UNSAFE` 并不启动 host；人工 Paper
+功能继续由既有路径提供。
+
+前一进程遗留的 `CLAIMED` 或 `REQUESTED` action 表示是否已执行未知。新进程因此判为 startup unsafe，
+不启动 `PaperAutonomyHost`，也不连接 READY/RUNNING 等 completion observer。操作员先人工检查
+broker、账户、订单和持仓；若自治仍为 `ENABLED` 或 `PAUSED`，先显式 disable 或 kill。随后可用
+`paper-autonomy unresolved` 查看账本事实，并通过 `paper-autonomy resolve-action --key ...
+--expected-status claimed|requested --reason ...` 将指定行原位标记为 `OPERATOR_RESOLVED`。
+这个终态只表示操作员已检查并关闭未知记录，不代表成功、失败或拒绝，不删除历史、不推进控制周期，
+也不释放当日 START 限额。resolution 前会重新读取 intent，且只允许其已经是 `DISABLED`；kill
+已锁定且为 DISABLED 时允许 resolution，但不会清除 kill。action commit 后会重新读取 A1 revision，
+再以 `BEGIN IMMEDIATE` 将 revision floor 写入原 action row；该 floor 只能写一次。若进程在两步之间
+退出，未 seal 的 OPERATOR_RESOLVED 仍显示在 `unresolved` 中，完整 ledger barrier read 会拒绝启动，
+操作员在保持 DISABLED 后用 `seal-action` 完成 sealing。
+
+resolution 不重新授权、不启动 session 或 host。完成后重启 Desktop，由新进程重新做完整 startup
+安全检查；只有检查通过后才可能启动 host。启动时若 intent 为 ENABLED/PAUSED，其 revision 必须
+严格大于 action ledger 中最新 recovery authorization floor；等于或更低都继续保持 startup unsafe，
+直到操作员显式 disable 后再 enable。DISABLED intent 可通过此项检查，因为它本身不授权自治工作。
+revision floor 来自 resolution commit 后 fresh-read 的 A1 revision；若并发 enable 已在 resolution
+commit 前生效，该 revision 会被纳入 floor 并要求之后再次授权。`completed_at` 只用于审计，不参与
+授权顺序。若 kill 仍锁定，操作员先显式 clear kill，再单独显式 enable。若需要当天再次交易，使用既有
+人工 Paper 路径，不能因 resolution 自动重试自治 START。
+
+Startup proof 对当前 Desktop process 不会因 A1 后续变更而自动刷新。Supervisor 每个 tick 都重新读取
+action ledger 的 recovery floor 和已 seal resolution 数量；任一值与该 process startup 时记录的值不同，
+当前 Supervisor 就永久进入 `BLOCKED_REQUIRES_OPERATOR`，即使 intent 仍为 DISABLED，或之后 revision
+已大于 floor。resolution 数量用于识别多条 recovery 共用同一 A1 floor 的情况。旧 Host 不会因
+`seal-action` 或后续 enable 自动恢复；必须重启 Desktop，让新 process 重新检查 broker、账户、持仓、未完成
+订单、reconciliation、Paper ownership 和 recovery floor。只有新 Supervisor 的完整 startup proof 安全后，
+才可继续自治工作。
+
+配置只从显式 `[paper.autonomy]` 读取，缺少或无效时不造默认时刻、不启动 host，并记录
+`AUTONOMY_SUPERVISOR_UNAVAILABLE`。必须显式提供以下值：
+
+| 配置键 | 含义 |
+| --- | --- |
+| `prepare_not_before_et` | 允许自动准备的最早纽约时间 |
+| `start_not_before_et` | 允许自动启动的最早纽约时间 |
+| `latest_start_et` | 当日最晚自动启动时间 |
+| `orderly_stop_at_et` | 发出有序停止请求的时间 |
+| `candidate_limit` | 每次准备的候选数量上限 |
+| `requested_capital_limit` | 自动请求的资金上限 |
+| `tick_interval_seconds` | 监督轮询间隔；实际值限制在 1–3600 秒 |
+
+`PaperAutonomyHost` 在所有 Desktop capability、facts、completion observer 与 signals 接通后才
+启动。关机前停止 timer；若关闭被拒绝且 shutdown admission 恢复，才重新启动 timer。架构守卫和
+回归用例覆盖 canonical calendar、唯一 preparation/start 路径、manual/A1 隔离、startup fail
+closed、异步 completion race、重复/冲突 completion、kill switch 竞态及禁止 broker bypass。
 
 ## 9. 已删除的旧架构
 
@@ -4609,18 +4728,25 @@ Closure vehicle                      = PR #58 / refactor/final-architecture-clos
 Final immutable baseline             = PR #58 merge commit recorded by Git history
 ```
 
-**下一阶段：Paper Autonomous Trading v1，已从 v1-A 开始（§8.28）。**
+**下一阶段：Paper Autonomous Trading v1。v1-A 已完成（§8.28）。**
 
 ```text
-Paper Autonomous Trading v1-A    ✅ 已完成（§8.28）persistent autonomy control plane
-Paper Autonomous Trading v1-B    ⏭ next  unattended supervisor / scheduler / recovery host
-Paper Autonomous Trading v1      NOT COMPLETE
+Final Architecture Closure                          ✅ COMPLETE（§8.27）
+
+Paper Autonomous Trading v1-A
+Persistent Autonomous Control Plane                 ✅ COMPLETE（§8.28）
+
+Paper Autonomous Trading v1-B
+Unattended Supervisor / Scheduler / Recovery Host   🔄 IN PROGRESS
+                                                       （feat/paper-autonomy-supervisor）
+
+Paper Autonomous Trading v1                          ❌ NOT COMPLETE
 ```
 
-`Paper Autonomous Trading v1` **不是** COMPLETE。v1-A 只建立了一个持久化控制面：它让
-"操作者希望自动系统处于什么状态"变成可持久化、可审计、crash/restart 后可恢复的事实，
-但**没有自动执行任何东西**——不启动 Paper、不连 broker、不下单、不创建 scheduler loop。
-因此文档里不会出现 "autonomous Paper trading COMPLETE"。
+`Paper Autonomous Trading v1` **不是** COMPLETE，而且本 PR 也不会把它变成 COMPLETE：
+v1-A 只建立了一个持久化控制面——"操作者希望自动系统处于什么状态"变成可持久化、
+可审计、crash/restart 后可恢复的事实——但**没有自动执行任何东西**。因此文档里不会
+出现 "autonomous Paper trading COMPLETE"。
 
 v1-B 才把 operator intent 变成真正的 no-human-button Paper autonomous execution，且
 **不能复制** Paper lifecycle：supervisor 必须 Qt-free，只做 deterministic decision，
@@ -4628,7 +4754,8 @@ v1-B 才把 operator intent 变成真正的 no-human-button Paper autonomous exe
 `PaperOrchestrator` / `StrategySelectionService` / `MarketOrchestrator` /
 `AccountOrchestrator`）执行，最终仍必须走 canonical `PaperOrchestrator.start()` 并重跑
 它的 preflight；autonomous authorization 必须与 UI arm 分离，不能假装人点过确认框。
-v1-B 必须从 v1-A merge 之后的 main 重新开分支，不从 v1-A feature branch 叠加。
+v1-B 从 v1-A merge 之后的 main（`b8e660c`）重新开分支，没有从 v1-A
+feature branch 叠加。
 
 之后依次是 Live-ready Execution Core、
 Small-capital Live Canary、Multi-strategy Portfolio Runtime、Strategy Lifecycle /

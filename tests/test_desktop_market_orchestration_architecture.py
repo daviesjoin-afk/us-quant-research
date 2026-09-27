@@ -895,6 +895,7 @@ def test_the_orchestration_package_is_the_only_new_home() -> None:
         "dashboard",
         "strategy",
         "execution",
+        "autonomy",
     }, children
 
     # The route aggregate must stay an aggregate: a capability-level

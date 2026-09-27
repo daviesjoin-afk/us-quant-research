@@ -257,7 +257,9 @@ def window(monkeypatch, tmp_path):
     window.execution_orchestrator._candidates = (_candidate(),)
     window._test_strategy = _strategy(window)
     window.paper_orchestrator._strategy_provider = lambda: window._test_strategy
-    window.paper_orchestrator._preflight_provider = lambda: _Preflight()
+    window.paper_orchestrator._preflight_provider = (
+        lambda _authorization: _Preflight()
+    )
     window.paper_orchestrator._shadow_is_active = lambda: False
     window.paper_orchestrator._capital_limit_provider = lambda: Decimal("20000")
 

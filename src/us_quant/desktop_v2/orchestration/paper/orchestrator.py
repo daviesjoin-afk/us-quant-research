@@ -136,6 +136,7 @@ from us_quant.trading.runtime.workflow_state import (
     PaperWorkflowPhase,
     WorkflowStateError,
 )
+from us_quant.trading.runtime.preflight import PaperLaunchAuthorization
 
 if TYPE_CHECKING:
     from us_quant.desktop_v2.orchestration.paper.models import PaperControlFacts
@@ -213,6 +214,11 @@ class PaperOrchestrator(QObject):
     #: later state as if it were this one.  Payload-free: the window repaints from the
     #: canonical truth rather than from a copy carried on the wire.
     session_finalized = Signal()
+    launch_authorization_published = Signal(object)
+    preparation_ready_published = Signal()
+    launch_failed_published = Signal(str)
+    session_running_published = Signal()
+    session_paused_published = Signal()
 
     #: This session can now only be continued through the operator.
     #:
@@ -229,7 +235,7 @@ class PaperOrchestrator(QObject):
         build_session: PaperSessionBuilder,
         submit_task: TaskSubmitter,
         health_evaluator: Any,
-        preflight_provider: Callable[[], AutoQuantPreflight],
+        preflight_provider: Callable[[PaperLaunchAuthorization], AutoQuantPreflight],
         strategy_provider: Callable[[], Any],
         candidates_provider: Callable[[], Sequence[AutoQuantCandidate]],
         capital_limit_provider: Callable[[], Decimal],
@@ -439,6 +445,37 @@ class PaperOrchestrator(QObject):
         return queries.launch_attempt_in_flight(self._workflow.phase)
 
     @property
+    def preparation_ready(self) -> bool:
+        return queries.preparation_ready(self._workflow.phase)
+
+    @property
+    def session_running(self) -> bool:
+        return queries.session_running(self._workflow.phase)
+
+    @property
+    def session_paused(self) -> bool:
+        return queries.session_paused(self._workflow.phase)
+
+    @property
+    def manual_recovery_is_required(self) -> bool:
+        return queries.manual_recovery_phase(self._workflow.phase)
+
+    @property
+    def finalization_pending(self) -> bool:
+        return (
+            queries.finalization_pending(self._workflow.phase)
+            or self._finalization_inflight
+        )
+
+    @property
+    def paper_ownership_consistent(self) -> bool:
+        return queries.ownership_consistent(
+            self._workflow.phase,
+            lease=self._workflow.lease,
+            order_service_held=self._paper_trading.has_order_service(),
+        )
+
+    @property
     def order_service_held(self) -> bool:
         """Whether the order-service owner holds a candidate or active service."""
 
@@ -473,8 +510,12 @@ class PaperOrchestrator(QObject):
 
         if self._workflow.phase is PaperWorkflowPhase.PREPARING:
             self._workflow.mark_ready()
+            self.preparation_ready_published.emit()
 
-    def start(self) -> None:
+    def start(
+        self,
+        authorization: PaperLaunchAuthorization = PaperLaunchAuthorization.MANUAL,
+    ) -> bool:
         """Run the launch gates, freeze the attempt, acquire PAPER and connect.
 
         The **duplicate gate comes first**: a second attempt refused after the connect
@@ -485,30 +526,30 @@ class PaperOrchestrator(QObject):
 
         if queries.launch_attempt_in_flight(self._workflow.phase):
             self.refused.emit(DUPLICATE_TITLE, DUPLICATE_MESSAGE)
-            return
+            return False
         if self._shadow_is_active():
             # The shared lease makes Shadow XOR Paper structural, so this is a
             # courtesy refusal with the operator's sentence: the lease would refuse
             # the launch anyway, and would report it less clearly.
-            self._clear_arm_confirmation()
+            self._clear_arm_if_manual(authorization)
             self.refused.emit(SHADOW_ACTIVE_TITLE, SHADOW_ACTIVE_MESSAGE)
-            return
-        preflight = self._preflight_provider()
+            return False
+        preflight = self._preflight_provider(authorization)
         if queries.preflight_failed(preflight):
-            self._clear_arm_confirmation()
+            self._clear_arm_if_manual(authorization)
             self.refused.emit(
                 PREFLIGHT_TITLE,
                 PREFLIGHT_PREFIX + queries.preflight_failure_text(preflight),
             )
-            return
+            return False
         strategy = self._strategy_provider()
         if strategy is None:
             # The preflight already refuses a missing strategy, so reaching here means
             # the selection changed between the two reads.  Refusing rather than
             # asserting keeps a race an operator condition, not a crash.
-            self._clear_arm_confirmation()
+            self._clear_arm_if_manual(authorization)
             self.refused.emit(PREFLIGHT_TITLE, PREFLIGHT_PREFIX)
-            return
+            return False
         self._next_attempt += 1
         try:
             request = queries.freeze_launch(
@@ -529,7 +570,7 @@ class PaperOrchestrator(QObject):
             # Nothing about this is a retry or a degraded launch, so the arm flag is
             # cleared and the fault is reported as an error event plus an operator
             # refusal.  The launch does not proceed under either hash.
-            self._clear_arm_confirmation()
+            self._clear_arm_if_manual(authorization)
             self.log_requested.emit(str(error))
             self.runtime_event_requested.emit(
                 PaperRuntimeEventRequest(
@@ -540,14 +581,14 @@ class PaperOrchestrator(QObject):
                 )
             )
             self.refused.emit(PAPER_STRATEGY_INTEGRITY_TITLE, str(error))
-            return
+            return False
         try:
             # Bound and acquired *before* the connect: Shadow and Paper share one
             # lease, so this ordering is the structural mutex, not a UI gate.
             self._workflow.begin_connecting(request.plan)
         except WorkflowStateError as error:
             self.refused.emit(BEGIN_REFUSED_TITLE, str(error))
-            return
+            return False
         self._render_launch_state()
         self._render_launch_context(CONNECTING_SUMMARY)
         candidate_id = str(request.plan.attempt_id)
@@ -573,7 +614,9 @@ class PaperOrchestrator(QObject):
 
         started = self._submit_task(
             task,
-            on_success=self._connect_finished,
+            on_success=lambda result, authorization=authorization: self._connect_finished(
+                result, authorization=authorization
+            ),
             start_message=CONNECT_START_MESSAGE,
             resource_group="broker",
         )
@@ -583,8 +626,21 @@ class PaperOrchestrator(QObject):
             # PAPER) and restore the controls.  Otherwise it is a CONNECTING zombie.
             self._workflow.reject_connecting(request.plan)
             self._render_launch_state()
+            return False
+        return True
 
-    def _connect_finished(self, result: object) -> None:
+    def _clear_arm_if_manual(
+        self, authorization: PaperLaunchAuthorization
+    ) -> None:
+        if authorization is PaperLaunchAuthorization.MANUAL:
+            self._clear_arm_confirmation()
+
+    def _connect_finished(
+        self,
+        result: object,
+        *,
+        authorization: PaperLaunchAuthorization = PaperLaunchAuthorization.MANUAL,
+    ) -> None:
         """Continue the launch after the async candidate connect returned.
 
         Five safety properties, in order.  The **shape is checked loudly**: swallowing
@@ -597,19 +653,32 @@ class PaperOrchestrator(QObject):
         """
 
         candidate_id, request, connection_error = _unpack(result)
+        clear_manual_confirmation = (
+            authorization is PaperLaunchAuthorization.MANUAL
+        )
         if connection_error is not None:
             self._reject_without_candidate(
-                request, CONNECT_FAILED_MESSAGE.format(error=connection_error)
+                request,
+                CONNECT_FAILED_MESSAGE.format(error=connection_error),
+                clear_manual_confirmation=clear_manual_confirmation,
             )
             return
         if self._workflow.active_plan != request.plan:
             self._discard_candidate(
-                candidate_id, request, STALE_PLAN_MESSAGE, show_message=False
+                candidate_id,
+                request,
+                STALE_PLAN_MESSAGE,
+                show_message=False,
+                clear_manual_confirmation=clear_manual_confirmation,
             )
             return
-        if queries.preflight_failed(self._preflight_provider()):
+        if queries.preflight_failed(self._preflight_provider(authorization)):
             self._discard_candidate(
-                candidate_id, request, PREFLIGHT_CHANGED_MESSAGE, show_message=True
+                candidate_id,
+                request,
+                PREFLIGHT_CHANGED_MESSAGE,
+                show_message=True,
+                clear_manual_confirmation=clear_manual_confirmation,
             )
             return
         if not queries.current_inputs_match(
@@ -619,10 +688,14 @@ class PaperOrchestrator(QObject):
             requested_capital_limit=self._capital_limit_provider(),
         ):
             self._discard_candidate(
-                candidate_id, request, IDENTITY_CHANGED_MESSAGE, show_message=True
+                candidate_id,
+                request,
+                IDENTITY_CHANGED_MESSAGE,
+                show_message=True,
+                clear_manual_confirmation=clear_manual_confirmation,
             )
             return
-        self._arm_and_publish(candidate_id, request)
+        self._arm_and_publish(candidate_id, request, authorization=authorization)
 
     # -- the active session ----------------------------------------------
     #
@@ -685,7 +758,7 @@ class PaperOrchestrator(QObject):
         except WorkflowStateError as error:
             self.log_requested.emit(str(error))
 
-    def pause(self) -> None:
+    def pause(self) -> bool:
         """Pause new entries; the exits keep running.
 
         A refusal is a *log line and nothing else*: no dialog, no fabricated result and
@@ -699,22 +772,24 @@ class PaperOrchestrator(QObject):
             result = self._workflow.set_entries_paused(True)
         except WorkflowStateError as error:
             self.log_requested.emit(str(error))
-            return
+            return False
         self._publish_result(result)
         self.log_requested.emit(PAUSE_SUCCEEDED_MESSAGE)
+        return True
 
-    def resume(self) -> None:
+    def resume(self) -> bool:
         """Resume new entries, from ``PAUSED`` only."""
 
         try:
             result = self._workflow.set_entries_paused(False)
         except WorkflowStateError as error:
             self.log_requested.emit(str(error))
-            return
+            return False
         self._publish_result(result)
         self.log_requested.emit(RESUME_SUCCEEDED_MESSAGE)
+        return True
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
         """Ask for an orderly stop, judged against the market fact of *this* moment.
 
         The snapshot is read through the provider at call time rather than captured when
@@ -726,8 +801,9 @@ class PaperOrchestrator(QObject):
             result = self._workflow.request_stop(self._market_snapshot_provider())
         except WorkflowStateError as error:
             self.log_requested.emit(str(error))
-            return
+            return False
         self._publish_result(result)
+        return True
 
     # -- manual recovery ---------------------------------------------------
     #
@@ -890,6 +966,10 @@ class PaperOrchestrator(QObject):
 
         self._retain_presentation(result)
         self.result_changed.emit(result)
+        if self.session_paused:
+            self.session_paused_published.emit()
+        elif self.session_running:
+            self.session_running_published.emit()
         for event in result.events:
             self.runtime_event_requested.emit(
                 PaperRuntimeEventRequest(
@@ -1313,7 +1393,11 @@ class PaperOrchestrator(QObject):
         self.manual_recovery_required.emit()
 
     def _arm_and_publish(
-        self, candidate_id: str, request: PaperLaunchRequest
+        self,
+        candidate_id: str,
+        request: PaperLaunchRequest,
+        *,
+        authorization: PaperLaunchAuthorization = PaperLaunchAuthorization.MANUAL,
     ) -> None:
         """Validate the reading, arm, take the promotion, publish, and end the claim.
 
@@ -1404,6 +1488,7 @@ class PaperOrchestrator(QObject):
         # The launch's own result goes out through the same path every later tick will
         # use, so "how is a Paper result published?" has one answer and one code path
         # from the first ``RUNNING`` to the last ``FINALIZED``.
+        self.launch_authorization_published.emit(authorization)
         self._publish_result(result)
         self.runtime_event_requested.emit(
             PaperRuntimeEventRequest(
@@ -1490,6 +1575,7 @@ class PaperOrchestrator(QObject):
         message: str,
         *,
         show_message: bool,
+        clear_manual_confirmation: bool = True,
     ) -> None:
         """Dispose one candidate and reject only the attempt it belongs to.
 
@@ -1508,14 +1594,22 @@ class PaperOrchestrator(QObject):
         finally:
             current = self._workflow.reject_connecting(request.plan)
             if current:
-                self._clear_arm_confirmation()
+                self.launch_failed_published.emit(
+                    "Canonical Paper launch did not reach RUNNING"
+                )
+                if clear_manual_confirmation:
+                    self._clear_arm_confirmation()
                 self._render_launch_state()
             self.log_requested.emit(message)
             if current and show_message:
                 self.refused.emit(LAUNCH_FAILED_TITLE, message)
 
     def _reject_without_candidate(
-        self, request: PaperLaunchRequest, message: str
+        self,
+        request: PaperLaunchRequest,
+        message: str,
+        *,
+        clear_manual_confirmation: bool = True,
     ) -> None:
         """Finish a failed connect that produced no candidate at all.
 
@@ -1525,7 +1619,11 @@ class PaperOrchestrator(QObject):
 
         current = self._workflow.reject_connecting(request.plan)
         if current:
-            self._clear_arm_confirmation()
+            self.launch_failed_published.emit(
+                "Canonical Paper launch did not reach RUNNING"
+            )
+            if clear_manual_confirmation:
+                self._clear_arm_confirmation()
             self._render_launch_state()
         self.log_requested.emit(message)
         if current:

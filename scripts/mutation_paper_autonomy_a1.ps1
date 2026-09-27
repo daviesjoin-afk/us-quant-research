@@ -234,7 +234,7 @@ $mutations = @(
     @{
         name = 'M10 the intent persists a candidate shortlist'
         file = $domainAutonomy
-        find = '\n    reason: str\n'
+        find = '\r?\n    reason: str\r?\n'
         repl = "`n    reason: str`n    candidate_symbols: tuple[str, ...] = ()`n"
         tests = @($autonomyArch)
         select = @("-k", "carries_no_runtime_truth")
@@ -242,7 +242,7 @@ $mutations = @(
     @{
         name = 'M11 the intent persists the selected strategy version'
         file = $domainAutonomy
-        find = '\n    reason: str\n'
+        find = '\r?\n    reason: str\r?\n'
         repl = "`n    reason: str`n    strategy_version_id: str = `"`"`n"
         tests = @($autonomyArch)
         select = @("-k", "carries_no_runtime_truth")

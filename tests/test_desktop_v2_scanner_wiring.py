@@ -226,7 +226,9 @@ def test_auto_market_scan_finished_refreshes_scanner_page(
     window.universe_orchestrator.restore_snapshot(_universe())
     monkeypatch.setattr(window, "_refresh_market_scope_summary", lambda: None)
     monkeypatch.setattr(
-        window.execution_orchestrator, "_build_shortlist", lambda: None
+        window.execution_orchestrator,
+        "_build_shortlist",
+        lambda *, request: None,
     )
     monkeypatch.setattr(
         window.paper_orchestrator, "begin_preparation", lambda: None

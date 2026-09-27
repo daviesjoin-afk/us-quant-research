@@ -270,6 +270,7 @@ def test_a_successful_refresh_records_a_runtime_event(
     from us_quant.paths import STATE_ROOT_ENV
 
     monkeypatch.setenv(STATE_ROOT_ENV, str(tmp_path))
+    window.runtime_events_orchestrator._last_refresh_at = None
     monkeypatch.setattr(
         window.execution_orchestrator, "refresh_preflight", lambda: None
     )

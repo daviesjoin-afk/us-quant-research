@@ -36,7 +36,7 @@ from __future__ import annotations
 import ast
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import pathlib
 import sqlite3
@@ -44,7 +44,14 @@ import threading
 
 import pytest
 
-from us_quant.cli import paper_autonomy_status, paper_autonomy_transition
+from us_quant.cli import (
+    paper_autonomy_resolve_action,
+    paper_autonomy_seal_action,
+    paper_autonomy_status,
+    paper_autonomy_transition,
+    paper_autonomy_unresolved,
+    build_parser,
+)
 from us_quant.trading.adapters.sqlite.paper_autonomy_repository import (
     SQLitePaperAutonomyRepository,
 )
@@ -1431,3 +1438,125 @@ def test_p2_the_cli_requires_a_reason_and_covers_every_verb(
     for verb in _OPERATOR_TRANSITIONS:
         with pytest.raises(SystemExit):
             build_parser().parse_args(["paper-autonomy", verb])
+
+
+def test_paper_autonomy_recovery_cli_lists_and_resolves_explicitly(
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from us_quant.trading.adapters.sqlite.paper_autonomy_action_repository import (
+        SQLitePaperAutonomyActionRepository,
+    )
+    from us_quant.trading.adapters.sqlite.paper_autonomy_repository import (
+        SQLitePaperAutonomyRepository,
+    )
+    from us_quant.trading.application.paper_autonomy import PaperAutonomyApplication
+    from us_quant.trading.domain.paper_autonomy_supervisor import (
+        PaperAutonomyActionStatus,
+        PaperAutonomyActionType,
+    )
+    from us_quant.trading.ports.paper_autonomy_action_repository import (
+        PaperAutonomyActionRecord,
+    )
+
+    intent_path = tmp_path / "intent.sqlite3"
+    actions_path = tmp_path / "actions.sqlite3"
+    intent_store = SQLitePaperAutonomyRepository(intent_path)
+    autonomy = PaperAutonomyApplication(intent_store)
+    enabled = autonomy.enable(INITIAL_REVISION, "old process authorization")
+    autonomy.disable(enabled.revision, "disable before reviewing old action")
+    actions = SQLitePaperAutonomyActionRepository(actions_path)
+    now = datetime(2026, 9, 27, 14, tzinfo=timezone.utc)
+    actions.claim(
+        PaperAutonomyActionRecord(
+            action_key="old-start",
+            intent_revision=enabled.revision,
+            trading_day=date(2026, 9, 27),
+            action=PaperAutonomyActionType.START,
+            status=PaperAutonomyActionStatus.CLAIMED,
+            claimed_at=now,
+            completed_at=None,
+            detail="old start request",
+        )
+    )
+    actions.mark_requested(action_key="old-start", detail="owner accepted request")
+
+    assert paper_autonomy_unresolved(
+        config_path=_PAPER_CONFIG,
+        intent_database_path=intent_path,
+        action_database_path=actions_path,
+    ) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert listed["readable"] is True
+    assert listed["count"] == 1
+    assert listed["actions"][0]["status"] == "requested"
+    assert "account" not in listed["actions"][0]
+
+    assert paper_autonomy_resolve_action(
+        config_path=_PAPER_CONFIG,
+        intent_database_path=intent_path,
+        action_database_path=actions_path,
+        action_key="old-start",
+        expected_status="requested",
+        reason="reviewed broker, account, orders, and positions",
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["resolved"] is True
+    assert result["previous_status"] == "requested"
+    assert result["new_status"] == "operator_resolved"
+    assert result["authorization_floor_revision"] == autonomy.snapshot().revision
+    assert "does not enable" in result["effect"]
+    assert "restart the Desktop" in result["next_step"]
+    assert actions.get("old-start").status is PaperAutonomyActionStatus.OPERATOR_RESOLVED
+    assert actions.get("old-start").authorization_floor_revision == autonomy.snapshot().revision
+
+    actions.claim(
+        PaperAutonomyActionRecord(
+            action_key="crashed-before-seal",
+            intent_revision=autonomy.snapshot().revision,
+            trading_day=date(2026, 9, 27),
+            action=PaperAutonomyActionType.START,
+            status=PaperAutonomyActionStatus.CLAIMED,
+            claimed_at=now,
+            completed_at=None,
+            detail="second old start request",
+        )
+    )
+    actions.resolve_unknown(
+        action_key="crashed-before-seal",
+        expected_status=PaperAutonomyActionStatus.CLAIMED,
+        resolved_at=now,
+        detail="simulated interruption before barrier seal",
+    )
+    assert paper_autonomy_unresolved(
+        config_path=_PAPER_CONFIG,
+        intent_database_path=intent_path,
+        action_database_path=actions_path,
+    ) == 0
+    unsealed = json.loads(capsys.readouterr().out)
+    assert unsealed["count"] == 1
+    assert unsealed["actions"][0]["authorization_floor_revision"] is None
+    assert paper_autonomy_seal_action(
+        config_path=_PAPER_CONFIG,
+        intent_database_path=intent_path,
+        action_database_path=actions_path,
+        action_key="crashed-before-seal",
+    ) == 0
+    seal_result = json.loads(capsys.readouterr().out)
+    assert seal_result["sealed"] is True
+    assert seal_result["authorization_floor_revision"] == autonomy.snapshot().revision
+
+    parsed = build_parser().parse_args([
+        "paper-autonomy", "resolve-action", "--key", "k",
+        "--expected-status", "claimed", "--reason", "reviewed",
+    ])
+    assert parsed.autonomy_command == "resolve-action"
+    parsed = build_parser().parse_args([
+        "paper-autonomy", "seal-action", "--key", "k",
+    ])
+    assert parsed.autonomy_command == "seal-action"
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([
+            "paper-autonomy", "resolve-action", "--key", "k",
+            "--expected-status", "succeeded", "--reason", "reviewed",
+        ])

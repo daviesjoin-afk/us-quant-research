@@ -267,7 +267,7 @@ def _orchestrator(
     preflight = (
         preflight_provider
         if preflight_provider is not None
-        else (lambda: None)
+        else (lambda _authorization: None)
     )
     return PaperOrchestrator(
         workflow_getter=lambda: workflow,
@@ -804,7 +804,7 @@ def test_a_retained_finished_session_does_not_gate_a_new_launch() -> None:
 
     probes: list[str] = []
 
-    def preflight() -> object:
+    def preflight(_authorization: object) -> object:
         probes.append("preflight")
         return AutoQuantPreflight(ready=False, checks=())
 

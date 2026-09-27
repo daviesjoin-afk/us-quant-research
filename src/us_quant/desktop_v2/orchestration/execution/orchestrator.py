@@ -108,6 +108,7 @@ from us_quant.trading.application.strategy_selection import (
     StrategySelectionPurpose,
     StrategySelectionService,
 )
+from us_quant.trading.domain.paper_preparation import PaperPreparationRequest
 from us_quant.trading.runtime.models import AutoQuantCandidate
 from us_quant.trading.runtime.preflight import (
     AutoQuantPreflight,
@@ -127,6 +128,7 @@ class ExecutionOrchestrator(QObject):
     #: start.  The window bridges this to ``paper_orchestrator.start()``: this
     #: class must not name the Paper capability.
     paper_start_requested = Signal()
+    preparation_failed_published = Signal(str)
 
     #: Market commands, as *requests*: the window applies the Paper / Shadow
     #: interlocks and reaches the market capability itself.  There are four of
@@ -265,6 +267,15 @@ class ExecutionOrchestrator(QObject):
         the arm confirmation and the open session -- are read here each time.
         """
 
+        return self.preflight_with_confirmation(
+            paper_confirmed=self._page.arm_confirmed()
+        )
+
+    def preflight_with_confirmation(
+        self, *, paper_confirmed: bool
+    ) -> AutoQuantPreflight:
+        """Recompute every launch gate with one explicit confirmation fact."""
+
         strategy = self.current_strategy
         eligible, detail = queries.strategy_eligibility(strategy)
         snapshot = self._providers.market_snapshot()
@@ -276,7 +287,7 @@ class ExecutionOrchestrator(QObject):
         )
         return evaluate_auto_quant_preflight(
             capability_enabled=self._providers.paper_capability_enabled(),
-            paper_confirmed=self._page.arm_confirmed(),
+            paper_confirmed=paper_confirmed,
             strategy_eligible=eligible,
             strategy_detail=detail,
             candidate_count=readiness.candidate_count,
@@ -446,7 +457,16 @@ class ExecutionOrchestrator(QObject):
     # -- candidate preparation ------------------------------------------
 
     def request_prepare(self) -> None:
-        """Build a new shortlist: refuse, mark PREPARING, then scan off-thread.
+        """Read the manual sizing controls and enter the shared preparation seam."""
+
+        request = PaperPreparationRequest(
+            candidate_limit=self._page.candidate_limit(),
+            capital_limit=self._page.capital_limit(),
+        )
+        self.request_prepare_with(request)
+
+    def request_prepare_with(self, request: PaperPreparationRequest) -> bool:
+        """Build a shortlist from one explicit request; return owner admission.
 
         The sequence is the contract.  A missing universe or a live session stops
         before anything is claimed; only then does the canonical workflow enter
@@ -459,18 +479,18 @@ class ExecutionOrchestrator(QObject):
             self.information_requested.emit(
                 UNIVERSE_MISSING_TITLE, UNIVERSE_MISSING_MESSAGE
             )
-            return
+            return False
         if self._paper.runtime_active:
             self.information_requested.emit(
                 SESSION_RUNNING_TITLE, SESSION_RUNNING_MESSAGE
             )
-            return
+            return False
         refusal = self._paper.begin_preparation()
         if refusal is not None:
             self.information_requested.emit(
                 PREPARATION_REFUSED_TITLE, refusal
             )
-            return
+            return False
         self._set_launch_busy(True)
         self._page.render_context(summary=PREPARING_SUMMARY)
         # The scan is sized on the *research scenario* capital, not on Paper
@@ -479,7 +499,9 @@ class ExecutionOrchestrator(QObject):
         research_capital = self._providers.research_scenario_capital()
         started = self._submit_task(
             lambda progress: self._prepare_task(progress, research_capital),
-            on_success=self._preparation_finished,
+            on_success=lambda result, request=request: self._preparation_finished(
+                result, request=request
+            ),
             on_failure=self._preparation_failed,
             start_message=PREPARE_START_MESSAGE,
             resource_group=SCAN_RESOURCE_GROUP,
@@ -487,6 +509,7 @@ class ExecutionOrchestrator(QObject):
         if not started:
             self._paper.cancel_preparation()
             self._set_launch_busy(False)
+        return started
 
     def _prepare_task(
         self, progress: Callable[[str], None], research_capital: Decimal
@@ -503,8 +526,13 @@ class ExecutionOrchestrator(QObject):
 
         self._cancel_preparation_if_active()
         self._set_launch_busy(False)
+        self.preparation_failed_published.emit(
+            "Execution candidate preparation failed"
+        )
 
-    def _preparation_finished(self, result: object) -> None:
+    def _preparation_finished(
+        self, result: object, *, request: PaperPreparationRequest
+    ) -> None:
         # The shape is asserted *before* the fact is handed over.  Adopting a
         # result the scanner cannot read would put a non-scan into the scan
         # truth and only fail later, inside the capability's own repaint --
@@ -524,13 +552,13 @@ class ExecutionOrchestrator(QObject):
             self.log_requested.emit(
                 HISTORY_SCHEDULED_MESSAGE.format(scheduled=scheduled)
             )
-        self._build_shortlist()
+        self._build_shortlist(request=request)
 
     def _cancel_preparation_if_active(self) -> None:
         if self._paper.preparation_active:
             self._paper.cancel_preparation()
 
-    def _build_shortlist(self) -> None:
+    def _build_shortlist(self, request: PaperPreparationRequest) -> None:
         """Turn the adopted scan into the retained candidate shortlist.
 
         Every refusal below gives back *both* things the attempt claimed -- the
@@ -546,8 +574,11 @@ class ExecutionOrchestrator(QObject):
         if scan is None or universe is None:
             self._cancel_preparation_if_active()
             self._set_launch_busy(False)
+            self.preparation_failed_published.emit(
+                "Execution candidate preparation facts were unavailable"
+            )
             return
-        limit = self._page.candidate_limit()
+        limit = request.candidate_limit
         paper_capital = self._providers.fresh_paper_capital()
         if paper_capital is None:
             self._cancel_preparation_if_active()
@@ -555,9 +586,12 @@ class ExecutionOrchestrator(QObject):
             self.information_requested.emit(
                 FRESH_CAPITAL_TITLE, FRESH_CAPITAL_MESSAGE
             )
+            self.preparation_failed_published.emit(
+                "Fresh Paper capital was unavailable"
+            )
             return
         effective_capital = queries.bounded_capital(
-            paper_capital, self._page.capital_limit()
+            paper_capital, request.capital_limit
         )
         references = self._reference_symbols()
         eligible = select_paper_rotation_rows(
@@ -585,6 +619,9 @@ class ExecutionOrchestrator(QObject):
                 ),
             )
             self._set_launch_busy(False)
+            self.preparation_failed_published.emit(
+                "The eligible candidate count was below the required minimum"
+            )
             return
         self._candidates = candidates
         if self._paper.preparation_active:

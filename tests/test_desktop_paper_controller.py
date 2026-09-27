@@ -178,7 +178,7 @@ def test_async_preparation_and_reconciliation_fail_closed() -> None:
     when the capability says the preparation is active.
     """
 
-    prepare = _execution_source("request_prepare")
+    prepare = _execution_source("request_prepare_with")
     assert "on_failure=self._preparation_failed" in prepare
     assert "if not started:" in prepare
     assert "self._paper.cancel_preparation()" in prepare

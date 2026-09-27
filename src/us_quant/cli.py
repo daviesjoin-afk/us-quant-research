@@ -35,11 +35,19 @@ from us_quant.trading.domain.paper_autonomy import (
 )
 from us_quant.trading.composition.paper_autonomy import (
     build_paper_autonomy_application,
+    build_paper_autonomy_recovery_application,
+)
+from us_quant.trading.domain.paper_autonomy_supervisor import (
+    PaperAutonomyActionStatus,
+    PaperAutonomySupervisorError,
 )
 from us_quant.trading.ports.paper_autonomy_repository import (
     PaperAutonomyConflict,
     PaperAutonomyEvent,
     PaperAutonomyStoreUnreadable,
+)
+from us_quant.trading.ports.paper_autonomy_action_repository import (
+    PaperAutonomyActionRecord,
 )
 from us_quant.strategy import MovingAverageTrendStrategy
 from us_quant.market_data import (
@@ -874,6 +882,15 @@ def _default_autonomy_database() -> Path:
     return ApplicationPaths.discover().runtime_root / "paper_autonomy.sqlite3"
 
 
+def _default_autonomy_action_database() -> Path:
+    """Where the supervisor's action ledger lives beside the intent store."""
+
+    return (
+        ApplicationPaths.discover().runtime_root
+        / "paper_autonomy_actions.sqlite3"
+    )
+
+
 def _require_paper_environment(config_path: Path) -> int | None:
     """The autonomy surface is Paper-only, and the config has to agree.
 
@@ -1032,6 +1049,165 @@ def paper_autonomy_transition(
             "enabled explicitly"
         )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _action_payload(record: PaperAutonomyActionRecord) -> dict:
+    """Expose ledger facts only; the action store contains no broker snapshot."""
+
+    return {
+        "action_key": record.action_key,
+        "intent_revision": record.intent_revision,
+        "trading_day": (
+            record.trading_day.isoformat() if record.trading_day else None
+        ),
+        "action_day": record.action_day.isoformat() if record.action_day else None,
+        "action": record.action.value,
+        "status": record.status.value,
+        "claimed_at": record.claimed_at.isoformat(),
+        "detail": record.detail,
+        "authorization_floor_revision": record.authorization_floor_revision,
+    }
+
+
+def paper_autonomy_unresolved(
+    *,
+    config_path: Path,
+    intent_database_path: Path | None,
+    action_database_path: Path | None,
+) -> int:
+    """List unresolved action ledger rows without querying broker state."""
+
+    refused = _require_paper_environment(config_path)
+    if refused is not None:
+        return refused
+    application = build_paper_autonomy_recovery_application(
+        intent_database_path=intent_database_path or _default_autonomy_database(),
+        action_database_path=action_database_path or _default_autonomy_action_database(),
+    )
+    try:
+        actions = application.unresolved()
+    except PaperAutonomySupervisorError as error:
+        print(
+            json.dumps(
+                {"readable": False, "error": str(error)},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 9
+    print(
+        json.dumps(
+            {
+                "readable": True,
+                "count": len(actions),
+                "actions": [_action_payload(record) for record in actions],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
+def paper_autonomy_resolve_action(
+    *,
+    config_path: Path,
+    intent_database_path: Path | None,
+    action_database_path: Path | None,
+    action_key: str,
+    expected_status: str,
+    reason: str,
+) -> int:
+    """Close an ambiguous row only after intent is freshly confirmed disabled."""
+
+    refused = _require_paper_environment(config_path)
+    if refused is not None:
+        return refused
+    application = build_paper_autonomy_recovery_application(
+        intent_database_path=intent_database_path or _default_autonomy_database(),
+        action_database_path=action_database_path or _default_autonomy_action_database(),
+    )
+    try:
+        record = application.resolve_unknown(
+            action_key=action_key,
+            expected_status=PaperAutonomyActionStatus(expected_status),
+            reason=reason,
+        )
+    except (PaperAutonomySupervisorError, ValueError) as error:
+        print(
+            json.dumps(
+                {
+                    "resolved": False,
+                    "action_key": action_key,
+                    "error": str(error),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 2
+    payload = {
+        "resolved": True,
+        "action_key": action_key,
+        "previous_status": expected_status,
+        "new_status": record.status.value,
+        "authorization_floor_revision": record.authorization_floor_revision,
+        "effect": (
+            "the ambiguous action was closed by explicit operator review; "
+            "this does not enable Paper autonomy"
+        ),
+        "next_step": (
+            "if the kill switch is latched, clear it; then restart the Desktop "
+            "and explicitly enable autonomy after startup is proven safe"
+        ),
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def paper_autonomy_seal_action(
+    *,
+    config_path: Path,
+    intent_database_path: Path | None,
+    action_database_path: Path | None,
+    action_key: str,
+) -> int:
+    """Finish a recovery barrier after a crash between resolve and seal."""
+
+    refused = _require_paper_environment(config_path)
+    if refused is not None:
+        return refused
+    application = build_paper_autonomy_recovery_application(
+        intent_database_path=intent_database_path or _default_autonomy_database(),
+        action_database_path=action_database_path or _default_autonomy_action_database(),
+    )
+    try:
+        record = application.seal_operator_resolution(action_key=action_key)
+    except PaperAutonomySupervisorError as error:
+        print(
+            json.dumps(
+                {"sealed": False, "action_key": action_key, "error": str(error)},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 2
+    print(
+        json.dumps(
+            {
+                "sealed": True,
+                "action_key": action_key,
+                "authorization_floor_revision": record.authorization_floor_revision,
+                "next_step": (
+                    "restart Desktop to recheck startup; then explicitly enable "
+                    "autonomy if startup is proven safe"
+                ),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -1209,11 +1385,37 @@ def build_parser() -> argparse.ArgumentParser:
             "(default: <state root>/runtime/paper_autonomy.sqlite3)"
         ),
     )
+    autonomy_parser.add_argument(
+        "--actions-database",
+        type=Path,
+        default=None,
+        help=(
+            "action ledger database "
+            "(default: <state root>/runtime/paper_autonomy_actions.sqlite3)"
+        ),
+    )
     autonomy_commands = autonomy_parser.add_subparsers(
         dest="autonomy_command",
         required=True,
     )
     autonomy_commands.add_parser("status")
+    autonomy_commands.add_parser("unresolved")
+    resolve_parser = autonomy_commands.add_parser(
+        "resolve-action",
+        help="close one ambiguous action after operator review",
+    )
+    resolve_parser.add_argument("--key", required=True)
+    resolve_parser.add_argument(
+        "--expected-status",
+        required=True,
+        choices=("claimed", "requested"),
+    )
+    resolve_parser.add_argument("--reason", required=True)
+    seal_parser = autonomy_commands.add_parser(
+        "seal-action",
+        help="finish sealing a resolved action after an interrupted recovery",
+    )
+    seal_parser.add_argument("--key", required=True)
     for verb, hint in _OPERATOR_HINTS.items():
         verb_parser = autonomy_commands.add_parser(verb, help=hint)
         verb_parser.add_argument(
@@ -1300,6 +1502,28 @@ def main() -> int:
             return paper_autonomy_status(
                 config_path=args.config,
                 database_path=args.database,
+            )
+        if args.autonomy_command == "unresolved":
+            return paper_autonomy_unresolved(
+                config_path=args.config,
+                intent_database_path=args.database,
+                action_database_path=args.actions_database,
+            )
+        if args.autonomy_command == "resolve-action":
+            return paper_autonomy_resolve_action(
+                config_path=args.config,
+                intent_database_path=args.database,
+                action_database_path=args.actions_database,
+                action_key=args.key,
+                expected_status=args.expected_status,
+                reason=args.reason,
+            )
+        if args.autonomy_command == "seal-action":
+            return paper_autonomy_seal_action(
+                config_path=args.config,
+                intent_database_path=args.database,
+                action_database_path=args.actions_database,
+                action_key=args.key,
             )
         return paper_autonomy_transition(
             config_path=args.config,

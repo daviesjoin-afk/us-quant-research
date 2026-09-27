@@ -1,9 +1,9 @@
-"""Paper autonomy composition root.
+"""Composition for the Paper autonomy intent and recovery applications.
 
-The one module allowed to know both the autonomy application and the concrete
-store it runs against.  Callers above this file -- the operator CLI now, a
-scheduler host later -- name the application and the port only, which is what
-lets the SQLite store be replaced without touching a caller.
+The module that binds these applications to their concrete stores. Callers
+above this file -- the operator CLI now -- name the application and its
+collaborator contract only, which is what lets the SQLite store be replaced
+without touching a caller.
 
 There is deliberately no builder for a *supervisor* here.  This control plane
 owns an operator's intent and nothing else; a component that acts on that intent
@@ -20,8 +20,14 @@ from pathlib import Path
 from us_quant.trading.adapters.sqlite.paper_autonomy_repository import (
     SQLitePaperAutonomyRepository,
 )
+from us_quant.trading.adapters.sqlite.paper_autonomy_action_repository import (
+    SQLitePaperAutonomyActionRepository,
+)
 from us_quant.trading.application.paper_autonomy import (
     PaperAutonomyApplication,
+)
+from us_quant.trading.application.paper_autonomy_recovery import (
+    PaperAutonomyRecoveryApplication,
 )
 
 
@@ -43,4 +49,24 @@ def build_paper_autonomy_application(
     )
 
 
-__all__ = ["build_paper_autonomy_application"]
+def build_paper_autonomy_recovery_application(
+    *,
+    intent_database_path: str | Path,
+    action_database_path: str | Path,
+    clock: Callable[[], datetime] | None = None,
+) -> PaperAutonomyRecoveryApplication:
+    """Bind the recovery authority to the intent reader and action ledger."""
+
+    return PaperAutonomyRecoveryApplication(
+        PaperAutonomyApplication(
+            SQLitePaperAutonomyRepository(intent_database_path)
+        ),
+        SQLitePaperAutonomyActionRepository(action_database_path),
+        clock=clock,
+    )
+
+
+__all__ = [
+    "build_paper_autonomy_application",
+    "build_paper_autonomy_recovery_application",
+]

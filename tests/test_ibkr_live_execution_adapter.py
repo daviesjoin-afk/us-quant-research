@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -283,6 +284,9 @@ def test_reserve_only_allocates_id_and_submit_builds_one_live_lmt_order():
     )
     assert order.tif == "DAY" and order.outsideRth is False
     assert order.account == ACCOUNT and order.transmit is True
+    with pytest.raises(IBKRLiveExecutionError, match="不得再次提交"):
+        adapter.submit(reservation)
+    assert len(gateway.placed) == 1
     adapter.disconnect()
 
 
@@ -421,11 +425,23 @@ def test_order_construction_failure_is_refused_before_submit_without_halting():
     adapter.disconnect()
 
 
+def test_reusing_an_order_id_for_different_intent_is_refused():
+    adapter, _, _ = _adapter()
+    _connect(adapter)
+    intent = _intent()
+    adapter.reserve(intent)
+
+    with pytest.raises(IBKRLiveExecutionError, match="内容冲突"):
+        adapter.reserve(replace(intent, quantity=2))
+    adapter.disconnect()
+
+
 @pytest.mark.parametrize(
     ("callback_args", "expected_status", "expected_message"),
     [
         ((0, 202, "Order cancelled", ""), OrderStatus.CANCELED, "Order cancelled"),
         ((201, "Order rejected"), OrderStatus.BROKER_REJECTED, "Order rejected"),
+        ((201, "Order rejected", "advanced json"), OrderStatus.BROKER_REJECTED, "Order rejected"),
     ],
 )
 def test_gateway_error_supports_ibapi_callback_signatures(
@@ -469,4 +485,4 @@ def test_uncertain_cancel_halts_and_connection_loss_requires_reconciliation():
     assert fresh.halted
     with pytest.raises(IBKRLiveExecutionError):
         fresh.reserve(_intent())
-    fresh.disconnect()\n
+    fresh.disconnect()

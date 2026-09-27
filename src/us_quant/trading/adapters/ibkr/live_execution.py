@@ -204,6 +204,7 @@ class IBKRLiveExecutionAdapter:
         self._execution_quantity_by_order: dict[int, Decimal] = {}
         self._intent_by_order: dict[int, OrderIntent] = {}
         self._order_by_intent: dict[str, int] = {}
+        self._submitted_orders: set[int] = set()
         self._cancel_requested: set[str] = set()
         self._seen_executions: set[str] = set()
         self._updates: deque[OrderEvent] = deque()
@@ -359,6 +360,10 @@ class IBKRLiveExecutionAdapter:
                 raise IBKRLiveExecutionError("Live LMT 价格必须为有限正数")
             existing = self._order_by_intent.get(intent.order_id)
             if existing is not None:
+                if self._intent_by_order[existing] != intent:
+                    raise IBKRLiveExecutionError(
+                        "已存在的 Live order id 与新 intent 内容冲突"
+                    )
                 return BrokerOrderReservation(
                     order_id=intent.order_id,
                     broker_order_id=existing,
@@ -395,6 +400,8 @@ class IBKRLiveExecutionAdapter:
                 raise IBKRLiveExecutionError("Live reservation 与 order intent 不匹配")
             if reservation.account_alias != mask_account_id(self._account):
                 raise IBKRLiveExecutionError("Live reservation 账户指纹发生变化")
+            if reservation.broker_order_id in self._submitted_orders:
+                raise IBKRLiveExecutionError("Live reservation 已提交，不得再次提交")
             client = self._client
             if client is None:
                 raise IBKRLiveExecutionError("Live channel 已断开")
@@ -418,6 +425,7 @@ class IBKRLiveExecutionAdapter:
                     broker_order_id=reservation.broker_order_id,
                     intent=intent,
                 ) from error
+            self._submitted_orders.add(reservation.broker_order_id)
 
     def _make_contract(self, symbol: str) -> Any:
         factory = self._contract_factory
@@ -544,13 +552,17 @@ class IBKRLiveExecutionAdapter:
             return
         code = 0
         message = "IBKR Live Gateway error"
+        modern_error_time_signature = False
         if len(args) >= 3:
             try:
-                code = int(args[1])
+                modern_code = int(args[1])
             except (TypeError, ValueError):
-                code = 0
-            message = str(args[2])
-        elif len(args) >= 2:
+                modern_code = None
+            modern_error_time_signature = modern_code is not None and isinstance(args[2], str)
+            if modern_error_time_signature:
+                code = modern_code
+                message = args[2]
+        if not modern_error_time_signature and len(args) >= 2:
             try:
                 code = int(args[0])
             except (TypeError, ValueError):

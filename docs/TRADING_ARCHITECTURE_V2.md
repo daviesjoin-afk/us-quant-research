@@ -5140,4 +5140,5 @@ Stage 4-B PR #64 已通过 merge commit 完成，实际 merge SHA 为
 且不输出 fill。构造订单失败发生在 broker 调用之前，作为明确拒绝处理；只有调用
 `placeOrder`/`cancelOrder` 后抛出的异常按结果不确定处理并 HALT。共享执行核心仍负责
 `reserve → durable record → submit`，不确定提交不重试，拒绝不 fallback。Stage 4-C 不改变
-共享核心或 production composition，不等于 Live 已可从桌面启动。
+共享核心或 production composition。同一个 reservation 成功提交后不能再次提交；已有 order id
+也不能复用于内容不同的 intent。Stage 4-C 不等于 Live 已可从桌面启动。

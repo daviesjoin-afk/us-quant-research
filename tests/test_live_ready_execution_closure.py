@@ -202,7 +202,21 @@ def test_c15_production_broker_api_calls_have_one_adapter_owner(method: str) -> 
         for node in ast.walk(_tree(path))
         if isinstance(node, ast.Call) and _call_name(node) == method
     ]
-    assert owners == ["trading/adapters/ibkr/execution.py"]
+    assert set(owners) == {
+        "trading/adapters/ibkr/execution.py",
+        "trading/adapters/ibkr/live_execution.py",
+    }
+    assert len(owners) == 2
+
+
+def test_c15b_live_adapter_is_not_constructed_by_production_code() -> None:
+    owners = [
+        path.relative_to(SRC).as_posix()
+        for path in _files(SRC)
+        for node in ast.walk(_tree(path))
+        if isinstance(node, ast.Call) and _call_name(node) == "IBKRLiveExecutionAdapter"
+    ]
+    assert owners == []
 
 
 def test_c16_durable_record_precedes_submit() -> None:

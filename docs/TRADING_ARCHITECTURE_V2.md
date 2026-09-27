@@ -5123,3 +5123,21 @@ canary limits 有效。Proof
 有效期不超过任何一项事实的 freshness window，也不能超过授权过期时间。任一事实缺失、过期
 或不安全都会留下 blocker，proof 不能报告 ready；ready proof 过期后也不能再作为当前证据。
 后续 4-D 仍须在执行边界重新读取并检查动态安全事实；4-B 本身不建立真钱 submission 路径。
+
+### 8.33 Stage 4-B baseline 与 Stage 4-C IBKR Live Execution Adapter
+
+Stage 4-B PR #64 已通过 merge commit 完成，实际 merge SHA 为
+`5d04bc8bd360de41ce164d38e3388dd1ff003a73`。Stage 4-C 从该 SHA 的独立分支
+`refactor/ibkr-live-execution-adapter` 开始。
+
+4-C 新增 `IBKRLiveExecutionAdapter`，只实现冻结的七方法 `BrokerExecutionPort`。
+测试可以直接构造它；production composition 仍只选择现有 Paper adapter。Live 端点限定为
+`127.0.0.1:4001`，managed account 必须唯一且 fingerprint 精确匹配。订单只接受绑定的
+策略版本与标的、整股 STK、正数限价 LMT、DAY 时效及已有 long 持仓范围内的 SELL；只允许取消
+本 adapter 跟踪的订单，不暴露全局取消或备用提交路径。
+
+执行回报还须与跟踪订单的账户、STK 合约、标的、方向及剩余数量一致；不匹配或未知成交会 HALT
+且不输出 fill。构造订单失败发生在 broker 调用之前，作为明确拒绝处理；只有调用
+`placeOrder`/`cancelOrder` 后抛出的异常按结果不确定处理并 HALT。共享执行核心仍负责
+`reserve → durable record → submit`，不确定提交不重试，拒绝不 fallback。Stage 4-C 不改变
+共享核心或 production composition，不等于 Live 已可从桌面启动。

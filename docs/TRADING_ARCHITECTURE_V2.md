@@ -5133,7 +5133,8 @@ Stage 4-B PR #64 已通过 merge commit 完成，实际 merge SHA 为
 4-C 新增 `IBKRLiveExecutionAdapter`，只实现冻结的七方法 `BrokerExecutionPort`。
 测试可以直接构造它；production composition 仍只选择现有 Paper adapter。Live 端点限定为
 `127.0.0.1:4001`，managed account 必须唯一且 fingerprint 精确匹配；启动持仓快照只接受 USD
-股票，不把衍生品或其他币种数量折算成股票。订单只接受绑定的策略版本与标的、整股 STK、正数
+股票，不把衍生品或其他币种数量折算成股票；在可连接前先读取完整 open-order 快照，任何未完成
+订单都会拒绝连接，要求先对账。订单只接受绑定的策略版本与标的、整股 STK、正数
 限价 LMT、DAY 时效、可表示为有限 IBKR 数值的价格及已有 long 持仓范围内的 SELL；只允许取消
 本 adapter 跟踪的订单，不暴露全局取消或备用提交路径。
 
@@ -5146,5 +5147,7 @@ Stage 4-B PR #64 已通过 merge commit 完成，实际 merge SHA 为
 也不能复用于内容不同的 intent。初始持仓快照完成后即撤销 IBKR 持仓推送订阅，以成交回报作为
 进程内仓位增减的唯一来源。非信息类 Gateway 错误和不确定结果会 HALT；HALT 后不再调用 broker
 取消接口。预期 disconnect 会先使旧 gateway callback 失效；失败握手可在修正连接条件后重试。
-部分成交后的明确取消事件按已确认 fill 数量计算 remaining；IBKR `UNSET_DOUBLE` 不作为价格事实
-暴露。Stage 4-C 不等于 Live 已可从桌面启动。
+broker 状态的 filled 与 remaining 必须合计等于原单数量，并符合 Filled/Partial 等状态语义；
+不一致时 HALT 且保留卖出 reservation。部分成交后的明确拒单/取消事件按已确认 fill 数量计算
+remaining，并释放对应 reservation；取消确认后 HALT，直到新进程重新读取持仓和 open orders。
+IBKR `UNSET_DOUBLE` 不作为价格事实暴露。Stage 4-C 不等于 Live 已可从桌面启动。

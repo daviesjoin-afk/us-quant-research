@@ -42,7 +42,7 @@ $mutations = @(
     @{ name='M11 already submitted reservation is submitted again'; find='if reservation\.broker_order_id in self\._submitted_orders:'; repl='if False:'; select='test_reserve_only_allocates_id_and_submit_builds_one_live_lmt_order' },
     @{ name='M12 conflicting intent reuses an existing broker id'; find='if self\._intent_by_order\[existing\] != intent:'; repl='if False:'; select='test_reusing_an_order_id_for_different_intent_is_refused' },
     @{ name='non-stock or non-USD positions are accepted'; find='if security_type != "STK" or currency != "USD":'; repl='if False:'; select='test_non_usd_stock_startup_position_fails_closed' },
-    @{ name='invalid filled or remaining values are trusted'; find='if quantities_valid:'; repl='if True:'; select='test_invalid_order_status_quantities_halt_and_publish_unknown' },
+    @{ name='invalid filled or remaining values are trusted'; find='if quantities_valid and status_facts_valid:'; repl='if True:'; select='test_invalid_order_status_quantities_halt_and_publish_unknown' },
     @{ name='position stream overwrites locally reconciled fill'; find='if self\._position_snapshot_complete:'; repl='if False:'; select='test_broker_order_status_and_fill_callbacks_are_normalized_and_deduplicated' },
     @{ name='HALT still permits broker cancellation'; find='or self\._halted'; repl='or False'; select='test_uncertain_submit_halt_blocks_another_broker_cancel' },
     @{ name='global gateway errors do not halt'; find='elif code not in \{201, 202\}:'; repl='elif False:'; select='test_post_handshake_gateway_error_halts_and_cancel_is_blocked' },
@@ -50,7 +50,11 @@ $mutations = @(
     @{ name='unrepresentable limit prices are accepted'; find='if not isfinite\(broker_limit_price\) or broker_limit_price <= 0:'; repl='if False:'; select='test_limit_price_outside_ibkr_float_range_is_refused' },
     @{ name='expected disconnect is mistaken for connection loss'; find='return app is self\._client and epoch == self\._epoch'; repl='return True'; select='test_intentional_disconnect_does_not_halt_and_adapter_can_reconnect' },
     @{ name='partial-fill cancellation reports original order size as remaining'; find='remaining=max\(Decimal\(intent\.quantity\) - filled_quantity, Decimal\("0"\)\),'; repl='remaining=Decimal(intent.quantity),'; select='test_partial_fill_cancel_event_reports_remaining_quantity' },
-    @{ name='IBKR unset fill price is exposed as a real price'; find='abs\(result\) >= Decimal\(str\(IBKR_UNSET_DOUBLE\)\)'; repl='False'; select='test_ibkr_unset_fill_prices_are_reported_as_missing' }
+    @{ name='IBKR unset fill price is exposed as a real price'; find='abs\(result\) >= Decimal\(str\(IBKR_UNSET_DOUBLE\)\)'; repl='False'; select='test_ibkr_unset_fill_prices_are_reported_as_missing' },
+    @{ name='startup permits pre-existing broker orders'; find='if self\._open_order_ids:'; repl='if False:'; select='test_startup_refuses_any_existing_open_order_for_bound_account' },
+    @{ name='inconsistent terminal order facts are accepted'; find='and status_facts_valid'; repl='and True'; select='test_inconsistent_terminal_status_halts_without_releasing_sell_capacity' },
+    @{ name='definitive sell rejection keeps reserved shares locked'; find='self\._release_sell_reservation_locked\(request_id\)'; repl='pass'; select='test_definitive_rejection_releases_sell_reservation' },
+    @{ name='cancel error terminal does not require reconciliation HALT'; find='elif status is OrderStatus\.CANCELED:'; repl='elif False:'; select='test_partial_fill_cancel_event_reports_remaining_quantity' }
 )
 
 $results = @()

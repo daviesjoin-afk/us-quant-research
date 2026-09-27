@@ -36,6 +36,7 @@ class _FakeGateway:
         *,
         accounts: tuple[str, ...] = (ACCOUNT,),
         positions: tuple[tuple[str, Decimal], ...] = (("AAPL", Decimal("2")),),
+        open_orders: tuple[tuple[int, str], ...] = (),
         submit_error: Exception | None = None,
         cancel_error: Exception | None = None,
     ) -> None:
@@ -43,6 +44,7 @@ class _FakeGateway:
         self.epoch = epoch
         self.accounts = accounts
         self.positions = positions
+        self.open_orders = open_orders
         self.submit_error = submit_error
         self.cancel_error = cancel_error
         self.connected = False
@@ -73,6 +75,17 @@ class _FakeGateway:
                 Decimal("100"),
             )
         self.sink.gateway_position_end(self, self.epoch)
+
+    def reqAllOpenOrders(self) -> None:
+        for order_id, account in self.open_orders:
+            self.sink.gateway_open_order(
+                self,
+                self.epoch,
+                order_id,
+                SimpleNamespace(symbol="AAPL", secType="STK", currency="USD"),
+                SimpleNamespace(account=account),
+            )
+        self.sink.gateway_open_order_end(self, self.epoch)
 
     def isConnected(self) -> bool:
         return self.connected
@@ -125,6 +138,7 @@ def _adapter(
     *,
     accounts: tuple[str, ...] = (ACCOUNT,),
     positions: tuple[tuple[str, Decimal], ...] = (("AAPL", Decimal("2")),),
+    open_orders: tuple[tuple[int, str], ...] = (),
     submit_error: Exception | None = None,
     cancel_error: Exception | None = None,
     repository: _Repository | None = None,
@@ -138,6 +152,7 @@ def _adapter(
             epoch,
             accounts=accounts,
             positions=positions,
+            open_orders=open_orders,
             submit_error=submit_error,
             cancel_error=cancel_error,
         )
@@ -247,6 +262,17 @@ def test_managed_account_must_be_one_exact_bound_live_account(accounts):
         _connect(adapter)
 
     assert not adapter.connected
+
+
+def test_startup_refuses_any_existing_open_order_for_bound_account():
+    adapter, gateway, _ = _adapter(open_orders=((17, ACCOUNT),))
+
+    with pytest.raises(IBKRLiveExecutionError, match="未完成订单"):
+        _connect(adapter)
+
+    assert not adapter.connected
+    assert not adapter.halted
+    assert gateway.placed == []
 
 
 @pytest.mark.parametrize(
@@ -651,6 +677,56 @@ def test_partial_fill_cancel_event_reports_remaining_quantity():
     assert event.status is OrderStatus.CANCELED
     assert event.filled == Decimal("1")
     assert event.remaining == Decimal("1")
+    assert adapter.halted
+    assert adapter._reserved_sell_by_symbol["AAPL"] == 0
+    adapter.disconnect()
+
+
+def test_definitive_rejection_releases_sell_reservation():
+    adapter, _, _ = _adapter()
+    _connect(adapter)
+    intent = _intent(side=Side.SELL, quantity=2)
+    reservation = adapter.reserve(intent)
+    adapter.submit(reservation)
+
+    adapter.gateway_error(
+        adapter._client,
+        adapter._epoch,
+        reservation.broker_order_id,
+        (1727452800000, 201, "Order rejected", ""),
+    )
+
+    event, = adapter.events()
+    assert event.status is OrderStatus.BROKER_REJECTED
+    assert adapter._reserved_sell_by_symbol["AAPL"] == 0
+    assert not adapter.halted
+    next_reservation = adapter.reserve(_intent(side=Side.SELL, quantity=2))
+    assert next_reservation.broker_order_id != reservation.broker_order_id
+    adapter.disconnect()
+
+
+@pytest.mark.parametrize(
+    ("status", "filled", "remaining"),
+    [("Canceled", "0", "0"), ("Filled", "0", "2")],
+)
+def test_inconsistent_terminal_status_halts_without_releasing_sell_capacity(
+    status, filled, remaining
+):
+    adapter, _, _ = _adapter()
+    _connect(adapter)
+    reservation = adapter.reserve(_intent(side=Side.SELL, quantity=2))
+    adapter.submit(reservation)
+
+    adapter.gateway_order_status(
+        adapter._client,
+        adapter._epoch,
+        (reservation.broker_order_id, status, Decimal(filled), Decimal(remaining)),
+    )
+
+    event, = adapter.events()
+    assert adapter.halted
+    assert event.status is OrderStatus.UNKNOWN
+    assert adapter._reserved_sell_by_symbol["AAPL"] == 2
     adapter.disconnect()
 
 

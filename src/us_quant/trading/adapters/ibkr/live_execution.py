@@ -62,6 +62,12 @@ class LiveGatewaySink(Protocol):
 
     def gateway_managed_accounts(self, app: Any, epoch: int, accounts: str) -> None: ...
 
+    def gateway_open_order(
+        self, app: Any, epoch: int, order_id: int, contract: Any, order: Any
+    ) -> None: ...
+
+    def gateway_open_order_end(self, app: Any, epoch: int) -> None: ...
+
     def gateway_error(self, app: Any, epoch: int, request_id: int, args: tuple[Any, ...]) -> None: ...
 
     def gateway_connection_closed(self, app: Any, epoch: int) -> None: ...
@@ -99,6 +105,15 @@ def _create_live_gateway_app(*, sink: LiveGatewaySink, epoch: int) -> Any:
         def managedAccounts(self, accountsList: str) -> None:
             if self._current():
                 sink.gateway_managed_accounts(self, epoch, accountsList)
+
+        def openOrder(self, orderId: int, contract: Any, order: Any, orderState: Any) -> None:
+            del orderState
+            if self._current():
+                sink.gateway_open_order(self, epoch, orderId, contract, order)
+
+        def openOrderEnd(self) -> None:
+            if self._current():
+                sink.gateway_open_order_end(self, epoch)
 
         def error(self, reqId: int, *args: Any) -> None:
             if self._current():
@@ -203,6 +218,7 @@ class IBKRLiveExecutionAdapter:
         self._halt_reason = ""
         self._account = ""
         self._managed_accounts: tuple[str, ...] = ()
+        self._open_order_ids: set[int] = set()
         self._next_valid_id: int | None = None
         self._next_order_id: int | None = None
         self._positions: dict[str, Decimal] = {}
@@ -220,6 +236,7 @@ class IBKRLiveExecutionAdapter:
         self._errors: list[str] = []
         self._next_id_ready = Event()
         self._accounts_ready = Event()
+        self._open_orders_ready = Event()
         self._positions_ready = Event()
         self._state_lock = RLock()
         self._event_lock = Lock()
@@ -270,9 +287,11 @@ class IBKRLiveExecutionAdapter:
             epoch = self._epoch
             self._next_id_ready.clear()
             self._accounts_ready.clear()
+            self._open_orders_ready.clear()
             self._positions_ready.clear()
             self._errors.clear()
             self._managed_accounts = ()
+            self._open_order_ids.clear()
             self._positions.clear()
             self._position_snapshot_complete = False
             self._next_valid_id = None
@@ -311,6 +330,16 @@ class IBKRLiveExecutionAdapter:
                     next_valid_id,
                     self.repository.max_broker_order_id() + 1,
                 )
+            app.reqAllOpenOrders()
+            if not _wait_before_deadline(self._open_orders_ready, deadline):
+                raise IBKRLiveExecutionError("等待 Live open-order 快照超时")
+            with self._state_lock:
+                if self._errors:
+                    raise IBKRLiveExecutionError("；".join(self._errors))
+                if self._open_order_ids:
+                    raise IBKRLiveExecutionError(
+                        "Live 账户存在未完成订单；必须先完成重启对账"
+                    )
             app.reqPositions()
             if not _wait_before_deadline(self._positions_ready, deadline):
                 raise IBKRLiveExecutionError("等待 Live 持仓快照超时")
@@ -567,6 +596,27 @@ class IBKRLiveExecutionAdapter:
             self._managed_accounts = values
             self._accounts_ready.set()
 
+    def gateway_open_order(
+        self,
+        app: Any,
+        epoch: int,
+        order_id: int,
+        contract: Any,
+        order: Any,
+    ) -> None:
+        del contract
+        if not self.gateway_is_current(app, epoch):
+            return
+        with self._state_lock:
+            if str(getattr(order, "account", "")).strip() != self._account:
+                self._errors.append("Live open order account is unknown or mismatched")
+                return
+            self._open_order_ids.add(int(order_id))
+
+    def gateway_open_order_end(self, app: Any, epoch: int) -> None:
+        if self.gateway_is_current(app, epoch):
+            self._open_orders_ready.set()
+
     def gateway_error(self, app: Any, epoch: int, request_id: int, args: tuple[Any, ...]) -> None:
         if not self.gateway_is_current(app, epoch):
             return
@@ -614,9 +664,16 @@ class IBKRLiveExecutionAdapter:
                     idempotency_key=intent.idempotency_key,
                 )
                 self._append_event(event)
+                if status in {OrderStatus.BROKER_REJECTED, OrderStatus.CANCELED}:
+                    self._release_sell_reservation_locked(request_id)
                 if status is OrderStatus.UNKNOWN:
                     self._connected = False
                     self._halt_locked(f"IBKR order error {code}: {message}")
+                elif status is OrderStatus.CANCELED:
+                    self._connected = False
+                    self._halt_locked(
+                        "IBKR cancel confirmation requires fresh position reconciliation"
+                    )
             elif code not in {201, 202}:
                 self._connected = False
                 self._halt_locked(f"IBKR Gateway error {code}: {message}")
@@ -687,8 +744,25 @@ class IBKRLiveExecutionAdapter:
                 and filled <= Decimal(intent.quantity)
                 and remaining <= Decimal(intent.quantity)
             )
-            if quantities_valid:
-                status = order_status_from_text(raw_status)
+            status = order_status_from_text(raw_status)
+            status_facts_valid = (
+                filled + remaining == Decimal(intent.quantity)
+                and (
+                    status is not OrderStatus.FILLED
+                    or (filled == Decimal(intent.quantity) and remaining == 0)
+                )
+                and (
+                    status is not OrderStatus.PARTIALLY_FILLED
+                    or (filled > 0 and remaining > 0)
+                )
+                and (
+                    not status.is_terminal
+                    or self._execution_quantity_by_order.get(
+                        broker_id, Decimal("0")
+                    ) == filled
+                )
+            )
+            if quantities_valid and status_facts_valid:
                 message = ""
             else:
                 self._halt_locked("IBKR Live order status contains invalid quantities")

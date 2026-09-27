@@ -9,7 +9,7 @@ by the persistence port.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -37,8 +37,12 @@ class LiveAccountFingerprint:
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[0-9a-f]{64}", self.sha256):
             raise LiveSafetyError("account fingerprint must be a SHA-256 digest")
-        if not self.masked_account.strip():
-            raise LiveSafetyError("masked account display must not be blank")
+        if (
+            not self.masked_account.startswith("…")
+            or len(self.masked_account) > 5
+            or any(character.isspace() for character in self.masked_account[1:])
+        ):
+            raise LiveSafetyError("account display must be masked to at most four characters")
 
     @classmethod
     def from_identity(
@@ -225,7 +229,7 @@ class LiveAuthorizationState:
 
     authorization: LiveOperatorAuthorization | None = None
     kill_latch: LiveKillLatch = LiveKillLatch()
-    session_armed: bool = False
+    session_armed: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         if self.authorization is not None and not isinstance(
@@ -234,10 +238,6 @@ class LiveAuthorizationState:
             raise LiveSafetyError("authorization has an invalid type")
         if not isinstance(self.kill_latch, LiveKillLatch):
             raise LiveSafetyError("kill_latch has an invalid type")
-        if type(self.session_armed) is not bool:
-            raise LiveSafetyError("session_armed must be a boolean")
-        if self.session_armed and self.kill_latch.is_latched:
-            raise LiveSafetyError("a latched Live session cannot be armed")
 
     def arm_blockers(
         self,
@@ -282,20 +282,21 @@ class LiveAuthorizationState:
         blockers = self.arm_blockers(**facts)  # type: ignore[arg-type]
         if blockers:
             raise LiveArmRefused(blockers)
-        return replace(self, session_armed=True)
+        armed = LiveAuthorizationState(self.authorization, self.kill_latch)
+        object.__setattr__(armed, "session_armed", True)
+        return armed
 
     def after_restart(self) -> "LiveAuthorizationState":
         """Rebuild process-local state from durable facts without an arm."""
 
-        return replace(self, session_armed=False)
+        return LiveAuthorizationState(self.authorization, self.kill_latch)
 
     def engage_kill(self, *, at: datetime, reason: str) -> "LiveAuthorizationState":
         """Latch the kill and drop this process's arm in the same value change."""
 
-        return replace(
-            self,
-            kill_latch=self.kill_latch.engage(at=at, reason=reason),
-            session_armed=False,
+        return LiveAuthorizationState(
+            self.authorization,
+            self.kill_latch.engage(at=at, reason=reason),
         )
 
 

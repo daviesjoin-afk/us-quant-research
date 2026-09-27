@@ -184,6 +184,15 @@ def _authorization_from_json(value: str) -> LiveOperatorAuthorization:
     data = json.loads(value)
     fingerprint_data = data["fingerprint"]
     limits_data = data["limits"]
+    approved_strategy_version_ids = _stored_string_array(
+        data["approved_strategy_version_ids"], "approved_strategy_version_ids"
+    )
+    allowed_symbols = _stored_string_array(
+        limits_data["allowed_symbols"], "allowed_symbols"
+    )
+    allowed_strategy_versions = _stored_string_array(
+        limits_data["allowed_strategy_versions"], "allowed_strategy_versions"
+    )
     fingerprint = LiveAccountFingerprint(
         sha256=fingerprint_data["sha256"],
         masked_account=fingerprint_data["masked_account"],
@@ -194,18 +203,26 @@ def _authorization_from_json(value: str) -> LiveOperatorAuthorization:
         max_daily_loss=Decimal(limits_data["max_daily_loss"]),
         max_positions=limits_data["max_positions"],
         max_open_orders=limits_data["max_open_orders"],
-        allowed_symbols=tuple(limits_data["allowed_symbols"]),
-        allowed_strategy_versions=tuple(limits_data["allowed_strategy_versions"]),
+        allowed_symbols=allowed_symbols,
+        allowed_strategy_versions=allowed_strategy_versions,
     )
     return LiveOperatorAuthorization(
         authorization_id=data["authorization_id"],
         created_at=_timestamp(data["created_at"]),
         expires_at=_timestamp(data["expires_at"]),
         expected_account_fingerprint=fingerprint,
-        approved_strategy_version_ids=tuple(data["approved_strategy_version_ids"]),
+        approved_strategy_version_ids=approved_strategy_version_ids,
         approved_canary_limits=limits,
         revoked_at=None if data["revoked_at"] is None else _timestamp(data["revoked_at"]),
     )
+
+
+def _stored_string_array(value: object, name: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise LiveSafetyStoreUnreadable(
+            f"stored {name} must be a JSON array of strings"
+        )
+    return tuple(value)
 
 
 def _record_from_row(row: sqlite3.Row | tuple[object, ...]) -> LiveSafetyRecord:

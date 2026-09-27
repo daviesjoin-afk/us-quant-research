@@ -31,14 +31,18 @@ function Set-Text([string]$path, [string]$text) {
 }
 
 $mutations = @(
-    @{ name='M1 restart restores session arm'; file=$domain; find='return replace\(self, session_armed=False\)'; repl='return replace(self, session_armed=True)'; select='clearing_kill_latch_does_not_restore_session_arm' },
+    @{ name='M1 restart preserves an existing arm'; file=$domain; find='return LiveAuthorizationState\(self\.authorization, self\.kill_latch\)'; repl='return self'; select='session_arm_is_not_a_persistable_field' },
     @{ name='M2 expired authorization remains valid'; file=$domain; find='elif not authorization\.is_valid_at\(now\):'; repl='elif False:'; select='invalid_authorization_account_or_limits_block_session_arm' },
     @{ name='M3 account fingerprint mismatch is ignored'; file=$domain; find='if authorization\.expected_account_fingerprint != account_fingerprint:'; repl='if False:'; select='invalid_authorization_account_or_limits_block_session_arm' },
     @{ name='M4 canary limits do not gate arm'; file=$domain; find='blockers\.extend\(authorization\.approved_canary_limits\.blockers\(\)\)'; repl='pass  # mutation'; select='invalid_authorization_account_or_limits_block_session_arm' },
     @{ name='M5 operator confirmation is optional'; file=$domain; find='if not operator_confirmed:'; repl='if False:'; select='zero_defaults_and_confirmation_are_fail_closed' },
     @{ name='M6 kill latch does not block new exposure'; file=$domain; find='return operation not in \{'; repl='return operation in {'; select='kill_latch_survives_restart_and_only_blocks_exposure_increase' },
     @{ name='M7 stale repository writer overwrites newer state'; file=$adapter; find='if type\(actual_revision\) is not int or actual_revision != expected_revision:'; repl='if False:'; select='repository_compare_and_swap_refuses_stale_writer' },
-    @{ name='M8 zero defaults permit session arm'; file=$domain; find='if not value\.is_finite\(\) or value <= 0:'; repl='if False:'; select='invalid_authorization_account_or_limits_block_session_arm' }
+    @{ name='M8 zero defaults permit session arm'; file=$domain; find='if not value\.is_finite\(\) or value <= 0:'; repl='if False:'; select='invalid_authorization_account_or_limits_block_session_arm' },
+    @{ name='M9 callers can construct an armed state'; file=$domain; find='session_armed: bool = field\(default=False, init=False\)'; repl='session_armed: bool = False'; select='session_arm_cannot_be_supplied_to_the_state_constructor' },
+    @{ name='M10 malformed JSON allowlists are accepted'; file=$adapter; find='if not isinstance\(value, list\) or any\(not isinstance\(item, str\) for item in value\):'; repl='if False:'; select='non_array_allowlists_make_the_persisted_record_unreadable' },
+    @{ name='M11 raw account display bypasses mask prefix'; file=$domain; find='not self\.masked_account\.startswith\([^)]*\)'; repl='False'; select='account_fingerprint_rejects_unmasked_display_values' },
+    @{ name='M12 full account suffix is accepted as masked'; file=$domain; find='len\(self\.masked_account\) > 5'; repl='False'; select='account_fingerprint_rejects_unmasked_display_values' }
 )
 
 $results = @()

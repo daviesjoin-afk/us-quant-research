@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import fields, replace
+from dataclasses import fields
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import sqlite3
 import ast
+import json
 from pathlib import Path
 
 import pytest
@@ -124,6 +125,7 @@ def test_session_arm_is_not_a_persistable_field_and_restart_drops_it(tmp_path):
     restarted = LiveAuthorizationState(durable.authorization, durable.kill_latch)
 
     assert restarted.session_armed is False
+    assert armed.after_restart().session_armed is False
     assert _arm(restarted).session_armed
 
 
@@ -255,6 +257,18 @@ def test_zero_defaults_and_confirmation_are_fail_closed():
         )
 
 
+def test_session_arm_cannot_be_supplied_to_the_state_constructor():
+    with pytest.raises(TypeError, match="session_armed"):
+        LiveAuthorizationState(session_armed=True)
+
+
+def test_account_fingerprint_rejects_unmasked_display_values():
+    with pytest.raises(ValueError, match="must be masked"):
+        LiveAccountFingerprint("a" * 64, "U1234")
+    with pytest.raises(ValueError, match="must be masked"):
+        LiveAccountFingerprint("a" * 64, "…12345")
+
+
 def test_repository_compare_and_swap_refuses_stale_writer(tmp_path):
     repository = SQLiteLiveSafetyRepository(tmp_path / "live-safety.sqlite3")
     replacement = LiveSafetyRecord(1, _authorization(), LiveKillLatch())
@@ -298,6 +312,41 @@ def test_corrupt_record_fails_closed(tmp_path):
         repository.load()
 
 
+@pytest.mark.parametrize(
+    ("field_path", "bad_value"),
+    [
+        (("limits", "allowed_symbols"), {"AAPL": True}),
+        (("limits", "allowed_strategy_versions"), "strategy-v1"),
+        (("approved_strategy_version_ids",), {"strategy-v1": True}),
+    ],
+)
+def test_non_array_allowlists_make_the_persisted_record_unreadable(
+    tmp_path, field_path, bad_value
+):
+    path = tmp_path / "live-safety.sqlite3"
+    repository = SQLiteLiveSafetyRepository(path)
+    repository.save(
+        expected_revision=0,
+        replacement=LiveSafetyRecord(1, _authorization(), LiveKillLatch()),
+    )
+    with sqlite3.connect(path) as connection:
+        row = connection.execute(
+            "SELECT authorization_json FROM live_safety_state"
+        ).fetchone()
+        payload = json.loads(row[0])
+        target = payload
+        for component in field_path[:-1]:
+            target = target[component]
+        target[field_path[-1]] = bad_value
+        connection.execute(
+            "UPDATE live_safety_state SET authorization_json = ?",
+            (json.dumps(payload),),
+        )
+
+    with pytest.raises(LiveSafetyStoreUnreadable):
+        repository.load()
+
+
 def test_write_does_not_overwrite_an_unreadable_safety_record(tmp_path):
     path = tmp_path / "live-safety.sqlite3"
     repository = SQLiteLiveSafetyRepository(path)
@@ -322,9 +371,9 @@ def test_clearing_kill_latch_does_not_restore_session_arm():
     armed = _arm(_armed_state())
     previously_armed = armed.engage_kill(at=NOW, reason="stop")
 
-    cleared = replace(
-        previously_armed,
-        kill_latch=previously_armed.kill_latch.clear(),
+    cleared = LiveAuthorizationState(
+        previously_armed.authorization,
+        previously_armed.kill_latch.clear(),
     )
 
     assert not cleared.kill_latch.is_latched

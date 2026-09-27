@@ -41,6 +41,7 @@ class LiveCanaryTruth:
     net_liquidation: Decimal
     daily_pnl: Decimal
     open_order_count: int
+    open_buy_notional: Decimal
     positions: tuple[LiveCanaryPosition, ...]
 
     def __post_init__(self) -> None:
@@ -57,6 +58,7 @@ class LiveCanaryTruth:
             raise LiveCanaryTruthError("daily P&L must be a finite Decimal")
         if type(self.open_order_count) is not int or self.open_order_count < 0:
             raise LiveCanaryTruthError("open_order_count must be a nonnegative integer")
+        _finite_nonnegative(self.open_buy_notional, "open BUY notional")
         if not isinstance(self.positions, tuple) or any(
             not isinstance(position, LiveCanaryPosition) for position in self.positions
         ):

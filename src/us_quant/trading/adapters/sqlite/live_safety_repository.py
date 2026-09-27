@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 import json
 from pathlib import Path
 import sqlite3
+from collections.abc import Iterator
 
 from us_quant.sqlite_support import connect_sqlite
 from us_quant.trading.adapters.clock import from_stored_text, to_stored_text
@@ -84,6 +85,44 @@ class SQLiteLiveSafetyRepository:
         ) as error:
             raise LiveSafetyStoreUnreadable(
                 "the Live safety record is unreadable; Live remains unavailable"
+            ) from error
+
+    @contextmanager
+    def execution_lease(self) -> Iterator[LiveSafetyRecord]:
+        """Hold SQLite's write reservation until the broker submit is decided.
+
+        Every durable safety update uses ``BEGIN IMMEDIATE`` in ``save``. This
+        lease uses the same database lock, so a concurrent kill/revoke either
+        commits first and is observed here, or waits until this submission has
+        been linearized ahead of that update.
+        """
+
+        try:
+            with closing(connect_sqlite(self.path)) as connection:
+                connection.isolation_level = None
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    row = connection.execute(
+                        """SELECT revision, authorization_json, kill_latched,
+                                  kill_latched_at, kill_reason
+                           FROM live_safety_state WHERE key = ?""",
+                        (_KEY,),
+                    ).fetchone()
+                    record = LiveSafetyRecord() if row is None else _record_from_row(row)
+                    yield record
+                    connection.execute("COMMIT")
+                except BaseException:
+                    _rollback_quietly(connection)
+                    raise
+        except LiveSafetyRepositoryError:
+            raise
+        except sqlite3.Error as error:
+            raise LiveSafetyRepositoryError(
+                "the Live safety execution lease could not be acquired"
+            ) from error
+        except (LiveSafetyError, ValueError, TypeError, KeyError, InvalidOperation, AttributeError) as error:
+            raise LiveSafetyStoreUnreadable(
+                "the existing Live safety record is unreadable; execution remains unavailable"
             ) from error
 
     def save(self, *, expected_revision: int, replacement: LiveSafetyRecord) -> None:

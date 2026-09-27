@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from typing import Protocol, runtime_checkable
 
 from us_quant.trading.domain.live_safety import LiveSafetyRecord
@@ -28,6 +29,9 @@ class LiveSafetyRepositoryPort(Protocol):
 
     def save(self, *, expected_revision: int, replacement: LiveSafetyRecord) -> None:
         """Atomically compare-and-swap the complete durable safety record."""
+
+    def execution_lease(self) -> AbstractContextManager[LiveSafetyRecord]:
+        """Serialize a broker submit against every durable authorization update."""
 
 
 __all__ = [

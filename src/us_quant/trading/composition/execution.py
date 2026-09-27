@@ -45,6 +45,7 @@ from us_quant.trading.domain.live_startup import (
 )
 from us_quant.trading.ports.broker_execution import BrokerExecutionPort
 from us_quant.trading.ports.live_canary_truth import LiveCanaryTruthPort
+from us_quant.trading.ports.live_safety_repository import LiveSafetyRepositoryPort
 from us_quant.trading.ports.order_repository import OrderRepositoryPort
 
 
@@ -111,6 +112,7 @@ def build_live_execution_candidate_factory(
     environment: Environment,
     live_trading_enabled: bool,
     live_authorization_state: Callable[[], LiveAuthorizationState] | None = None,
+    live_safety_repository: LiveSafetyRepositoryPort | None = None,
     live_startup_proof: Callable[[], LiveStartupProof] | None = None,
     live_truth: LiveCanaryTruthPort | None = None,
 ) -> Callable[..., BrokerExecutionPort]:
@@ -126,6 +128,8 @@ def build_live_execution_candidate_factory(
         raise ExecutionDeploymentError(decision.reason)
     if (
         live_authorization_state is None
+        or live_safety_repository is None
+        or not callable(getattr(live_safety_repository, "execution_lease", None))
         or live_startup_proof is None
         or live_truth is None
         or not callable(getattr(live_truth, "snapshot", None))
@@ -178,6 +182,7 @@ def build_live_execution_candidate_factory(
         return LiveCanaryExecutionGuard(
             broker,
             authorization_state=live_authorization_state,
+            safety_repository=live_safety_repository,
             startup_proof=live_startup_proof,
             truth=live_truth,
         )

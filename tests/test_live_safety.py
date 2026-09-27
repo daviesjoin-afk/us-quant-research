@@ -7,6 +7,7 @@ import sqlite3
 import ast
 import json
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
@@ -278,6 +279,37 @@ def test_repository_compare_and_swap_refuses_stale_writer(tmp_path):
         repository.save(expected_revision=0, replacement=LiveSafetyRecord(1))
 
     assert repository.load() == replacement
+
+
+def test_execution_lease_serializes_kill_writer_until_submit_boundary_releases(tmp_path):
+    repository = SQLiteLiveSafetyRepository(tmp_path / "live-safety.sqlite3")
+    initial = LiveSafetyRecord(1, _authorization(), LiveKillLatch())
+    repository.save(expected_revision=0, replacement=initial)
+    writer_started = Event()
+    writer_finished = Event()
+
+    def write_kill_latch():
+        writer_started.set()
+        repository.save(
+            expected_revision=1,
+            replacement=LiveSafetyRecord(
+                2,
+                initial.authorization,
+                LiveKillLatch().engage(at=NOW, reason="concurrent operator kill"),
+            ),
+        )
+        writer_finished.set()
+
+    with repository.execution_lease() as locked:
+        assert locked == initial
+        writer = Thread(target=write_kill_latch)
+        writer.start()
+        assert writer_started.wait(timeout=1)
+        assert not writer_finished.wait(timeout=0.05)
+
+    assert writer_finished.wait(timeout=1)
+    writer.join(timeout=1)
+    assert repository.load().kill_latch.is_latched
 
 
 def test_repository_persists_no_raw_account_or_session_arm(tmp_path):

@@ -8,6 +8,9 @@ import pytest
 
 from us_quant.ibkr import IBKRConnectionConfig
 from us_quant.trading.adapters.sqlite.order_repository import SQLiteOrderRepository
+from us_quant.trading.adapters.sqlite.live_safety_repository import (
+    SQLiteLiveSafetyRepository,
+)
 from us_quant.trading.adapters.ibkr.live_execution import IBKRLiveExecutionAdapter
 from us_quant.trading.application.live_canary_execution import LiveCanaryExecutionGuard
 from us_quant.trading.composition.execution import (
@@ -26,6 +29,7 @@ from us_quant.trading.domain.live_safety import (
     LiveAuthorizationState,
     LiveCanaryLimits,
     LiveOperatorAuthorization,
+    LiveSafetyRecord,
 )
 from us_quant.trading.domain.live_startup import LiveEndpointIdentity, LiveStartupProof
 
@@ -89,10 +93,24 @@ def _live_build_context():
                 net_liquidation=Decimal("5000"),
                 daily_pnl=Decimal("0"),
                 open_order_count=0,
+                open_buy_notional=Decimal("0"),
                 positions=(),
             )
 
     return state, proof, _Truth()
+
+
+def _live_safety_repository(tmp_path, state):
+    repository = SQLiteLiveSafetyRepository(tmp_path / "live-safety.sqlite3")
+    repository.save(
+        expected_revision=0,
+        replacement=LiveSafetyRecord(
+            revision=1,
+            authorization=state.authorization,
+            kill_latch=state.kill_latch,
+        ),
+    )
+    return repository
 
 
 @pytest.mark.parametrize(
@@ -273,6 +291,7 @@ def test_live_composition_wraps_only_the_concrete_live_adapter_in_the_canary_gua
         environment=Environment.LIVE,
         live_trading_enabled=True,
         live_authorization_state=lambda: state,
+        live_safety_repository=_live_safety_repository(tmp_path, state),
         live_startup_proof=lambda: proof,
         live_truth=truth,
     )
@@ -299,6 +318,7 @@ def test_live_composition_rejects_paper_profile_and_extended_hours(tmp_path) -> 
         environment=Environment.LIVE,
         live_trading_enabled=True,
         live_authorization_state=lambda: state,
+        live_safety_repository=_live_safety_repository(tmp_path, state),
         live_startup_proof=lambda: proof,
         live_truth=truth,
     )

@@ -8,7 +8,10 @@ from threading import RLock
 from typing import Callable
 
 from us_quant.trading.domain.live_canary import LiveCanaryTruth
-from us_quant.trading.domain.live_safety import LiveAuthorizationState
+from us_quant.trading.domain.live_safety import (
+    LiveAuthorizationState,
+    LiveSafetyRecord,
+)
 from us_quant.trading.domain.live_startup import (
     LIVE_STARTUP_PROOF_TTL,
     LiveStartupProof,
@@ -21,6 +24,7 @@ from us_quant.trading.ports.broker_execution import (
     ExecutionSubmissionUncertain,
 )
 from us_quant.trading.ports.live_canary_truth import LiveCanaryTruthPort
+from us_quant.trading.ports.live_safety_repository import LiveSafetyRepositoryPort
 
 
 class LiveCanaryExecutionGuard(BrokerExecutionPort):
@@ -36,12 +40,14 @@ class LiveCanaryExecutionGuard(BrokerExecutionPort):
         broker: BrokerExecutionPort,
         *,
         authorization_state: Callable[[], LiveAuthorizationState],
+        safety_repository: LiveSafetyRepositoryPort,
         startup_proof: Callable[[], LiveStartupProof],
         truth: LiveCanaryTruthPort,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._broker = broker
         self._authorization_state = authorization_state
+        self._safety_repository = safety_repository
         self._startup_proof = startup_proof
         self._truth = truth
         self._now = now or (lambda: datetime.now(timezone.utc))
@@ -55,30 +61,36 @@ class LiveCanaryExecutionGuard(BrokerExecutionPort):
         self._broker.disconnect()
 
     def reserve(self, intent: OrderIntent) -> BrokerOrderReservation:
-        with self._lock:
-            self._validate(intent)
-            reservation = self._broker.reserve(intent)
-            if reservation.broker_order_id in self._active:
-                raise ExecutionRefused("Live canary received a duplicate broker order id")
-            self._active[reservation.broker_order_id] = (intent, False)
-            return reservation
+        with self._safety_repository.execution_lease() as durable_state:
+            with self._lock:
+                self._validate(intent, durable_state=durable_state)
+                reservation = self._broker.reserve(intent)
+                if reservation.broker_order_id in self._active:
+                    raise ExecutionRefused("Live canary received a duplicate broker order id")
+                self._active[reservation.broker_order_id] = (intent, False)
+                return reservation
 
     def submit(self, reservation: BrokerOrderReservation) -> None:
-        with self._lock:
-            active = self._active.get(reservation.broker_order_id)
-            if active is None or active[0].order_id != reservation.order_id:
-                raise ExecutionRefused("Live canary reservation is not tracked")
-            intent = active[0]
-            try:
-                self._validate(intent, own_reservation=reservation.broker_order_id)
-                self._broker.submit(reservation)
-            except ExecutionSubmissionUncertain:
+        with self._safety_repository.execution_lease() as durable_state:
+            with self._lock:
+                active = self._active.get(reservation.broker_order_id)
+                if active is None or active[0].order_id != reservation.order_id:
+                    raise ExecutionRefused("Live canary reservation is not tracked")
+                intent = active[0]
+                try:
+                    self._validate(
+                        intent,
+                        own_reservation=reservation.broker_order_id,
+                        durable_state=durable_state,
+                    )
+                    self._broker.submit(reservation)
+                except ExecutionSubmissionUncertain:
+                    self._active[reservation.broker_order_id] = (intent, True)
+                    raise
+                except ExecutionRefused:
+                    self._active.pop(reservation.broker_order_id, None)
+                    raise
                 self._active[reservation.broker_order_id] = (intent, True)
-                raise
-            except ExecutionRefused:
-                self._active.pop(reservation.broker_order_id, None)
-                raise
-            self._active[reservation.broker_order_id] = (intent, True)
 
     def cancel(self, order_id: str) -> bool:
         # Tracked cancellation is a safety operation and remains available while
@@ -101,6 +113,7 @@ class LiveCanaryExecutionGuard(BrokerExecutionPort):
         intent: OrderIntent,
         *,
         own_reservation: int | None = None,
+        durable_state: LiveSafetyRecord,
     ) -> None:
         try:
             state = self._authorization_state()
@@ -114,6 +127,12 @@ class LiveCanaryExecutionGuard(BrokerExecutionPort):
 
         if not isinstance(state, LiveAuthorizationState):
             raise ExecutionRefused("Live canary authorization state is invalid")
+        if (
+            not isinstance(durable_state, LiveSafetyRecord)
+            or state.authorization != durable_state.authorization
+            or state.kill_latch != durable_state.kill_latch
+        ):
+            raise ExecutionRefused("Live canary state differs from locked durable safety state")
         if not isinstance(proof, LiveStartupProof) or not isinstance(
             truth, LiveCanaryTruth
         ):
@@ -197,7 +216,13 @@ class LiveCanaryExecutionGuard(BrokerExecutionPort):
                 Decimal("0"),
             )
             exposure_cap = min(limits.capital_limit, truth.net_liquidation)
-            if truth.gross_exposure + reserved_notional + notional > exposure_cap:
+            if (
+                truth.gross_exposure
+                + truth.open_buy_notional
+                + reserved_notional
+                + notional
+                > exposure_cap
+            ):
                 raise ExecutionRefused("Live canary capital limit would be exceeded")
             daily_loss = max(Decimal("0"), -truth.daily_pnl)
             if daily_loss >= limits.max_daily_loss:

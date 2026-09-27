@@ -5165,7 +5165,10 @@ Stage 4-C PR #65 已通过 merge commit 完成，实际 merge SHA 为
 重新 arm 后，旧 proof 不能继续授权新订单。
 
 每笔增仓都必须通过策略与标的 allowlist、整股和正限价、单笔名义金额、总资金、当日 broker P&L、
-同时持仓数和 open-order 数上限。guard 只拒绝，不替 RiskApplication 缩量。SELL 必须不超过新鲜
+同时持仓数和 open-order 数上限；总资金检查还计入 broker truth 中未完成 BUY 的剩余名义金额。
+reserve/submit 持有 `LiveSafetyRepositoryPort.execution_lease`，SQLite 实现用同一持久库写锁
+与 kill/revoke/limits CAS 更新串行化，授权更新先完成则提交拒绝，提交先取得 lease 则先于该更新线性化。
+guard 只拒绝，不替 RiskApplication 缩量。SELL 必须不超过新鲜
 long 持仓扣除进程内已预留卖量；kill latch 阻止 BUY/增仓，但仍允许不超过当前持仓的风险降低 SELL。
 授权、proof 或 broker truth 不可读时均拒绝，不重试、不 fallback。ExecutionApplication 原有
 `reserve → durable record → submit` 顺序没有变化。

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from contextlib import contextmanager
+from threading import RLock, Thread, Event
 
 import pytest
 
@@ -19,6 +21,7 @@ from us_quant.trading.domain.live_safety import (
     LiveAuthorizationState,
     LiveCanaryLimits,
     LiveOperatorAuthorization,
+    LiveSafetyRecord,
 )
 from us_quant.trading.domain.live_startup import (
     LiveEndpointIdentity,
@@ -34,6 +37,26 @@ from us_quant.trading.ports.broker_execution import (
     BrokerOrderReservation,
     ExecutionRefused,
 )
+
+
+class _SafetyRepository:
+    def __init__(self, state_provider):
+        self._state_provider = state_provider
+        self._lock = RLock()
+
+    @contextmanager
+    def execution_lease(self):
+        with self._lock:
+            state = self._state_provider()
+            yield LiveSafetyRecord(
+                revision=1,
+                authorization=state.authorization,
+                kill_latch=state.kill_latch,
+            )
+
+    def update(self, replacement):
+        with self._lock:
+            replacement()
 
 
 NOW = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
@@ -165,6 +188,7 @@ def _truth(
     positions: tuple[LiveCanaryPosition, ...] = (),
     daily_pnl: Decimal = Decimal("0"),
     open_order_count: int = 0,
+    open_buy_notional: Decimal = Decimal("0"),
     observed_at: datetime = NOW,
     net_liquidation: Decimal = Decimal("10000"),
 ) -> LiveCanaryTruth:
@@ -174,6 +198,7 @@ def _truth(
         net_liquidation=net_liquidation,
         daily_pnl=daily_pnl,
         open_order_count=open_order_count,
+        open_buy_notional=open_buy_notional,
         positions=positions,
     )
 
@@ -210,9 +235,11 @@ def _guard(
     broker_truth = truth or _Truth(_truth())
     live_proof = proof or _proof(current_state)
     underlying = broker or _Broker()
+    safety_repository = _SafetyRepository(lambda: state_holder[0])
     guard = LiveCanaryExecutionGuard(
         underlying,
         authorization_state=lambda: state_holder[0],
+        safety_repository=safety_repository,
         startup_proof=lambda: live_proof,
         truth=broker_truth,
         now=lambda: NOW,
@@ -230,6 +257,18 @@ def test_guard_preserves_the_shared_reserve_durable_submit_boundary():
 
     assert broker.reservations == [reservation]
     assert broker.submissions == [reservation]
+
+
+def test_external_open_buy_notional_counts_against_the_capital_limit():
+    guard, broker, _, _ = _guard(
+        state=_armed_state(limits=_limits(capital_limit=Decimal("2000"), max_open_orders=2)),
+        truth=_Truth(_truth(open_order_count=1, open_buy_notional=Decimal("1900"))),
+    )
+
+    with pytest.raises(ExecutionRefused, match="capital limit"):
+        guard.reserve(_intent(price="200"))
+
+    assert broker.reservations == []
 
 
 @pytest.mark.parametrize(
@@ -292,6 +331,58 @@ def test_guard_rechecks_ephemeral_session_arm_before_submit():
     with pytest.raises(ExecutionRefused, match="explicit operator arm"):
         guard.reserve(_intent())
     assert broker.reservations == []
+
+
+def test_persistent_kill_writer_is_serialized_with_submit():
+    state = _armed_state()
+    state_holder = [state]
+    safety_repository = _SafetyRepository(lambda: state_holder[0])
+    submit_reached = Event()
+    writer_finished = Event()
+
+    class _RacingTruth(_Truth):
+        race = False
+
+        def snapshot(self):
+            if self.race:
+                writer = Thread(
+                    target=lambda: (
+                        safety_repository.update(
+                            lambda: state_holder.__setitem__(
+                                0, state.engage_kill(at=NOW, reason="operator kill")
+                            )
+                        ),
+                        writer_finished.set(),
+                    )
+                )
+                writer.start()
+            return super().snapshot()
+
+    class _SubmitWitness(_Broker):
+        def submit(self, reservation):
+            assert not writer_finished.is_set()
+            submit_reached.set()
+            super().submit(reservation)
+
+    broker = _SubmitWitness()
+    truth = _RacingTruth(_truth())
+    proof = _proof(state)
+    guard = LiveCanaryExecutionGuard(
+        broker,
+        authorization_state=lambda: state_holder[0],
+        safety_repository=safety_repository,
+        startup_proof=lambda: proof,
+        truth=truth,
+        now=lambda: NOW,
+    )
+    reservation = guard.reserve(_intent())
+    truth.race = True
+    guard.submit(reservation)
+
+    assert submit_reached.is_set()
+    assert writer_finished.wait(timeout=1)
+    assert broker.submissions == [reservation]
+    assert state_holder[0].kill_latch.is_latched
 
 
 def test_old_startup_proof_cannot_authorize_a_replaced_limit_set():

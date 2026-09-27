@@ -16,6 +16,7 @@ from enum import StrEnum
 import hashlib
 import json
 import re
+from uuid import uuid4
 
 
 class LiveSafetyError(ValueError):
@@ -158,6 +159,35 @@ class LiveOperatorAuthorization:
         _aware(now, "now")
         return self.revoked_at is None and self.created_at <= now < self.expires_at
 
+    @property
+    def authorization_fingerprint(self) -> str:
+        """Digest the full authorization so startup proof cannot outlive edits."""
+
+        limits = self.approved_canary_limits
+        payload = {
+            "authorization_id": self.authorization_id,
+            "created_at": self.created_at.isoformat(),
+            "expires_at": self.expires_at.isoformat(),
+            "revoked_at": (
+                None if self.revoked_at is None else self.revoked_at.isoformat()
+            ),
+            "account_fingerprint": self.expected_account_fingerprint.sha256,
+            "approved_strategy_version_ids": list(self.approved_strategy_version_ids),
+            "limits": {
+                "capital_limit": str(limits.capital_limit),
+                "max_order_notional": str(limits.max_order_notional),
+                "max_daily_loss": str(limits.max_daily_loss),
+                "max_positions": limits.max_positions,
+                "max_open_orders": limits.max_open_orders,
+                "allowed_symbols": list(limits.allowed_symbols),
+                "allowed_strategy_versions": list(
+                    limits.allowed_strategy_versions
+                ),
+            },
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
 
 class LiveOperation(StrEnum):
     INCREASE_EXPOSURE = "increase_exposure"
@@ -230,6 +260,7 @@ class LiveAuthorizationState:
     authorization: LiveOperatorAuthorization | None = None
     kill_latch: LiveKillLatch = LiveKillLatch()
     session_armed: bool = field(default=False, init=False)
+    session_arm_id: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.authorization is not None and not isinstance(
@@ -284,6 +315,7 @@ class LiveAuthorizationState:
             raise LiveArmRefused(blockers)
         armed = LiveAuthorizationState(self.authorization, self.kill_latch)
         object.__setattr__(armed, "session_armed", True)
+        object.__setattr__(armed, "session_arm_id", uuid4().hex)
         return armed
 
     def after_restart(self) -> "LiveAuthorizationState":

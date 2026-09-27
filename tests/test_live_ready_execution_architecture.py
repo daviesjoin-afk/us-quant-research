@@ -187,13 +187,13 @@ def test_production_broker_submit_and_cancel_are_adapter_owned() -> None:
         assert set(owners) == expected and len(owners) == len(expected), (method, owners)
 
 
-def test_live_adapter_is_not_constructed_by_production_code() -> None:
+def test_only_execution_composition_constructs_the_live_adapter() -> None:
     owners = []
     for path in _python_files(SRC):
         for node in ast.walk(_tree(path)):
             if isinstance(node, ast.Call) and _call_name(node) == "IBKRLiveExecutionAdapter":
                 owners.append(path.relative_to(SRC).as_posix())
-    assert owners == []
+    assert owners == ["trading/composition/execution.py"]
 
 
 def test_desktop_only_uses_the_gated_factory_and_no_adapter() -> None:
@@ -213,15 +213,21 @@ def test_paper_service_remains_environment_blind() -> None:
     assert not any(isinstance(node, ast.Name) and node.id == "live_trading_enabled" for node in ast.walk(tree))
 
 
-def test_composition_selects_only_current_paper_candidate() -> None:
+def test_composition_is_the_only_paper_and_live_adapter_selector() -> None:
     tree = _tree(TRADING / "composition" / "execution.py")
     names = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
     assert "build_execution_candidate_factory" in names
+    assert "build_live_execution_candidate_factory" in names
     assert "_build_paper_execution_candidate" in names
-    assert not any("live" in name.casefold() for name in names)
     factory = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "build_execution_candidate_factory")
-    calls = [node for node in ast.walk(factory) if isinstance(node, ast.Call)]
-    assert sum(_call_name(node) == "_build_paper_execution_candidate" for node in calls) == 1
+    paper_calls = [node for node in ast.walk(factory) if isinstance(node, ast.Call)]
+    assert sum(_call_name(node) == "_build_paper_execution_candidate" for node in paper_calls) == 1
+    assert not any(_call_name(node) == "IBKRLiveExecutionAdapter" for node in paper_calls)
+
+    live_factory = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "build_live_execution_candidate_factory")
+    calls = [node for node in ast.walk(live_factory) if isinstance(node, ast.Call)]
+    assert sum(_call_name(node) == "IBKRLiveExecutionAdapter" for node in calls) == 1
+    assert sum(_call_name(node) == "LiveCanaryExecutionGuard" for node in calls) == 1
 
 
 def test_current_ibkr_adapter_keeps_paper_boundary() -> None:

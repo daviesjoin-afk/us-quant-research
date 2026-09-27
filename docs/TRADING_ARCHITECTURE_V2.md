@@ -5151,3 +5151,28 @@ broker 状态的 filled 与 remaining 必须合计等于原单数量，并符合
 不一致时 HALT 且保留卖出 reservation。部分成交后的明确拒单/取消事件按已确认 fill 数量计算
 remaining，并释放对应 reservation；取消确认后 HALT，直到新进程重新读取持仓和 open orders。
 IBKR `UNSET_DOUBLE` 不作为价格事实暴露。Stage 4-C 不等于 Live 已可从桌面启动。
+
+### 8.34 Stage 4-C baseline 与 Stage 4-D Live Canary Guard
+
+Stage 4-C PR #65 已通过 merge commit 完成，实际 merge SHA 为
+`5c379814a46f43f2f813904a6e0a02b7e23808c1`。Stage 4-D 从该 SHA 的独立分支
+`refactor/live-canary-execution-gate` 开始。
+
+4-D 在 provider-neutral `LiveCanaryExecutionGuard` 中把 canary 政策放在现有
+`ExecutionApplication` 与 `BrokerExecutionPort` 之间。它在 reserve 和 submit 两个边界都重读
+当前授权状态、startup proof 和 broker account truth；proof 必须新鲜，且绑定当前完整授权摘要、
+本次进程唯一 session-arm id、确切账户指纹与 Live endpoint。授权或 limits 更新、session 重启或
+重新 arm 后，旧 proof 不能继续授权新订单。
+
+每笔增仓都必须通过策略与标的 allowlist、整股和正限价、单笔名义金额、总资金、当日 broker P&L、
+同时持仓数和 open-order 数上限。guard 只拒绝，不替 RiskApplication 缩量。SELL 必须不超过新鲜
+long 持仓扣除进程内已预留卖量；kill latch 阻止 BUY/增仓，但仍允许不超过当前持仓的风险降低 SELL。
+授权、proof 或 broker truth 不可读时均拒绝，不重试、不 fallback。ExecutionApplication 原有
+`reserve → durable record → submit` 顺序没有变化。
+
+production composition 将 Paper candidate factory 与独立 Live guarded candidate factory 分开。
+PaperTradingService 不能收到 Live adapter；Live factory 只有在明确选择 `Environment.LIVE`、flag 开启、
+Live 账户授权存在、proof/truth providers 存在且 Gateway 配置为 loopback `127.0.0.1:4001` 时才
+构造 IBKR Live adapter 与 canary guard。当前桌面尚未提供这些 Live providers，因此桌面路径仍拒绝
+真钱启动；operator controls 将在 4-F 接入。RiskApplication、ExecutionApplication、OrderDispatch、
+TradingRuntime 与七方法 `BrokerExecutionPort` 保持唯一共享核心。

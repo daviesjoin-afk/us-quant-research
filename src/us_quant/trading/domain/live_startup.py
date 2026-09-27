@@ -94,6 +94,8 @@ class LiveStartupProof:
     expires_at: datetime
     endpoint_identity: str | None
     account_fingerprint: LiveAccountFingerprint | None
+    authorization_fingerprint: str | None
+    session_arm_id: str | None
     broker_connected: bool
     connection_observed_at: datetime | None
     account_truth_known: bool
@@ -328,6 +330,12 @@ class LiveStartupProof:
                 and len(selected_managed_matches) == 1
                 else None
             ),
+            "authorization_fingerprint": (
+                None
+                if authorization is None
+                else authorization.authorization_fingerprint
+            ),
+            "session_arm_id": authorization_state.session_arm_id,
             "broker_connected": broker_connected,
             "connection_observed_at": connection_observed_at,
             "account_truth_known": account_truth_known,

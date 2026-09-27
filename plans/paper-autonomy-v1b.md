@@ -24,10 +24,11 @@ Complete the reviewed PR #60 recovery closure on `feat/paper-autonomy-supervisor
 - [x] Targeted autonomy, CLI and FAC checks: 350 passed.
 - [x] Python 3.14.7 full suite: 5,172 passed, 0 skipped; doctor, compileall, Qt offscreen and diff check passed.
 - [x] Mutation suites: B1 65/65, A1 26/26, G2-B 35/35, E2 12/12, E3 41/41, E4 11/11, FAC 42/42; no survivors or harness errors. Ten-item recovery and scope audit passed.
-- [ ] Commit and push only task-owned files; do not merge.
-- [ ] Wait for new Windows/Python 3.14 CI, update PR evidence, confirm PR #60 remains OPEN and review threads are clear.
+- [x] Commit and push only task-owned files; PR head is `f4fd5fb78383aa851c7ed2b3885b1bf3da6dd6bf`.
+- [x] New-head Windows/Python 3.14 CI passed (run `36305577910`, `5169 passed, 3 shallow skips`); PR description updated; PR remains OPEN with 0 unresolved review threads. Do not merge.
 
 ## Decision log
 - 2026-09-27: Prior PR #60 review findings are addressed on the branch; current GitHub review-thread count was zero before this update. Do not report the historical two P1 threads as unresolved.
 - 2026-09-27: Disabled intent is required immediately before resolving; a latched kill with `DISABLED` is allowed and remains latched.
 - 2026-09-27: `OPERATOR_RESOLVED` counts as a terminal history row and as a same-day START attempt, but never as a successful control cycle.
+- 2026-09-27: The new-head CI completed successfully; the 3 remote skips are the existing unreachable-base architecture checks.

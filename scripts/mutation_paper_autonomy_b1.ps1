@@ -365,8 +365,8 @@ $mutations = @(
     @{
         name = 'M30 an unreadable action ledger is treated as empty'
         file = $supervisorApplication
-        find = 'return \(False, None, False, PaperAutonomyControlCycles\(\)\)'
-        repl = 'return (True, None, False, PaperAutonomyControlCycles())'
+        find = 'return \(False, None, False, PaperAutonomyControlCycles\(\), None, None\)'
+        repl = 'return (True, None, False, PaperAutonomyControlCycles(), None, None)'
         tests = @($tickBehaviour)
         select = @("-k", "unreadable_action_ledger_blocks or unreadable_ledger_blocks_even_when_only_the_day_query_fails")
     },
@@ -685,8 +685,8 @@ $mutations = @(
     @{
         name = 'M71 an unsealed operator resolution is accepted as a complete barrier'
         file = $actionRecovery
-        find = 'if any\(row\.authorization_floor_revision is None for row in resolutions\):'
-        repl = 'if False:'
+        find = '(def latest_operator_resolution_barrier\([\s\S]*?)(if any\(row\.authorization_floor_revision is None for row in resolutions\):)'
+        repl = '$1if False:'
         tests = @($recoveryBehaviour)
         select = @("-k", "unsealed_resolution_is_startup_unsafe_and_can_be_resumed")
     },
@@ -697,6 +697,38 @@ $mutations = @(
         repl = 'if False:'
         tests = @($recoveryBehaviour)
         select = @("-k", "seal_is_write_once_and_preserves_action_fields")
+    },
+    @{
+        name = 'M73 a recovery after process startup does not invalidate the supervisor'
+        file = $supervisorApplication
+        find = 'if action_store_readable and \([\s\S]*?\):\s+self\._recovery_invalidated_process = True'
+        repl = 'if False: self._recovery_invalidated_process = True'
+        tests = @($tickBehaviour)
+        select = @("-k", "same_process_recovery_requires_restart")
+    },
+    @{
+        name = 'M74 same-floor recoveries do not advance the process generation'
+        file = $supervisorApplication
+        find = 'or current_recovery_generation\s+!= self\._startup\.operator_resolution_generation_at_start'
+        repl = 'or False'
+        tests = @($tickBehaviour)
+        select = @("-k", "same_floor_recovery_still_changes_process_generation")
+    },
+    @{
+        name = 'M75 a floor below the action revision is accepted by the row parser'
+        file = $portAction
+        find = 'if self\.authorization_floor_revision < self\.intent_revision:'
+        repl = 'if False:'
+        tests = @($behaviour)
+        select = @("-k", "impossible_floor_is_store_unreadable")
+    },
+    @{
+        name = 'M76 sealing accepts a floor below the stored action revision'
+        file = $adapterAction
+        find = 'if authorization_floor_revision < stored\.intent_revision:'
+        repl = 'if False:'
+        tests = @($behaviour)
+        select = @("-k", "seal_rejects_revision_regression")
     }
 )
 

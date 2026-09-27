@@ -1620,6 +1620,18 @@ class MainWindow(QMainWindow):
                 intent.mode, intent.revision, latest_resolution_floor
             )
 
+        def recovery_barrier_at_start() -> int | None:
+            try:
+                return actions.latest_operator_resolution_barrier()
+            except Exception:  # noqa: BLE001 - startup must fail closed
+                return None
+
+        def operator_resolution_generation() -> int | None:
+            try:
+                return actions.operator_resolution_generation()
+            except Exception:  # noqa: BLE001 - startup must fail closed
+                return None
+
         try:
             connection, broker_snapshot = startup_probe_result
             open_orders = connection.open_broker_orders
@@ -1676,6 +1688,8 @@ class MainWindow(QMainWindow):
             intent_store_readable=intent_store_readable,
             unresolved_action_count=unresolved_action_count,
             recovery_authorization_valid=recovery_authorization_valid,
+            recovery_barrier_at_start=recovery_barrier_at_start,
+            operator_resolution_generation=operator_resolution_generation,
             broker_state_known=broker_state_known,
             account_identity_known=account_identity_known,
             # The account snapshot is not proof about open broker orders. Until

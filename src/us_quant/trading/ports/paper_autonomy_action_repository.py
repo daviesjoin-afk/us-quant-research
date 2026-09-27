@@ -67,7 +67,8 @@ class PaperAutonomyActionRecord:
     terminal one without it would leave the crash analysis unable to say whether
     the record is finished. An operator-resolved row has a second durable step:
     ``authorization_floor_revision`` stays NULL until the post-resolution A1
-    revision has been sampled and sealed.
+    revision has been sampled and sealed. That floor cannot precede the
+    action's ``intent_revision`` because A1 revisions are monotonic.
     """
 
     action_key: str
@@ -148,6 +149,10 @@ class PaperAutonomyActionRecord:
             ):
                 raise PaperAutonomySupervisorViolation(
                     "an authorization floor must be a non-negative revision"
+                )
+            if self.authorization_floor_revision < self.intent_revision:
+                raise PaperAutonomySupervisorViolation(
+                    "an authorization floor cannot predate the action intent revision"
                 )
 
     @property
@@ -273,6 +278,13 @@ class PaperAutonomyActionRepositoryPort(Protocol):
 
         Implementations must parse the complete ledger. ``None`` means no
         operator resolution exists; a damaged or unsealed resolution raises.
+        """
+
+    def operator_resolution_generation(self) -> int:
+        """Count operator resolutions so repeated same-floor recoveries differ.
+
+        Implementations parse the complete ledger and fail on any unsealed
+        resolution. A supervisor compares this process generation every tick.
         """
 
     def start_attempted(self, trading_day: date) -> bool:

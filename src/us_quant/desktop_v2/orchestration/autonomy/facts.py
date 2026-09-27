@@ -89,6 +89,8 @@ class PaperAutonomyStartupFactsAdapter:
         intent_store_readable: Callable[[], bool],
         unresolved_action_count: Callable[[], int | None],
         recovery_authorization_valid: Callable[[], bool | None],
+        recovery_barrier_at_start: Callable[[], int | None] = lambda: None,
+        operator_resolution_generation: Callable[[], int | None] = lambda: 0,
         broker_state_known: Callable[[], bool],
         account_identity_known: Callable[[], bool],
         open_broker_orders: Callable[[], int | None],
@@ -101,6 +103,8 @@ class PaperAutonomyStartupFactsAdapter:
             intent_store_readable,
             unresolved_action_count,
             recovery_authorization_valid,
+            recovery_barrier_at_start,
+            operator_resolution_generation,
             broker_state_known,
             account_identity_known,
             open_broker_orders,
@@ -118,6 +122,8 @@ class PaperAutonomyStartupFactsAdapter:
             intent_readable,
             unresolved_count,
             recovery_authorization_valid,
+            recovery_barrier_reader,
+            resolution_generation_reader,
             broker_known,
             account_known,
             open_orders,
@@ -131,11 +137,21 @@ class PaperAutonomyStartupFactsAdapter:
             authorization_valid = recovery_authorization_valid()
         except Exception:  # noqa: BLE001 - authorization must fail closed
             authorization_valid = None
+        try:
+            recovery_barrier = recovery_barrier_reader()
+        except Exception:  # noqa: BLE001 - generation proof must fail closed
+            recovery_barrier = None
+        try:
+            resolution_generation = resolution_generation_reader()
+        except Exception:  # noqa: BLE001 - generation proof must fail closed
+            resolution_generation = None
         self._facts = PaperAutonomyStartupFacts(
             intent_store_readable=bool(intent_readable()),
             action_store_readable=unresolved_count is not None,
             unresolved_action_count=unresolved_count,
             recovery_authorization_valid=authorization_valid,
+            recovery_barrier_at_start=recovery_barrier,
+            operator_resolution_generation_at_start=resolution_generation,
             broker_state_known=bool(broker_known()),
             account_identity_known=bool(account_known()),
             open_broker_orders=open_orders(),

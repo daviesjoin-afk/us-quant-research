@@ -434,6 +434,10 @@ class SQLitePaperAutonomyActionRepository:
                         raise PaperAutonomyActionRepositoryError(
                             "only an operator-resolved action can be sealed"
                         )
+                    if authorization_floor_revision < stored.intent_revision:
+                        raise PaperAutonomyActionRepositoryError(
+                            "an authorization floor cannot predate the action intent revision"
+                        )
                     if stored.authorization_floor_revision is not None:
                         raise PaperAutonomyActionRepositoryError(
                             f"the operator resolution under {action_key!r} is already sealed"
@@ -503,6 +507,19 @@ class SQLitePaperAutonomyActionRepository:
             (row.authorization_floor_revision for row in resolutions),
             default=None,
         )
+
+    def operator_resolution_generation(self) -> int:
+        records = self._read(_SELECT_ALL, ())
+        resolutions = tuple(
+            row
+            for row in records
+            if row.status is PaperAutonomyActionStatus.OPERATOR_RESOLVED
+        )
+        if any(row.authorization_floor_revision is None for row in resolutions):
+            raise PaperAutonomyActionStoreUnreadable(
+                "an operator-resolved action has no sealed authorization floor"
+            )
+        return len(resolutions)
 
     def recent(
         self, limit: int = 50

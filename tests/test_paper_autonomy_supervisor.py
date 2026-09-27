@@ -1568,6 +1568,55 @@ def test_a_corrupt_action_record_is_never_read_as_a_valid_one(
         store.unresolved()
 
 
+def test_impossible_floor_is_store_unreadable(tmp_path: pathlib.Path) -> None:
+    store = _ledger(tmp_path)
+    assert _claim(store, "floor-regression", revision=10)
+    store.resolve_unknown(
+        action_key="floor-regression",
+        expected_status=PaperAutonomyActionStatus.CLAIMED,
+        resolved_at=_NOW,
+        detail="operator reviewed the ambiguous action",
+    )
+    store.seal_operator_resolution(
+        action_key="floor-regression", authorization_floor_revision=10
+    )
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE paper_autonomy_action "
+            "SET authorization_floor_revision = 3 "
+            "WHERE action_key = 'floor-regression'"
+        )
+
+    with pytest.raises(PaperAutonomyActionStoreUnreadable):
+        store.get("floor-regression")
+    with pytest.raises(PaperAutonomyActionStoreUnreadable):
+        store.unresolved()
+    with pytest.raises(PaperAutonomyActionStoreUnreadable):
+        store.latest_operator_resolution_barrier()
+    with pytest.raises(PaperAutonomyActionStoreUnreadable):
+        store.operator_resolution_generation()
+
+
+def test_seal_rejects_revision_regression(tmp_path: pathlib.Path) -> None:
+    store = _ledger(tmp_path)
+    assert _claim(store, "seal-floor-regression", revision=10)
+    store.resolve_unknown(
+        action_key="seal-floor-regression",
+        expected_status=PaperAutonomyActionStatus.CLAIMED,
+        resolved_at=_NOW,
+        detail="operator reviewed the ambiguous action",
+    )
+
+    with pytest.raises(PaperAutonomyActionRepositoryError, match="cannot predate"):
+        store.seal_operator_resolution(
+            action_key="seal-floor-regression", authorization_floor_revision=9
+        )
+    assert store.get("seal-floor-regression").authorization_floor_revision is None
+    store.seal_operator_resolution(
+        action_key="seal-floor-regression", authorization_floor_revision=10
+    )
+
+
 def test_a_terminal_record_cannot_carry_no_completion_time(
     tmp_path: pathlib.Path,
 ) -> None:

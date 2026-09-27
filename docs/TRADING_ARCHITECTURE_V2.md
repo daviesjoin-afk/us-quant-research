@@ -3746,6 +3746,14 @@ commit 前生效，该 revision 会被纳入 floor 并要求之后再次授权�
 授权顺序。若 kill 仍锁定，操作员先显式 clear kill，再单独显式 enable。若需要当天再次交易，使用既有
 人工 Paper 路径，不能因 resolution 自动重试自治 START。
 
+Startup proof 对当前 Desktop process 不会因 A1 后续变更而自动刷新。Supervisor 每个 tick 都重新读取
+action ledger 的 recovery floor 和已 seal resolution 数量；任一值与该 process startup 时记录的值不同，
+当前 Supervisor 就永久进入 `BLOCKED_REQUIRES_OPERATOR`，即使 intent 仍为 DISABLED，或之后 revision
+已大于 floor。resolution 数量用于识别多条 recovery 共用同一 A1 floor 的情况。旧 Host 不会因
+`seal-action` 或后续 enable 自动恢复；必须重启 Desktop，让新 process 重新检查 broker、账户、持仓、未完成
+订单、reconciliation、Paper ownership 和 recovery floor。只有新 Supervisor 的完整 startup proof 安全后，
+才可继续自治工作。
+
 配置只从显式 `[paper.autonomy]` 读取，缺少或无效时不造默认时刻、不启动 host，并记录
 `AUTONOMY_SUPERVISOR_UNAVAILABLE`。必须显式提供以下值：
 

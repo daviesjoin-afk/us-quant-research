@@ -31,6 +31,9 @@ from us_quant.trading.adapters.paper_autonomy_schedule import PaperAutonomySched
 from us_quant.trading.application.paper_autonomy_supervisor import (
     PaperAutonomySupervisor,
 )
+from us_quant.trading.application.paper_autonomy_recovery import (
+    PaperAutonomyRecoveryApplication,
+)
 from us_quant.trading.domain.paper_autonomy import (
     PaperAutonomyIntent,
     PaperAutonomyMode,
@@ -93,6 +96,15 @@ class _Intent:
         if self._unreadable:
             raise PaperAutonomyStoreUnreadable("the test store is corrupt")
         return self._intent
+
+    def set(self, *, mode: PaperAutonomyMode, revision: int) -> None:
+        self._intent = PaperAutonomyIntent(
+            revision=revision,
+            mode=mode,
+            kill_switch_latched=False,
+            updated_at=_MOMENT,
+            reason="operator changed intent during the test",
+        )
 
 
 class _Runtime:
@@ -352,6 +364,8 @@ def _startup_facts(**overrides: object) -> PaperAutonomyStartupFacts:
         "action_store_readable": True,
         "unresolved_action_count": 0,
         "recovery_authorization_valid": True,
+        "recovery_barrier_at_start": None,
+        "operator_resolution_generation_at_start": 0,
         "broker_state_known": True,
         "account_identity_known": True,
         "open_broker_orders": 0,
@@ -424,8 +438,15 @@ class _Harness:
         self.intent_port = intent or _Intent()
         self.runtime_port = _Runtime(runtime or _runtime_facts())
         self.schedule_port = _Schedule(schedule or _schedule_facts())
-        self.startup_port = _Startup()
         self.events: list = []
+        self.startup_port = _Startup(
+            _startup_facts(
+                recovery_barrier_at_start=self.ledger.latest_operator_resolution_barrier(),
+                operator_resolution_generation_at_start=(
+                    self.ledger.operator_resolution_generation()
+                ),
+            )
+        )
         self.supervisor = PaperAutonomySupervisor(
             intent=self.intent_port,
             actions=self.ledger,
@@ -460,6 +481,14 @@ class _Harness:
             self.intent_port = intent
         if schedule is not None:
             self.schedule_port = _Schedule(schedule)
+        self.startup_port = _Startup(
+            _startup_facts(
+                recovery_barrier_at_start=self.ledger.latest_operator_resolution_barrier(),
+                operator_resolution_generation_at_start=(
+                    self.ledger.operator_resolution_generation()
+                ),
+            )
+        )
         self.supervisor = PaperAutonomySupervisor(
             intent=self.intent_port,
             actions=self.ledger,
@@ -893,6 +922,102 @@ def test_an_unresolved_action_blocks_and_is_reported_as_recovery(
     assert result.claimed is False
     assert harness.executor.calls == []
     assert harness.codes() == ["AUTONOMY_RECOVERY_REQUIRED"]
+
+
+def test_same_process_recovery_requires_restart(tmp_path: pathlib.Path) -> None:
+    intent = _Intent(PaperAutonomyMode.DISABLED, revision=0)
+    harness = _Harness(tmp_path, intent=intent)
+    assert harness.ledger.claim(
+        PaperAutonomyActionRecord(
+            action_key="same-process-recovery",
+            intent_revision=0,
+            trading_day=_DAY,
+            action=PaperAutonomyActionType.PAUSE_ENTRIES,
+            status=PaperAutonomyActionStatus.CLAIMED,
+            claimed_at=_MOMENT,
+            completed_at=None,
+            detail="simulated action from the previous unattended tick",
+        )
+    )
+
+    recovery = PaperAutonomyRecoveryApplication(
+        intent, harness.ledger, clock=lambda: _MOMENT
+    )
+    recovery.resolve_unknown(
+        action_key="same-process-recovery",
+        expected_status=PaperAutonomyActionStatus.CLAIMED,
+        reason="operator reviewed the ambiguous action",
+    )
+
+    disabled_tick = harness.tick()
+    assert disabled_tick.decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
+    assert "restart Desktop" in disabled_tick.decision.reason
+    intent.set(mode=PaperAutonomyMode.ENABLED, revision=1)
+    enabled_tick = harness.tick()
+    assert enabled_tick.decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
+    assert "restart Desktop" in enabled_tick.decision.reason
+    assert harness.executor.calls == []
+
+    harness.rebuild()
+    restarted_tick = harness.tick()
+    assert restarted_tick.decision.action is PaperAutonomyAction.PREPARE
+    assert restarted_tick.claimed is True
+    assert harness.executor.calls[0][0] == "request_prepare"
+
+
+def test_same_floor_recovery_still_changes_process_generation(
+    tmp_path: pathlib.Path,
+) -> None:
+    intent = _Intent(PaperAutonomyMode.DISABLED, revision=0)
+    harness = _Harness(tmp_path, intent=intent)
+    recovery = PaperAutonomyRecoveryApplication(
+        intent, harness.ledger, clock=lambda: _MOMENT
+    )
+    assert harness.ledger.claim(
+        PaperAutonomyActionRecord(
+            action_key="same-floor-recovery-before-startup",
+            intent_revision=0,
+            trading_day=_DAY,
+            action=PaperAutonomyActionType.START,
+            status=PaperAutonomyActionStatus.CLAIMED,
+            claimed_at=_MOMENT,
+            completed_at=None,
+            detail="simulated ambiguous start",
+        )
+        )
+    resolved_before_startup = recovery.resolve_unknown(
+        action_key="same-floor-recovery-before-startup",
+        expected_status=PaperAutonomyActionStatus.CLAIMED,
+        reason="operator reviewed this ambiguous action",
+    )
+    assert resolved_before_startup.authorization_floor_revision == 0
+    harness.rebuild()
+
+    assert harness.ledger.claim(
+        PaperAutonomyActionRecord(
+            action_key="same-floor-recovery-after-startup",
+            intent_revision=0,
+            trading_day=_DAY,
+            action=PaperAutonomyActionType.START,
+            status=PaperAutonomyActionStatus.CLAIMED,
+            claimed_at=_MOMENT,
+            completed_at=None,
+            detail="another simulated ambiguous start",
+        )
+    )
+    resolved_after_startup = recovery.resolve_unknown(
+        action_key="same-floor-recovery-after-startup",
+        expected_status=PaperAutonomyActionStatus.CLAIMED,
+        reason="operator reviewed this second ambiguous action",
+    )
+    assert resolved_after_startup.authorization_floor_revision == 0
+
+    assert harness.ledger.latest_operator_resolution_barrier() == 0
+    assert harness.ledger.operator_resolution_generation() == 2
+    result = harness.tick()
+    assert result.decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
+    assert "restart Desktop" in result.decision.reason
+    assert harness.executor.calls == []
 
 
 def test_a_manual_recovery_is_reported_as_recovery(

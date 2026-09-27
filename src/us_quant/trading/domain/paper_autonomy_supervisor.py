@@ -586,6 +586,8 @@ class PaperAutonomyStartupFacts:
     manual_recovery_required: bool
     unresolved_action_count: int | None = None
     recovery_authorization_valid: bool | None = None
+    recovery_barrier_at_start: int | None = None
+    operator_resolution_generation_at_start: int | None = 0
 
     @property
     def proven_safe(self) -> bool:
@@ -600,6 +602,17 @@ class PaperAutonomyStartupFacts:
             and self.action_store_readable
             and self.unresolved_action_count == 0
             and self.recovery_authorization_valid is True
+            and (
+                self.recovery_barrier_at_start is None
+                or (
+                    isinstance(self.recovery_barrier_at_start, int)
+                    and not isinstance(self.recovery_barrier_at_start, bool)
+                    and self.recovery_barrier_at_start >= INITIAL_REVISION
+                )
+            )
+            and isinstance(self.operator_resolution_generation_at_start, int)
+            and not isinstance(self.operator_resolution_generation_at_start, bool)
+            and self.operator_resolution_generation_at_start >= 0
             and self.broker_state_known
             and self.account_identity_known
             and self.open_broker_orders == 0

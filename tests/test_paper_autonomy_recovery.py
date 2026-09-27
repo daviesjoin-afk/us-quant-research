@@ -41,10 +41,15 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "us_quant"
 
 
-def _record(key: str, status: PaperAutonomyActionStatus) -> PaperAutonomyActionRecord:
+def _record(
+    key: str,
+    status: PaperAutonomyActionStatus,
+    *,
+    revision: int = INITIAL_REVISION,
+) -> PaperAutonomyActionRecord:
     return PaperAutonomyActionRecord(
         action_key=key,
-        intent_revision=3,
+        intent_revision=revision,
         trading_day=DAY,
         action=PaperAutonomyActionType.START,
         status=status,
@@ -68,7 +73,9 @@ def setup(tmp_path: pathlib.Path):
 def test_resolve_requires_disabled_intent(setup) -> None:
     _, actions, intent, recovery = setup
     enabled = intent.enable(INITIAL_REVISION, "operator enabled Paper autonomy")
-    actions.claim(_record("old-start", PaperAutonomyActionStatus.CLAIMED))
+    actions.claim(
+        _record("old-start", PaperAutonomyActionStatus.CLAIMED, revision=1)
+    )
     actions.mark_requested(action_key="old-start", detail="Paper accepted start")
 
     with pytest.raises(PaperAutonomySupervisorViolation, match="disable Paper autonomy"):
@@ -86,7 +93,9 @@ def test_resolution_uses_expected_status(setup) -> None:
     _, actions, intent, recovery = setup
     enabled = intent.enable(INITIAL_REVISION, "enable for the old process")
     intent.disable(enabled.revision, "stop autonomy before recovery")
-    actions.claim(_record("old-start", PaperAutonomyActionStatus.CLAIMED))
+    actions.claim(
+        _record("old-start", PaperAutonomyActionStatus.CLAIMED, revision=2)
+    )
     actions.mark_requested(action_key="old-start", detail="Paper accepted start")
 
     with pytest.raises(PaperAutonomyActionRepositoryError, match="changed status"):
@@ -122,7 +131,7 @@ def test_resolution_uses_expected_status(setup) -> None:
     assert resolved.detail == "broker, account, orders, and positions reviewed"
     assert resolved.action_key == "old-start"
     assert resolved.claimed_at == NOW
-    assert resolved.intent_revision == 3
+    assert resolved.intent_revision == 2
     assert resolved.action is PaperAutonomyActionType.START
     assert resolved.trading_day == DAY and resolved.action_day == DAY
     assert recovery.unresolved() == ()

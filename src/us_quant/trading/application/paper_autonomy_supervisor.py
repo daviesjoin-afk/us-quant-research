@@ -10,16 +10,17 @@ A tick is a fixed sequence, and the sequence is the design:
     read the operator intent          -- fresh, every tick
     read the runtime facts            -- fresh, every tick
     read the schedule verdict         -- fresh, every tick
-    read the action state             -- fresh, every tick
+    read the action state and recovery generation -- fresh, every tick
     decide                            -- pure (see ``decide_paper_autonomy``)
     claim the action                  -- atomically, before asking anybody
     ask the owner                     -- one narrow request
     record how far the request got    -- CLAIMED -> REQUESTED, or terminal
     emit one event                    -- for the audit surface
 
-Nothing is cached between ticks.  A scheduler that reused a previous tick's facts
-would be deciding on the strength of a session that may since have stopped, and
-it is the tick *after* a session ends that matters most.
+Intent, runtime, schedule and action state are fresh each tick. Startup broker and
+account proof is immutable for the process lifetime: if the action ledger shows
+that recovery occurred after that proof, this supervisor permanently blocks and
+Desktop must restart to run the proof again.
 
 Two things are deliberately not here:
 
@@ -127,12 +128,11 @@ class PaperAutonomySupervisor:
         self._clock = clock or _utc_now
         self._emit = emit
 
-        # The startup classification describes the *process's* beginning, which
-        # is asked once.  This is the one fact that is not re-read per tick, and
-        # it is not a cache: re-reading it later would answer a different
-        # question -- "is the world safe now" -- which is what the runtime and
-        # schedule facts are for.
+        # The broker and account startup classification is immutable for this
+        # process. Recovery generation is read afresh with action state each
+        # tick; once it changes, this process can no longer reuse that proof.
         self._startup: PaperAutonomyStartupFacts = startup_facts.startup_facts()
+        self._recovery_invalidated_process = False
 
     def tick(self, *, now: datetime | None = None) -> PaperAutonomyTickResult:
         """One full sequence.  Never sleeps, never blocks, never retries."""
@@ -156,10 +156,30 @@ class PaperAutonomySupervisor:
 
         runtime = self._runtime_facts.facts()
         schedule = self._schedule.schedule(now=moment)
-        action_store_readable, unresolved, attempted, control_cycles = self._read_action_state(
+        (
+            action_store_readable,
+            unresolved,
+            attempted,
+            control_cycles,
+            current_recovery_barrier,
+            current_recovery_generation,
+        ) = self._read_action_state(
             trading_day=schedule.trading_day,
             action_day=schedule.action_day,
         )
+
+        if action_store_readable and (
+            current_recovery_barrier != self._startup.recovery_barrier_at_start
+            or current_recovery_generation
+            != self._startup.operator_resolution_generation_at_start
+        ):
+            self._recovery_invalidated_process = True
+
+        if self._recovery_invalidated_process:
+            return self._blocked_after_process_recovery(
+                intent_revision=intent_revision,
+                schedule=schedule,
+            )
 
         decision = decide_paper_autonomy(
             intent_mode=mode,
@@ -417,13 +437,38 @@ class PaperAutonomySupervisor:
                 else False
             )
             cycles = self._actions.control_cycles(action_day)
+            recovery_barrier = self._actions.latest_operator_resolution_barrier()
+            recovery_generation = self._actions.operator_resolution_generation()
         except PaperAutonomyActionRepositoryError:
-            return (False, None, False, PaperAutonomyControlCycles())
+            return (False, None, False, PaperAutonomyControlCycles(), None, None)
         return (
             True,
             unresolved[0].action_key if unresolved else None,
             attempted,
             cycles,
+            recovery_barrier,
+            recovery_generation,
+        )
+
+    def _blocked_after_process_recovery(
+        self, *, intent_revision: int, schedule
+    ) -> PaperAutonomyTickResult:
+        """Keep this process blocked after recovery invalidates its startup proof."""
+
+        decision = PaperAutonomyDecision(
+            action=PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR,
+            reason=(
+                "an operator recovery occurred after this Desktop process "
+                "completed its startup proof; restart Desktop before "
+                "unattended Paper work can resume"
+            ),
+            trading_day=schedule.trading_day,
+            intent_revision=intent_revision,
+            action_key=None,
+        )
+        self._report(decision, code=PaperAutonomyEventCode.RECOVERY_REQUIRED)
+        return PaperAutonomyTickResult(
+            decision=decision, claimed=False, status=None, outcome=None
         )
 
     # -- reporting ------------------------------------------------------

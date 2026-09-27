@@ -249,6 +249,7 @@ def test_b_a4_the_action_adapter_is_only_a_store() -> None:
         "seal_operator_resolution",
         "unresolved",
         "latest_operator_resolution_barrier",
+        "operator_resolution_generation",
         "recent",
         "start_attempted",
     } <= store
@@ -1003,6 +1004,7 @@ def test_b_a16_the_supervisor_retains_no_runtime_truth() -> None:
         "_schedule",
         "_startup",
         "_startup_facts",
+        "_recovery_invalidated_process",
     }, sorted(assigned)
 
 

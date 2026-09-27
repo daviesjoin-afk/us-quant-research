@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from test_live_ready_execution_core import (
+    _dispatch,
+    _proposal,
+    _refusing_dispatch,
+)
 from us_quant.ibkr import IBKRConnectionConfig
 from us_quant.trading.adapters.sqlite.order_repository import SQLiteOrderRepository
 from us_quant.trading.composition.execution import build_execution_candidate_factory
@@ -16,6 +20,7 @@ from us_quant.trading.domain.execution_environment import (
     ExecutionDeploymentError,
     evaluate_execution_deployment,
 )
+from us_quant.trading.domain.risk import RiskDecision
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -210,18 +215,37 @@ def test_c16_durable_record_precedes_submit() -> None:
 
 
 def test_c17_uncertain_outcome_is_not_retried() -> None:
-    path = ROOT / "tests" / "test_live_ready_execution_core.py"
-    text = path.read_text(encoding="utf-8")
-    assert "def test_uncertain_alternate_submission_halts_without_retry" in text
-    assert 'trace == ["reserve", "durable", "submit"]' in text
-    assert "broker.submit_attempts == 1" in text
+    dispatch, repository, broker, trace = _dispatch(uncertain=True)
+    result = dispatch.submit(
+        proposal=_proposal(),
+        decision=RiskDecision.approve(requested_quantity=2),
+        execution_symbol="AAPL",
+        reason="closure uncertainty proof",
+        session_id="closure-session",
+    )
+
+    assert result.halt is True
+    assert result.intent is not None
+    assert repository.intent(result.intent.order_id) is result.intent
+    assert trace == ["reserve", "durable", "submit"]
+    assert broker.submit_attempts == 1
 
 
 def test_c18_explicit_refusal_has_no_fallback() -> None:
-    text = (ROOT / "tests" / "test_live_ready_execution_core.py").read_text(encoding="utf-8")
-    assert "def test_explicit_alternate_refusal_does_not_create_a_fallback_channel" in text
-    assert 'trace == ["refused"]' in text
-    assert "broker.submit_attempts == 0" in text
+    dispatch, repository, broker, trace = _refusing_dispatch()
+    result = dispatch.submit(
+        proposal=_proposal(),
+        decision=RiskDecision.approve(requested_quantity=2),
+        execution_symbol="AAPL",
+        reason="closure refusal proof",
+        session_id="closure-session",
+    )
+
+    assert result.halt is True
+    assert result.submitted is False
+    assert trace == ["refused"]
+    assert repository.intents == {}
+    assert broker.submit_attempts == 0
 
 
 def test_c19_paper_autonomy_wiring_uses_existing_service_boundary() -> None:

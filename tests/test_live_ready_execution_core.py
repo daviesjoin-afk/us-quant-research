@@ -112,6 +112,12 @@ class RecordingBrokerExecutionPort:
         return ()
 
 
+class RefusingBrokerExecutionPort(RecordingBrokerExecutionPort):
+    def reserve(self, intent: OrderIntent) -> BrokerOrderReservation:
+        self.trace.append("refused")
+        raise ExecutionRefused("alternate test provider refused")
+
+
 def _dispatch(*, uncertain: bool = False):
     trace: list[str] = []
     repository = _Repository(trace)
@@ -121,6 +127,20 @@ def _dispatch(*, uncertain: bool = False):
         config=TradingSessionConfig(initial_cash=Decimal("10000"), capital_source="test"),
         risk=object(),  # submit() consumes the already-issued domain verdict.
         execution=execution,
+    )
+    return dispatch, repository, broker, trace
+
+
+def _refusing_dispatch():
+    trace: list[str] = []
+    repository = _Repository(trace)
+    broker = RefusingBrokerExecutionPort(trace)
+    dispatch = OrderDispatch(
+        config=TradingSessionConfig(
+            initial_cash=Decimal("10000"), capital_source="test"
+        ),
+        risk=object(),  # submit() consumes the already-issued domain verdict.
+        execution=ExecutionApplication(repository=repository, broker=broker),
     )
     return dispatch, repository, broker, trace
 
@@ -172,19 +192,7 @@ def test_uncertain_alternate_submission_halts_without_retry() -> None:
 
 
 def test_explicit_alternate_refusal_does_not_create_a_fallback_channel() -> None:
-    class RefusingBroker(RecordingBrokerExecutionPort):
-        def reserve(self, intent: OrderIntent) -> BrokerOrderReservation:
-            self.trace.append("refused")
-            raise ExecutionRefused("alternate test provider refused")
-
-    trace: list[str] = []
-    repository = _Repository(trace)
-    broker = RefusingBroker(trace)
-    dispatch = OrderDispatch(
-        config=TradingSessionConfig(initial_cash=Decimal("10000"), capital_source="test"),
-        risk=object(),
-        execution=ExecutionApplication(repository=repository, broker=broker),
-    )
+    dispatch, repository, broker, trace = _refusing_dispatch()
     result = dispatch.submit(
         proposal=_proposal(),
         decision=RiskDecision.approve(requested_quantity=2),

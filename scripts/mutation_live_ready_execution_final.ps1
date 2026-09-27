@@ -1,4 +1,4 @@
-# Stage 3-A exact-one mutation harness. Every mutation must make its named
+# Stage 3 Final exact-one mutation harness. Every mutation must make its named
 # pytest target fail by assertion; dead patterns, syntax errors and process
 # failures are reported as HARNESS-ERROR and fail the harness.
 

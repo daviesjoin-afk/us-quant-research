@@ -5143,4 +5143,6 @@ Stage 4-B PR #64 已通过 merge commit 完成，实际 merge SHA 为
 `placeOrder`/`cancelOrder` 后抛出的异常按结果不确定处理并 HALT。共享执行核心仍负责
 `reserve → durable record → submit`，不确定提交不重试，拒绝不 fallback。Stage 4-C 不改变
 共享核心或 production composition。同一个 reservation 成功提交后不能再次提交；已有 order id
-也不能复用于内容不同的 intent。Stage 4-C 不等于 Live 已可从桌面启动。
+也不能复用于内容不同的 intent。初始持仓快照完成后即撤销 IBKR 持仓推送订阅，以成交回报作为
+进程内仓位增减的唯一来源。非信息类 Gateway 错误和不确定结果会 HALT；HALT 后不再调用 broker
+取消接口。Stage 4-C 不等于 Live 已可从桌面启动。

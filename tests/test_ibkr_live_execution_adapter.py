@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -45,6 +46,7 @@ class _FakeGateway:
         self.submit_error = submit_error
         self.cancel_error = cancel_error
         self.connected = False
+        self.position_cancel_calls = 0
         self.placed: list[tuple[int, object, object]] = []
         self.cancelled: list[tuple[int, str]] = []
         self.connect_calls: list[tuple[str, int, int]] = []
@@ -79,7 +81,7 @@ class _FakeGateway:
         self.connected = False
 
     def cancelPositions(self) -> None:
-        pass
+        self.position_cancel_calls += 1
 
     def placeOrder(self, order_id: int, contract: object, order: object) -> None:
         self.placed.append((order_id, contract, order))
@@ -303,6 +305,7 @@ def test_reserve_only_allocates_id_and_submit_builds_one_live_lmt_order():
     )
     assert order.tif == "DAY" and order.outsideRth is False
     assert order.account == ACCOUNT and order.transmit is True
+    assert gateway.position_cancel_calls == 1
     with pytest.raises(IBKRLiveExecutionError, match="不得再次提交"):
         adapter.submit(reservation)
     assert len(gateway.placed) == 1
@@ -361,7 +364,7 @@ def test_broker_order_status_and_fill_callbacks_are_normalized_and_deduplicated(
         shares=Decimal("1"),
         price=Decimal("201"),
         side="BOT",
-        time="20260928  08:00:00 UTC",
+        time="20260928  08:00:00",
     )
     contract = SimpleNamespace(symbol="AAPL", secType="STK")
     adapter.gateway_exec_details(gateway, adapter._epoch, contract, execution)
@@ -373,6 +376,18 @@ def test_broker_order_status_and_fill_callbacks_are_normalized_and_deduplicated(
     assert len(fills) == 1
     assert fills[0].execution_id == "exec-1"
     assert fills[0].quantity == Decimal("1") and fills[0].price == Decimal("201")
+    assert fills[0].occurred_at.tzinfo is timezone.utc
+    assert fills[0].occurred_at.isoformat() == "2026-09-28T08:00:00+00:00"
+    assert adapter._positions["AAPL"] == Decimal("3")
+    adapter.gateway_position(
+        gateway,
+        adapter._epoch,
+        ACCOUNT,
+        SimpleNamespace(symbol="AAPL", secType="STK", currency="USD"),
+        Decimal("2"),
+        Decimal("100"),
+    )
+    assert adapter._positions["AAPL"] == Decimal("3")
     adapter.disconnect()
 
 
@@ -503,6 +518,44 @@ def test_gateway_error_supports_ibapi_callback_signatures(
     event, = adapter.events()
     assert event.status is expected_status
     assert event.message == expected_message
+    adapter.disconnect()
+
+
+def test_post_handshake_gateway_error_halts_and_cancel_is_blocked():
+    adapter, gateway, _ = _adapter()
+    _connect(adapter)
+    intent = _intent()
+    adapter.reserve(intent)
+    adapter.submit(adapter.reserve(intent))
+
+    adapter.gateway_error(
+        adapter._client,
+        adapter._epoch,
+        -1,
+        (1727452800000, 1100, "Connectivity between IB and TWS has been lost", ""),
+    )
+
+    assert adapter.halted
+    assert not adapter.connected
+    with pytest.raises(IBKRLiveExecutionError, match="disconnected"):
+        adapter.cancel(intent.order_id)
+    assert gateway.cancelled == []
+    adapter.disconnect()
+
+
+def test_uncertain_submit_halt_blocks_another_broker_cancel():
+    adapter, gateway, _ = _adapter(submit_error=RuntimeError("submit uncertain"))
+    _connect(adapter)
+    intent = _intent()
+    reservation = adapter.reserve(intent)
+
+    with pytest.raises(IBKRLiveSubmissionUncertain):
+        adapter.submit(reservation)
+    with pytest.raises(IBKRLiveExecutionError, match="disconnected"):
+        adapter.cancel(intent.order_id)
+
+    assert len(gateway.placed) == 1
+    assert gateway.cancelled == []
     adapter.disconnect()
 
 

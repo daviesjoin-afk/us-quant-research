@@ -131,7 +131,12 @@ def _aware_execution_time(value: object) -> datetime:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
     text = str(value or "").strip()
-    for pattern in ("%Y%m%d  %H:%M:%S %Z", "%Y%m%d %H:%M:%S %Z"):
+    for pattern in (
+        "%Y%m%d  %H:%M:%S %Z",
+        "%Y%m%d %H:%M:%S %Z",
+        "%Y%m%d  %H:%M:%S",
+        "%Y%m%d %H:%M:%S",
+    ):
         try:
             parsed = datetime.strptime(text, pattern)
             return parsed.replace(tzinfo=timezone.utc)
@@ -199,6 +204,7 @@ class IBKRLiveExecutionAdapter:
         self._next_valid_id: int | None = None
         self._next_order_id: int | None = None
         self._positions: dict[str, Decimal] = {}
+        self._position_snapshot_complete = False
         self._reserved_sell_remaining: dict[int, int] = {}
         self._reserved_sell_by_symbol: dict[str, int] = {}
         self._execution_quantity_by_order: dict[int, Decimal] = {}
@@ -266,6 +272,7 @@ class IBKRLiveExecutionAdapter:
             self._errors.clear()
             self._managed_accounts = ()
             self._positions.clear()
+            self._position_snapshot_complete = False
             self._next_valid_id = None
             self._account = ""
         try:
@@ -310,6 +317,8 @@ class IBKRLiveExecutionAdapter:
                     raise IBKRLiveExecutionError("；".join(self._errors))
                 if any(not _whole_quantity(quantity) for quantity in self._positions.values()):
                     raise IBKRLiveExecutionError("Live 账户含有空头或 fractional 持仓")
+            app.cancelPositions()
+            with self._state_lock:
                 self._connected = True
         except (IBKRClientConnectError, TimeoutError, OSError) as error:
             self._disconnect_after_failed_connect()
@@ -468,6 +477,7 @@ class IBKRLiveExecutionAdapter:
             if (
                 client is None
                 or not self._connected
+                or self._halted
                 or not client.isConnected()
             ):
                 raise IBKRLiveExecutionError("Live channel is disconnected")
@@ -591,6 +601,12 @@ class IBKRLiveExecutionAdapter:
                     idempotency_key=intent.idempotency_key,
                 )
                 self._append_event(event)
+                if status is OrderStatus.UNKNOWN:
+                    self._connected = False
+                    self._halt_locked(f"IBKR order error {code}: {message}")
+            elif code not in {201, 202}:
+                self._connected = False
+                self._halt_locked(f"IBKR Gateway error {code}: {message}")
 
     def gateway_connection_closed(self, app: Any, epoch: int) -> None:
         if not self.gateway_is_current(app, epoch):
@@ -611,6 +627,8 @@ class IBKRLiveExecutionAdapter:
         if not self.gateway_is_current(app, epoch):
             return
         with self._state_lock:
+            if self._position_snapshot_complete:
+                return
             if self._account and account != self._account:
                 self._errors.append("Live position snapshot contains another account")
                 return
@@ -632,7 +650,9 @@ class IBKRLiveExecutionAdapter:
 
     def gateway_position_end(self, app: Any, epoch: int) -> None:
         if self.gateway_is_current(app, epoch):
-            self._positions_ready.set()
+            with self._state_lock:
+                self._position_snapshot_complete = True
+                self._positions_ready.set()
 
     def gateway_order_status(self, app: Any, epoch: int, args: tuple[Any, ...]) -> None:
         if not self.gateway_is_current(app, epoch) or len(args) < 4:

@@ -42,7 +42,11 @@ $mutations = @(
     @{ name='M11 already submitted reservation is submitted again'; find='if reservation\.broker_order_id in self\._submitted_orders:'; repl='if False:'; select='test_reserve_only_allocates_id_and_submit_builds_one_live_lmt_order' },
     @{ name='M12 conflicting intent reuses an existing broker id'; find='if self\._intent_by_order\[existing\] != intent:'; repl='if False:'; select='test_reusing_an_order_id_for_different_intent_is_refused' },
     @{ name='non-stock or non-USD positions are accepted'; find='if security_type != "STK" or currency != "USD":'; repl='if False:'; select='test_non_usd_stock_startup_position_fails_closed' },
-    @{ name='invalid filled or remaining values are trusted'; find='if quantities_valid:'; repl='if True:'; select='test_invalid_order_status_quantities_halt_and_publish_unknown' }
+    @{ name='invalid filled or remaining values are trusted'; find='if quantities_valid:'; repl='if True:'; select='test_invalid_order_status_quantities_halt_and_publish_unknown' },
+    @{ name='position stream overwrites locally reconciled fill'; find='if self\._position_snapshot_complete:'; repl='if False:'; select='test_broker_order_status_and_fill_callbacks_are_normalized_and_deduplicated' },
+    @{ name='HALT still permits broker cancellation'; find='or self\._halted'; repl='or False'; select='test_uncertain_submit_halt_blocks_another_broker_cancel' },
+    @{ name='global gateway errors do not halt'; find='elif code not in \{201, 202\}:'; repl='elif False:'; select='test_post_handshake_gateway_error_halts_and_cancel_is_blocked' },
+    @{ name='timezone-less IBKR execution time remains naive'; find='            return parsed\.replace\(tzinfo=timezone\.utc\)'; repl='            return parsed'; select='test_broker_order_status_and_fill_callbacks_are_normalized_and_deduplicated' }
 )
 
 $results = @()

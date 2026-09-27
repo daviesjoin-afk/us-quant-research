@@ -12,6 +12,7 @@ from us_quant.trading.application.live_canary_execution import (
     LiveCanaryExecutionGuard,
 )
 from us_quant.trading.domain.live_canary import (
+    LiveCanaryOpenOrder,
     LiveCanaryPosition,
     LiveCanaryTruth,
     LiveCanaryTruthError,
@@ -187,8 +188,7 @@ def _truth(
     *,
     positions: tuple[LiveCanaryPosition, ...] = (),
     daily_pnl: Decimal = Decimal("0"),
-    open_order_count: int = 0,
-    open_buy_notional: Decimal = Decimal("0"),
+    open_orders: tuple[LiveCanaryOpenOrder, ...] = (),
     observed_at: datetime = NOW,
     net_liquidation: Decimal = Decimal("10000"),
 ) -> LiveCanaryTruth:
@@ -197,9 +197,24 @@ def _truth(
         observed_at=observed_at,
         net_liquidation=net_liquidation,
         daily_pnl=daily_pnl,
-        open_order_count=open_order_count,
-        open_buy_notional=open_buy_notional,
+        open_orders=open_orders,
         positions=positions,
+    )
+
+
+def _open_order(
+    broker_order_id: int,
+    *,
+    side: Side = Side.BUY,
+    quantity: int = 1,
+    price: str = "200",
+) -> LiveCanaryOpenOrder:
+    return LiveCanaryOpenOrder(
+        broker_order_id=broker_order_id,
+        symbol="AAPL",
+        side=side,
+        remaining_quantity=quantity,
+        limit_price=Decimal(price),
     )
 
 
@@ -262,13 +277,30 @@ def test_guard_preserves_the_shared_reserve_durable_submit_boundary():
 def test_external_open_buy_notional_counts_against_the_capital_limit():
     guard, broker, _, _ = _guard(
         state=_armed_state(limits=_limits(capital_limit=Decimal("2000"), max_open_orders=2)),
-        truth=_Truth(_truth(open_order_count=1, open_buy_notional=Decimal("1900"))),
+        truth=_Truth(_truth(open_orders=(_open_order(900, price="1900"),))),
     )
 
     with pytest.raises(ExecutionRefused, match="capital limit"):
         guard.reserve(_intent(price="200"))
 
     assert broker.reservations == []
+
+
+def test_broker_visible_active_order_is_counted_once_by_its_identity():
+    guard, broker, _, truth = _guard(
+        state=_armed_state(limits=_limits(max_open_orders=2)),
+    )
+    first = _intent()
+    reservation = guard.reserve(first)
+    guard.submit(reservation)
+    truth.current = _truth(
+        open_orders=(_open_order(reservation.broker_order_id),)
+    )
+
+    second_reservation = guard.reserve(_intent())
+
+    assert len(broker.reservations) == 2
+    assert second_reservation.broker_order_id != reservation.broker_order_id
 
 
 @pytest.mark.parametrize(
@@ -282,7 +314,7 @@ def test_external_open_buy_notional_counts_against_the_capital_limit():
             _truth(positions=(LiveCanaryPosition("MSFT", 1, Decimal("100")),)),
             _intent(),
         ),
-        (_limits(max_open_orders=1), _truth(open_order_count=1), _intent()),
+        (_limits(max_open_orders=1), _truth(open_orders=(_open_order(900),)), _intent()),
         (_limits(allowed_symbols=("MSFT",)), _truth(), _intent()),
         (_limits(), _truth(), _intent(strategy="other")),
     ],

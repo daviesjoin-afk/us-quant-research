@@ -197,9 +197,13 @@ class LiveCanaryExecutionGuard(BrokerExecutionPort):
             notional = Decimal(intent.quantity) * intent.limit_price
             if notional > limits.max_order_notional:
                 raise ExecutionRefused("Live canary order exceeds max_order_notional")
-            active_count = sum(
-                broker_id != own_reservation for broker_id in self._active
-            )
+            broker_open_ids = {order.broker_order_id for order in truth.open_orders}
+            unrepresented_active = {
+                broker_id
+                for broker_id in self._active
+                if broker_id != own_reservation and broker_id not in broker_open_ids
+            }
+            active_count = len(unrepresented_active)
             if truth.open_order_count + active_count >= limits.max_open_orders:
                 raise ExecutionRefused("Live canary open-order limit would be exceeded")
             if intent.side is Side.SELL:
@@ -208,7 +212,7 @@ class LiveCanaryExecutionGuard(BrokerExecutionPort):
             active_buys = [
                 active_intent
                 for broker_id, (active_intent, _) in self._active.items()
-                if broker_id != own_reservation and active_intent.side is Side.BUY
+                if broker_id in unrepresented_active and active_intent.side is Side.BUY
             ]
             reserved_notional = sum(
                 (Decimal(active_intent.quantity) * active_intent.limit_price
@@ -230,7 +234,7 @@ class LiveCanaryExecutionGuard(BrokerExecutionPort):
             active_symbols = {
                 active_intent.execution_symbol.strip().upper()
                 for broker_id, (active_intent, _) in self._active.items()
-                if broker_id != own_reservation and active_intent.side is Side.BUY
+                if broker_id in unrepresented_active and active_intent.side is Side.BUY
             }
             projected_positions = truth.position_count + sum(
                 symbol not in {p.symbol.strip().upper() for p in truth.positions}

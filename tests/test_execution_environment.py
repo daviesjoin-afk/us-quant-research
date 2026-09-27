@@ -92,8 +92,7 @@ def _live_build_context():
                 observed_at=now,
                 net_liquidation=Decimal("5000"),
                 daily_pnl=Decimal("0"),
-                open_order_count=0,
-                open_buy_notional=Decimal("0"),
+                open_orders=(),
                 positions=(),
             )
 

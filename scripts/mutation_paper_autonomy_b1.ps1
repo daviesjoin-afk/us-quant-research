@@ -621,8 +621,8 @@ $mutations = @(
     @{
         name = 'M62 unknown action resolution is allowed while autonomy is enabled'
         file = $autonomyRecovery
-        find = 'if intent\.mode is not PaperAutonomyMode\.DISABLED:'
-        repl = 'if False:'
+        find = '(def resolve_unknown\([\s\S]*?)(if intent\.mode is not PaperAutonomyMode\.DISABLED:)'
+        repl = '$1if False:'
         tests = @($recoveryBehaviour)
         select = @("-k", "resolve_requires_disabled_intent")
     },
@@ -667,12 +667,36 @@ $mutations = @(
         select = @("-k", "unsafe_startup_returns_before_completion_signals_are_connected")
     },
     @{
-        name = 'M68 authorization at the recovery timestamp is treated as later'
+        name = 'M69 active authorization at the recovery floor is accepted'
         file = $supervisorDomain
-        find = 'return authorization_updated_at > latest_resolution_at'
-        repl = 'return authorization_updated_at >= latest_resolution_at'
+        find = 'return authorization_revision > latest_resolution_floor_revision'
+        repl = 'return authorization_revision >= latest_resolution_floor_revision'
         tests = @($recoveryBehaviour)
-        select = @("-k", "recovery_authorization_timestamp_comparison_is_strict")
+        select = @("-k", "recovery_authorization_revision_comparison_is_strict")
+    },
+    @{
+        name = 'M70 the pre-resolution revision is sealed instead of the post-resolution sample'
+        file = $autonomyRecovery
+        find = 'authorization_floor_revision=post_resolution_intent\.revision'
+        repl = 'authorization_floor_revision=intent.revision'
+        tests = @($recoveryBehaviour)
+        select = @("-k", "concurrent_enable_before_resolution_is_not_fresh_authorization")
+    },
+    @{
+        name = 'M71 an unsealed operator resolution is accepted as a complete barrier'
+        file = $actionRecovery
+        find = 'if any\(row\.authorization_floor_revision is None for row in resolutions\):'
+        repl = 'if False:'
+        tests = @($recoveryBehaviour)
+        select = @("-k", "unsealed_resolution_is_startup_unsafe_and_can_be_resumed")
+    },
+    @{
+        name = 'M72 an operator resolution authorization floor can be overwritten'
+        file = $actionRecovery
+        find = 'if stored\.authorization_floor_revision is not None:'
+        repl = 'if False:'
+        tests = @($recoveryBehaviour)
+        select = @("-k", "seal_is_write_once_and_preserves_action_fields")
     }
 )
 

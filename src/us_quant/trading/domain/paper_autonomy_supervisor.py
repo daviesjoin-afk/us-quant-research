@@ -59,19 +59,27 @@ class PaperAutonomySupervisorViolation(PaperAutonomySupervisorError):
 
 def recovery_authorization_is_valid(
     mode: PaperAutonomyMode,
-    authorization_updated_at: datetime,
-    latest_resolution_at: datetime | None,
+    authorization_revision: int | None,
+    latest_resolution_floor_revision: int | None,
 ) -> bool:
-    """Require active intent to postdate the latest ambiguity closure."""
+    """Require active intent to advance beyond the latest recovery floor."""
 
-    if mode is PaperAutonomyMode.DISABLED or latest_resolution_at is None:
+    if (
+        mode is PaperAutonomyMode.DISABLED
+        or latest_resolution_floor_revision is None
+    ):
         return True
     if (
-        authorization_updated_at.tzinfo is None
-        or latest_resolution_at.tzinfo is None
+        authorization_revision is None
+        or isinstance(authorization_revision, bool)
+        or not isinstance(authorization_revision, int)
+        or authorization_revision < INITIAL_REVISION
+        or isinstance(latest_resolution_floor_revision, bool)
+        or not isinstance(latest_resolution_floor_revision, int)
+        or latest_resolution_floor_revision < INITIAL_REVISION
     ):
         return False
-    return authorization_updated_at > latest_resolution_at
+    return authorization_revision > latest_resolution_floor_revision
 
 
 class PaperAutonomySessionWindow(StrEnum):

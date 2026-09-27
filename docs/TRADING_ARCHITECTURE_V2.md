@@ -3568,6 +3568,7 @@ revision 的页面不能覆盖它之后才按下的 kill switch。application �
 python -m us_quant paper-autonomy status
 python -m us_quant paper-autonomy unresolved
 python -m us_quant paper-autonomy resolve-action --key "<action-key>" --expected-status requested --reason "..."
+python -m us_quant paper-autonomy seal-action --key "<action-key>"
 python -m us_quant paper-autonomy enable      --reason "..."
 python -m us_quant paper-autonomy pause       --reason "..."
 python -m us_quant paper-autonomy disable     --reason "..."
@@ -3582,9 +3583,10 @@ CLI 里没有任何到达 store 的路径：它不 import sqlite adapter，也�
 `clear-kill` 作用在未置位的 latch 上同样是 exit 2 / `applied=false`，且不产生任何
 audit event。
 
-`unresolved` 和 `resolve-action` 通过独立的 recovery application 读取和更新 action ledger；
-CLI 不 import 其 SQLite adapter。resolution 仍受 Paper-only 配置检查，并要求 `--key`、
-`--expected-status claimed|requested` 和非空 `--reason`。
+`unresolved`、`resolve-action` 和 `seal-action` 通过独立的 recovery application 读取和更新
+action ledger；CLI 不 import 其 SQLite adapter。resolution 仍受 Paper-only 配置检查，并要求
+`--key`、`--expected-status claimed|requested` 和非空 `--reason`。`seal-action` 仅用于进程在
+resolution 已提交、authorization floor 尚未写入时恢复；它要求 intent 当前为 DISABLED。
 
 #### 8.28.8 本轮刻意不做的事
 
@@ -3730,13 +3732,18 @@ broker、账户、订单和持仓；若自治仍为 `ENABLED` 或 `PAUSED`，先
 --expected-status claimed|requested --reason ...` 将指定行原位标记为 `OPERATOR_RESOLVED`。
 这个终态只表示操作员已检查并关闭未知记录，不代表成功、失败或拒绝，不删除历史、不推进控制周期，
 也不释放当日 START 限额。resolution 前会重新读取 intent，且只允许其已经是 `DISABLED`；kill
-已锁定且为 DISABLED 时允许 resolution，但不会清除 kill。
+已锁定且为 DISABLED 时允许 resolution，但不会清除 kill。action commit 后会重新读取 A1 revision，
+再以 `BEGIN IMMEDIATE` 将 revision floor 写入原 action row；该 floor 只能写一次。若进程在两步之间
+退出，未 seal 的 OPERATOR_RESOLVED 仍显示在 `unresolved` 中，完整 ledger barrier read 会拒绝启动，
+操作员在保持 DISABLED 后用 `seal-action` 完成 sealing。
 
 resolution 不重新授权、不启动 session 或 host。完成后重启 Desktop，由新进程重新做完整 startup
-安全检查；只有检查通过后才可能启动 host。若 kill 仍锁定，操作员先显式 clear kill，再单独显式
-enable。最新 resolution 之后写入的 intent 时间必须严格晚于 resolution 时间；如果 ENABLED/PAUSED
-授权在 resolution 前或时间顺序无法证明，新进程保持 startup unsafe，直到操作员在 resolution 后重新
-明确授权。DISABLED intent 可通过此项检查，因为它本身不授权自治工作。若需要当天再次交易，使用既有
+安全检查；只有检查通过后才可能启动 host。启动时若 intent 为 ENABLED/PAUSED，其 revision 必须
+严格大于 action ledger 中最新 recovery authorization floor；等于或更低都继续保持 startup unsafe，
+直到操作员显式 disable 后再 enable。DISABLED intent 可通过此项检查，因为它本身不授权自治工作。
+revision floor 来自 resolution commit 后 fresh-read 的 A1 revision；若并发 enable 已在 resolution
+commit 前生效，该 revision 会被纳入 floor 并要求之后再次授权。`completed_at` 只用于审计，不参与
+授权顺序。若 kill 仍锁定，操作员先显式 clear kill，再单独显式 enable。若需要当天再次交易，使用既有
 人工 Paper 路径，不能因 resolution 自动重试自治 START。
 
 配置只从显式 `[paper.autonomy]` 读取，缺少或无效时不造默认时刻、不启动 host，并记录

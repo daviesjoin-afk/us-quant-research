@@ -46,6 +46,7 @@ import pytest
 
 from us_quant.cli import (
     paper_autonomy_resolve_action,
+    paper_autonomy_seal_action,
     paper_autonomy_status,
     paper_autonomy_transition,
     paper_autonomy_unresolved,
@@ -1503,15 +1504,57 @@ def test_paper_autonomy_recovery_cli_lists_and_resolves_explicitly(
     assert result["resolved"] is True
     assert result["previous_status"] == "requested"
     assert result["new_status"] == "operator_resolved"
+    assert result["authorization_floor_revision"] == autonomy.snapshot().revision
     assert "does not enable" in result["effect"]
     assert "restart the Desktop" in result["next_step"]
     assert actions.get("old-start").status is PaperAutonomyActionStatus.OPERATOR_RESOLVED
+    assert actions.get("old-start").authorization_floor_revision == autonomy.snapshot().revision
+
+    actions.claim(
+        PaperAutonomyActionRecord(
+            action_key="crashed-before-seal",
+            intent_revision=autonomy.snapshot().revision,
+            trading_day=date(2026, 9, 27),
+            action=PaperAutonomyActionType.START,
+            status=PaperAutonomyActionStatus.CLAIMED,
+            claimed_at=now,
+            completed_at=None,
+            detail="second old start request",
+        )
+    )
+    actions.resolve_unknown(
+        action_key="crashed-before-seal",
+        expected_status=PaperAutonomyActionStatus.CLAIMED,
+        resolved_at=now,
+        detail="simulated interruption before barrier seal",
+    )
+    assert paper_autonomy_unresolved(
+        config_path=_PAPER_CONFIG,
+        intent_database_path=intent_path,
+        action_database_path=actions_path,
+    ) == 0
+    unsealed = json.loads(capsys.readouterr().out)
+    assert unsealed["count"] == 1
+    assert unsealed["actions"][0]["authorization_floor_revision"] is None
+    assert paper_autonomy_seal_action(
+        config_path=_PAPER_CONFIG,
+        intent_database_path=intent_path,
+        action_database_path=actions_path,
+        action_key="crashed-before-seal",
+    ) == 0
+    seal_result = json.loads(capsys.readouterr().out)
+    assert seal_result["sealed"] is True
+    assert seal_result["authorization_floor_revision"] == autonomy.snapshot().revision
 
     parsed = build_parser().parse_args([
         "paper-autonomy", "resolve-action", "--key", "k",
         "--expected-status", "claimed", "--reason", "reviewed",
     ])
     assert parsed.autonomy_command == "resolve-action"
+    parsed = build_parser().parse_args([
+        "paper-autonomy", "seal-action", "--key", "k",
+    ])
+    assert parsed.autonomy_command == "seal-action"
     with pytest.raises(SystemExit):
         build_parser().parse_args([
             "paper-autonomy", "resolve-action", "--key", "k",

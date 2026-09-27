@@ -1066,6 +1066,7 @@ def _action_payload(record: PaperAutonomyActionRecord) -> dict:
         "status": record.status.value,
         "claimed_at": record.claimed_at.isoformat(),
         "detail": record.detail,
+        "authorization_floor_revision": record.authorization_floor_revision,
     }
 
 
@@ -1151,6 +1152,7 @@ def paper_autonomy_resolve_action(
         "action_key": action_key,
         "previous_status": expected_status,
         "new_status": record.status.value,
+        "authorization_floor_revision": record.authorization_floor_revision,
         "effect": (
             "the ambiguous action was closed by explicit operator review; "
             "this does not enable Paper autonomy"
@@ -1161,6 +1163,51 @@ def paper_autonomy_resolve_action(
         ),
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def paper_autonomy_seal_action(
+    *,
+    config_path: Path,
+    intent_database_path: Path | None,
+    action_database_path: Path | None,
+    action_key: str,
+) -> int:
+    """Finish a recovery barrier after a crash between resolve and seal."""
+
+    refused = _require_paper_environment(config_path)
+    if refused is not None:
+        return refused
+    application = build_paper_autonomy_recovery_application(
+        intent_database_path=intent_database_path or _default_autonomy_database(),
+        action_database_path=action_database_path or _default_autonomy_action_database(),
+    )
+    try:
+        record = application.seal_operator_resolution(action_key=action_key)
+    except PaperAutonomySupervisorError as error:
+        print(
+            json.dumps(
+                {"sealed": False, "action_key": action_key, "error": str(error)},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 2
+    print(
+        json.dumps(
+            {
+                "sealed": True,
+                "action_key": action_key,
+                "authorization_floor_revision": record.authorization_floor_revision,
+                "next_step": (
+                    "restart Desktop to recheck startup; then explicitly enable "
+                    "autonomy if startup is proven safe"
+                ),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -1364,6 +1411,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("claimed", "requested"),
     )
     resolve_parser.add_argument("--reason", required=True)
+    seal_parser = autonomy_commands.add_parser(
+        "seal-action",
+        help="finish sealing a resolved action after an interrupted recovery",
+    )
+    seal_parser.add_argument("--key", required=True)
     for verb, hint in _OPERATOR_HINTS.items():
         verb_parser = autonomy_commands.add_parser(verb, help=hint)
         verb_parser.add_argument(
@@ -1465,6 +1517,13 @@ def main() -> int:
                 action_key=args.key,
                 expected_status=args.expected_status,
                 reason=args.reason,
+            )
+        if args.autonomy_command == "seal-action":
+            return paper_autonomy_seal_action(
+                config_path=args.config,
+                intent_database_path=args.database,
+                action_database_path=args.actions_database,
+                action_key=args.key,
             )
         return paper_autonomy_transition(
             config_path=args.config,

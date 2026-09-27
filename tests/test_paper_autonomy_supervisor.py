@@ -1183,6 +1183,15 @@ def test_legacy_action_ledger_migrates_without_losing_rows_or_null_day_support(
             )
             """
         )
+        connection.execute(
+            """
+            INSERT INTO paper_autonomy_action VALUES (
+                'legacy-unsealed-resolution', 4, '2026-09-28', 'start',
+                'operator_resolved', '2026-09-28T13:45:00+00:00',
+                '2026-09-28T13:46:00+00:00', 'old recovery without a floor'
+            )
+            """
+        )
         connection.commit()
     finally:
         connection.close()
@@ -1190,6 +1199,18 @@ def test_legacy_action_ledger_migrates_without_losing_rows_or_null_day_support(
     store = SQLitePaperAutonomyActionRepository(path)
     assert store.get("legacy").action_day == _DAY
     assert store.get("legacy").trading_day == _DAY
+    assert store.get("legacy-unsealed-resolution").authorization_floor_revision is None
+    assert any(
+        row.action_key == "legacy-unsealed-resolution"
+        for row in store.unresolved()
+    )
+    with pytest.raises(PaperAutonomyActionStoreUnreadable, match="no sealed authorization floor"):
+        store.latest_operator_resolution_barrier()
+    store.seal_operator_resolution(
+        action_key="legacy-unsealed-resolution",
+        authorization_floor_revision=4,
+    )
+    assert store.latest_operator_resolution_barrier() == 4
     assert store.claim(
         PaperAutonomyActionRecord(
             action_key="uncertain-pause",
@@ -1487,6 +1508,7 @@ def test_the_ledger_records_no_session_truth(tmp_path: pathlib.Path) -> None:
         "completed_at",
         "detail",
         "action_day",
+        "authorization_floor_revision",
     }
     for forbidden in (
         "symbols",
@@ -1514,6 +1536,7 @@ def test_the_ledger_records_no_session_truth(tmp_path: pathlib.Path) -> None:
         ("trading_day", "not a date"),
         ("detail", "   "),
         ("action_key", ""),
+        ("authorization_floor_revision", "not an integer"),
     ),
 )
 def test_a_corrupt_action_record_is_never_read_as_a_valid_one(

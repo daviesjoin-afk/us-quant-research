@@ -1613,11 +1613,11 @@ class MainWindow(QMainWindow):
         def recovery_authorization_valid() -> bool | None:
             try:
                 intent = self.paper_autonomy_application.snapshot()
-                latest_resolution = actions.latest_operator_resolution_at()
+                latest_resolution_floor = actions.latest_operator_resolution_barrier()
             except Exception:  # noqa: BLE001 - startup must fail closed
                 return None
             return recovery_authorization_is_valid(
-                intent.mode, intent.updated_at, latest_resolution
+                intent.mode, intent.revision, latest_resolution_floor
             )
 
         try:

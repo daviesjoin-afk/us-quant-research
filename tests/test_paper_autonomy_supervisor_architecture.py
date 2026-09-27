@@ -246,7 +246,9 @@ def test_b_a4_the_action_adapter_is_only_a_store() -> None:
         "claim",
         "mark_requested",
         "complete",
+        "seal_operator_resolution",
         "unresolved",
+        "latest_operator_resolution_barrier",
         "recent",
         "start_attempted",
     } <= store

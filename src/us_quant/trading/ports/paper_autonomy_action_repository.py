@@ -65,7 +65,9 @@ class PaperAutonomyActionRecord:
     an invariant rather than a convention: a non-terminal record that carried a
     completion time would be an outcome the scheduler might reason from, while a
     terminal one without it would leave the crash analysis unable to say whether
-    the record is finished.
+    the record is finished. An operator-resolved row has a second durable step:
+    ``authorization_floor_revision`` stays NULL until the post-resolution A1
+    revision has been sampled and sealed.
     """
 
     action_key: str
@@ -77,6 +79,7 @@ class PaperAutonomyActionRecord:
     completed_at: datetime | None
     detail: str
     action_day: date | None = None
+    authorization_floor_revision: int | None = None
 
     def __post_init__(self) -> None:
         if not str(self.action_key).strip():
@@ -133,6 +136,19 @@ class PaperAutonomyActionRecord:
             raise PaperAutonomySupervisorViolation(
                 "an action record needs a timezone-aware completed_at"
             )
+        if self.authorization_floor_revision is not None:
+            if self.status is not PaperAutonomyActionStatus.OPERATOR_RESOLVED:
+                raise PaperAutonomySupervisorViolation(
+                    "only an operator-resolved action may carry an authorization floor"
+                )
+            if (
+                isinstance(self.authorization_floor_revision, bool)
+                or not isinstance(self.authorization_floor_revision, int)
+                or self.authorization_floor_revision < INITIAL_REVISION
+            ):
+                raise PaperAutonomySupervisorViolation(
+                    "an authorization floor must be a non-negative revision"
+                )
 
     @property
     def is_terminal(self) -> bool:
@@ -235,24 +251,28 @@ class PaperAutonomyActionRepositoryPort(Protocol):
         unresolved row to ``OPERATOR_RESOLVED`` atomically.
         """
 
-    def unresolved(self) -> tuple[PaperAutonomyActionRecord, ...]:
-        """Every claimed-but-unfinished action, oldest first.
+    def seal_operator_resolution(
+        self, *, action_key: str, authorization_floor_revision: int
+    ) -> None:
+        """Seal one unsealed OPERATOR_RESOLVED row exactly once."""
 
-        Read once at startup and once per tick.  A non-empty answer is not a
-        problem to be worked around: it means the previous attempt's outcome is
-        genuinely unknown, and no retry can establish it.
+    def unresolved(self) -> tuple[PaperAutonomyActionRecord, ...]:
+        """Every unfinished action or unsealed recovery row, oldest first.
+
+        Read once at startup and once per tick. A non-empty answer is not a
+        problem to be worked around: it means an action outcome is unknown or
+        an operator resolution still lacks its authorization barrier.
 
         An implementation must parse the whole ledger rather than filter in the
-        query.  A row it cannot interpret is a row whose status nobody knows,
-        and "I could not read one of today's attempts" is the stricter answer,
-        not the same one as "nothing is outstanding".
+        query. A row it cannot interpret is a row whose status nobody knows;
+        an unsealed OPERATOR_RESOLVED row also requires explicit recovery work.
         """
 
-    def latest_operator_resolution_at(self) -> datetime | None:
-        """Latest durable timestamp that closed an ambiguous action.
+    def latest_operator_resolution_barrier(self) -> int | None:
+        """Latest sealed authorization floor, or fail on any unsealed closure.
 
         Implementations must parse the complete ledger. ``None`` means no
-        operator resolution exists; a damaged/unreadable ledger must raise.
+        operator resolution exists; a damaged or unsealed resolution raises.
         """
 
     def start_attempted(self, trading_day: date) -> bool:

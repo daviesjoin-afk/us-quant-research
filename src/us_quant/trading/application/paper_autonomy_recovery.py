@@ -45,7 +45,7 @@ class PaperAutonomyRecoveryApplication:
         self._clock = clock or _utc_now
 
     def unresolved(self) -> tuple[PaperAutonomyActionRecord, ...]:
-        """Return ledger rows whose action outcome is still unknown."""
+        """Return unknown outcomes and resolutions that still need sealing."""
 
         return self._actions.unresolved()
 
@@ -78,12 +78,57 @@ class PaperAutonomyRecoveryApplication:
             resolved_at=moment,
             detail=reason,
         )
+        post_resolution_intent = self._intent_reader.snapshot()
+        self._actions.seal_operator_resolution(
+            action_key=action_key,
+            authorization_floor_revision=post_resolution_intent.revision,
+        )
         record = self._actions.get(action_key)
         if record is None:  # pragma: no cover - adapter contract violation
             raise PaperAutonomySupervisorViolation(
                 "the resolved action could not be read back"
             )
         return record
+
+    def seal_operator_resolution(
+        self, *, action_key: str
+    ) -> PaperAutonomyActionRecord:
+        """Finish a resolution whose process stopped before its barrier seal."""
+
+        intent = self._intent_reader.snapshot()
+        if intent.mode is not PaperAutonomyMode.DISABLED:
+            raise PaperAutonomySupervisorViolation(
+                "disable Paper autonomy before sealing an operator resolution"
+            )
+        record = self._actions.get(action_key)
+        if record is None:
+            raise PaperAutonomySupervisorViolation(
+                f"no action is stored under {action_key!r}"
+            )
+        if record.status is not PaperAutonomyActionStatus.OPERATOR_RESOLVED:
+            raise PaperAutonomySupervisorViolation(
+                "only an operator-resolved action can be sealed"
+            )
+        if record.authorization_floor_revision is not None:
+            raise PaperAutonomySupervisorViolation(
+                "the operator resolution is already sealed"
+            )
+
+        seal_intent = self._intent_reader.snapshot()
+        if seal_intent.mode is not PaperAutonomyMode.DISABLED:
+            raise PaperAutonomySupervisorViolation(
+                "disable Paper autonomy before sealing an operator resolution"
+            )
+        self._actions.seal_operator_resolution(
+            action_key=action_key,
+            authorization_floor_revision=seal_intent.revision,
+        )
+        sealed = self._actions.get(action_key)
+        if sealed is None:  # pragma: no cover - adapter contract violation
+            raise PaperAutonomySupervisorViolation(
+                "the sealed action could not be read back"
+            )
+        return sealed
 
 
 __all__ = ["PaperAutonomyRecoveryApplication"]

@@ -18,6 +18,9 @@ from us_quant.trading.application.paper_autonomy import PaperAutonomyApplication
 from us_quant.trading.application.paper_autonomy_recovery import (
     PaperAutonomyRecoveryApplication,
 )
+from us_quant.desktop_v2.orchestration.autonomy.facts import (
+    PaperAutonomyStartupFactsAdapter,
+)
 from us_quant.trading.domain.paper_autonomy import INITIAL_REVISION, PaperAutonomyMode
 from us_quant.trading.domain.paper_autonomy_supervisor import (
     PaperAutonomyActionStatus,
@@ -29,6 +32,7 @@ from us_quant.trading.domain.paper_autonomy_supervisor import (
 from us_quant.trading.ports.paper_autonomy_action_repository import (
     PaperAutonomyActionRecord,
     PaperAutonomyActionRepositoryError,
+    PaperAutonomyActionStoreUnreadable,
 )
 
 NOW = datetime(2026, 9, 27, 9, 0, tzinfo=timezone.utc)
@@ -114,6 +118,7 @@ def test_resolution_uses_expected_status(setup) -> None:
     )
     assert resolved.status is PaperAutonomyActionStatus.OPERATOR_RESOLVED
     assert resolved.completed_at == NOW
+    assert resolved.authorization_floor_revision == intent.snapshot().revision
     assert resolved.detail == "broker, account, orders, and positions reviewed"
     assert resolved.action_key == "old-start"
     assert resolved.claimed_at == NOW
@@ -256,16 +261,18 @@ def test_concurrent_enable_before_resolution_is_not_fresh_authorization(
         )
     )
 
-    class RacingIntentReader:
-        def snapshot(self):
-            observed_disabled = intent_store.load_intent()
+    class RacingActionRepository:
+        def __getattr__(self, name):
+            return getattr(actions, name)
+
+        def resolve_unknown(self, **kwargs):
             PaperAutonomyApplication(
                 intent_store, clock=lambda: at(3)
-            ).enable(observed_disabled.revision, "concurrent stale writer")
-            return observed_disabled
+            ).enable(disabled.revision, "enable during action resolution")
+            actions.resolve_unknown(**kwargs)
 
     recovery = PaperAutonomyRecoveryApplication(
-        RacingIntentReader(), actions, clock=lambda: at(4)
+        intent, RacingActionRepository(), clock=lambda: at(4)
     )
     resolved = recovery.resolve_unknown(
         action_key="race-start",
@@ -276,10 +283,12 @@ def test_concurrent_enable_before_resolution_is_not_fresh_authorization(
     concurrent_intent = intent_store.load_intent()
     assert concurrent_intent.mode is PaperAutonomyMode.ENABLED
     assert resolved.completed_at == at(4)
+    assert resolved.authorization_floor_revision == concurrent_intent.revision
+    assert actions.latest_operator_resolution_barrier() == concurrent_intent.revision
     assert not recovery_authorization_is_valid(
         concurrent_intent.mode,
-        concurrent_intent.updated_at,
-        actions.latest_operator_resolution_at(),
+        concurrent_intent.revision,
+        actions.latest_operator_resolution_barrier(),
     )
 
     disabled_again = PaperAutonomyApplication(
@@ -290,23 +299,131 @@ def test_concurrent_enable_before_resolution_is_not_fresh_authorization(
     ).enable(disabled_again.revision, "explicit post-recovery authorization")
     assert recovery_authorization_is_valid(
         enabled_after_recovery.mode,
-        enabled_after_recovery.updated_at,
-        actions.latest_operator_resolution_at(),
+        enabled_after_recovery.revision,
+        actions.latest_operator_resolution_barrier(),
     )
 
 
-def test_recovery_authorization_timestamp_comparison_is_strict() -> None:
-    resolution = NOW
-    assert recovery_authorization_is_valid(PaperAutonomyMode.DISABLED, NOW, resolution)
-    assert not recovery_authorization_is_valid(PaperAutonomyMode.ENABLED, NOW, resolution)
-    assert not recovery_authorization_is_valid(
-        PaperAutonomyMode.ENABLED,
-        NOW.replace(tzinfo=None), resolution
+def test_recovery_authorization_revision_comparison_is_strict() -> None:
+    assert recovery_authorization_is_valid(PaperAutonomyMode.DISABLED, None, 7)
+    assert recovery_authorization_is_valid(PaperAutonomyMode.ENABLED, 8, None)
+    assert not recovery_authorization_is_valid(PaperAutonomyMode.ENABLED, 7, 7)
+    assert not recovery_authorization_is_valid(PaperAutonomyMode.PAUSED, 6, 7)
+    assert recovery_authorization_is_valid(PaperAutonomyMode.ENABLED, 8, 7)
+
+
+def test_unsealed_resolution_is_startup_unsafe_and_can_be_resumed(setup) -> None:
+    _, actions, intent, recovery = setup
+    actions.claim(_record("prior-sealed", PaperAutonomyActionStatus.CLAIMED))
+    actions.resolve_unknown(
+        action_key="prior-sealed",
+        expected_status=PaperAutonomyActionStatus.CLAIMED,
+        resolved_at=NOW,
+        detail="prior resolution",
     )
+    actions.seal_operator_resolution(
+        action_key="prior-sealed",
+        authorization_floor_revision=INITIAL_REVISION,
+    )
+    actions.claim(_record("crashed-before-seal", PaperAutonomyActionStatus.CLAIMED))
+    actions.resolve_unknown(
+        action_key="crashed-before-seal",
+        expected_status=PaperAutonomyActionStatus.CLAIMED,
+        resolved_at=NOW,
+        detail="operator reviewed before crash",
+    )
+
+    assert actions.unresolved()[0].status is PaperAutonomyActionStatus.OPERATOR_RESOLVED
+    with pytest.raises(PaperAutonomyActionStoreUnreadable, match="no sealed authorization floor"):
+        actions.latest_operator_resolution_barrier()
+
+    def recovery_barrier_valid():
+        try:
+            current = intent.snapshot()
+            floor = actions.latest_operator_resolution_barrier()
+        except PaperAutonomyActionStoreUnreadable:
+            return None
+        return recovery_authorization_is_valid(
+            current.mode, current.revision, floor
+        )
+
+    startup = PaperAutonomyStartupFactsAdapter(
+        intent_store_readable=lambda: True,
+        unresolved_action_count=lambda: len(actions.unresolved()),
+        recovery_authorization_valid=recovery_barrier_valid,
+        broker_state_known=lambda: True,
+        account_identity_known=lambda: True,
+        open_broker_orders=lambda: 0,
+        broker_positions=lambda: 0,
+        unreconciled_rows=lambda: 0,
+        paper_ownership_clear=lambda: True,
+        manual_recovery_required=lambda: False,
+    ).startup_facts()
+    assert startup.unresolved_action_count == 1
+    assert startup.recovery_authorization_valid is None
+    assert not startup.proven_safe
+
+    sealed = recovery.seal_operator_resolution(
+        action_key="crashed-before-seal"
+    )
+    assert sealed.authorization_floor_revision == intent.snapshot().revision
+    assert actions.unresolved() == ()
+    assert actions.latest_operator_resolution_barrier() == intent.snapshot().revision
+
+
+def test_seal_is_write_once_and_preserves_action_fields(setup) -> None:
+    _, actions, intent, recovery = setup
+    actions.claim(_record("seal-once", PaperAutonomyActionStatus.CLAIMED))
+    actions.resolve_unknown(
+        action_key="seal-once",
+        expected_status=PaperAutonomyActionStatus.CLAIMED,
+        resolved_at=NOW,
+        detail="operator reviewed the action",
+    )
+    unsealed = actions.get("seal-once")
+    assert unsealed.authorization_floor_revision is None
+
+    sealed = recovery.seal_operator_resolution(action_key="seal-once")
+    assert sealed.authorization_floor_revision == intent.snapshot().revision
+    for field in (
+        "action",
+        "action_key",
+        "intent_revision",
+        "trading_day",
+        "action_day",
+        "claimed_at",
+        "completed_at",
+        "detail",
+    ):
+        assert getattr(sealed, field) == getattr(unsealed, field)
+
+    with pytest.raises(PaperAutonomyActionRepositoryError, match="already sealed"):
+        actions.seal_operator_resolution(
+            action_key="seal-once",
+            authorization_floor_revision=intent.snapshot().revision + 1,
+        )
+    assert actions.get("seal-once") == sealed
+
+
+def test_enable_after_resolution_seal_advances_authorization_revision(setup) -> None:
+    _, actions, intent, recovery = setup
+    actions.claim(_record("post-recovery-enable", PaperAutonomyActionStatus.CLAIMED))
+
+    resolved = recovery.resolve_unknown(
+        action_key="post-recovery-enable",
+        expected_status=PaperAutonomyActionStatus.CLAIMED,
+        reason="operator reviewed before explicit reauthorization",
+    )
+    enabled = intent.enable(
+        resolved.authorization_floor_revision,
+        "authorize after recovery",
+    )
+
+    assert enabled.revision > resolved.authorization_floor_revision
     assert recovery_authorization_is_valid(
-        PaperAutonomyMode.ENABLED,
-        NOW.replace(microsecond=1),
-        resolution,
+        enabled.mode,
+        enabled.revision,
+        actions.latest_operator_resolution_barrier(),
     )
 
 

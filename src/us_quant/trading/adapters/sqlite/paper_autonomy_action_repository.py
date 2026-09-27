@@ -48,7 +48,7 @@ TABLENAME = "paper_autonomy_action"
 
 _COLUMNS = (
     "action_key, intent_revision, trading_day, action, status, "
-    "claimed_at, completed_at, detail, action_day"
+    "claimed_at, completed_at, detail, action_day, authorization_floor_revision"
 )
 
 _SELECT_ONE = f"SELECT {_COLUMNS} FROM {TABLENAME} WHERE action_key = ?"
@@ -408,6 +408,59 @@ class SQLitePaperAutonomyActionRepository:
                 _rollback_quietly(connection)
                 raise
 
+    def seal_operator_resolution(
+        self, *, action_key: str, authorization_floor_revision: int
+    ) -> None:
+        if (
+            isinstance(authorization_floor_revision, bool)
+            or not isinstance(authorization_floor_revision, int)
+            or authorization_floor_revision < 0
+        ):
+            raise PaperAutonomyActionRepositoryError(
+                "an authorization floor must be a non-negative revision"
+            )
+        try:
+            with closing(connect_sqlite(self.path)) as connection:
+                connection.isolation_level = None
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    row = connection.execute(_SELECT_ONE, (action_key,)).fetchone()
+                    if row is None:
+                        raise PaperAutonomyActionRepositoryError(
+                            f"no action is stored under {action_key!r}"
+                        )
+                    stored = _record_from_row(row)
+                    if stored.status is not PaperAutonomyActionStatus.OPERATOR_RESOLVED:
+                        raise PaperAutonomyActionRepositoryError(
+                            "only an operator-resolved action can be sealed"
+                        )
+                    if stored.authorization_floor_revision is not None:
+                        raise PaperAutonomyActionRepositoryError(
+                            f"the operator resolution under {action_key!r} is already sealed"
+                        )
+                    cursor = connection.execute(
+                        f"""
+                        UPDATE {TABLENAME}
+                        SET authorization_floor_revision = ?
+                        WHERE action_key = ?
+                        """,
+                        (authorization_floor_revision, action_key),
+                    )
+                    if cursor.rowcount != 1:
+                        raise PaperAutonomyActionRepositoryError(
+                            f"the operator resolution under {action_key!r} changed while sealing"
+                        )
+                    connection.execute("COMMIT")
+                except BaseException:
+                    _rollback_quietly(connection)
+                    raise
+        except PaperAutonomyActionRepositoryError:
+            raise
+        except sqlite3.Error as error:
+            raise PaperAutonomyActionRepositoryError(
+                "the operator resolution authorization floor could not be stored"
+            ) from error
+
     # -- reads ----------------------------------------------------------
 
     def get(self, action_key: str) -> PaperAutonomyActionRecord | None:
@@ -425,16 +478,31 @@ class SQLitePaperAutonomyActionRepository:
         """
 
         records = self._read(_SELECT_ALL, ())
-        return tuple(row for row in records if not row.is_terminal)
+        return tuple(
+            row
+            for row in records
+            if not row.is_terminal
+            or (
+                row.status is PaperAutonomyActionStatus.OPERATOR_RESOLVED
+                and row.authorization_floor_revision is None
+            )
+        )
 
-    def latest_operator_resolution_at(self) -> datetime | None:
+    def latest_operator_resolution_barrier(self) -> int | None:
         records = self._read(_SELECT_ALL, ())
-        completed = (
-            row.completed_at
+        resolutions = tuple(
+            row
             for row in records
             if row.status is PaperAutonomyActionStatus.OPERATOR_RESOLVED
         )
-        return max(completed, default=None)
+        if any(row.authorization_floor_revision is None for row in resolutions):
+            raise PaperAutonomyActionStoreUnreadable(
+                "an operator-resolved action has no sealed authorization floor"
+            )
+        return max(
+            (row.authorization_floor_revision for row in resolutions),
+            default=None,
+        )
 
     def recent(
         self, limit: int = 50
@@ -525,7 +593,8 @@ class SQLitePaperAutonomyActionRepository:
                             claimed_at TEXT NOT NULL,
                             completed_at TEXT,
                             detail TEXT NOT NULL,
-                            action_day TEXT
+                            action_day TEXT,
+                            authorization_floor_revision INTEGER
                         )
                         """
                     )
@@ -558,21 +627,28 @@ class SQLitePaperAutonomyActionRepository:
                                 claimed_at TEXT NOT NULL,
                                 completed_at TEXT,
                                 detail TEXT NOT NULL,
-                                action_day TEXT
+                                action_day TEXT,
+                                authorization_floor_revision INTEGER
                             )
                             """
                         )
                         old_action_day = (
                             "action_day" if "action_day" in columns else "trading_day"
                         )
+                        old_authorization_floor = (
+                            "authorization_floor_revision"
+                            if "authorization_floor_revision" in columns
+                            else "NULL"
+                        )
                         connection.execute(
                             f"""
                             INSERT INTO {TABLENAME}(
                                 action_key, intent_revision, trading_day, action,
-                                status, claimed_at, completed_at, detail, action_day
+                                status, claimed_at, completed_at, detail, action_day,
+                                authorization_floor_revision
                             ) SELECT action_key, intent_revision, trading_day, action,
                                 status, claimed_at, completed_at, detail,
-                                {old_action_day} FROM {legacy}
+                                {old_action_day}, {old_authorization_floor} FROM {legacy}
                             """
                         )
                         connection.execute(f"DROP TABLE {legacy}")
@@ -580,6 +656,17 @@ class SQLitePaperAutonomyActionRepository:
                     elif "action_day" not in columns:
                         connection.execute(
                             f"ALTER TABLE {TABLENAME} ADD COLUMN action_day TEXT"
+                        )
+                    columns = {
+                        row[1]
+                        for row in connection.execute(
+                            f"PRAGMA table_info({TABLENAME})"
+                        ).fetchall()
+                    }
+                    if "authorization_floor_revision" not in columns:
+                        connection.execute(
+                            f"ALTER TABLE {TABLENAME} "
+                            "ADD COLUMN authorization_floor_revision INTEGER"
                         )
                     connection.execute(
                         f"UPDATE {TABLENAME} SET action_day = trading_day "
@@ -641,6 +728,17 @@ def _record_from_row(row: object) -> PaperAutonomyActionRecord:
     completed_at = _optional_timestamp(row[6])  # type: ignore[index]
     trading_day_text = row[2]  # type: ignore[index]
     action_day_text = row[8]  # type: ignore[index]
+    authorization_floor_text = row[9]  # type: ignore[index]
+    try:
+        authorization_floor = (
+            int(str(authorization_floor_text))
+            if authorization_floor_text is not None
+            else None
+        )
+    except (TypeError, ValueError) as error:
+        raise PaperAutonomyActionStoreUnreadable(
+            "the stored authorization floor is not an integer"
+        ) from error
     try:
         return PaperAutonomyActionRecord(
             action_key=str(row[0]),  # type: ignore[index]
@@ -660,6 +758,7 @@ def _record_from_row(row: object) -> PaperAutonomyActionRecord:
                 if action_day_text is not None
                 else None
             ),
+            authorization_floor_revision=authorization_floor,
         )
     except PaperAutonomyActionStoreUnreadable:
         raise

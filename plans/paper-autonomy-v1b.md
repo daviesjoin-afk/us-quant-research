@@ -24,11 +24,12 @@ Complete the reviewed PR #60 recovery closure and follow-up authorization-race f
 - [x] Kept the existing shared read-only `snapshot()` port and CLI resolution output free of a post-commit A1 read; added `seal-action` to resume a crash between resolution and sealing.
 - [x] Required targeted suites: 563 passed. B1 mutation harness: 69/69 red, 0 survivors, 0 harness errors (M69–M72 cover strict floor, post-resolution sample, unsealed crash state, and write-once sealing). A1: 26/26 red, 0 survivors, 0 harness errors.
 - [x] Python 3.14.7 full suite: 5,176 passed, 0 skipped; doctor, compileall, Desktop offscreen self-test, and staged diff check passed.
-- [ ] Commit and push task-owned files, update PR evidence, and confirm Windows/Python 3.14 CI for the resulting HEAD. Keep PR OPEN and do not merge.
+- [x] Commit and push the revision-floor implementation (`ca1a7987f50f4c0b38e174a326ea86702c9dccdd`), update PR evidence, and confirm Windows/Python 3.14 CI run `36318179945`: SUCCESS, `5173 passed, 3 skipped` (the three existing unreachable-base skips). Keep PR OPEN and do not merge.
 
 ## Decision log
 - 2026-09-27: Prior PR #60 review findings are addressed on the branch; current GitHub review-thread count was zero before this update. Do not report the historical two P1 threads as unresolved.
 - 2026-09-27: Disabled intent is required immediately before resolving; a latched kill with `DISABLED` is allowed and remains latched.
 - 2026-09-27: `OPERATOR_RESOLVED` counts as a terminal history row and as a same-day START attempt, but never as a successful control cycle.
 - 2026-09-27: Wall-clock timestamps remain audit data only. Startup requires the active A1 revision to be strictly greater than every sealed operator-resolution floor; any unsealed resolution blocks startup until an operator seals it while DISABLED.
-- 2026-09-27: Validation for the revision-floor implementation is complete locally; the remaining work is commit/push, new-head CI, and final PR-state verification.
+- 2026-09-27: Revision-floor implementation passed local and new-head CI validation; only user-directed merge review remains, and this task must leave the PR unmerged.
+- 2026-09-27: Revision-floor code commit is pushed; new-head CI and final PR checks passed. PR is OPEN, non-draft, mergeable/CLEAN, with zero unresolved review threads. No merge was performed.

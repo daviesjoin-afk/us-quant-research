@@ -747,7 +747,7 @@ def test_every_route_task_releases_its_own_state() -> None:
     assert "_channel_probe_inflight = False" in _method_source(
         tree, "_channel_probe_failed"
     )
-    prepare = _method_source(tree, "request_prepare")
+    prepare = _method_source(tree, "request_prepare_with")
     assert "on_failure=self._preparation_failed" in prepare
     failed = _method_source(tree, "_preparation_failed")
     assert "_cancel_preparation_if_active" in failed

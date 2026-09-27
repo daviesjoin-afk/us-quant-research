@@ -52,6 +52,7 @@ from us_quant.desktop_v2.orchestration.paper.models import (
 )
 from us_quant.trading.domain.strategy import parameter_hash_for
 from us_quant.trading.runtime.workflow_state import PaperWorkflowPhase
+from us_quant.trading.runtime.workflow_state import ExecutionLease
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -70,6 +71,48 @@ def launch_attempt_in_flight(phase: PaperWorkflowPhase) -> bool:
     """
 
     return phase is PaperWorkflowPhase.CONNECTING
+
+
+def preparation_ready(phase: PaperWorkflowPhase) -> bool:
+    """Whether canonical Paper preparation reached READY."""
+
+    return phase is PaperWorkflowPhase.READY
+
+
+def session_running(phase: PaperWorkflowPhase) -> bool:
+    return phase is PaperWorkflowPhase.RUNNING
+
+
+def session_paused(phase: PaperWorkflowPhase) -> bool:
+    return phase is PaperWorkflowPhase.PAUSED
+
+
+def finalization_pending(phase: PaperWorkflowPhase) -> bool:
+    """Whether Paper is in its canonical orderly finalization phase."""
+
+    return phase is PaperWorkflowPhase.STOPPING
+
+
+def ownership_consistent(
+    phase: PaperWorkflowPhase,
+    *,
+    lease: ExecutionLease,
+    order_service_held: bool,
+) -> bool:
+    """Check the canonical phase against Paper's lease and service owner."""
+
+    if phase is PaperWorkflowPhase.CONNECTING:
+        return lease is ExecutionLease.PAPER
+    if phase in {
+        PaperWorkflowPhase.RUNNING,
+        PaperWorkflowPhase.PAUSED,
+        PaperWorkflowPhase.STOPPING,
+        PaperWorkflowPhase.HALTED,
+        PaperWorkflowPhase.RECONCILING,
+        PaperWorkflowPhase.RECONCILING_READY,
+    }:
+        return lease is ExecutionLease.PAPER and order_service_held
+    return lease is ExecutionLease.NONE and not order_service_held
 
 
 #: The phases in which a live session owns the run loop.  ``STOPPING`` is in the set

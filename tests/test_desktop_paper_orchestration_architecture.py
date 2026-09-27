@@ -400,6 +400,12 @@ PUBLIC_SURFACE = (
     "begin_preparation",
     "cancel_preparation",
     "mark_preparation_ready",
+    "preparation_ready",
+    "session_running",
+    "session_paused",
+    "manual_recovery_is_required",
+    "finalization_pending",
+    "paper_ownership_consistent",
 )
 
 #: The Qt signals the window relies on.  ``result_changed`` carries the workflow's own
@@ -420,6 +426,11 @@ PUBLIC_SIGNALS = (
     "presentation_refresh_requested",
     "session_finalized",
     "manual_recovery_required",
+    "launch_authorization_published",
+    "preparation_ready_published",
+    "session_running_published",
+    "session_paused_published",
+    "launch_failed_published",
 )
 
 #: Every ``self.paper_orchestrator.<name>`` the window may reach for.
@@ -1438,7 +1449,7 @@ def test_the_duplicate_gate_reads_the_workflow_phase() -> None:
     assert "queries.launch_attempt_in_flight(self._workflow.phase)" in start
     # The gate must come first: a second start may read no fact before it returns.
     assert start.index("launch_attempt_in_flight") < start.index(
-        "self._preflight_provider()"
+        "self._preflight_provider(authorization)"
     )
     assert start.index("launch_attempt_in_flight") < start.index(
         "self._shadow_is_active()"
@@ -1870,7 +1881,7 @@ def test_the_second_preflight_and_identity_revalidation_are_both_kept() -> None:
     """The first pass is not evidence about the present."""
 
     source = _function_source(_ORCHESTRATOR_PATH, "_connect_finished")
-    assert "queries.preflight_failed(self._preflight_provider())" in source
+    assert "queries.preflight_failed(self._preflight_provider(authorization))" in source
     assert "queries.current_inputs_match(" in source
 
 
@@ -1921,7 +1932,7 @@ def test_the_lease_is_never_touched_directly() -> None:
     ):
         assert forbidden not in source, forbidden
     named = set(re.findall(r"ExecutionLease\.(\w+)", source))
-    assert named == {"PAPER"}, sorted(named)
+    assert named == {"NONE", "PAPER"}, sorted(named)
 
 
 # -- Guard H: the window left recovery and finalization ------------------

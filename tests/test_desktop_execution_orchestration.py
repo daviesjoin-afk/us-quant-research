@@ -64,6 +64,7 @@ from us_quant.desktop_v2.orchestration.execution import (  # noqa: E402
     orchestrator as execution_orchestrator,
 )
 from us_quant.desktop_v2.pages.execution import ExecutionPage  # noqa: E402
+from us_quant.trading.domain.paper_preparation import PaperPreparationRequest  # noqa: E402
 from us_quant.trading.application.strategy_selection import (  # noqa: E402
     StrategySelectionError,
     StrategySelectionPurpose,
@@ -774,6 +775,40 @@ def test_the_scan_completion_writes_no_manual_line(harness: Harness) -> None:
     assert not any("扫描完成" in line for line in harness.log)
 
 
+def test_manual_prepare_reads_both_ui_limits_and_uses_shared_seam(harness, monkeypatch):
+    harness.page._candidate_limit = 6
+    harness.page._capital_limit = Decimal("4200")
+    admitted = []
+    monkeypatch.setattr(
+        harness.orchestrator,
+        "request_prepare_with",
+        lambda request: admitted.append(request) or True,
+    )
+
+    harness.orchestrator.request_prepare()
+
+    assert admitted == [
+        PaperPreparationRequest(candidate_limit=6, capital_limit=Decimal("4200"))
+    ]
+
+
+def test_explicit_prepare_request_never_reads_ui_limits(harness, monkeypatch):
+    def unexpected_ui_read():
+        raise AssertionError("autonomous preparation read a UI limit")
+
+    monkeypatch.setattr(harness.page, "candidate_limit", unexpected_ui_read)
+    monkeypatch.setattr(harness.page, "capital_limit", unexpected_ui_read)
+    request = PaperPreparationRequest(
+        candidate_limit=5, capital_limit=Decimal("2500")
+    )
+
+    assert harness.orchestrator.request_prepare_with(request)
+
+    assert harness.selection_rule_calls[-1]["limit"] == 5
+    assert harness.selection_rule_calls[-1]["capital"] == Decimal("2500")
+    assert len(harness.orchestrator.candidates) == 3
+
+
 def test_the_completion_rejects_an_unexpected_result(
     harness: Harness,
 ) -> None:
@@ -788,7 +823,12 @@ def test_an_unexpected_result_never_reaches_the_capability(
     """The shape is asserted *before* the fact is handed to the scan owner."""
 
     with pytest.raises(TypeError):
-        harness.orchestrator._preparation_finished(object())
+        harness.orchestrator._preparation_finished(
+            object(),
+            request=PaperPreparationRequest(
+                candidate_limit=8, capital_limit=Decimal("25000")
+            ),
+        )
     assert harness.adopted == [], (
         "a non-scan must never be adopted into the scan truth"
     )

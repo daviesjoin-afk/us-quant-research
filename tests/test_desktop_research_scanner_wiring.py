@@ -25,6 +25,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from datetime import date, datetime, timezone
 
 import pytest
+
+from us_quant.trading.domain.paper_preparation import PaperPreparationRequest
 from PySide6.QtWidgets import QApplication
 
 from us_quant.desktop import MainWindow
@@ -235,10 +237,13 @@ def test_an_autoquant_scan_is_the_capabilitys_scan(window, monkeypatch) -> None:
     scan = _scan()
     window.universe_orchestrator.restore_snapshot(_universe())
     monkeypatch.setattr(
-        window.execution_orchestrator, "_build_shortlist", lambda: None
+        window.execution_orchestrator, "_build_shortlist", lambda **_kwargs: None
     )
 
-    window.execution_orchestrator._preparation_finished(scan)
+    window.execution_orchestrator._preparation_finished(
+        scan,
+        request=PaperPreparationRequest(candidate_limit=8, capital_limit=10000),
+    )
 
     assert window.scanner_orchestrator.scan is scan
 
@@ -301,10 +306,13 @@ def test_the_autoquant_finish_publishes_page_truth_and_follow_ups(
     monkeypatch.setattr(
         window.execution_orchestrator,
         "_build_shortlist",
-        lambda: candidate_selections.append("x"),
+        lambda **_kwargs: candidate_selections.append("x"),
     )
 
-    window.execution_orchestrator._preparation_finished(scan)
+    window.execution_orchestrator._preparation_finished(
+        scan,
+        request=PaperPreparationRequest(candidate_limit=8, capital_limit=10000),
+    )
 
     # The truth moved, through the capability's adoption entry point.
     assert window.scanner_orchestrator.scan is scan
@@ -323,12 +331,17 @@ def test_the_autoquant_finish_writes_no_manual_completion_line(
 
     window.universe_orchestrator.restore_snapshot(_universe())
     monkeypatch.setattr(
-        window.execution_orchestrator, "_build_shortlist", lambda: None
+        window.execution_orchestrator,
+        "_build_shortlist",
+        lambda **_kwargs: None,
     )
     logs: list[str] = []
     monkeypatch.setattr(window, "_log", logs.append)
 
-    window.execution_orchestrator._preparation_finished(_scan())
+    window.execution_orchestrator._preparation_finished(
+        _scan(),
+        request=PaperPreparationRequest(candidate_limit=8, capital_limit=10000),
+    )
 
     assert not [line for line in logs if "扫描完成" in line], logs
 
@@ -367,7 +380,10 @@ def test_the_autoquant_finish_rejects_a_wrong_type(window) -> None:
     """
 
     with pytest.raises(TypeError):
-        window.execution_orchestrator._preparation_finished(object())
+        window.execution_orchestrator._preparation_finished(
+            object(),
+            request=PaperPreparationRequest(candidate_limit=8, capital_limit=10000),
+        )
 
     assert window.scanner_orchestrator.scan is None, (
         "the refused result must not have reached the scan truth"

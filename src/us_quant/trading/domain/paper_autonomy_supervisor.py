@@ -270,6 +270,11 @@ class PaperAutonomyEventCode(StrEnum):
     ACTION_FAILED = "AUTONOMY_ACTION_FAILED"
     ACTION_OUTCOME_UNKNOWN = "AUTONOMY_ACTION_OUTCOME_UNKNOWN"
     RECOVERY_REQUIRED = "AUTONOMY_RECOVERY_REQUIRED"
+    AUTONOMY_PREPARE_SUCCEEDED = "AUTONOMY_PREPARE_SUCCEEDED"
+    AUTONOMY_START_SUCCEEDED = "AUTONOMY_START_SUCCEEDED"
+    AUTONOMY_PAUSE_SUCCEEDED = "AUTONOMY_PAUSE_SUCCEEDED"
+    AUTONOMY_RESUME_SUCCEEDED = "AUTONOMY_RESUME_SUCCEEDED"
+    AUTONOMY_STOP_SUCCEEDED = "AUTONOMY_STOP_SUCCEEDED"
 
 
 #: The severity each code is recorded at.  Kept beside the codes rather than in
@@ -286,6 +291,11 @@ EVENT_SEVERITIES: dict[PaperAutonomyEventCode, str] = {
     PaperAutonomyEventCode.ACTION_FAILED: "error",
     PaperAutonomyEventCode.ACTION_OUTCOME_UNKNOWN: "error",
     PaperAutonomyEventCode.RECOVERY_REQUIRED: "warning",
+    PaperAutonomyEventCode.AUTONOMY_PREPARE_SUCCEEDED: "info",
+    PaperAutonomyEventCode.AUTONOMY_START_SUCCEEDED: "info",
+    PaperAutonomyEventCode.AUTONOMY_PAUSE_SUCCEEDED: "info",
+    PaperAutonomyEventCode.AUTONOMY_RESUME_SUCCEEDED: "info",
+    PaperAutonomyEventCode.AUTONOMY_STOP_SUCCEEDED: "info",
 }
 
 #: The code each executable action is recorded under when an owner accepts it.
@@ -453,7 +463,7 @@ class PaperAutonomyScheduleFacts:
     """
 
     trading_day: date
-    session: PaperAutonomySessionWindow
+    session: PaperAutonomySessionWindow | None
     preparation_allowed: bool
     start_allowed: bool
     orderly_stop_due: bool
@@ -974,7 +984,8 @@ def decide_paper_autonomy(
             )
         return _noop(
             f"candidates are ready but this session "
-            f"({schedule.session.value}) does not permit an autonomous start",
+            f"({schedule.session.value if schedule.session is not None else 'unknown'}) "
+            "does not permit an autonomous start",
             day,
             intent_revision,
         )
@@ -986,14 +997,16 @@ def decide_paper_autonomy(
         return _act(
             PaperAutonomyAction.PREPARE,
             f"the operator authorised autonomy and this session "
-            f"({schedule.session.value}) permits preparation",
+            f"({schedule.session.value if schedule.session is not None else 'unknown'}) "
+            "permits preparation",
             day,
             intent_revision,
         )
 
     return _noop(
         f"the operator authorised autonomy but this session "
-        f"({schedule.session.value}) is outside the autonomy policy windows",
+        f"({schedule.session.value if schedule.session is not None else 'unknown'}) "
+        "is outside the autonomy policy windows",
         day,
         intent_revision,
     )

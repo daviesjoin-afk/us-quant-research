@@ -41,6 +41,7 @@ from us_quant.trading.domain.paper_autonomy import (
     PaperAutonomyError,
     PaperAutonomyMode,
 )
+from us_quant.trading.domain.paper_preparation import PaperPreparationRequest
 from us_quant.trading.domain.paper_autonomy_supervisor import (
     EVENT_SEVERITIES,
     REQUESTED_EVENT_CODES,
@@ -64,7 +65,6 @@ from us_quant.trading.ports.paper_autonomy_action_repository import (
 from us_quant.trading.ports.paper_autonomy_supervisor import (
     PaperAutonomyExecutorPort,
     PaperAutonomyIntentReaderPort,
-    PaperAutonomyPreparationRequest,
     PaperAutonomyRequestOutcome,
     PaperAutonomyRuntimeFactsPort,
     PaperAutonomySchedulePort,
@@ -313,7 +313,7 @@ class PaperAutonomySupervisor:
 
         if action is PaperAutonomyAction.PREPARE:
             return self._executor.request_prepare(
-                PaperAutonomyPreparationRequest(
+                PaperPreparationRequest(
                     candidate_limit=self._policy.candidate_limit,
                     capital_limit=self._policy.requested_capital_limit,
                 )

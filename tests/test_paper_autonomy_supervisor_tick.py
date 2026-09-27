@@ -33,6 +33,7 @@ from us_quant.trading.domain.paper_autonomy import (
     PaperAutonomyIntent,
     PaperAutonomyMode,
 )
+from us_quant.trading.domain.paper_preparation import PaperPreparationRequest
 from us_quant.trading.ports.paper_autonomy_repository import (
     PaperAutonomyStoreUnreadable,
 )
@@ -54,7 +55,6 @@ from us_quant.trading.ports.paper_autonomy_action_repository import (
     PaperAutonomyActionRecord,
 )
 from us_quant.trading.ports.paper_autonomy_supervisor import (
-    PaperAutonomyPreparationRequest,
     PaperAutonomyRequestOutcome,
 )
 
@@ -312,7 +312,7 @@ class _Executor:
         self.detail = detail
         self.raises = raises
         self.calls: list[tuple[str, object]] = []
-        self.preparations: list[PaperAutonomyPreparationRequest] = []
+        self.preparations: list[PaperPreparationRequest] = []
 
     def _answer(self, name: str, argument: object = None):
         self.calls.append((name, argument))
@@ -322,7 +322,7 @@ class _Executor:
             accepted=self.accepted, detail=self.detail
         )
 
-    def request_prepare(self, request: PaperAutonomyPreparationRequest):
+    def request_prepare(self, request: PaperPreparationRequest):
         self.preparations.append(request)
         return self._answer("request_prepare", request)
 
@@ -539,7 +539,7 @@ def test_the_preparation_is_sized_by_the_policy_not_by_a_widget(
     harness.tick()
 
     assert harness.executor.preparations == [
-        PaperAutonomyPreparationRequest(
+        PaperPreparationRequest(
             candidate_limit=7, capital_limit=Decimal("1234")
         )
     ]
@@ -570,7 +570,9 @@ def test_an_identical_second_tick_does_not_ask_again(
     assert len(harness.rows()) == 1
 
 
-def test_two_ticks_racing_ask_the_owner_once(tmp_path: pathlib.Path) -> None:
+def test_two_ticks_racing_ask_the_owner_once(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The claim is the *concurrency* carrier, and this is where it works alone.
 
     Several ticks that each read "nothing outstanding" before any of them claims
@@ -583,6 +585,15 @@ def test_two_ticks_racing_ask_the_owner_once(tmp_path: pathlib.Path) -> None:
     harness = _Harness(tmp_path)
     workers = 4
     barrier = threading.Barrier(workers)
+    claim_barrier = threading.Barrier(workers)
+    original_claim = harness.ledger.claim
+
+    def synchronized_claim(record):
+        # All requests have passed the read/decision phase before any can claim.
+        claim_barrier.wait()
+        return original_claim(record)
+
+    monkeypatch.setattr(harness.ledger, "claim", synchronized_claim)
 
     def attempt(_index: int):
         barrier.wait()

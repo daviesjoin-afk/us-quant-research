@@ -64,6 +64,13 @@ from us_quant.trading.composition.accounts import (
 from us_quant.trading.composition.market_data import (
     build_market_data_application,
 )
+from us_quant.trading.composition.paper_autonomy import (
+    build_paper_autonomy_application,
+)
+from us_quant.trading.composition.paper_autonomy_supervisor import (
+    build_paper_autonomy_action_repository,
+    build_paper_autonomy_supervisor,
+)
 from us_quant.trading.domain.account import (
     BrokerAccountPortfolio,
     BrokerAccountSnapshot,
@@ -72,6 +79,14 @@ from us_quant.trading.domain.market import (
     MarketDataMode,
     MarketSnapshot,
 )
+from us_quant.trading.domain.paper_autonomy import PaperAutonomyError
+from us_quant.trading.domain.paper_autonomy_supervisor import (
+    EVENT_SEVERITIES,
+    REQUESTED_EVENT_CODES,
+    PaperAutonomyEventCode,
+    PaperAutonomyStartupFacts,
+)
+from us_quant.trading.runtime.preflight import PaperLaunchAuthorization
 from us_quant.desktop_settings import (
     DesktopSettingsCommit,
     DesktopSettingsService,
@@ -197,6 +212,13 @@ from us_quant.desktop_v2.orchestration.research.targeted.session import (
     TargetedSessionOrchestrator,
 )
 from us_quant.desktop_v2.orchestration.shadow import ShadowOrchestrator
+from us_quant.desktop_v2.orchestration.autonomy import (
+    PaperAutonomyDesktopExecutor,
+    PaperAutonomyCompletionObserver,
+    PaperAutonomyRuntimeFactsAdapter,
+    PaperAutonomyStartupFactsAdapter,
+)
+from us_quant.desktop_v2.orchestration.autonomy.host import PaperAutonomyHost
 from us_quant.desktop_v2.orchestration.shadow.models import ShadowCapitalFact
 from us_quant.desktop_v2.orchestration.strategy import (
     StrategyGovernanceOrchestrator,
@@ -267,6 +289,8 @@ from us_quant.user_settings import (
     UserPreferencesStore,
 )
 
+
+_PAPER_AUTONOMY_PROBE_PENDING = object()
 
 APP_TITLE = "美股量化研究台"
 
@@ -406,6 +430,11 @@ class MainWindow(QMainWindow):
         self.config = replace(
             baseline_config,
             ibkr=ibkr_config_from_preferences(self.preferences),
+        )
+        self.paper_autonomy_application = build_paper_autonomy_application(
+            database_path=(
+                self.paths.runtime_root / "paper_autonomy.sqlite3"
+            )
         )
         self.artifact_catalog: ArtifactCatalog = load_artifact_catalog(
             self.paths.research_results_root
@@ -557,9 +586,7 @@ class MainWindow(QMainWindow):
             build_session=self._build_paper_session,
             submit_task=self._start_task,
             health_evaluator=self._paper_execution_health_adapter,
-            preflight_provider=lambda: (
-                self.execution_orchestrator.current_preflight
-            ),
+            preflight_provider=self._paper_launch_preflight,
             # The AUTO_ROTATION version, read from the selection service by the
             # route that runs it.  Paper never names the service and never
             # reads the combo: it receives the canonical value.
@@ -658,6 +685,7 @@ class MainWindow(QMainWindow):
         self._finalize_layout_behavior()
         self._apply_style()
         self._register_runtime_components()
+        self._initialize_paper_autonomy()
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -1509,6 +1537,281 @@ class MainWindow(QMainWindow):
             self.shadow_orchestrator.stop()
         if self.market_orchestrator.stop():
             self.execution_orchestrator.on_market_stopped()
+
+    def _paper_launch_preflight(
+        self, authorization: PaperLaunchAuthorization
+    ):
+        """Use the UI arm for manual launches and freshly read A1 for autonomy."""
+
+        if authorization is PaperLaunchAuthorization.MANUAL:
+            return self.execution_orchestrator.current_preflight
+        try:
+            intent = self.paper_autonomy_application.snapshot()
+            confirmed = intent.allows_autonomous_work
+        except PaperAutonomyError:
+            confirmed = False
+        return self.execution_orchestrator.preflight_with_confirmation(
+            paper_confirmed=confirmed
+        )
+
+    def _initialize_paper_autonomy(
+        self, *, startup_probe_result: object = _PAPER_AUTONOMY_PROBE_PENDING
+    ) -> None:
+        """Compose autonomy only from a complete production policy and owners."""
+
+        self.paper_autonomy_host: PaperAutonomyHost | None = None
+        policy = self.config.paper_autonomy_policy
+        if policy is None:
+            reason = (
+                self.config.paper_autonomy_config_error
+                or "[paper.autonomy] policy is unavailable"
+            )
+            self.runtime_events_orchestrator.record(
+                severity="warning",
+                component="paper-autonomy",
+                code="AUTONOMY_SUPERVISOR_UNAVAILABLE",
+                message=f"Paper autonomy supervisor unavailable: {reason}",
+            )
+            return
+
+        if startup_probe_result is _PAPER_AUTONOMY_PROBE_PENDING:
+            started = self._start_task(
+                self._paper_autonomy_startup_probe_task,
+                on_success=self._paper_autonomy_startup_probe_succeeded,
+                on_failure=self._paper_autonomy_startup_probe_failed,
+                start_message="正在检查 Paper 账户和未结订单…",
+                resource_group="broker",
+                suppress_busy_message=True,
+            )
+            if not started:
+                self._paper_autonomy_startup_probe_failed(
+                    "Paper broker resource is unavailable"
+                )
+            return
+
+        actions = build_paper_autonomy_action_repository(
+            self.paths.runtime_root / "paper_autonomy_actions.sqlite3"
+        )
+
+        def intent_store_readable() -> bool:
+            try:
+                self.paper_autonomy_application.snapshot()
+            except PaperAutonomyError:
+                return False
+            return True
+
+        def action_store_readable() -> bool:
+            try:
+                actions.unresolved()
+                return True
+            except Exception:  # noqa: BLE001 - startup must fail closed
+                return False
+
+        try:
+            connection, broker_snapshot = startup_probe_result
+            open_orders = connection.open_broker_orders
+            unreconciled_from_broker = connection.unreconciled_local_orders
+            account_alias = connection.account_alias
+            snapshot_complete = connection.snapshot_complete
+            broker_account_alias = broker_snapshot.account_alias
+            broker_positions_count = len(broker_snapshot.positions)
+        except (AttributeError, TypeError, ValueError):
+            open_orders = None
+            unreconciled_from_broker = None
+            account_alias = ""
+            snapshot_complete = False
+            broker_account_alias = ""
+            broker_positions_count = None
+
+        def broker_state_known() -> bool:
+            return bool(snapshot_complete and broker_account_alias)
+
+        def account_identity_known() -> bool:
+            return bool(
+                self.config.environment.value == "paper"
+                and account_alias.strip()
+                and broker_account_alias == account_alias
+            )
+
+        def broker_positions() -> int | None:
+            return broker_positions_count
+
+        def unreconciled_rows() -> int | None:
+            try:
+                return self.order_repository.reconciliation_summary().unreconciled
+            except Exception:  # noqa: BLE001 - unknown is not an empty ledger
+                return None
+
+        runtime_facts = PaperAutonomyRuntimeFactsAdapter(
+            shutting_down=lambda: self.runtime_supervisor.shutting_down,
+            preparation_active=lambda: self.paper_orchestrator.preparation_active,
+            preparation_ready=lambda: self.paper_orchestrator.preparation_ready,
+            launch_in_flight=lambda: self.paper_orchestrator.launch_attempt_in_flight,
+            session_running=lambda: self.paper_orchestrator.session_running,
+            session_paused=lambda: self.paper_orchestrator.session_paused,
+            manual_recovery_required=lambda: (
+                self.paper_orchestrator.manual_recovery_is_required
+            ),
+            finalization_pending=lambda: (
+                self.paper_orchestrator.finalization_pending
+            ),
+            paper_ownership_consistent=lambda: (
+                self.paper_orchestrator.paper_ownership_consistent
+            ),
+        )
+        startup_facts = PaperAutonomyStartupFactsAdapter(
+            intent_store_readable=intent_store_readable,
+            action_store_readable=action_store_readable,
+            broker_state_known=broker_state_known,
+            account_identity_known=account_identity_known,
+            # The account snapshot is not proof about open broker orders. Until
+            # the existing startup channel probe supplies that fact, unknown
+            # stays unknown and the supervisor blocks this process instance.
+            open_broker_orders=lambda: open_orders,
+            broker_positions=broker_positions,
+            unreconciled_rows=lambda: (
+                unreconciled_from_broker
+                if unreconciled_from_broker is not None
+                else unreconciled_rows()
+            ),
+            paper_ownership_clear=lambda: (
+                self.paper_orchestrator.paper_ownership_consistent
+                and not self.paper_orchestrator.runtime_active
+                and not self.paper_orchestrator.order_service_held
+            ),
+            manual_recovery_required=lambda: (
+                self.paper_orchestrator.manual_recovery_is_required
+            ),
+        )
+        executor = PaperAutonomyDesktopExecutor(
+            prepare=lambda request: (
+                self.execution_orchestrator.request_prepare_with(request)
+            ),
+            start=lambda: self.paper_orchestrator.start(
+                PaperLaunchAuthorization.AUTONOMOUS
+            ),
+            pause=self.paper_orchestrator.pause,
+            resume=self.paper_orchestrator.resume,
+            stop=self.paper_orchestrator.stop,
+        )
+        completion = PaperAutonomyCompletionObserver(
+            actions=actions,
+            emit=self._record_paper_autonomy_completion,
+        )
+        completion_ref = {"observer": completion}
+
+        def emit_supervisor_event(event) -> None:
+            self.runtime_events_orchestrator.record(
+                severity=event.severity,
+                component="paper-autonomy",
+                code=event.code.value,
+                message=event.detail,
+            )
+            if event.code in REQUESTED_EVENT_CODES.values():
+                completion_ref["observer"].flush_pending()
+
+        try:
+            composition = build_paper_autonomy_supervisor(
+                intent=self.paper_autonomy_application,
+                runtime_facts=runtime_facts,
+                startup_facts=startup_facts,
+                executor=executor,
+                policy=policy,
+                actions=actions,
+                emit=emit_supervisor_event,
+            )
+            startup = startup_facts.startup_facts()
+            self.paper_autonomy_supervisor = composition.supervisor
+            self.paper_autonomy_action_repository = composition.actions
+            self.paper_autonomy_runtime_facts = runtime_facts
+            self.paper_autonomy_completion_observer = completion
+        except Exception as error:  # noqa: BLE001 - preserve manual Paper operation
+            self.runtime_events_orchestrator.record(
+                severity="warning",
+                component="paper-autonomy",
+                code="AUTONOMY_SUPERVISOR_UNAVAILABLE",
+                message=(
+                    "Paper autonomy supervisor unavailable or blocked: "
+                    f"{type(error).__name__}"
+                ),
+            )
+            return
+
+        self.paper_orchestrator.launch_authorization_published.connect(
+            runtime_facts.on_launch_authorization_published
+        )
+        self.paper_orchestrator.session_finalized.connect(
+            runtime_facts.on_session_finalized
+        )
+        self.paper_orchestrator.preparation_ready_published.connect(
+            completion.preparation_ready
+        )
+        self.paper_orchestrator.session_running_published.connect(
+            completion.session_running
+        )
+        self.paper_orchestrator.session_running_published.connect(
+            completion.session_resumed
+        )
+        self.paper_orchestrator.session_paused_published.connect(
+            completion.session_paused
+        )
+        self.paper_orchestrator.session_finalized.connect(
+            completion.session_finalized
+        )
+        self.paper_orchestrator.launch_failed_published.connect(
+            completion.launch_failed
+        )
+        self.execution_orchestrator.preparation_failed_published.connect(
+            completion.preparation_failed
+        )
+        if not startup.proven_safe:
+            self.runtime_events_orchestrator.record(
+                severity="warning",
+                component="paper-autonomy",
+                code="AUTONOMY_STARTUP_UNSAFE",
+                message=(
+                    "Paper autonomy supervisor is blocked because startup "
+                    "facts were unknown or unsafe; restart after manual review"
+                ),
+            )
+        self.paper_autonomy_host = PaperAutonomyHost(
+            composition.supervisor,
+            tick_interval_seconds=policy.bounded_tick_interval_seconds,
+            parent=self,
+        )
+        self.paper_autonomy_host.start()
+
+    def _paper_autonomy_startup_probe_task(
+        self, progress: Callable[[str], None]
+    ) -> object:
+        progress("读取 Paper 未结订单与账户快照")
+        return self._probe_auto_order_channel()
+
+    def _paper_autonomy_startup_probe_succeeded(self, result: object) -> None:
+        if self.runtime_supervisor.shutting_down:
+            return
+        self._initialize_paper_autonomy(startup_probe_result=result)
+
+    def _paper_autonomy_startup_probe_failed(self, _message: str) -> None:
+        self.runtime_events_orchestrator.record(
+            severity="warning",
+            component="paper-autonomy",
+            code="AUTONOMY_STARTUP_UNSAFE",
+            message=(
+                "Paper autonomy supervisor is blocked because the startup "
+                "broker snapshot could not be verified"
+            ),
+        )
+
+    def _record_paper_autonomy_completion(
+        self, code: PaperAutonomyEventCode, detail: str
+    ) -> None:
+        self.runtime_events_orchestrator.record(
+            severity=EVENT_SEVERITIES[code],
+            component="paper-autonomy",
+            code=code.value,
+            message=detail,
+        )
 
     def _confirm_execution_start(self, title: str, message: str) -> None:
         """Collect the operator's launch consent and hand the answer back.
@@ -3084,6 +3387,8 @@ class MainWindow(QMainWindow):
             return
         try:
             self.runtime_supervisor.cancel_shutdown()
+            if self.paper_autonomy_host is not None:
+                self.paper_autonomy_host.start()
         except RuntimeError as error:
             self._log(f"关闭流程无法撤销，保持关闭状态：{error}")
 
@@ -3127,6 +3432,8 @@ class MainWindow(QMainWindow):
         # a task is still running the window must already refuse new work, and
         # a second close must not re-admit anything.  ``begin_shutdown`` never
         # joins and never releases, so no in-flight write is disturbed.
+        if self.paper_autonomy_host is not None:
+            self.paper_autonomy_host.stop()
         self.runtime_supervisor.begin_shutdown()
         running_tasks = self.task_controller.running_workers()
         if running_tasks:

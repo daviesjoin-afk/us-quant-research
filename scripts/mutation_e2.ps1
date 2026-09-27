@@ -98,8 +98,8 @@ $mutations = @(
     @{
         name = "M8  a refused pause still reports success"
         file = $orchestrator
-        find = 'except WorkflowStateError as error:\s+self\.log_requested\.emit\(str\(error\)\)\s+return\s+self\._publish_result\(result\)\s+self\.log_requested\.emit\(PAUSE_SUCCEEDED_MESSAGE\)'
-        repl = "except WorkflowStateError as error:`n            self.log_requested.emit(PAUSE_SUCCEEDED_MESSAGE)`n            return`n        self._publish_result(result)`n        self.log_requested.emit(PAUSE_SUCCEEDED_MESSAGE)"
+        find = 'result = self\._workflow\.set_entries_paused\(True\)\s+except WorkflowStateError as error:\s+self\.log_requested\.emit\(str\(error\)\)\s+return False'
+        repl = "result = self._workflow.set_entries_paused(True)`n        except WorkflowStateError as error:`n            self.log_requested.emit(PAUSE_SUCCEEDED_MESSAGE)`n            return True"
         tests = @($behavior)
         select = @("-k", "refused_outside_a_live_session")
     },

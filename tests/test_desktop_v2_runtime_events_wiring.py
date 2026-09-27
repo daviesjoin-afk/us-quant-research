@@ -122,6 +122,7 @@ def test_refresh_reads_the_latest_five_hundred_and_repaints(
 def test_recording_an_event_refreshes_the_page(monkeypatch, tmp_path) -> None:
     window = _window(monkeypatch, tmp_path)
     try:
+        _force_immediate(window)
         before = window.runtime_events_page.table.rowCount()
         window.runtime_events_orchestrator.record(
             severity="info",

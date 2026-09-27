@@ -81,10 +81,23 @@ $domainSupervisor = Join-Path $src "trading\domain\paper_autonomy_supervisor.py"
 $supervisorApplication = Join-Path $src "trading\application\paper_autonomy_supervisor.py"
 $portAction = Join-Path $src "trading\ports\paper_autonomy_action_repository.py"
 $adapterAction = Join-Path $src "trading\adapters\sqlite\paper_autonomy_action_repository.py"
+$scheduleAdapter = Join-Path $src "trading\adapters\paper_autonomy_schedule.py"
+$executionOrchestrator = Join-Path $src "desktop_v2\orchestration\execution\orchestrator.py"
+$paperOrchestrator = Join-Path $src "desktop_v2\orchestration\paper\orchestrator.py"
+$desktop = Join-Path $src "desktop.py"
+$autonomyExecutor = Join-Path $src "desktop_v2\orchestration\autonomy\executor.py"
+$autonomyFacts = Join-Path $src "desktop_v2\orchestration\autonomy\facts.py"
+$autonomyCompletion = Join-Path $src "desktop_v2\orchestration\autonomy\completion.py"
+$autonomyHost = Join-Path $src "desktop_v2\orchestration\autonomy\host.py"
 
 $behaviour = Join-Path $projectRoot "tests/test_paper_autonomy_supervisor.py"
 $tickBehaviour = Join-Path $projectRoot "tests/test_paper_autonomy_supervisor_tick.py"
 $architecture = Join-Path $projectRoot "tests/test_paper_autonomy_supervisor_architecture.py"
+$launchBehaviour = Join-Path $projectRoot "tests/test_desktop_paper_launch_orchestrator.py"
+$launchAuthorization = Join-Path $projectRoot "tests/test_desktop_paper_launch_authorization.py"
+$completionBehaviour = Join-Path $projectRoot "tests/test_paper_autonomy_completion.py"
+$scheduleBehaviour = Join-Path $projectRoot "tests/test_paper_autonomy_schedule.py"
+$adapterBehaviour = Join-Path $projectRoot "tests/test_paper_autonomy_adapters.py"
 
 function Get-Text([string]$path) { [System.IO.File]::ReadAllText($path) }
 function Set-Text([string]$path, [string]$text) {
@@ -360,6 +373,174 @@ $mutations = @(
         repl = "if decision.action is PaperAutonomyAction.NOOP:`n            self._report(decision, code=PaperAutonomyEventCode.TICK_BLOCKED)"
         tests = @($tickBehaviour)
         select = @("-k", "a_tick_that_decides_nothing_asks_nobody or only_a_block_or_a_request_is_reported")
+    },
+    @{
+        name = 'M32 schedule bypasses the canonical session provider'
+        file = $scheduleAdapter
+        find = 'canonical_session = us_equity_session\(eastern\)'
+        repl = 'canonical_session = USEquitySession.REGULAR'
+        tests = @($architecture)
+        select = @("-k", "production_schedule_and_preparation_seams_stay_canonical")
+    },
+    @{
+        name = 'M33 AFTER_HOURS permits autonomous START'
+        file = $scheduleAdapter
+        find = 'canonical_session is USEquitySession\.REGULAR'
+        repl = 'canonical_session in {USEquitySession.REGULAR, USEquitySession.AFTER_HOURS}'
+        tests = @($architecture)
+        select = @("-k", "production_schedule_keeps_start_inside_regular_policy_window")
+    },
+    @{
+        name = 'M34 the latest start boundary is ignored'
+        file = $scheduleAdapter
+        find = '<= self\._policy\.latest_start_et'
+        repl = '<= time.max'
+        tests = @($architecture)
+        select = @("-k", "production_schedule_keeps_start_inside_regular_policy_window")
+    },
+    @{
+        name = 'M35 orderly stop no longer closes new work'
+        file = $scheduleAdapter
+        find = 'eastern_time >= self\._policy\.orderly_stop_at_et'
+        repl = 'eastern_time >= time.max'
+        tests = @($scheduleBehaviour)
+        select = @("-k", "orderly_stop_boundary_is_due_and_closes_new_work")
+    },
+    @{
+        name = 'M36 automatic preparation reads the UI candidate limit'
+        file = $executionOrchestrator
+        find = 'limit = request\.candidate_limit'
+        repl = 'limit = self._page.candidate_limit()'
+        tests = @($architecture)
+        select = @("-k", "execution_uses_one_request_driven_shortlist_implementation")
+    },
+    @{
+        name = 'M37 automatic preparation reads the UI capital limit'
+        file = $executionOrchestrator
+        find = 'paper_capital, request\.capital_limit'
+        repl = 'paper_capital, self._page.capital_limit()'
+        tests = @($architecture)
+        select = @("-k", "execution_uses_one_request_driven_shortlist_implementation")
+    },
+    @{
+        name = 'M38 preparation duplicates the shortlist implementation call'
+        file = $executionOrchestrator
+        find = 'self\._build_shortlist\(request=request\)'
+        repl = 'self._build_shortlist(request=request); self._build_shortlist(request=request)'
+        tests = @($architecture)
+        select = @("-k", "execution_uses_one_request_driven_shortlist_implementation")
+    },
+    @{
+        name = 'M39 a refused autonomous launch clears the manual arm'
+        file = $paperOrchestrator
+        find = 'def _clear_arm_if_manual\(\s*self,\s*authorization: PaperLaunchAuthorization\s*\) -> None:\s+if authorization is PaperLaunchAuthorization\.MANUAL:\s+self\._clear_arm_confirmation\(\)'
+        repl = 'def _clear_arm_if_manual(self, authorization: PaperLaunchAuthorization): return self._clear_arm_confirmation()'
+        tests = @($launchBehaviour)
+        select = @("-k", "refused_autonomous_start_does_not_clear_manual_arm")
+    },
+    @{
+        name = 'M40 manual launch reads the A1 intent'
+        file = $desktop
+        find = 'if authorization is PaperLaunchAuthorization\.MANUAL:'
+        repl = 'if authorization is PaperLaunchAuthorization.MANUAL and self.paper_autonomy_application.snapshot():'
+        tests = @($launchAuthorization)
+        select = @("-k", "manual_preflight_does_not_read_autonomy_intent")
+    },
+    @{
+        name = 'M41 unreadable A1 permits autonomous confirmation'
+        file = $desktop
+        find = 'confirmed = False'
+        repl = 'confirmed = True'
+        tests = @($launchAuthorization)
+        select = @("-k", "unreadable_a1_refuses_autonomous_confirmation")
+    },
+    @{
+        name = 'M42 an unknown active session is adopted as autonomous'
+        file = $autonomyFacts
+        find = 'PaperAutonomySessionProvenance\.UNKNOWN'
+        repl = 'PaperAutonomySessionProvenance.AUTONOMOUS'
+        tests = @($adapterBehaviour)
+        select = @("-k", "runtime_facts_are_fresh_and_active_restart_is_unknown")
+    },
+    @{
+        name = 'M43 accepted RUNNING publication completes the wrong action'
+        file = $autonomyCompletion
+        find = 'PaperAutonomyActionType\.START,\s+PaperAutonomyActionStatus\.SUCCEEDED'
+        repl = 'PaperAutonomyActionType.PREPARE, PaperAutonomyActionStatus.SUCCEEDED'
+        tests = @($completionBehaviour)
+        select = @("-k", "start_completes_only_from_running_publication")
+    },
+    @{
+        name = 'M44 synchronous completion is lost before REQUESTED'
+        file = $autonomyCompletion
+        find = 'if row\.status is PaperAutonomyActionStatus\.CLAIMED:\s+self\._pending\[row\.action_key\] = completion\s+return'
+        repl = 'if row.status is PaperAutonomyActionStatus.CLAIMED: return'
+        tests = @($completionBehaviour)
+        select = @("-k", "sync_publication_before_mark_requested_is_buffered_then_flushed")
+    },
+    @{
+        name = 'M45 host takes over a business decision'
+        file = $autonomyHost
+        find = 'self\._supervisor\.tick\(\)'
+        repl = 'self._supervisor.start()'
+        tests = @($architecture)
+        select = @("-k", "launch_authorization_host_and_completion_boundaries")
+    },
+    @{
+        name = 'M46 a manual session is classified as autonomous'
+        file = $autonomyFacts
+        find = 'PaperAutonomySessionProvenance\.MANUAL'
+        repl = 'PaperAutonomySessionProvenance.AUTONOMOUS'
+        tests = @($adapterBehaviour)
+        select = @("-k", "runtime_facts_are_fresh_and_active_restart_is_unknown")
+    },
+    @{
+        name = 'M47 STOP completes before finalization'
+        file = $autonomyCompletion
+        find = 'PaperAutonomyActionType\.STOP'
+        repl = 'PaperAutonomyActionType.START'
+        tests = @($completionBehaviour)
+        select = @("-k", "stop_completes_only_from_finalized_publication")
+    },
+    @{
+        name = 'M48 autonomy reaches reconciliation directly'
+        file = $autonomyCompletion
+        find = 'from __future__ import annotations'
+        repl = "from __future__ import annotations`n# reconcile("
+        tests = @($architecture)
+        select = @("-k", "desktop_autonomy_modules_do_not_bypass_paper_owners")
+    },
+    @{
+        name = 'M49 autonomy releases the shared execution lease'
+        file = $autonomyCompletion
+        find = 'from __future__ import annotations'
+        repl = "from __future__ import annotations`n# release_paper("
+        tests = @($architecture)
+        select = @("-k", "desktop_autonomy_modules_do_not_bypass_paper_owners")
+    },
+    @{
+        name = 'M50 autonomy reaches the Market capability directly'
+        file = $autonomyCompletion
+        find = 'from __future__ import annotations'
+        repl = "from __future__ import annotations`n# MarketOrchestrator"
+        tests = @($architecture)
+        select = @("-k", "desktop_autonomy_modules_do_not_bypass_paper_owners")
+    },
+    @{
+        name = 'M51 the Qt host imports a broker module'
+        file = $autonomyHost
+        find = 'from __future__ import annotations'
+        repl = "from __future__ import annotations`n# broker"
+        tests = @($architecture)
+        select = @("-k", "launch_authorization_host_and_completion_boundaries")
+    },
+    @{
+        name = 'M52 runtime facts retain the workflow phase type'
+        file = $autonomyFacts
+        find = 'from __future__ import annotations'
+        repl = "from __future__ import annotations`n# PaperWorkflowPhase"
+        tests = @($architecture)
+        select = @("-k", "desktop_autonomy_modules_do_not_bypass_paper_owners")
     }
 )
 

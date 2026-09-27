@@ -209,8 +209,8 @@ $mutations = @(
     @{
         name = 'M14 candidate sizing runs on the research scenario capital'
         file = $orchestratorPath
-        find = '            paper_capital, self\._page\.capital_limit\(\)'
-        repl = "            self._providers.research_scenario_capital(), self._page.capital_limit()"
+        find = '            paper_capital, request\.capital_limit'
+        repl = "            self._providers.research_scenario_capital(), request.capital_limit"
         tests = @($behaviour)
         select = @("-k", "shortlist_is_sized_on_the_bounded_paper_capital")
     },

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import time
 from decimal import Decimal
 from pathlib import Path
 import tomllib
@@ -9,6 +10,7 @@ from us_quant.trading.domain.common import Environment, decimal
 from us_quant.ibkr import IBKRConnectionConfig
 from us_quant.portfolio import SubstitutionRule
 from us_quant.trading.domain.risk import RiskLimits
+from us_quant.trading.domain.paper_autonomy_supervisor import PaperAutonomyPolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +51,8 @@ class AppConfig:
     execution: ExecutionConfig
     ibkr: IBKRConnectionConfig
     substitutions: dict[str, SubstitutionRule]
+    paper_autonomy_policy: PaperAutonomyPolicy | None = None
+    paper_autonomy_config_error: str | None = None
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -62,6 +66,7 @@ def load_config(path: str | Path) -> AppConfig:
     research = raw.get("research", {})
     execution = raw["execution"]
     broker = raw["broker"]
+    autonomy_policy, autonomy_error = _paper_autonomy_policy(raw)
 
     substitutions = {
         source_symbol: SubstitutionRule(
@@ -124,4 +129,50 @@ def load_config(path: str | Path) -> AppConfig:
             ),
         ),
         substitutions=substitutions,
+        paper_autonomy_policy=autonomy_policy,
+        paper_autonomy_config_error=autonomy_error,
     )
+
+
+def _paper_autonomy_policy(
+    raw: dict,
+) -> tuple[PaperAutonomyPolicy | None, str | None]:
+    """Load an explicitly configured policy without inventing production times."""
+
+    section = raw.get("paper")
+    autonomy = section.get("autonomy") if isinstance(section, dict) else None
+    if not isinstance(autonomy, dict):
+        return None, "required [paper.autonomy] policy is missing"
+    try:
+        policy = PaperAutonomyPolicy(
+            prepare_not_before_et=time.fromisoformat(
+                str(autonomy["prepare_not_before_et"])
+            ),
+            start_not_before_et=time.fromisoformat(
+                str(autonomy["start_not_before_et"])
+            ),
+            latest_start_et=time.fromisoformat(
+                str(autonomy["latest_start_et"])
+            ),
+            orderly_stop_at_et=time.fromisoformat(
+                str(autonomy["orderly_stop_at_et"])
+            ),
+            candidate_limit=int(autonomy["candidate_limit"]),
+            requested_capital_limit=Decimal(
+                str(autonomy["requested_capital_limit"])
+            ),
+            tick_interval_seconds=int(autonomy["tick_interval_seconds"]),
+        )
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return None, "[paper.autonomy] policy is invalid or incomplete"
+    if any(
+        value.tzinfo is not None
+        for value in (
+            policy.prepare_not_before_et,
+            policy.start_not_before_et,
+            policy.latest_start_et,
+            policy.orderly_stop_at_et,
+        )
+    ):
+        return None, "[paper.autonomy] times must be Eastern wall-clock values"
+    return policy, None

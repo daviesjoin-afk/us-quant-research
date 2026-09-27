@@ -57,6 +57,7 @@ from us_quant.desktop_v2.orchestration.paper.orchestrator import (
 from us_quant.paper_order_models import PaperBrokerPosition, PaperBrokerState
 from us_quant.trading.application.paper.models import PaperTradingLifecycleError
 from us_quant.trading.domain.strategy import parameter_hash_for
+from us_quant.trading.runtime.preflight import PaperLaunchAuthorization
 from us_quant.trading.runtime.workflow_state import (
     PaperWorkflowPhase,
     WorkflowStateError,
@@ -493,8 +494,10 @@ def _build(
     events = _Events()
     renders: list[str | None] = []
     arm_clears: list[int] = []
+    authorizations: list[object] = []
 
-    def preflight():
+    def preflight(authorization):
+        authorizations.append(authorization)
         return queue.pop(0) if len(queue) > 1 else queue[0]
 
     orchestrator = PaperOrchestrator(
@@ -539,6 +542,7 @@ def _build(
                 "renders": renders,
                 "arm_clears": arm_clears,
                 "preflights": queue,
+                "authorizations": authorizations,
             },
         )()
     )
@@ -564,6 +568,44 @@ def test_one_start_submits_one_connect_task_and_binds_one_plan() -> None:
     assert [call["resource_group"] for call in harness.submitter.calls] == ["broker"]
     assert len(harness.workflow.begin_calls) == 1
     assert len(harness.workflow.published) == 1
+
+
+def test_manual_start_uses_manual_authorization() -> None:
+    harness = _build()
+
+    harness.orchestrator.start()
+    harness.submitter.finish(harness.submitter.work())
+
+    assert harness.authorizations == [
+        PaperLaunchAuthorization.MANUAL,
+        PaperLaunchAuthorization.MANUAL,
+    ]
+    assert harness.arm_clears == []
+
+
+def test_autonomous_start_uses_autonomous_authorization_without_clearing_arm() -> None:
+    harness = _build()
+
+    harness.orchestrator.start(PaperLaunchAuthorization.AUTONOMOUS)
+    harness.submitter.finish(harness.submitter.work())
+
+    assert harness.authorizations == [
+        PaperLaunchAuthorization.AUTONOMOUS,
+        PaperLaunchAuthorization.AUTONOMOUS,
+    ]
+    assert harness.arm_clears == []
+
+
+def test_refused_autonomous_start_does_not_clear_manual_arm() -> None:
+    harness = _build(preflights=[_Preflight(ready=False)])
+
+    admitted = harness.orchestrator.start(
+        PaperLaunchAuthorization.AUTONOMOUS
+    )
+
+    assert admitted is False
+    assert harness.arm_clears == []
+    assert harness.workflow.phase is PaperWorkflowPhase.READY
 
 
 def test_a_duplicate_start_is_refused_before_anything_is_built() -> None:

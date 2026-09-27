@@ -25,43 +25,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
 from us_quant.trading.domain.paper_autonomy import PaperAutonomyIntent
+from us_quant.trading.domain.paper_preparation import PaperPreparationRequest
 from us_quant.trading.domain.paper_autonomy_supervisor import (
     PaperAutonomyRuntimeFacts,
     PaperAutonomyScheduleFacts,
     PaperAutonomyStartupFacts,
     PaperAutonomySupervisorViolation,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class PaperAutonomyPreparationRequest:
-    """The two inputs a preparation needs, as values rather than as widgets.
-
-    Candidate preparation is owned by the Execution capability, and its size is
-    a decision somebody has to make.  While that decision is read off a spin box,
-    an unattended scheduler's preparation is sized by whatever the operator last
-    left in the UI -- which is a coupling nobody chose.  Passing the two numbers
-    as a value breaks it without moving preparation anywhere: the manual route
-    still fills exactly the same numbers in, from the widgets it owns.
-    """
-
-    candidate_limit: int
-    capital_limit: Decimal
-
-    def __post_init__(self) -> None:
-        if self.candidate_limit <= 0:
-            raise PaperAutonomySupervisorViolation(
-                f"a preparation needs a positive candidate limit, not "
-                f"{self.candidate_limit}"
-            )
-        if self.capital_limit < 0:
-            raise PaperAutonomySupervisorViolation(
-                "a preparation capital limit cannot be negative"
-            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +142,7 @@ class PaperAutonomyExecutorPort(Protocol):
     """
 
     def request_prepare(
-        self, request: PaperAutonomyPreparationRequest
+        self, request: PaperPreparationRequest
     ) -> PaperAutonomyRequestOutcome:
         """Ask for a candidate shortlist of the given size."""
 
@@ -189,7 +162,7 @@ class PaperAutonomyExecutorPort(Protocol):
 __all__ = [
     "PaperAutonomyExecutorPort",
     "PaperAutonomyIntentReaderPort",
-    "PaperAutonomyPreparationRequest",
+    "PaperPreparationRequest",
     "PaperAutonomyRequestOutcome",
     "PaperAutonomyRuntimeFactsPort",
     "PaperAutonomySchedulePort",

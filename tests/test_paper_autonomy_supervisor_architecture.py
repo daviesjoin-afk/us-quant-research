@@ -1,8 +1,7 @@
-"""v1-B foundation guards: the boundaries the control core has to keep.
+"""v1-B architecture guards: the boundaries the autonomy control path keeps.
 
-The supervisor application, the desktop host and the launch-authorization wiring
-do not exist yet on this branch, so this file guards what does: the vocabulary,
-the four seams and the action ledger.  Each guard is written against a *fact*
+The guards cover the vocabulary, production adapters, desktop host,
+launch-authorization wiring and the action ledger. Each is written against a *fact*
 rather than a wording, and each names the thing it is protecting against, so a
 later slice cannot quietly widen a boundary this one closed.
 
@@ -46,7 +45,6 @@ from us_quant.trading.ports.paper_autonomy_action_repository import (
 )
 from us_quant.trading.ports.paper_autonomy_supervisor import (
     PaperAutonomyExecutorPort,
-    PaperAutonomyPreparationRequest,
     PaperAutonomyRequestOutcome,
     PaperAutonomyRuntimeFactsPort,
     PaperAutonomySchedulePort,
@@ -886,7 +884,9 @@ def test_b_a12_the_executor_seam_cannot_express_completion() -> None:
     ):
         assert forbidden not in names, forbidden
 
-    preparation = {field.name for field in fields(PaperAutonomyPreparationRequest)}
+    from us_quant.trading.domain.paper_preparation import PaperPreparationRequest
+
+    preparation = {field.name for field in fields(PaperPreparationRequest)}
     assert preparation == {"candidate_limit", "capital_limit"}
 
 
@@ -1002,3 +1002,194 @@ def test_b_a16_the_supervisor_retains_no_runtime_truth() -> None:
         "_startup",
         "_startup_facts",
     }, sorted(assigned)
+
+
+def test_production_schedule_and_preparation_seams_stay_canonical() -> None:
+    schedule = (_SRC / "trading/adapters/paper_autonomy_schedule.py").read_text(
+        encoding="utf-8"
+    )
+    assert "us_equity_session" in schedule
+    assert schedule.count("us_equity_session(") == 3
+    assert "holiday_calendar" not in schedule.lower()
+    assert "is_holiday" not in schedule.lower()
+    assert "early_close" not in schedule.lower()
+    assert "canonical_session is USEquitySession.REGULAR" in schedule
+    assert schedule.index("<= eastern_time") < schedule.index(
+        "<= self._policy.latest_start_et"
+    )
+
+    request_path = _SRC / "trading/domain/paper_preparation.py"
+    request_tree = ast.parse(request_path.read_text(encoding="utf-8"))
+    request = next(
+        node
+        for node in request_tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "PaperPreparationRequest"
+    )
+    assert {
+        node.target.id
+        for node in request.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+    } == {"candidate_limit", "capital_limit"}
+
+    execution = ast.parse(
+        (_SRC / "desktop_v2/orchestration/execution/orchestrator.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    preparation_methods = {
+        node.name
+        for node in ast.walk(execution)
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"request_prepare", "request_prepare_with"}
+    }
+    assert preparation_methods == {"request_prepare", "request_prepare_with"}
+
+
+def test_launch_authorization_host_and_completion_boundaries() -> None:
+    preflight = ast.parse(
+        (_SRC / "trading/runtime/preflight.py").read_text(encoding="utf-8")
+    )
+    authorization = next(
+        node
+        for node in preflight.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "PaperLaunchAuthorization"
+    )
+    assert {
+        node.targets[0].id
+        for node in authorization.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+    } == {"MANUAL", "AUTONOMOUS"}
+
+    paper = ast.parse(
+        (_SRC / "desktop_v2/orchestration/paper/orchestrator.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    paper_class = next(
+        node
+        for node in paper.body
+        if isinstance(node, ast.ClassDef) and node.name == "PaperOrchestrator"
+    )
+    assert sum(
+        isinstance(node, ast.FunctionDef) and node.name == "start"
+        for node in paper_class.body
+    ) == 1
+
+    autonomy_root = _SRC / "desktop_v2/orchestration/autonomy"
+    host = (autonomy_root / "host.py").read_text(encoding="utf-8")
+    assert "PySide6" in host and "QTimer" in host
+    assert "self._supervisor.tick()" in host
+    assert not any(
+        token in host for token in ("broker", "risk", "execution", "PaperWorkflowPhase")
+    )
+    assert "decide_paper_autonomy" not in host
+
+    for filename in ("executor.py", "facts.py", "completion.py"):
+        source = (autonomy_root / filename).read_text(encoding="utf-8")
+        assert "set_arm_confirmed" not in source
+    completion = (autonomy_root / "completion.py").read_text(encoding="utf-8")
+    for token in ("ibkr", "broker", "risk", "execution", "reconcile", "release"):
+        assert token not in completion.lower()
+
+
+def test_autonomous_launch_preflight_reads_fresh_a1_and_manual_bypasses_it() -> None:
+    desktop_source = (_SRC / "desktop.py").read_text(encoding="utf-8")
+    tree = ast.parse(desktop_source)
+    method = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_paper_launch_preflight"
+    )
+    source = ast.get_source_segment(desktop_source, method)
+    assert source is not None
+    assert "PaperLaunchAuthorization.MANUAL" in source
+    assert "paper_autonomy_application.snapshot()" in source
+    assert "preflight_with_confirmation" in source
+
+
+def test_execution_uses_one_request_driven_shortlist_implementation() -> None:
+    source = (_SRC / "desktop_v2/orchestration/execution/orchestrator.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    method_names = [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+    ]
+    assert method_names.count("_build_shortlist") == 1
+    shortlist = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_build_shortlist"
+    )
+    body = ast.get_source_segment(source, shortlist)
+    assert body is not None
+    assert "request.candidate_limit" in body
+    assert "request.capital_limit" in body
+    assert "self._page.candidate_limit()" not in body
+    assert "self._page.capital_limit()" not in body
+    assert source.count("self._build_shortlist(request=request)") == 1
+
+
+def test_production_schedule_keeps_start_inside_regular_policy_window() -> None:
+    source = (_SRC / "trading/adapters/paper_autonomy_schedule.py").read_text(
+        encoding="utf-8"
+    )
+    assert "canonical_session is USEquitySession.REGULAR" in source
+    assert "<= eastern_time" in source
+    assert "<= self._policy.latest_start_et" in source
+
+
+def test_executor_propagates_owner_errors_and_only_maps_admission() -> None:
+    source = (_SRC / "desktop_v2/orchestration/autonomy/executor.py").read_text(
+        encoding="utf-8"
+    )
+    assert "except " not in source
+    assert "return _outcome(" in source
+
+
+def test_startup_probe_is_async_and_precedes_host_admission() -> None:
+    desktop_source = (_SRC / "desktop.py").read_text(encoding="utf-8")
+    tree = ast.parse(desktop_source)
+    initialize = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_initialize_paper_autonomy"
+    )
+    source = ast.get_source_segment(desktop_source, initialize)
+    assert source is not None
+    assert "self._start_task(" in source
+    assert "on_success=self._paper_autonomy_startup_probe_succeeded" in source
+    assert "open_broker_orders=lambda: open_orders" in source
+    assert source.index("startup = startup_facts.startup_facts()") < source.index(
+        "self.paper_autonomy_host.start()"
+    )
+    assert "_paper_autonomy_startup_probe_task" in desktop_source
+
+
+def test_desktop_autonomy_modules_do_not_bypass_paper_owners() -> None:
+    autonomy_root = _SRC / "desktop_v2/orchestration/autonomy"
+    source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in autonomy_root.rglob("*.py")
+        if "__pycache__" not in path.parts
+    )
+    for forbidden in (
+        "reconcile(",
+        "confirm_reconciliation",
+        "release_paper(",
+        "ExecutionLeaseManager",
+        "MarketOrchestrator",
+        "RiskApplication",
+        "BrokerExecutionPort",
+        "PaperWorkflowPhase",
+    ):
+        assert forbidden not in source, forbidden

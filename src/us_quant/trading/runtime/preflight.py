@@ -14,9 +14,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from enum import StrEnum
 from typing import Iterable
 
 from us_quant.trading.domain.market import MarketQuote, MarketSnapshot
+
+
+class PaperLaunchAuthorization(StrEnum):
+    """The two authorization sources accepted by the canonical Paper launch."""
+
+    MANUAL = "manual"
+    AUTONOMOUS = "autonomous"
 
 
 @dataclass(frozen=True, slots=True)

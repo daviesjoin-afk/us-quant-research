@@ -3596,9 +3596,9 @@ audit event。
   `PaperAutonomy` / `SQLitePaperAutonomy` 开头）。
 - **不**创建 `AutonomyManager` / `TradingManager` / `GlobalSupervisorContext` /
   `ServiceBag` / `AutomationContext`。
-- **不**在本轮做 supervisor / scheduler / recovery host / watchdog / action
-  idempotency：那是 v1-B，且必须从 v1-A merge 后的 main 重新开分支，**不**从本轮
-  feature branch 叠加。
+- 本轮 v1-B 在独立分支实现 supervisor、scheduler、Desktop host、startup gate、
+  action completion 与幂等账本；这些模块仍调用既有 Paper / Execution owner。Live、
+  实盘资金、AI 与策略演化不属于 v1-B。
 
 #### 8.28.9 验证
 
@@ -3652,6 +3652,69 @@ v1-A mutation 里有几处捕获方式值得记下，因为它们说明"哪一�
 
 这些存活记录都留在文档里：它们暴露的是测试没打到目标或守卫互补，而 mutation 的价值
 正在于把"看起来在测、其实没测到"变成可见。
+
+#### 8.28.10 v1-B 监督与所有权
+
+v1-B 的生产路径如下：
+
+```text
+PaperAutonomyApplication (持久意图 A1)
+        │ fresh snapshot
+        ▼
+PaperAutonomySupervisor ──► PaperAutonomyActionRepository (claim-before-effect)
+        │                          │
+        │ ExecutorPort             └── CompletionObserver ◄── canonical Paper signals
+        ▼
+PaperAutonomyDesktopExecutor
+  ├── ExecutionOrchestrator.request_prepare_with(PaperPreparationRequest)
+  └── PaperOrchestrator.start(AUTONOMOUS) / pause / resume / stop
+        │
+        ▼
+RiskApplication → ExecutionApplication → Paper order service
+```
+
+Supervisor、schedule adapter、intent 与 action repository 都不依赖 Qt。只有
+`desktop_v2/orchestration/autonomy/host.py` 使用 `QTimer`；它每次只调用一次
+`tick()`，不作业务判断。Schedule adapter 每次调用既有
+`us_quant.extended_hours.us_equity_session()`，用纽约时区分类，不缓存时段，也不另建
+节假日或早收市日历。输入时间必须带时区；分类异常时不允许准备或启动。
+
+PREPARE 使用共享值对象 `PaperPreparationRequest(candidate_limit, capital_limit)`；人工按钮
+与 supervisor 最终进入同一个 `request_prepare_with()`。启动也只有
+`PaperOrchestrator.start(authorization=...)` 一条路径。`MANUAL` 保留现有 UI arm 与确认行为；
+`AUTONOMOUS` 在首次和异步连接后的二次预检都重新读取 A1，未能读取时按未授权拒绝。
+自治启动不设置人工 arm。活动会话的来源只在 runtime facts adapter 中短暂记录；进程重启后
+无法证明来源时归类为 `UNKNOWN`，需要人工恢复。
+
+首次启动时，Desktop 在 broker worker 上调用既有只读 Paper 通道探测；探测需读出账号、持仓、
+开放 API 订单和本地未对账数量。探测失败或数据不完整时不启动 host。Supervisor 初始化时只
+缓存这一份 startup classification；后续 tick 则重读 A1、runtime、schedule 与 action ledger。
+有未结订单、持仓、未对账记录、未知所有权或人工恢复标记时，自动工作保持关闭。
+
+Supervisor 在调用 owner 前先原子 claim action。请求接受只记 `REQUESTED`；只有 canonical
+Paper 发布 `READY`、`RUNNING`、暂停/恢复或 `session_finalized` 后，completion observer 才写
+成功。若完成信号先于请求返回，observer 仅将一个进程内 pending completion 暂存，等 ledger
+转到 `REQUESTED` 再提交；进程崩溃则未完成 action 留在 unresolved 状态，重启后 fail closed。
+失败发布写 terminal failure；重复的同结果信号安全忽略，冲突结果报错，不触碰 broker、风险、
+reconciliation 或 lease。
+
+配置只从显式 `[paper.autonomy]` 读取，缺少或无效时不造默认时刻、不启动 host，并记录
+`AUTONOMY_SUPERVISOR_UNAVAILABLE`。必须显式提供以下值：
+
+| 配置键 | 含义 |
+| --- | --- |
+| `prepare_not_before_et` | 允许自动准备的最早纽约时间 |
+| `start_not_before_et` | 允许自动启动的最早纽约时间 |
+| `latest_start_et` | 当日最晚自动启动时间 |
+| `orderly_stop_at_et` | 发出有序停止请求的时间 |
+| `candidate_limit` | 每次准备的候选数量上限 |
+| `requested_capital_limit` | 自动请求的资金上限 |
+| `tick_interval_seconds` | 监督轮询间隔；实际值限制在 1–3600 秒 |
+
+`PaperAutonomyHost` 在所有 Desktop capability、facts、completion observer 与 signals 接通后才
+启动。关机前停止 timer；若关闭被拒绝且 shutdown admission 恢复，才重新启动 timer。架构守卫和
+回归用例覆盖 canonical calendar、唯一 preparation/start 路径、manual/A1 隔离、startup fail
+closed、异步 completion race、重复/冲突 completion、kill switch 竞态及禁止 broker bypass。
 
 ## 9. 已删除的旧架构
 

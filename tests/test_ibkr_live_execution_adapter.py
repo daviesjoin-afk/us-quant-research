@@ -177,6 +177,7 @@ def _intent(
     quantity: int = 1,
     symbol: str = "AAPL",
     strategy: str = "strategy-v1",
+    limit_price: Decimal = Decimal("200"),
 ) -> OrderIntent:
     return OrderIntent.create(
         session_id="live-session",
@@ -185,7 +186,7 @@ def _intent(
         execution_symbol=symbol,
         side=side,
         quantity=quantity,
-        limit_price=Decimal("200"),
+        limit_price=limit_price,
         reason="test order",
     )
 
@@ -326,6 +327,17 @@ def test_unapproved_symbol_strategy_fractional_or_oversell_is_refused():
     object.__setattr__(fractional, "quantity", 1.5)
     with pytest.raises(IBKRLiveExecutionError, match="整股"):
         adapter.reserve(fractional)
+    adapter.disconnect()
+
+
+@pytest.mark.parametrize("price", [Decimal("1e1000"), Decimal("1e-1000")])
+def test_limit_price_outside_ibkr_float_range_is_refused(price):
+    adapter, _, _ = _adapter()
+    _connect(adapter)
+
+    with pytest.raises(IBKRLiveExecutionError, match="IBKR 数值范围"):
+        adapter.reserve(_intent(limit_price=price))
+
     adapter.disconnect()
 
 

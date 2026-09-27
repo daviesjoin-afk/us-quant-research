@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from math import isfinite
 from threading import Event, Lock, RLock, Thread
 from time import monotonic
 from typing import Any, Callable, Protocol
@@ -367,6 +368,12 @@ class IBKRLiveExecutionAdapter:
                 raise IBKRLiveExecutionError("Live 订单必须使用正整股数量")
             if not intent.limit_price.is_finite() or intent.limit_price <= 0:
                 raise IBKRLiveExecutionError("Live LMT 价格必须为有限正数")
+            try:
+                broker_limit_price = float(intent.limit_price)
+            except (OverflowError, TypeError, ValueError) as error:
+                raise IBKRLiveExecutionError("Live LMT 价格无法表示为 IBKR 数值") from error
+            if not isfinite(broker_limit_price) or broker_limit_price <= 0:
+                raise IBKRLiveExecutionError("Live LMT 价格超出 IBKR 数值范围")
             existing = self._order_by_intent.get(intent.order_id)
             if existing is not None:
                 if self._intent_by_order[existing] != intent:

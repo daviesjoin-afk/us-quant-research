@@ -379,6 +379,9 @@ def test_a_failed_feed_is_recorded_in_the_event_log(
     monkeypatch.setenv(STATE_ROOT_ENV, str(tmp_path))
 
     window.market_orchestrator._on_failed("socket exploded")
+    # Runtime-event arrivals coalesce page paints inside a one-second window;
+    # force the immediate path before reading the rendered table.
+    window.runtime_events_orchestrator.refresh()
     _APP.processEvents()
 
     table = window.runtime_events_page.table

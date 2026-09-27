@@ -350,6 +350,7 @@ def _startup_facts(**overrides: object) -> PaperAutonomyStartupFacts:
     base: dict = {
         "intent_store_readable": True,
         "action_store_readable": True,
+        "unresolved_action_count": 0,
         "broker_state_known": True,
         "account_identity_known": True,
         "open_broker_orders": 0,
@@ -698,6 +699,9 @@ def test_refused_pause_cycle_blocks_when_pause_is_still_required(
     assert first.status is PaperAutonomyActionStatus.REFUSED
     assert second.decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
     assert "already ended as refused" in second.decision.reason
+    assert [row.action_key for row in harness.rows()] == [
+        first.decision.action_key
+    ]
     assert [name for name, _ in harness.executor.calls] == ["request_pause"]
 
 
@@ -1104,17 +1108,87 @@ def test_pause_resume_pause_uses_durable_control_cycles(
     assert second_pause_key.endswith("pause_entries:operator#1")
     assert second_pause_key != first_pause_key
     cycles = harness.ledger.control_cycles(_DAY)
-    assert cycles.pause_attempt == 1
-    assert cycles.resume_attempt == 2
-    assert cycles.stop_attempt == 3
+    assert cycles.pause_attempt == 2
+    assert cycles.resume_attempt == 1
+    assert cycles.stop_attempt == 0
 
     harness.rebuild(runtime=paused, schedule=_schedule_facts())
     second_resume = harness.tick()
     assert second_resume.decision.action is PaperAutonomyAction.RESUME_ENTRIES
     assert second_resume.decision.action_key.endswith(
-        "resume_entries:operator#2"
+        "resume_entries:operator#1"
     )
     assert second_resume.decision.action_key != resume.decision.action_key
+
+
+def test_manual_resume_does_not_reuse_a_successful_pause_key(
+    tmp_path: pathlib.Path,
+) -> None:
+    running = _runtime_facts(
+        session_running=True,
+        session_provenance=PaperAutonomySessionProvenance.AUTONOMOUS,
+    )
+    uncertain = _schedule_facts(
+        trading_day=None,
+        action_day=_DAY,
+        session=None,
+        preparation_allowed=False,
+        start_allowed=False,
+        exceptional_schedule_uncertain=True,
+    )
+    harness = _Harness(tmp_path, runtime=running, schedule=uncertain)
+
+    first = harness.tick()
+    harness.ledger.complete(
+        action_key=first.decision.action_key,
+        status=PaperAutonomyActionStatus.SUCCEEDED,
+        completed_at=_MOMENT,
+        detail="autonomous pause succeeded",
+    )
+
+    # The operator resumes directly. No autonomous RESUME row is written.
+    harness.rebuild(runtime=running, schedule=uncertain)
+    second = harness.tick()
+
+    assert first.decision.action_key.endswith("pause_entries:operator")
+    assert second.decision.action is PaperAutonomyAction.PAUSE_ENTRIES
+    assert second.decision.action_key.endswith("pause_entries:operator#1")
+    assert second.decision.action_key != first.decision.action_key
+    assert [name for name, _ in harness.executor.calls] == [
+        "request_pause",
+        "request_pause",
+    ]
+
+
+def test_manual_pause_does_not_reuse_a_successful_resume_key(
+    tmp_path: pathlib.Path,
+) -> None:
+    paused = _runtime_facts(
+        session_paused=True,
+        session_provenance=PaperAutonomySessionProvenance.AUTONOMOUS,
+    )
+    harness = _Harness(tmp_path, runtime=paused)
+
+    first = harness.tick()
+    harness.ledger.complete(
+        action_key=first.decision.action_key,
+        status=PaperAutonomyActionStatus.SUCCEEDED,
+        completed_at=_MOMENT,
+        detail="autonomous resume succeeded",
+    )
+
+    # The operator pauses directly. No autonomous PAUSE row is written.
+    harness.rebuild(runtime=paused)
+    second = harness.tick()
+
+    assert first.decision.action_key.endswith("resume_entries:operator")
+    assert second.decision.action is PaperAutonomyAction.RESUME_ENTRIES
+    assert second.decision.action_key.endswith("resume_entries:operator#1")
+    assert second.decision.action_key != first.decision.action_key
+    assert [name for name, _ in harness.executor.calls] == [
+        "request_resume",
+        "request_resume",
+    ]
 
 
 def test_the_supervisor_only_ever_calls_one_executor_request_per_tick(

@@ -87,7 +87,7 @@ class PaperAutonomyStartupFactsAdapter:
         self,
         *,
         intent_store_readable: Callable[[], bool],
-        action_store_readable: Callable[[], bool],
+        unresolved_action_count: Callable[[], int | None],
         broker_state_known: Callable[[], bool],
         account_identity_known: Callable[[], bool],
         open_broker_orders: Callable[[], int | None],
@@ -98,7 +98,7 @@ class PaperAutonomyStartupFactsAdapter:
     ) -> None:
         self._readers = (
             intent_store_readable,
-            action_store_readable,
+            unresolved_action_count,
             broker_state_known,
             account_identity_known,
             open_broker_orders,
@@ -114,7 +114,7 @@ class PaperAutonomyStartupFactsAdapter:
             return self._facts
         (
             intent_readable,
-            actions_readable,
+            unresolved_count,
             broker_known,
             account_known,
             open_orders,
@@ -123,9 +123,11 @@ class PaperAutonomyStartupFactsAdapter:
             ownership_clear,
             recovery_required,
         ) = self._readers
+        unresolved_count = unresolved_count()
         self._facts = PaperAutonomyStartupFacts(
             intent_store_readable=bool(intent_readable()),
-            action_store_readable=bool(actions_readable()),
+            action_store_readable=unresolved_count is not None,
+            unresolved_action_count=unresolved_count,
             broker_state_known=bool(broker_known()),
             account_identity_known=bool(account_known()),
             open_broker_orders=open_orders(),

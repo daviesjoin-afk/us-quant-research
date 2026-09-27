@@ -541,6 +541,11 @@ class PaperAutonomyStartupFacts:
     v1-B never repairs what these facts describe.  An unknown account, a
     position, an open order or an unreconciled row is a human's problem, not a
     scheduler's opportunity.
+
+    An unresolved autonomy action from a previous process also needs operator
+    review. Its original owner may have completed after the process lost its
+    ability to observe the publication, so a clean broker snapshot cannot
+    reconstruct that missing correlation.
     """
 
     intent_store_readable: bool
@@ -552,6 +557,7 @@ class PaperAutonomyStartupFacts:
     unreconciled_rows: int | None
     paper_ownership_clear: bool
     manual_recovery_required: bool
+    unresolved_action_count: int | None = None
 
     @property
     def proven_safe(self) -> bool:
@@ -564,6 +570,7 @@ class PaperAutonomyStartupFacts:
         return (
             self.intent_store_readable
             and self.action_store_readable
+            and self.unresolved_action_count == 0
             and self.broker_state_known
             and self.account_identity_known
             and self.open_broker_orders == 0

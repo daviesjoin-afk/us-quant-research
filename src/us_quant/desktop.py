@@ -83,6 +83,7 @@ from us_quant.trading.domain.paper_autonomy import PaperAutonomyError
 from us_quant.trading.domain.paper_autonomy_supervisor import (
     EVENT_SEVERITIES,
     REQUESTED_EVENT_CODES,
+    PaperAutonomyAction,
     PaperAutonomyEventCode,
     PaperAutonomyStartupFacts,
 )
@@ -1600,12 +1601,11 @@ class MainWindow(QMainWindow):
                 return False
             return True
 
-        def action_store_readable() -> bool:
+        def unresolved_action_count() -> int | None:
             try:
-                actions.unresolved()
-                return True
+                return len(actions.unresolved())
             except Exception:  # noqa: BLE001 - startup must fail closed
-                return False
+                return None
 
         try:
             connection, broker_snapshot = startup_probe_result
@@ -1661,7 +1661,7 @@ class MainWindow(QMainWindow):
         )
         startup_facts = PaperAutonomyStartupFactsAdapter(
             intent_store_readable=intent_store_readable,
-            action_store_readable=action_store_readable,
+            unresolved_action_count=unresolved_action_count,
             broker_state_known=broker_state_known,
             account_identity_known=account_identity_known,
             # The account snapshot is not proof about open broker orders. Until
@@ -1700,7 +1700,17 @@ class MainWindow(QMainWindow):
         )
         completion_ref = {"observer": completion}
 
+        last_block_event: tuple[PaperAutonomyEventCode, str] | None = None
+
         def emit_supervisor_event(event) -> None:
+            nonlocal last_block_event
+            if event.code is PaperAutonomyEventCode.RECOVERY_REQUIRED:
+                identity = (event.code, event.detail)
+                if identity == last_block_event:
+                    return
+                last_block_event = identity
+            else:
+                last_block_event = None
             self.runtime_events_orchestrator.record(
                 severity=event.severity,
                 component="paper-autonomy",
@@ -1738,16 +1748,28 @@ class MainWindow(QMainWindow):
             return
 
         if not startup.proven_safe:
+            unresolved_previous_action = (
+                startup.unresolved_action_count not in (None, 0)
+            )
             self.runtime_events_orchestrator.record(
                 severity="warning",
                 component="paper-autonomy",
                 code="AUTONOMY_STARTUP_UNSAFE",
                 message=(
-                    "Paper autonomy host not started because startup facts "
-                    "were unknown or unsafe; restart after manual review"
+                    "Paper autonomy host not started because an unresolved "
+                    "autonomy action from the previous process requires "
+                    "operator review"
+                    if unresolved_previous_action
+                    else "Paper autonomy host not started because startup "
+                    "facts were unknown or unsafe; restart after manual review"
                 ),
             )
             return
+
+        def reset_block_event_after_recovery(result) -> None:
+            nonlocal last_block_event
+            if result.decision.action is PaperAutonomyAction.NOOP:
+                last_block_event = None
 
         self.paper_orchestrator.launch_authorization_published.connect(
             runtime_facts.on_launch_authorization_published
@@ -1780,6 +1802,9 @@ class MainWindow(QMainWindow):
             composition.supervisor,
             tick_interval_seconds=policy.bounded_tick_interval_seconds,
             parent=self,
+        )
+        self.paper_autonomy_host.tick_completed.connect(
+            reset_block_event_after_recovery
         )
         self.paper_autonomy_host.start()
 

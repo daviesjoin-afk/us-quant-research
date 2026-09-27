@@ -390,9 +390,13 @@ class SQLitePaperAutonomyActionRepository:
             for record in day_rows
         )
         return PaperAutonomyControlCycles(
-            pause_attempt=resumes,
-            resume_attempt=pauses,
-            stop_attempt=pauses + resumes,
+            pause_attempt=pauses,
+            resume_attempt=resumes,
+            stop_attempt=sum(
+                record.action is PaperAutonomyActionType.STOP
+                and record.status is PaperAutonomyActionStatus.SUCCEEDED
+                for record in day_rows
+            ),
         )
 
     def _read(

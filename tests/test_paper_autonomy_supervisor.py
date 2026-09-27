@@ -140,6 +140,7 @@ def _startup(**overrides: object) -> PaperAutonomyStartupFacts:
     base: dict = {
         "intent_store_readable": True,
         "action_store_readable": True,
+        "unresolved_action_count": 0,
         "broker_state_known": True,
         "account_identity_known": True,
         "open_broker_orders": 0,
@@ -1435,11 +1436,27 @@ def test_control_cycles_parse_the_full_ledger_before_counting(tmp_path):
         completed_at=_NOW,
         detail="paused",
     )
-    assert store.control_cycles(_DAY).resume_attempt == 1
-
+    _claim(store, "stop", action=PaperAutonomyActionType.STOP)
+    store.mark_requested(action_key="stop", detail="accepted")
+    store.complete(
+        action_key="stop",
+        status=PaperAutonomyActionStatus.SUCCEEDED,
+        completed_at=_NOW,
+        detail="stopped",
+    )
+    cycles = store.control_cycles(_DAY)
+    assert cycles.pause_attempt == 1
+    assert cycles.resume_attempt == 0
+    assert cycles.stop_attempt == 1
     _corrupt(store, "status = ?", "BROKEN", key="pause")
     with pytest.raises(PaperAutonomyActionStoreUnreadable):
         store.control_cycles(_DAY)
+
+
+def test_startup_rejects_unresolved_or_unknown_action_count():
+    assert not _startup(unresolved_action_count=1).proven_safe
+    assert not _startup(unresolved_action_count=None).proven_safe
+    assert _startup(unresolved_action_count=0).proven_safe
 
 
 def test_a_preparation_is_not_a_start(tmp_path: pathlib.Path) -> None:

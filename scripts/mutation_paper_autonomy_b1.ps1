@@ -581,6 +581,38 @@ $mutations = @(
         repl = "if not matches:`n            raise PaperAutonomyActionRepositoryError(`"unattributable completion`")"
         tests = @($completionBehaviour)
         select = @("-k", "manual_running_after_failed_autonomous_start_is_ignored or manual_launch_failure_after_successful_start_is_ignored or manual_prepare_ready_after_failed_autonomous_prepare_is_ignored")
+    },
+    @{
+        name = 'M58 manual RESUME does not advance a later PAUSE identity'
+        file = $adapterAction
+        find = 'pause_attempt=pauses,'
+        repl = 'pause_attempt=resumes,'
+        tests = @($tickBehaviour)
+        select = @("-k", "manual_resume_does_not_reuse_a_successful_pause_key")
+    },
+    @{
+        name = 'M59 manual PAUSE does not advance a later RESUME identity'
+        file = $adapterAction
+        find = 'resume_attempt=resumes,'
+        repl = 'resume_attempt=pauses,'
+        tests = @($tickBehaviour)
+        select = @("-k", "manual_pause_does_not_reuse_a_successful_resume_key")
+    },
+    @{
+        name = 'M60 an unresolved action is considered startup-safe'
+        file = $domainSupervisor
+        find = 'and self\.unresolved_action_count == 0'
+        repl = 'and True'
+        tests = @($behaviour, $adapterBehaviour)
+        select = @("-k", "startup_rejects_unresolved_or_unknown_action_count or startup_action_count_blocks_when_previous_action_is_unresolved")
+    },
+    @{
+        name = 'M61 an unsafe startup still wires old completion actions'
+        file = $desktop
+        find = 'if not startup\.proven_safe:'
+        repl = 'if False and not startup.proven_safe:'
+        tests = @($architecture)
+        select = @("-k", "startup_with_unresolved_action_never_wires_completion_or_starts_host")
     }
 )
 

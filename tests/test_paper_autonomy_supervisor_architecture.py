@@ -1184,7 +1184,49 @@ def test_startup_probe_is_async_and_precedes_host_admission() -> None:
     assert source.index("if not startup.proven_safe:") < source.index(
         "self.paper_autonomy_host.start()"
     )
+    startup_gate = source.index("if not startup.proven_safe:")
+    assert startup_gate < source.index(
+        "self.paper_orchestrator.session_running_published.connect("
+    )
+    assert "unresolved_action_count=unresolved_action_count" in source
+    assert "len(actions.unresolved())" in source
     assert "_paper_autonomy_startup_probe_task" in desktop_source
+
+
+def test_startup_with_unresolved_action_never_wires_completion_or_starts_host() -> None:
+    desktop_source = (_SRC / "desktop.py").read_text(encoding="utf-8")
+    tree = ast.parse(desktop_source)
+    initialize = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_initialize_paper_autonomy"
+    )
+    source = ast.get_source_segment(desktop_source, initialize)
+    assert source is not None
+    gate = source.index("if not startup.proven_safe:")
+    assert source.index("if not startup.proven_safe:") < source.index(
+        "self.paper_orchestrator.preparation_ready_published.connect("
+    )
+    assert gate < source.index("self.paper_autonomy_host.start()")
+    assert "startup.unresolved_action_count not in (None, 0)" in source
+
+
+def test_recovery_block_events_are_deduplicated_at_the_desktop_bridge() -> None:
+    desktop_source = (_SRC / "desktop.py").read_text(encoding="utf-8")
+    tree = ast.parse(desktop_source)
+    initialize = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_initialize_paper_autonomy"
+    )
+    source = ast.get_source_segment(desktop_source, initialize)
+    assert source is not None
+    assert "identity == last_block_event" in source
+    assert "reset_block_event_after_recovery" in source
+    assert "result.decision.action is PaperAutonomyAction.NOOP" in source
+    assert "tick_completed.connect(" in source
 
 
 def test_desktop_autonomy_modules_do_not_bypass_paper_owners() -> None:

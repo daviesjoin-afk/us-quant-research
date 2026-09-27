@@ -89,6 +89,7 @@ def _capture(**changes: object) -> LiveStartupProof:
         "broker_connected": True,
         "observed_endpoint": ENDPOINT,
         "managed_account_ids": (ACCOUNT_ID,),
+        "broker_account_id": ACCOUNT_ID,
         "connection_observed_at": NOW,
         "account_truth_known": True,
         "account_truth_observed_at": NOW,
@@ -151,6 +152,17 @@ def test_account_fingerprint_is_bound_to_the_configured_endpoint():
     )
 
     proof = _capture(authorization_state=LiveAuthorizationState(authorization))
+
+    assert LiveStartupBlocker.ACCOUNT_MISMATCH in proof.blockers
+    assert LiveStartupBlocker.AUTHORIZATION_ACCOUNT_MISMATCH in proof.blockers
+    assert proof.account_fingerprint is None
+
+
+def test_broker_truth_must_be_scoped_to_the_exactly_matched_managed_account():
+    proof = _capture(
+        managed_account_ids=(ACCOUNT_ID, "DU0000000"),
+        broker_account_id="DU0000000",
+    )
 
     assert LiveStartupBlocker.ACCOUNT_MISMATCH in proof.blockers
     assert LiveStartupBlocker.AUTHORIZATION_ACCOUNT_MISMATCH in proof.blockers
@@ -274,6 +286,13 @@ def test_proof_timestamps_must_be_timezone_aware():
 
     with pytest.raises(LiveStartupError, match="account_truth_observed_at"):
         _capture(account_truth_observed_at=datetime(2026, 9, 28))
+
+
+def test_missing_broker_selected_account_blocks_startup():
+    proof = _capture(broker_account_id=None)
+
+    assert LiveStartupBlocker.BROKER_ACCOUNT_UNAVAILABLE in proof.blockers
+    assert not proof.ready
 
 
 def test_callers_cannot_construct_a_startup_proof_without_capture():

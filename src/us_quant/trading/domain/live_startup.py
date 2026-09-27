@@ -27,6 +27,7 @@ class LiveStartupBlocker(StrEnum):
     BROKER_DISCONNECTED = "broker_disconnected"
     BROKER_CONNECTION_UNKNOWN = "broker_connection_unknown"
     BROKER_CONNECTION_STALE = "broker_connection_stale"
+    BROKER_ACCOUNT_UNAVAILABLE = "broker_account_unavailable"
     EXPECTED_ACCOUNT_UNAVAILABLE = "expected_account_unavailable"
     ACCOUNT_IDENTITY_AMBIGUOUS = "account_identity_ambiguous"
     ACCOUNT_MISMATCH = "account_mismatch"
@@ -130,6 +131,7 @@ class LiveStartupProof:
         broker_connected: bool,
         observed_endpoint: LiveEndpointIdentity,
         managed_account_ids: tuple[str, ...],
+        broker_account_id: str | None,
         connection_observed_at: datetime | None,
         account_truth_known: bool,
         account_truth_observed_at: datetime | None,
@@ -155,6 +157,10 @@ class LiveStartupProof:
             for account_id in managed_account_ids
         ):
             raise LiveStartupError("managed_account_ids must be a tuple of nonblank strings")
+        if broker_account_id is not None and (
+            not isinstance(broker_account_id, str) or not broker_account_id.strip()
+        ):
+            raise LiveStartupError("broker_account_id must be None or a nonblank string")
         if type(open_orders_known) is not bool or type(positions_known) is not bool:
             raise LiveStartupError("broker truth known flags must be booleans")
         if type(account_truth_known) is not bool or type(market_truth_known) is not bool:
@@ -189,7 +195,7 @@ class LiveStartupProof:
             if authorization is not None
             else None
         )
-        matched: list[LiveAccountFingerprint] = []
+        managed_fingerprints: list[LiveAccountFingerprint] = []
         for account_id in managed_account_ids:
             candidate = LiveAccountFingerprint.from_identity(
                 provider="IBKR",
@@ -197,16 +203,43 @@ class LiveStartupProof:
                 account_id=account_id,
                 endpoint_identity=endpoint_identity,
             )
-            if candidate == expected:
-                matched.append(candidate)
+            managed_fingerprints.append(candidate)
+
+        selected_fingerprint = (
+            LiveAccountFingerprint.from_identity(
+                provider="IBKR",
+                environment="LIVE",
+                account_id=broker_account_id,
+                endpoint_identity=endpoint_identity,
+            )
+            if broker_account_id is not None
+            else None
+        )
+        selected_managed_matches = (
+            [item for item in managed_fingerprints if item == selected_fingerprint]
+            if selected_fingerprint is not None
+            else []
+        )
+        expected_managed_matches = (
+            [item for item in managed_fingerprints if item == expected]
+            if expected is not None
+            else []
+        )
 
         if expected is None:
             blockers.append(LiveStartupBlocker.EXPECTED_ACCOUNT_UNAVAILABLE)
-        elif not managed_account_ids:
-            blockers.append(LiveStartupBlocker.EXPECTED_ACCOUNT_UNAVAILABLE)
-        elif len(matched) > 1:
+        elif not expected_managed_matches:
+            if not managed_account_ids:
+                blockers.append(LiveStartupBlocker.EXPECTED_ACCOUNT_UNAVAILABLE)
+            else:
+                blockers.append(LiveStartupBlocker.ACCOUNT_MISMATCH)
+        elif len(expected_managed_matches) > 1:
             blockers.append(LiveStartupBlocker.ACCOUNT_IDENTITY_AMBIGUOUS)
-        elif not matched:
+        elif selected_fingerprint != expected:
+            blockers.append(LiveStartupBlocker.ACCOUNT_MISMATCH)
+        if broker_account_id is None:
+            blockers.append(LiveStartupBlocker.BROKER_ACCOUNT_UNAVAILABLE)
+        elif not selected_managed_matches:
             blockers.append(LiveStartupBlocker.ACCOUNT_MISMATCH)
 
         if not account_truth_known:
@@ -250,7 +283,11 @@ class LiveStartupProof:
             elif not authorization.is_valid_at(now):
                 blockers.append(LiveStartupBlocker.AUTHORIZATION_EXPIRED)
             authorization_valid = authorization.is_valid_at(now)
-            if expected is not None and (not matched or len(matched) != 1):
+            if expected is not None and (
+                selected_fingerprint != expected
+                or len(expected_managed_matches) != 1
+                or len(selected_managed_matches) != 1
+            ):
                 blockers.append(LiveStartupBlocker.AUTHORIZATION_ACCOUNT_MISMATCH)
             limits_valid = not authorization.approved_canary_limits.blockers()
             if not limits_valid:
@@ -282,7 +319,13 @@ class LiveStartupProof:
             "observed_at": now,
             "expires_at": min(expiry_candidates),
             "endpoint_identity": endpoint_identity,
-            "account_fingerprint": matched[0] if len(matched) == 1 else None,
+            "account_fingerprint": (
+                selected_fingerprint
+                if selected_fingerprint == expected
+                and len(expected_managed_matches) == 1
+                and len(selected_managed_matches) == 1
+                else None
+            ),
             "broker_connected": broker_connected,
             "connection_observed_at": connection_observed_at,
             "account_truth_known": account_truth_known,

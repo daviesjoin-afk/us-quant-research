@@ -10,7 +10,7 @@ Finish the latest PR #60 recovery review on `feat/paper-autonomy-supervisor`, pu
 - Preserve canonical Paper / Execution / Risk ownership, unrelated untracked files, and minimal scope. Block-event dedup remains future cleanup.
 
 ## Current phase
-Process-lifetime recovery gate is implemented and locally verified on top of reviewed PR HEAD `a2773247d1b5af06bc0cbd230b491680126a28ae`. Targeted suites pass (567); B1 is 73/73 RED and A1 is 26/26 RED. Python 3.14.7 full suite passed (5,180, zero skips); doctor, compileall, Desktop offscreen self-test, and `git diff --check` passed. Commit and push this follow-up, then wait for fresh Windows/Python 3.14 CI. PR #60 must stay OPEN and unmerged.
+Process-lifetime recovery implementation `d13575c23dd72e4da360c4271f126a0527af9131` is pushed to PR #60. Targeted suites pass (567); B1 is 73/73 RED and A1 is 26/26 RED. Python 3.14.7 full suite passed (5,180, zero skips); doctor, compileall, Desktop offscreen self-test, and `git diff --check` passed. Windows/Python 3.14 CI run `36322505051` passed with 5,177 passed and the three existing shallow-checkout skips. PR is OPEN, non-draft, MERGEABLE/CLEAN, with 0 unresolved review threads. Do not merge.
 
 ## Decisions
 - `OPERATOR_RESOLVED` is terminal and distinct from owner outcomes; same-day START still counts, while successful control-cycle counts remain unchanged.
@@ -31,10 +31,10 @@ Process-lifetime recovery gate is implemented and locally verified on top of rev
 - Current process-lifetime targeted suites — 567 passed.
 - B1 73/73 (M73–M76 added), A1 26/26; 0 survivors and 0 harness errors.
 - Python 3.14.7 `pytest -q` — 5,180 passed, 0 skipped; doctor, compileall, Desktop offscreen self-test, and `git diff --check` passed.
-- The last CI run `36318898478` covers the previous HEAD only; fresh CI for the process-lifetime follow-up is pending.
+- CI run `36322505051` covers the process-lifetime implementation HEAD; the previous run `36318898478` covers the earlier revision-floor-only HEAD.
 
 ## Blockers or risks
-- Local gates pass; new-head GitHub CI and final PR-state verification remain.
+- No blocker identified. PR #60 remains unmerged for the user's later merge decision.
 
 ## Next action
-Commit and push the follow-up, wait for new-head CI, and recheck PR state and unresolved threads. Do not merge.
+No further implementation work is pending. Leave PR #60 OPEN and do not merge.

@@ -26,7 +26,7 @@ Complete the reviewed PR #60 recovery closure and follow-up authorization-race f
 - [x] Added floor integrity guards: a sealed floor cannot predate the action intent revision, and corrupt stored rows fail every full-ledger safety read.
 - [x] Required targeted suites: 567 passed. B1 mutation harness: 73/73 red, 0 survivors, 0 harness errors (M73–M76 cover old-process blocking, same-floor generations, parser corruption and seal validation). A1: 26/26 red, 0 survivors, 0 harness errors.
 - [x] Python 3.14.7 full suite: 5,180 passed, 0 skipped; doctor, compileall, Desktop offscreen self-test, and `git diff --check` passed.
-- [ ] Commit and push this process-lifetime follow-up, then confirm fresh Windows/Python 3.14 CI on the new HEAD. Keep PR OPEN and do not merge.
+- [x] Commit and push process-lifetime implementation `d13575c23dd72e4da360c4271f126a0527af9131`; Windows/Python 3.14 CI run `36322505051` passed (`5177 passed, 3 skipped`, the same three unreachable-base skips). PR remains OPEN and unmerged.
 
 ## Decision log
 - 2026-09-27: Prior PR #60 review findings are addressed on the branch; current GitHub review-thread count was zero before this update. Do not report the historical two P1 threads as unresolved.
@@ -36,4 +36,4 @@ Complete the reviewed PR #60 recovery closure and follow-up authorization-race f
 - 2026-09-27: Revision-floor implementation passed local and new-head CI validation; only user-directed merge review remains, and this task must leave the PR unmerged.
 - 2026-09-27: Revision-floor code commit is pushed; new-head CI and final PR checks passed. PR is OPEN, non-draft, mergeable/CLEAN, with zero unresolved review threads. No merge was performed.
 - 2026-09-27: A recovery after Supervisor construction invalidates that process even after explicit re-enable; only a new Desktop process may rerun broker/account startup proof. The action count distinguishes repeated recoveries that share one A1 revision floor.
-- 2026-09-27: Process-lifetime follow-up passes all local gates; fresh CI and PR status for the new HEAD remain pending.
+- 2026-09-27: Process-lifetime follow-up passed local and fresh CI gates. PR is OPEN, non-draft, MERGEABLE/CLEAN, with zero unresolved review threads. No merge was performed.

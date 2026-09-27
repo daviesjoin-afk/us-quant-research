@@ -31,9 +31,10 @@ from us_quant.trading.application.execution import (
 )
 from us_quant.trading.composition.execution import (
     build_execution_application,
-    build_execution_candidate,
+    build_execution_candidate_factory,
     build_order_repository,
 )
+from us_quant.trading.domain.common import Environment
 from us_quant.trading.domain.orders import (
     ExecutionFill,
     OrderEvent,
@@ -161,9 +162,10 @@ def test_the_candidate_builder_produces_a_channel_over_the_shared_store(
 
     repository = build_order_repository(tmp_path / "orders.sqlite3")
     config = _paper_config()
-    adapter = build_execution_candidate(
-        config, repository=repository, extended_hours_enabled=False
-    )
+    adapter = build_execution_candidate_factory(
+        environment=Environment.PAPER,
+        live_trading_enabled=False,
+    )(config, repository=repository, extended_hours_enabled=False)
 
     assert adapter.repository is repository
     assert adapter.extended_hours_enabled is False

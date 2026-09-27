@@ -22,8 +22,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from us_quant.ibkr import IBKRConnectionConfig
+from us_quant.trading.domain.common import Environment
 from us_quant.trading.composition.execution import (
-    build_execution_candidate,
+    build_execution_candidate_factory,
     build_order_repository,
 )
 
@@ -47,7 +48,10 @@ def main() -> int:
         repository = build_order_repository(
             Path(directory) / "paper_channel_check.sqlite3"
         )
-        service = build_execution_candidate(config, repository=repository)
+        service = build_execution_candidate_factory(
+            environment=Environment.PAPER,
+            live_trading_enabled=False,
+        )(config, repository=repository)
         try:
             connection = service.connect()
             state = service.broker_state()

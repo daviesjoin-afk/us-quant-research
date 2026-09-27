@@ -28,7 +28,6 @@ from us_quant.trading.adapters.sqlite.order_repository import (
 )
 from us_quant.trading.composition.execution import (
     build_execution_application,
-    build_execution_candidate,
     build_order_repository,
 )
 from us_quant.trading.domain.orders import (
@@ -195,17 +194,19 @@ def _ibapi_stub_modules() -> dict[str, ModuleType]:
 class IBKRPaperOrderTests(unittest.TestCase):
     def test_only_local_paper_order_config_is_accepted(self) -> None:
         ensure_paper_order_config(_config())
-        with self.assertRaises((ValueError, IBKRPaperOrderError)):
-            ensure_paper_order_config(
-                IBKRConnectionConfig(
-                    host="127.0.0.1",
-                    port=4001,
-                    client_id=81,
-                    api_read_only=False,
-                    paper_order_submission_enabled=True,
-                    connection_timeout_seconds=5,
-                )
-            )
+        for invalid_port in (4001, 7497):
+            with self.subTest(port=invalid_port):
+                with self.assertRaises((ValueError, IBKRPaperOrderError)):
+                    ensure_paper_order_config(
+                        IBKRConnectionConfig(
+                            host="127.0.0.1",
+                            port=invalid_port,
+                            client_id=81,
+                            api_read_only=False,
+                            paper_order_submission_enabled=True,
+                            connection_timeout_seconds=5,
+                        )
+                    )
 
     def test_whole_share_limit_and_session_caps(self) -> None:
         intent = _intent(quantity=2, limit_price=Decimal("200"))
@@ -811,7 +812,7 @@ class IBKRPaperOrderTests(unittest.TestCase):
             repository = build_order_repository(
                 Path(directory) / "orders.sqlite3"
             )
-            adapter = build_execution_candidate(_config(), repository=repository)
+            adapter = IBKRExecutionAdapter(_config(), repository=repository)
             adapter._connected = True
             adapter._client = client
             adapter._account = "DU1234567"

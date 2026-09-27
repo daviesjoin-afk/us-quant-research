@@ -28,11 +28,13 @@ Account、Strategy、Risk、Execution 的迁移都在后续轮次，本文档只
 > 自己的最终 SHA —— 只要写入 SHA，commit 内容就变了，SHA 也随之改变，形成不可落地
 > 的自引用。PR body 可以记录 exact HEAD，因为 PR body 不参与 commit hash。
 >
-> **下一阶段**：Paper Autonomous Trading v1。**尚未开始**：Live ready、
-> autonomous trading、strategy evolution、AI decision —— 本轮均未实现，也不声称
-> 完成。（本轮未新增 Live adapter / Live credential / 真钱开关 / production
-> scheduler；这是 PR scope fact，由 `git diff --name-only` 可查，不是永久
-> architecture invariant。）
+> **进度更新（Paper Autonomous Trading v1 ✅ COMPLETE）**：PR #60 已合并；
+> merge baseline 为 `a07cd0a543dcec8eca852725cb632bb1a6aa0d98`。Desktop process
+> 运行期间，Paper 可以依持久化 operator intent 自动执行，无需人工点击
+> Prepare / Arm / Start，并具有 fail-closed crash/recovery/idempotency/reconciliation
+> 边界。Windows Service、OS startup daemon、machine reboot 自动拉起和 headless
+> long-running service 不属于 v1，本轮不做 v1-C。路线已进入 Stage 3：Live-ready
+> Execution Core；Stage 3-A 只做 execution environment boundary，不启用 Live 下单。
 >
 > **进度更新（Trading Framework Closure v2C）**：正式 Trading Runtime 已完全
 > 脱离内部 Shadow 模拟器，正式 session config 与 Shadow overlay 分离，
@@ -3142,7 +3144,8 @@ Paper begin_connecting 取得 PAPER → shadow.start() 必须 WorkflowStateError
 构造体内不出现 `paper` / `live` / `ibkr` / `alpaca` / `production` 的 name / attr /
 字面量 / compare —— 按 AST 而非源码文本，因为 docstring 里的 "lives" 之类的散文不是
 mode branch）。具体 adapter construction 在 composition：
-`build_execution_candidate() -> IBKRExecutionAdapter`，
+`build_execution_candidate_factory(environment, live_trading_enabled)` 在构造 adapter 前
+执行部署决策；只有 PAPER 会返回构造现有 `IBKRExecutionAdapter` 的 factory，
 `build_execution_application() -> ExecutionApplication(port)`。FA19 断言
 `application/risk.py` 与 `application/execution.py` 零 concrete broker import。
 
@@ -4045,8 +4048,8 @@ OrderRepositoryPort / BrokerExecutionPort
 ```
 
 `PaperOrderIntent`、`new_paper_order_intent` 与 `order_sink` 已删除；
-`paper_trading_service.py` 的默认工厂改为 composition 的
-`build_execution_candidate`，`paper_session.py` 的事件读取改为
+`paper_trading_service.py` 的 Paper 候选 factory 由 composition 的
+`build_execution_candidate_factory` 注入，`paper_session.py` 的事件读取改为
 `fills()` / `events()`，两者都只做类型迁移、排序与语义未动。
 
 ### 10.0 过渡残留：现已清零
@@ -4737,27 +4740,20 @@ Paper Autonomous Trading v1-A
 Persistent Autonomous Control Plane                 ✅ COMPLETE（§8.28）
 
 Paper Autonomous Trading v1-B
-Unattended Supervisor / Scheduler / Recovery Host   🔄 IN PROGRESS
-                                                       （feat/paper-autonomy-supervisor）
+Unattended Supervisor / Scheduler / Recovery Host   ✅ COMPLETE
+                                                       （PR #60，§8.28）
 
-Paper Autonomous Trading v1                          ❌ NOT COMPLETE
+Paper Autonomous Trading v1                          ✅ COMPLETE
+Merge baseline                                       a07cd0a543dcec8eca852725cb632bb1a6aa0d98
 ```
 
-`Paper Autonomous Trading v1` **不是** COMPLETE，而且本 PR 也不会把它变成 COMPLETE：
-v1-A 只建立了一个持久化控制面——"操作者希望自动系统处于什么状态"变成可持久化、
-可审计、crash/restart 后可恢复的事实——但**没有自动执行任何东西**。因此文档里不会
-出现 "autonomous Paper trading COMPLETE"。
+Paper Autonomous Trading v1 定义为：Desktop process 已运行时，Paper 可以在无需人工点击
+Prepare / Arm / Start 的情况下按 persistent operator intent 自动运行，并具有 fail-closed
+crash/recovery/idempotency/reconciliation 边界。它不包含 Windows Service、OS startup
+daemon、machine reboot 自动拉起或 headless long-running service；这些如有需要属于
+未来的 v1-C，本轮不做。
 
-v1-B 才把 operator intent 变成真正的 no-human-button Paper autonomous execution，且
-**不能复制** Paper lifecycle：supervisor 必须 Qt-free，只做 deterministic decision，
-通过窄 `PaperAutonomyExecutorPort` 请求既有 owner（`ExecutionOrchestrator` /
-`PaperOrchestrator` / `StrategySelectionService` / `MarketOrchestrator` /
-`AccountOrchestrator`）执行，最终仍必须走 canonical `PaperOrchestrator.start()` 并重跑
-它的 preflight；autonomous authorization 必须与 UI arm 分离，不能假装人点过确认框。
-v1-B 从 v1-A merge 之后的 main（`b8e660c`）重新开分支，没有从 v1-A
-feature branch 叠加。
-
-之后依次是 Live-ready Execution Core、
+之后依次是 Stage 3 Live-ready Execution Core、
 Small-capital Live Canary、Multi-strategy Portfolio Runtime、Strategy Lifecycle /
 Autonomous Evolution、AI Information & Decision Assistance、AI-assisted Strategy
 Evolution、Autonomous Quant Platform。
@@ -4773,7 +4769,62 @@ supervision、no human button dependency、full audit/event trail、operator kil
 switch、Paper-only hard gate。它仍然必须走
 `RiskApplication → ExecutionApplication → BrokerExecutionPort`，不绕开现有安全链。
 其中 **persistent autonomous intent/state 与 operator kill switch 已在 v1-A 完成**
-（§8.28）；其余仍属 v1-B 及以后，v1-A 一项都没有替它们做决定。
+（§8.28）；v1-B 的 supervisor、scheduler、recovery host 和相关 fail-closed 边界已随
+PR #60 完成（§8.28）。
+
+### 8.29 Stage 3-A：Live-ready Execution Core / execution environment boundary
+
+Paper Autonomous Trading v1 已于 PR #60 合并完成，基线为
+`a07cd0a543dcec8eca852725cb632bb1a6aa0d98`。当前主路线进入 Stage 3
+**Live-ready Execution Core**。Stage 3 的目标是让唯一 Risk / Execution / Runtime
+业务路径能承载未来单独实现的 adapter，并证明当前 production 不具备 Live 下单能力；
+Live-ready 不等于 Live-enabled，也不代表连接或提交真实 Live 订单。
+
+Stage 3-A 的部署决策只存在于纯 domain rule 与 execution composition：
+
+```text
+AppConfig(Environment, live_trading_enabled)
+                 │
+                 ▼
+      ExecutionDeploymentDecision
+                 │
+                 ▼
+       Execution composition factory
+          ├── PAPER ──▶ IBKR Paper adapter ──▶ BrokerExecutionPort
+          └── other ──▶ REFUSED
+
+TradingRuntime ──▶ OrderDispatch ── evaluate(...) ──▶ RiskApplication
+                         │                                │
+                         └── submit_approved(...) ◀ verdict┘
+                                      │
+                                      ▼
+                             ExecutionApplication
+                                │            │
+                                │            └── reserve / submit ──▶ BrokerExecutionPort
+                                └── durable intent/correlation ────▶ OrderRepositoryPort
+```
+
+`OrderDispatch` 是 runtime 唯一调用 `RiskApplication` 与 `ExecutionApplication` 的 seam；
+`ExecutionApplication` 先 reserve，再持久化 intent/broker correlation，最后才 submit。
+`Environment` 只影响 composition/adapter selection，不进入 Risk、Execution、Dispatch 或
+TradingRuntime。`BrokerExecutionPort` 继续 provider-neutral；test-only alternate broker
+double 用来证明相同 Execution core 可接另一实现，不连接任何真实 broker。
+
+| Environment | `live_trading_enabled` | Stage 3-A 结果 |
+| --- | --- | --- |
+| BACKTEST | false 或 true | 拒绝 broker channel：`backtest does not own a broker execution channel` |
+| PAPER | false 或 true | 选择现有 Paper-only `IBKRExecutionAdapter`；adapter 自身仍执行 Paper safety checks |
+| LIVE | false | 拒绝：`Live trading feature flag is disabled` |
+| LIVE | true | 拒绝：`Live execution is not implemented in Stage 3-A` |
+
+`live_trading_enabled` 只是 deployment feature flag，不是 operator、account、risk、broker 或
+canary authorization。Stage 3-A 不实现 Live adapter、Live account binding、Live operator
+intent、Live kill switch、Live startup proof、Live reconciliation、canary capital 或 Live order
+caps。当前 Paper adapter 继续 loopback / port 4002 / DU-only / whole-share / LMT / no-short，
+不因 Stage 3-A 放宽。
+
+后续候选 Stage 3-B 是 Live Execution Authorization & Safety Envelope；它仍须在 review 前
+保持无法提交真实 Live 订单。Small-capital Live Canary 属于 Stage 4，不能提前到本阶段。
 
 Shadow Framework v2 刻意没有做的事，留给更后面：
 

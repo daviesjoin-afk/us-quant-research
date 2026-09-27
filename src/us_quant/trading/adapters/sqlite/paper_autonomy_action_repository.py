@@ -427,6 +427,15 @@ class SQLitePaperAutonomyActionRepository:
         records = self._read(_SELECT_ALL, ())
         return tuple(row for row in records if not row.is_terminal)
 
+    def latest_operator_resolution_at(self) -> datetime | None:
+        records = self._read(_SELECT_ALL, ())
+        completed = (
+            row.completed_at
+            for row in records
+            if row.status is PaperAutonomyActionStatus.OPERATOR_RESOLVED
+        )
+        return max(completed, default=None)
+
     def recent(
         self, limit: int = 50
     ) -> tuple[PaperAutonomyActionRecord, ...]:

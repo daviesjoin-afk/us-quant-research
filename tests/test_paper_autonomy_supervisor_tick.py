@@ -351,6 +351,7 @@ def _startup_facts(**overrides: object) -> PaperAutonomyStartupFacts:
         "intent_store_readable": True,
         "action_store_readable": True,
         "unresolved_action_count": 0,
+        "recovery_authorization_valid": True,
         "broker_state_known": True,
         "account_identity_known": True,
         "open_broker_orders": 0,

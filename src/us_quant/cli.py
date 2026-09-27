@@ -1146,9 +1146,6 @@ def paper_autonomy_resolve_action(
             )
         )
         return 2
-    intent = build_paper_autonomy_application(
-        database_path=intent_database_path or _default_autonomy_database()
-    ).snapshot()
     payload = {
         "resolved": True,
         "action_key": action_key,
@@ -1159,15 +1156,10 @@ def paper_autonomy_resolve_action(
             "this does not enable Paper autonomy"
         ),
         "next_step": (
-            "restart the Desktop and explicitly enable autonomy after startup "
-            "is proven safe"
+            "if the kill switch is latched, clear it; then restart the Desktop "
+            "and explicitly enable autonomy after startup is proven safe"
         ),
     }
-    if intent.kill_switch_latched:
-        payload["next_step"] = (
-            "clear the kill switch, then explicitly enable autonomy after "
-            "restarting the Desktop and proving startup safe"
-        )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 

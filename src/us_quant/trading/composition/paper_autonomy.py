@@ -58,7 +58,9 @@ def build_paper_autonomy_recovery_application(
     """Bind the recovery authority to the intent reader and action ledger."""
 
     return PaperAutonomyRecoveryApplication(
-        SQLitePaperAutonomyRepository(intent_database_path),
+        PaperAutonomyApplication(
+            SQLitePaperAutonomyRepository(intent_database_path)
+        ),
         SQLitePaperAutonomyActionRepository(action_database_path),
         clock=clock,
     )

@@ -91,6 +91,7 @@ $autonomyCompletion = Join-Path $src "desktop_v2\orchestration\autonomy\completi
 $autonomyHost = Join-Path $src "desktop_v2\orchestration\autonomy\host.py"
 $autonomyRecovery = Join-Path $src "trading\application\paper_autonomy_recovery.py"
 $actionRecovery = Join-Path $src "trading\adapters\sqlite\paper_autonomy_action_repository.py"
+$supervisorDomain = Join-Path $src "trading\domain\paper_autonomy_supervisor.py"
 $recoveryBehaviour = Join-Path $projectRoot "tests/test_paper_autonomy_recovery.py"
 
 $behaviour = Join-Path $projectRoot "tests/test_paper_autonomy_supervisor.py"
@@ -664,6 +665,14 @@ $mutations = @(
         repl = "            )`n            pass`n`n        def reset_block_event_after_recovery"
         tests = @($recoveryBehaviour)
         select = @("-k", "unsafe_startup_returns_before_completion_signals_are_connected")
+    },
+    @{
+        name = 'M68 authorization at the recovery timestamp is treated as later'
+        file = $supervisorDomain
+        find = 'return authorization_updated_at > latest_resolution_at'
+        repl = 'return authorization_updated_at >= latest_resolution_at'
+        tests = @($recoveryBehaviour)
+        select = @("-k", "recovery_authorization_timestamp_comparison_is_strict")
     }
 )
 

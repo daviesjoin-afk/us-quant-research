@@ -3734,7 +3734,10 @@ broker、账户、订单和持仓；若自治仍为 `ENABLED` 或 `PAUSED`，先
 
 resolution 不重新授权、不启动 session 或 host。完成后重启 Desktop，由新进程重新做完整 startup
 安全检查；只有检查通过后才可能启动 host。若 kill 仍锁定，操作员先显式 clear kill，再单独显式
-enable。若需要当天再次交易，使用既有人工 Paper 路径，不能因 resolution 自动重试自治 START。
+enable。最新 resolution 之后写入的 intent 时间必须严格晚于 resolution 时间；如果 ENABLED/PAUSED
+授权在 resolution 前或时间顺序无法证明，新进程保持 startup unsafe，直到操作员在 resolution 后重新
+明确授权。DISABLED intent 可通过此项检查，因为它本身不授权自治工作。若需要当天再次交易，使用既有
+人工 Paper 路径，不能因 resolution 自动重试自治 START。
 
 配置只从显式 `[paper.autonomy]` 读取，缺少或无效时不造默认时刻、不启动 host，并记录
 `AUTONOMY_SUPERVISOR_UNAVAILABLE`。必须显式提供以下值：

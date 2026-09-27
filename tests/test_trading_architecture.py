@@ -315,7 +315,6 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "market_data.py",
         "order_repository.py",
         "paper_autonomy_action_repository.py",
-        "paper_autonomy_intent_reader.py",
         "paper_autonomy_repository.py",
         "paper_autonomy_supervisor.py",
         "strategy_repository.py",

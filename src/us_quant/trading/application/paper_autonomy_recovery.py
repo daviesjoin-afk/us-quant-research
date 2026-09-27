@@ -16,7 +16,7 @@ from us_quant.trading.ports.paper_autonomy_action_repository import (
     PaperAutonomyActionRecord,
     PaperAutonomyActionRepositoryPort,
 )
-from us_quant.trading.ports.paper_autonomy_intent_reader import (
+from us_quant.trading.ports.paper_autonomy_supervisor import (
     PaperAutonomyIntentReaderPort,
 )
 
@@ -59,7 +59,7 @@ class PaperAutonomyRecoveryApplication:
     ) -> PaperAutonomyActionRecord:
         """Close one unresolved row without claiming success or failure."""
 
-        intent = self._intent_reader.load_intent()
+        intent = self._intent_reader.snapshot()
         if intent.mode is not PaperAutonomyMode.DISABLED:
             raise PaperAutonomySupervisorViolation(
                 "disable Paper autonomy before resolving an ambiguous action"

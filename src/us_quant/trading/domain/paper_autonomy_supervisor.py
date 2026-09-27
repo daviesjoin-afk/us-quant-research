@@ -57,6 +57,23 @@ class PaperAutonomySupervisorViolation(PaperAutonomySupervisorError):
     """A value or a stored record would break an invariant of this vocabulary."""
 
 
+def recovery_authorization_is_valid(
+    mode: PaperAutonomyMode,
+    authorization_updated_at: datetime,
+    latest_resolution_at: datetime | None,
+) -> bool:
+    """Require active intent to postdate the latest ambiguity closure."""
+
+    if mode is PaperAutonomyMode.DISABLED or latest_resolution_at is None:
+        return True
+    if (
+        authorization_updated_at.tzinfo is None
+        or latest_resolution_at.tzinfo is None
+    ):
+        return False
+    return authorization_updated_at > latest_resolution_at
+
+
 class PaperAutonomySessionWindow(StrEnum):
     """The canonical US equity session, in the autonomy vocabulary.
 
@@ -560,6 +577,7 @@ class PaperAutonomyStartupFacts:
     paper_ownership_clear: bool
     manual_recovery_required: bool
     unresolved_action_count: int | None = None
+    recovery_authorization_valid: bool | None = None
 
     @property
     def proven_safe(self) -> bool:
@@ -573,6 +591,7 @@ class PaperAutonomyStartupFacts:
             self.intent_store_readable
             and self.action_store_readable
             and self.unresolved_action_count == 0
+            and self.recovery_authorization_valid is True
             and self.broker_state_known
             and self.account_identity_known
             and self.open_broker_orders == 0

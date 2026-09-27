@@ -1,7 +1,7 @@
 # Exec plan: Paper Autonomous Trading v1-B
 
 ## Goal and completion criteria
-Complete the reviewed PR #60 recovery closure on `feat/paper-autonomy-supervisor`, starting from exact HEAD `6f0226454a83526ed562f9bc41880459bf8fdc63`. Add an explicit, disabled-only operator resolution for old `CLAIMED`/`REQUESTED` actions, preserving fail-closed startup, canonical Paper ownership and all existing scope limits. Update evidence, push the branch, wait for CI on the new HEAD, and stop without merging.
+Complete the reviewed PR #60 recovery closure and follow-up authorization-race fix on `feat/paper-autonomy-supervisor`. Preserve fail-closed startup, canonical Paper ownership and all existing scope limits. Update evidence, push the branch, wait for CI on the new HEAD, and stop without merging.
 
 ## Constraints
 - No OCR, OpenCodeReview, Live, real-money execution, AI, or strategy evolution.
@@ -20,12 +20,16 @@ Complete the reviewed PR #60 recovery closure on `feat/paper-autonomy-supervisor
 ## Status
 - [x] Reviewed exact HEAD and preserved existing unrelated untracked files.
 - [x] Implemented operator-resolved terminal status, atomic stale-checked SQLite update, Qt-free recovery application, CLI commands, documentation and regression/architecture cases.
-- [x] B1 mutation harness: 65/65 red, 0 survivors, 0 harness errors.
+- [x] Closed the follow-up authorization race: startup rejects ENABLED/PAUSED intent unless its timestamp is strictly newer than the latest `OPERATOR_RESOLVED`; recovery and supervisor share one read-only `snapshot()` port; successful CLI resolution output has no post-commit A1 read.
+- [x] B1 mutation harness: 66/66 red, 0 survivors, 0 harness errors (M68 locks strict post-resolution ordering).
 - [x] Targeted autonomy, CLI and FAC checks: 350 passed.
 - [x] Python 3.14.7 full suite: 5,172 passed, 0 skipped; doctor, compileall, Qt offscreen and diff check passed.
 - [x] Mutation suites: B1 65/65, A1 26/26, G2-B 35/35, E2 12/12, E3 41/41, E4 11/11, FAC 42/42; no survivors or harness errors. Ten-item recovery and scope audit passed.
 - [x] Commit and push only task-owned files; PR head is `f4fd5fb78383aa851c7ed2b3885b1bf3da6dd6bf`.
 - [x] New-head Windows/Python 3.14 CI passed (run `36305577910`, `5169 passed, 3 shallow skips`); PR description updated; PR remains OPEN with 0 unresolved review threads. Do not merge.
+- [x] Follow-up exact-HEAD audit race closed with startup timestamp barrier; recovery now uses the existing `snapshot()` port; CLI resolution output no longer performs a post-commit A1 read.
+- [x] Full local suite after follow-up: `5172 passed, 14 subtests passed`; `compileall` and `git diff --check` passed.
+- [ ] Commit and push the follow-up, update PR evidence, and confirm CI for the new HEAD. Do not merge.
 
 ## Decision log
 - 2026-09-27: Prior PR #60 review findings are addressed on the branch; current GitHub review-thread count was zero before this update. Do not report the historical two P1 threads as unresolved.

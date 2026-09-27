@@ -94,6 +94,7 @@ def test_startup_facts_are_read_once_and_unknown_is_preserved():
     adapter = PaperAutonomyStartupFactsAdapter(
         intent_store_readable=lambda: True,
         unresolved_action_count=read_action_count,
+        recovery_authorization_valid=lambda: True,
         broker_state_known=lambda: True,
         account_identity_known=lambda: True,
         open_broker_orders=read_orders,
@@ -117,6 +118,7 @@ def test_startup_action_count_blocks_when_previous_action_is_unresolved():
     adapter = PaperAutonomyStartupFactsAdapter(
         intent_store_readable=lambda: True,
         unresolved_action_count=lambda: 1,
+        recovery_authorization_valid=lambda: True,
         broker_state_known=lambda: True,
         account_identity_known=lambda: True,
         open_broker_orders=lambda: 0,
@@ -137,6 +139,7 @@ def test_startup_action_store_failure_is_unknown_and_unsafe():
     adapter = PaperAutonomyStartupFactsAdapter(
         intent_store_readable=lambda: True,
         unresolved_action_count=lambda: None,
+        recovery_authorization_valid=lambda: True,
         broker_state_known=lambda: True,
         account_identity_known=lambda: True,
         open_broker_orders=lambda: 0,
@@ -177,6 +180,7 @@ def test_previous_process_requested_start_or_prepare_blocks_startup(
     adapter = PaperAutonomyStartupFactsAdapter(
         intent_store_readable=lambda: True,
         unresolved_action_count=lambda: len(actions.unresolved()),
+        recovery_authorization_valid=lambda: True,
         broker_state_known=lambda: True,
         account_identity_known=lambda: True,
         open_broker_orders=lambda: 0,
@@ -221,6 +225,7 @@ def test_terminal_historical_action_does_not_block_startup(tmp_path, action):
     adapter = PaperAutonomyStartupFactsAdapter(
         intent_store_readable=lambda: True,
         unresolved_action_count=lambda: len(actions.unresolved()),
+        recovery_authorization_valid=lambda: True,
         broker_state_known=lambda: True,
         account_identity_known=lambda: True,
         open_broker_orders=lambda: 0,

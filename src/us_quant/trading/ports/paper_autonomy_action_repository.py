@@ -248,6 +248,13 @@ class PaperAutonomyActionRepositoryPort(Protocol):
         not the same one as "nothing is outstanding".
         """
 
+    def latest_operator_resolution_at(self) -> datetime | None:
+        """Latest durable timestamp that closed an ambiguous action.
+
+        Implementations must parse the complete ledger. ``None`` means no
+        operator resolution exists; a damaged/unreadable ledger must raise.
+        """
+
     def start_attempted(self, trading_day: date) -> bool:
         """Whether an autonomous start was already attempted on that day.
 

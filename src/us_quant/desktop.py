@@ -79,8 +79,11 @@ from us_quant.trading.domain.market import (
     MarketDataMode,
     MarketSnapshot,
 )
-from us_quant.trading.domain.paper_autonomy import PaperAutonomyError
+from us_quant.trading.domain.paper_autonomy import (
+    PaperAutonomyError,
+)
 from us_quant.trading.domain.paper_autonomy_supervisor import (
+    recovery_authorization_is_valid,
     EVENT_SEVERITIES,
     REQUESTED_EVENT_CODES,
     PaperAutonomyAction,
@@ -1607,6 +1610,16 @@ class MainWindow(QMainWindow):
             except Exception:  # noqa: BLE001 - startup must fail closed
                 return None
 
+        def recovery_authorization_valid() -> bool | None:
+            try:
+                intent = self.paper_autonomy_application.snapshot()
+                latest_resolution = actions.latest_operator_resolution_at()
+            except Exception:  # noqa: BLE001 - startup must fail closed
+                return None
+            return recovery_authorization_is_valid(
+                intent.mode, intent.updated_at, latest_resolution
+            )
+
         try:
             connection, broker_snapshot = startup_probe_result
             open_orders = connection.open_broker_orders
@@ -1662,6 +1675,7 @@ class MainWindow(QMainWindow):
         startup_facts = PaperAutonomyStartupFactsAdapter(
             intent_store_readable=intent_store_readable,
             unresolved_action_count=unresolved_action_count,
+            recovery_authorization_valid=recovery_authorization_valid,
             broker_state_known=broker_state_known,
             account_identity_known=account_identity_known,
             # The account snapshot is not proof about open broker orders. Until

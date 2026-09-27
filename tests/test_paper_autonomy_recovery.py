@@ -24,6 +24,7 @@ from us_quant.trading.domain.paper_autonomy_supervisor import (
     PaperAutonomyActionType,
     PaperAutonomyStartupFacts,
     PaperAutonomySupervisorViolation,
+    recovery_authorization_is_valid,
 )
 from us_quant.trading.ports.paper_autonomy_action_repository import (
     PaperAutonomyActionRecord,
@@ -55,7 +56,7 @@ def setup(tmp_path: pathlib.Path):
     actions = SQLitePaperAutonomyActionRepository(tmp_path / "actions.sqlite3")
     intent = PaperAutonomyApplication(intent_store, clock=lambda: NOW)
     recovery = PaperAutonomyRecoveryApplication(
-        intent_store, actions, clock=lambda: NOW
+        intent, actions, clock=lambda: NOW
     )
     return intent_store, actions, intent, recovery
 
@@ -102,6 +103,7 @@ def test_resolution_uses_expected_status(setup) -> None:
         paper_ownership_clear=True,
         manual_recovery_required=False,
         unresolved_action_count=len(recovery.unresolved()),
+        recovery_authorization_valid=True,
     )
     assert unsafe_startup.proven_safe is False
 
@@ -131,6 +133,7 @@ def test_resolution_uses_expected_status(setup) -> None:
         paper_ownership_clear=True,
         manual_recovery_required=False,
         unresolved_action_count=len(recovery.unresolved()),
+        recovery_authorization_valid=True,
     )
     assert startup.proven_safe is True
 
@@ -228,6 +231,83 @@ def test_resolved_start_still_counts_as_attempted(setup) -> None:
     )
 
     assert actions.start_attempted(DAY) is True
+
+
+def test_concurrent_enable_before_resolution_is_not_fresh_authorization(
+    tmp_path: pathlib.Path,
+) -> None:
+    intent_store = SQLitePaperAutonomyRepository(tmp_path / "intent-race.sqlite3")
+    actions = SQLitePaperAutonomyActionRepository(tmp_path / "actions-race.sqlite3")
+    at = lambda second: datetime(2026, 9, 27, 9, 0, second, tzinfo=timezone.utc)
+    intent = PaperAutonomyApplication(intent_store, clock=lambda: at(1))
+    enabled = intent.enable(INITIAL_REVISION, "initial authorization")
+    intent = PaperAutonomyApplication(intent_store, clock=lambda: at(2))
+    disabled = intent.disable(enabled.revision, "disable before recovery")
+    actions.claim(
+        PaperAutonomyActionRecord(
+            action_key="race-start",
+            intent_revision=disabled.revision,
+            trading_day=DAY,
+            action=PaperAutonomyActionType.START,
+            status=PaperAutonomyActionStatus.CLAIMED,
+            claimed_at=at(1),
+            completed_at=None,
+            detail="interrupted start",
+        )
+    )
+
+    class RacingIntentReader:
+        def snapshot(self):
+            observed_disabled = intent_store.load_intent()
+            PaperAutonomyApplication(
+                intent_store, clock=lambda: at(3)
+            ).enable(observed_disabled.revision, "concurrent stale writer")
+            return observed_disabled
+
+    recovery = PaperAutonomyRecoveryApplication(
+        RacingIntentReader(), actions, clock=lambda: at(4)
+    )
+    resolved = recovery.resolve_unknown(
+        action_key="race-start",
+        expected_status=PaperAutonomyActionStatus.CLAIMED,
+        reason="operator reviewed the ambiguous action",
+    )
+
+    concurrent_intent = intent_store.load_intent()
+    assert concurrent_intent.mode is PaperAutonomyMode.ENABLED
+    assert resolved.completed_at == at(4)
+    assert not recovery_authorization_is_valid(
+        concurrent_intent.mode,
+        concurrent_intent.updated_at,
+        actions.latest_operator_resolution_at(),
+    )
+
+    disabled_again = PaperAutonomyApplication(
+        intent_store, clock=lambda: at(5)
+    ).disable(concurrent_intent.revision, "operator reviewed after recovery")
+    enabled_after_recovery = PaperAutonomyApplication(
+        intent_store, clock=lambda: at(6)
+    ).enable(disabled_again.revision, "explicit post-recovery authorization")
+    assert recovery_authorization_is_valid(
+        enabled_after_recovery.mode,
+        enabled_after_recovery.updated_at,
+        actions.latest_operator_resolution_at(),
+    )
+
+
+def test_recovery_authorization_timestamp_comparison_is_strict() -> None:
+    resolution = NOW
+    assert recovery_authorization_is_valid(PaperAutonomyMode.DISABLED, NOW, resolution)
+    assert not recovery_authorization_is_valid(PaperAutonomyMode.ENABLED, NOW, resolution)
+    assert not recovery_authorization_is_valid(
+        PaperAutonomyMode.ENABLED,
+        NOW.replace(tzinfo=None), resolution
+    )
+    assert recovery_authorization_is_valid(
+        PaperAutonomyMode.ENABLED,
+        NOW.replace(microsecond=1),
+        resolution,
+    )
 
 
 def test_recovery_authority_has_no_runtime_or_enable_capability() -> None:

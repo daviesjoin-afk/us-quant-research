@@ -88,6 +88,7 @@ class PaperAutonomyStartupFactsAdapter:
         *,
         intent_store_readable: Callable[[], bool],
         unresolved_action_count: Callable[[], int | None],
+        recovery_authorization_valid: Callable[[], bool | None],
         broker_state_known: Callable[[], bool],
         account_identity_known: Callable[[], bool],
         open_broker_orders: Callable[[], int | None],
@@ -99,6 +100,7 @@ class PaperAutonomyStartupFactsAdapter:
         self._readers = (
             intent_store_readable,
             unresolved_action_count,
+            recovery_authorization_valid,
             broker_state_known,
             account_identity_known,
             open_broker_orders,
@@ -115,6 +117,7 @@ class PaperAutonomyStartupFactsAdapter:
         (
             intent_readable,
             unresolved_count,
+            recovery_authorization_valid,
             broker_known,
             account_known,
             open_orders,
@@ -124,10 +127,15 @@ class PaperAutonomyStartupFactsAdapter:
             recovery_required,
         ) = self._readers
         unresolved_count = unresolved_count()
+        try:
+            authorization_valid = recovery_authorization_valid()
+        except Exception:  # noqa: BLE001 - authorization must fail closed
+            authorization_valid = None
         self._facts = PaperAutonomyStartupFacts(
             intent_store_readable=bool(intent_readable()),
             action_store_readable=unresolved_count is not None,
             unresolved_action_count=unresolved_count,
+            recovery_authorization_valid=authorization_valid,
             broker_state_known=bool(broker_known()),
             account_identity_known=bool(account_known()),
             open_broker_orders=open_orders(),

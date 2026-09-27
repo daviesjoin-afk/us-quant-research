@@ -947,6 +947,7 @@ NON_MARKET_DATA_ADAPTER_MODULES = {
     "ibkr/__init__.py",
     "ibkr/account.py",
     "ibkr/execution.py",
+    "ibkr/live_execution.py",
     "ibkr/execution_gateway.py",
     "ibkr/support.py",
     "sqlite/paper_autonomy_action_repository.py",
@@ -2425,6 +2426,7 @@ EXECUTION_V2_MODULES = (
     EXECUTION_APPLICATION,
     EXECUTION_COMPOSITION,
     EXECUTION_ADAPTER,
+    _TRADING / "adapters" / "ibkr" / "live_execution.py",
     EXECUTION_GATEWAY,
     EXECUTION_STORE,
     _TRADING / "adapters" / "clock.py",
@@ -2451,6 +2453,7 @@ EXECUTION_APPLICATION_FORBIDDEN_PREFIXES = (
 #: problem, and a guard that cannot pass is a guard that gets weakened.
 STRATEGY_EXECUTION_SURFACE_NAMES = (
     "IBKRExecutionAdapter",
+    "IBKRLiveExecutionAdapter",
     "placeOrder",
     "cancelOrder",
 )

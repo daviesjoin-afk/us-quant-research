@@ -174,14 +174,26 @@ def test_composition_is_the_only_production_adapter_construction_owner() -> None
 
 
 def test_production_broker_submit_and_cancel_are_adapter_owned() -> None:
-    expected = "trading/adapters/ibkr/execution.py"
+    expected = {
+        "trading/adapters/ibkr/execution.py",
+        "trading/adapters/ibkr/live_execution.py",
+    }
     for method in ("placeOrder", "cancelOrder"):
         owners = []
         for path in _python_files(SRC):
             for node in ast.walk(_tree(path)):
                 if isinstance(node, ast.Call) and _call_name(node) == method:
                     owners.append(path.relative_to(SRC).as_posix())
-        assert owners == [expected], (method, owners)
+        assert set(owners) == expected and len(owners) == len(expected), (method, owners)
+
+
+def test_live_adapter_is_not_constructed_by_production_code() -> None:
+    owners = []
+    for path in _python_files(SRC):
+        for node in ast.walk(_tree(path)):
+            if isinstance(node, ast.Call) and _call_name(node) == "IBKRLiveExecutionAdapter":
+                owners.append(path.relative_to(SRC).as_posix())
+    assert owners == []
 
 
 def test_desktop_only_uses_the_gated_factory_and_no_adapter() -> None:

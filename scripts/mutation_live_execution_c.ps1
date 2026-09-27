@@ -40,7 +40,9 @@ $mutations = @(
     @{ name='M9 execution account mismatch is accepted'; find='if execution_account != self\._account:'; repl='if False:'; select='test_execution_fill_mismatch_halts_without_emitting_fill' },
     @{ name='M10 overfill beyond reserved quantity is accepted'; find='if cumulative_quantity > Decimal\(intent\.quantity\):'; repl='if False:'; select='test_execution_fill_mismatch_halts_without_emitting_fill' },
     @{ name='M11 already submitted reservation is submitted again'; find='if reservation\.broker_order_id in self\._submitted_orders:'; repl='if False:'; select='test_reserve_only_allocates_id_and_submit_builds_one_live_lmt_order' },
-    @{ name='M12 conflicting intent reuses an existing broker id'; find='if self\._intent_by_order\[existing\] != intent:'; repl='if False:'; select='test_reusing_an_order_id_for_different_intent_is_refused' }
+    @{ name='M12 conflicting intent reuses an existing broker id'; find='if self\._intent_by_order\[existing\] != intent:'; repl='if False:'; select='test_reusing_an_order_id_for_different_intent_is_refused' },
+    @{ name='non-stock or non-USD positions are accepted'; find='if security_type != "STK" or currency != "USD":'; repl='if False:'; select='test_non_usd_stock_startup_position_fails_closed' },
+    @{ name='invalid filled or remaining values are trusted'; find='if quantities_valid:'; repl='if True:'; select='test_invalid_order_status_quantities_halt_and_publish_unknown' }
 )
 
 $results = @()

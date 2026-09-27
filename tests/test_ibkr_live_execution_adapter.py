@@ -58,12 +58,15 @@ class _FakeGateway:
         self.sink.gateway_managed_accounts(self, self.epoch, ",".join(self.accounts))
 
     def reqPositions(self) -> None:
-        for symbol, quantity in self.positions:
+        for row in self.positions:
+            symbol, quantity = row[:2]
+            security_type = row[2] if len(row) > 2 else "STK"
+            currency = row[3] if len(row) > 3 else "USD"
             self.sink.gateway_position(
                 self,
                 self.epoch,
                 self.accounts[0],
-                SimpleNamespace(symbol=symbol),
+                SimpleNamespace(symbol=symbol, secType=security_type, currency=currency),
                 quantity,
                 Decimal("100"),
             )
@@ -255,6 +258,22 @@ def test_short_or_fractional_startup_position_fails_closed(positions):
     assert not adapter.connected
 
 
+@pytest.mark.parametrize(
+    "positions",
+    [
+        (("AAPL", Decimal("10"), "OPT"),),
+        (("AAPL", Decimal("10"), "STK", "EUR"),),
+    ],
+)
+def test_non_usd_stock_startup_position_fails_closed(positions):
+    adapter, _, _ = _adapter(positions=positions)
+
+    with pytest.raises(IBKRLiveExecutionError):
+        _connect(adapter)
+
+    assert not adapter.connected
+
+
 def test_reserve_only_allocates_id_and_submit_builds_one_live_lmt_order():
     adapter, gateway, _ = _adapter(repository=_Repository(maximum=42))
     _connect(adapter)
@@ -354,6 +373,27 @@ def test_broker_order_status_and_fill_callbacks_are_normalized_and_deduplicated(
     assert len(fills) == 1
     assert fills[0].execution_id == "exec-1"
     assert fills[0].quantity == Decimal("1") and fills[0].price == Decimal("201")
+    adapter.disconnect()
+
+
+def test_invalid_order_status_quantities_halt_and_publish_unknown():
+    adapter, _, _ = _adapter()
+    _connect(adapter)
+    intent = _intent()
+    reservation = adapter.reserve(intent)
+    adapter.submit(reservation)
+
+    adapter.gateway_order_status(
+        adapter._client,
+        adapter._epoch,
+        (reservation.broker_order_id, "Filled", Decimal("1.5"), Decimal("0")),
+    )
+
+    event, = adapter.events()
+    assert adapter.halted
+    assert event.status is OrderStatus.UNKNOWN
+    assert event.filled == Decimal("0")
+    assert event.remaining == Decimal("1")
     adapter.disconnect()
 
 

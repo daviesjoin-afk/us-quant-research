@@ -618,6 +618,13 @@ class IBKRLiveExecutionAdapter:
             if not symbol:
                 self._errors.append("Live position snapshot contains an unknown symbol")
                 return
+            security_type = str(getattr(contract, "secType", "")).strip().upper()
+            currency = str(getattr(contract, "currency", "")).strip().upper()
+            if security_type != "STK" or currency != "USD":
+                self._errors.append(
+                    "Live position snapshot contains a non-USD-stock instrument"
+                )
+                return
             try:
                 self._positions[symbol] = Decimal(str(quantity))
             except (InvalidOperation, TypeError, ValueError):
@@ -636,12 +643,26 @@ class IBKRLiveExecutionAdapter:
             filled = Decimal(str(args[2]))
             remaining = Decimal(str(args[3]))
         except (InvalidOperation, TypeError, ValueError):
-            filled, remaining = Decimal("0"), Decimal("0")
+            filled, remaining = Decimal("NaN"), Decimal("NaN")
         with self._state_lock:
             intent = self._intent_by_order.get(broker_id)
             if intent is None:
                 return
-            status = order_status_from_text(raw_status)
+            quantities_valid = (
+                _whole_quantity(filled)
+                and _whole_quantity(remaining)
+                and filled <= Decimal(intent.quantity)
+                and remaining <= Decimal(intent.quantity)
+            )
+            if quantities_valid:
+                status = order_status_from_text(raw_status)
+                message = ""
+            else:
+                self._halt_locked("IBKR Live order status contains invalid quantities")
+                status = OrderStatus.UNKNOWN
+                filled = Decimal("0")
+                remaining = Decimal(intent.quantity)
+                message = "Invalid broker-reported filled/remaining quantities"
             event = OrderEvent(
                 order_id=intent.order_id,
                 status=status,
@@ -651,7 +672,7 @@ class IBKRLiveExecutionAdapter:
                 remaining=remaining,
                 average_fill_price=_optional_decimal(args[4] if len(args) > 4 else None),
                 last_fill_price=_optional_decimal(args[7] if len(args) > 7 else None),
-                message="",
+                message=message,
                 idempotency_key=intent.idempotency_key,
                 occurred_at=datetime.now(timezone.utc),
             )

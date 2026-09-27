@@ -22,6 +22,7 @@ from us_quant.ibkr import (
     connect_ibkr_client,
 )
 from us_quant.trading.adapters.ibkr.support import (
+    IBKR_UNSET_DOUBLE,
     INFORMATIONAL_ERROR_CODES,
     mask_account_id,
 )
@@ -335,7 +336,10 @@ class IBKRLiveExecutionAdapter:
         )
 
     def _disconnect_after_failed_connect(self) -> None:
-        client = self._client
+        with self._state_lock:
+            client = self._client
+            self._client = None
+            self._connected = False
         if client is not None:
             try:
                 if client.isConnected():
@@ -347,7 +351,6 @@ class IBKRLiveExecutionAdapter:
             thread.join(timeout=2)
         with self._state_lock:
             self._connected = False
-            self._client = None
             self._account = ""
             self._positions.clear()
 
@@ -528,6 +531,7 @@ class IBKRLiveExecutionAdapter:
         with self._state_lock:
             client = self._client
             self._connected = False
+            self._client = None
         if client is not None:
             try:
                 if client.isConnected():
@@ -539,7 +543,6 @@ class IBKRLiveExecutionAdapter:
         if thread is not None and thread.is_alive():
             thread.join(timeout=3)
         with self._state_lock:
-            self._client = None
             self._account = ""
             self._positions.clear()
             if self._intent_by_order:
@@ -597,13 +600,16 @@ class IBKRLiveExecutionAdapter:
                     status = OrderStatus.BROKER_REJECTED
                 else:
                     status = OrderStatus.UNKNOWN
+                filled_quantity = self._execution_quantity_by_order.get(
+                    request_id, Decimal("0")
+                )
                 event = OrderEvent(
                     order_id=intent.order_id,
                     status=status,
                     broker_order_id=request_id,
                     broker_status=f"Error {code}",
-                    filled=self._execution_quantity_by_order.get(request_id, Decimal("0")),
-                    remaining=Decimal(intent.quantity),
+                    filled=filled_quantity,
+                    remaining=max(Decimal(intent.quantity) - filled_quantity, Decimal("0")),
                     message=message,
                     idempotency_key=intent.idempotency_key,
                 )
@@ -838,7 +844,9 @@ def _optional_decimal(value: Any) -> Decimal | None:
         result = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError):
         return None
-    return result if result.is_finite() else None
+    if not result.is_finite() or abs(result) >= Decimal(str(IBKR_UNSET_DOUBLE)):
+        return None
+    return result
 
 
 def _wait_before_deadline(event: Event, deadline: float) -> bool:

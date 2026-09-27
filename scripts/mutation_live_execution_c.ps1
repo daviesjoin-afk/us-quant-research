@@ -47,7 +47,10 @@ $mutations = @(
     @{ name='HALT still permits broker cancellation'; find='or self\._halted'; repl='or False'; select='test_uncertain_submit_halt_blocks_another_broker_cancel' },
     @{ name='global gateway errors do not halt'; find='elif code not in \{201, 202\}:'; repl='elif False:'; select='test_post_handshake_gateway_error_halts_and_cancel_is_blocked' },
     @{ name='timezone-less IBKR execution time remains naive'; find='            return parsed\.replace\(tzinfo=timezone\.utc\)'; repl='            return parsed'; select='test_broker_order_status_and_fill_callbacks_are_normalized_and_deduplicated' },
-    @{ name='unrepresentable limit prices are accepted'; find='if not isfinite\(broker_limit_price\) or broker_limit_price <= 0:'; repl='if False:'; select='test_limit_price_outside_ibkr_float_range_is_refused' }
+    @{ name='unrepresentable limit prices are accepted'; find='if not isfinite\(broker_limit_price\) or broker_limit_price <= 0:'; repl='if False:'; select='test_limit_price_outside_ibkr_float_range_is_refused' },
+    @{ name='expected disconnect is mistaken for connection loss'; find='return app is self\._client and epoch == self\._epoch'; repl='return True'; select='test_intentional_disconnect_does_not_halt_and_adapter_can_reconnect' },
+    @{ name='partial-fill cancellation reports original order size as remaining'; find='remaining=max\(Decimal\(intent\.quantity\) - filled_quantity, Decimal\("0"\)\),'; repl='remaining=Decimal(intent.quantity),'; select='test_partial_fill_cancel_event_reports_remaining_quantity' },
+    @{ name='IBKR unset fill price is exposed as a real price'; find='abs\(result\) >= Decimal\(str\(IBKR_UNSET_DOUBLE\)\)'; repl='False'; select='test_ibkr_unset_fill_prices_are_reported_as_missing' }
 )
 
 $results = @()

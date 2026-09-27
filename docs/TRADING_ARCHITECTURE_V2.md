@@ -5145,4 +5145,6 @@ Stage 4-B PR #64 已通过 merge commit 完成，实际 merge SHA 为
 共享核心或 production composition。同一个 reservation 成功提交后不能再次提交；已有 order id
 也不能复用于内容不同的 intent。初始持仓快照完成后即撤销 IBKR 持仓推送订阅，以成交回报作为
 进程内仓位增减的唯一来源。非信息类 Gateway 错误和不确定结果会 HALT；HALT 后不再调用 broker
-取消接口。Stage 4-C 不等于 Live 已可从桌面启动。
+取消接口。预期 disconnect 会先使旧 gateway callback 失效；失败握手可在修正连接条件后重试。
+部分成交后的明确取消事件按已确认 fill 数量计算 remaining；IBKR `UNSET_DOUBLE` 不作为价格事实
+暴露。Stage 4-C 不等于 Live 已可从桌面启动。

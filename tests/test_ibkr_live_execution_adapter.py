@@ -79,6 +79,7 @@ class _FakeGateway:
 
     def disconnect(self) -> None:
         self.connected = False
+        self.sink.gateway_connection_closed(self, self.epoch)
 
     def cancelPositions(self) -> None:
         self.position_cancel_calls += 1
@@ -591,3 +592,90 @@ def test_uncertain_cancel_halts_and_connection_loss_requires_reconciliation():
     with pytest.raises(IBKRLiveExecutionError):
         fresh.reserve(_intent())
     fresh.disconnect()
+
+
+def test_intentional_disconnect_does_not_halt_and_adapter_can_reconnect():
+    adapter, _, _ = _adapter()
+    _connect(adapter)
+    adapter.disconnect()
+
+    assert not adapter.halted
+    _connect(adapter)
+    assert adapter.connected
+    assert not adapter.halted
+    adapter.disconnect()
+
+
+def test_failed_handshake_disconnect_does_not_prevent_a_later_connection():
+    adapter, _, _ = _adapter(accounts=())
+    with pytest.raises(IBKRLiveExecutionError):
+        _connect(adapter)
+    assert not adapter.halted
+
+    adapter._gateway_factory = lambda *, sink, epoch: _FakeGateway(sink, epoch)
+    _connect(adapter)
+
+    assert adapter.connected
+    adapter.disconnect()
+
+
+def test_partial_fill_cancel_event_reports_remaining_quantity():
+    adapter, _, _ = _adapter()
+    _connect(adapter)
+    intent = _intent(side=Side.SELL, quantity=2)
+    reservation = adapter.reserve(intent)
+    adapter.submit(reservation)
+    adapter.gateway_exec_details(
+        adapter._client,
+        adapter._epoch,
+        SimpleNamespace(symbol="AAPL", secType="STK"),
+        SimpleNamespace(
+            orderId=reservation.broker_order_id,
+            acctNumber=ACCOUNT,
+            execId="partial-sell",
+            shares=Decimal("1"),
+            price=Decimal("199"),
+            side="SLD",
+            time="20260928 08:00:00",
+        ),
+    )
+
+    adapter.gateway_error(
+        adapter._client,
+        adapter._epoch,
+        reservation.broker_order_id,
+        (1727452800000, 202, "Order cancelled", ""),
+    )
+
+    event, = adapter.events()
+    assert event.status is OrderStatus.CANCELED
+    assert event.filled == Decimal("1")
+    assert event.remaining == Decimal("1")
+    adapter.disconnect()
+
+
+def test_ibkr_unset_fill_prices_are_reported_as_missing():
+    adapter, _, _ = _adapter()
+    _connect(adapter)
+    reservation = adapter.reserve(_intent())
+    adapter.submit(reservation)
+
+    adapter.gateway_order_status(
+        adapter._client,
+        adapter._epoch,
+        (
+            reservation.broker_order_id,
+            "Submitted",
+            Decimal("0"),
+            Decimal("1"),
+            1.7976931348623157e308,
+            0,
+            0,
+            1.7976931348623157e308,
+        ),
+    )
+
+    event, = adapter.events()
+    assert event.average_fill_price is None
+    assert event.last_fill_price is None
+    adapter.disconnect()

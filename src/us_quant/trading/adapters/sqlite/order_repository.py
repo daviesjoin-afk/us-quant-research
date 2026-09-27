@@ -289,6 +289,54 @@ class SQLiteOrderRepository:
         value = row[0] if row is not None else None
         return int(value) if value is not None else 0
 
+    def unreconciled_broker_order_ids(
+        self, account_alias: str
+    ) -> tuple[int, ...]:
+        """Return Live orders whose durable status and fills do not agree.
+
+        Startup uses this before enabling reservations.  A missing/nonterminal
+        status or a terminal status whose reported fill quantity differs from
+        the durable executions means a previous process may have stopped
+        before recording the broker's final outcome.
+        """
+
+        with closing(connect_sqlite(self.path)) as connection:
+            rows = connection.execute(
+                """
+                SELECT i.intent_id, i.broker_order_id, i.quantity,
+                       u.status, u.filled
+                FROM paper_order_intent i
+                LEFT JOIN paper_order_update u
+                  ON u.update_id = (
+                    SELECT MAX(u2.update_id)
+                    FROM paper_order_update u2
+                    WHERE u2.intent_id = i.intent_id
+                  )
+                WHERE i.account_alias = ?
+                ORDER BY i.generated_at, i.intent_id
+                """,
+                (account_alias,),
+            ).fetchall()
+        unresolved: list[int] = []
+        for intent_id, broker_order_id, quantity, raw_status, raw_filled in rows:
+            status = (
+                order_status_from_text(str(raw_status))
+                if raw_status is not None
+                else None
+            )
+            if status is None or not status.is_terminal:
+                unresolved.append(int(broker_order_id or 0))
+                continue
+            fills = self.fills(str(intent_id))
+            executed = sum((fill.quantity for fill in fills), Decimal("0"))
+            reported_filled = Decimal(str(raw_filled or "0"))
+            intended = Decimal(str(quantity))
+            if executed != reported_filled or (
+                status is OrderStatus.FILLED and executed != intended
+            ):
+                unresolved.append(int(broker_order_id or 0))
+        return tuple(unresolved)
+
     # -- reconciliation views -------------------------------------------
 
     def reconciliation_rows(

@@ -12,9 +12,11 @@ from collections import deque
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from math import isfinite
+import re
 from threading import Event, Lock, RLock, Thread
 from time import monotonic
 from typing import Any, Callable, Protocol
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from us_quant.ibkr import (
     IBKRClientConnectError,
@@ -53,6 +55,8 @@ class IBKRLiveSubmissionUncertain(ExecutionSubmissionUncertain):
 
 class LiveOrderStorePort(Protocol):
     def max_broker_order_id(self) -> int: ...
+
+    def unreconciled_broker_order_ids(self, account_alias: str) -> tuple[int, ...]: ...
 
 
 class LiveGatewaySink(Protocol):
@@ -148,17 +152,22 @@ def _aware_execution_time(value: object) -> datetime:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
     text = str(value or "").strip()
-    for pattern in (
-        "%Y%m%d  %H:%M:%S %Z",
-        "%Y%m%d %H:%M:%S %Z",
-        "%Y%m%d  %H:%M:%S",
-        "%Y%m%d %H:%M:%S",
-    ):
+    broker_time = re.fullmatch(
+        r"(\d{8})\s+(\d{2}:\d{2}:\d{2})(?:\s+(.+))?", text
+    )
+    if broker_time is not None:
+        date_text, time_text, zone_name = broker_time.groups()
         try:
-            parsed = datetime.strptime(text, pattern)
-            return parsed.replace(tzinfo=timezone.utc)
+            parsed = datetime.strptime(f"{date_text} {time_text}", "%Y%m%d %H:%M:%S")
         except ValueError:
-            pass
+            parsed = None
+        if parsed is not None:
+            if not zone_name:
+                return parsed.replace(tzinfo=timezone.utc)
+            try:
+                return parsed.replace(tzinfo=ZoneInfo(zone_name)).astimezone(timezone.utc)
+            except (ValueError, ZoneInfoNotFoundError):
+                pass
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
@@ -199,6 +208,8 @@ class IBKRLiveExecutionAdapter:
             raise IBKRLiveExecutionError("Live adapter 必须显式绑定策略版本")
         if not callable(getattr(repository, "max_broker_order_id", None)):
             raise IBKRLiveExecutionError("Live adapter 需要订单号持久化下界")
+        if not callable(getattr(repository, "unreconciled_broker_order_ids", None)):
+            raise IBKRLiveExecutionError("Live adapter 需要持久化订单重启对账")
         self.config = config
         self.repository = repository
         self.expected_account_fingerprint = expected_account_fingerprint
@@ -322,6 +333,13 @@ class IBKRLiveExecutionAdapter:
             )
             if fingerprint != self.expected_account_fingerprint:
                 raise IBKRLiveExecutionError("Live managed account 与授权账户指纹不匹配")
+            unresolved_orders = self.repository.unreconciled_broker_order_ids(
+                mask_account_id(accounts[0])
+            )
+            if unresolved_orders:
+                raise IBKRLiveExecutionError(
+                    "Live 本地持久化订单尚未完成状态与成交对账"
+                )
             if next_valid_id is None:
                 raise IBKRLiveExecutionError("IBKR Live 未提供有效的下一个订单号")
             with self._state_lock:
@@ -711,6 +729,11 @@ class IBKRLiveExecutionAdapter:
             if security_type != "STK" or currency != "USD":
                 self._errors.append(
                     "Live position snapshot contains a non-USD-stock instrument"
+                )
+                return
+            if symbol in self._positions:
+                self._errors.append(
+                    "Live position snapshot contains duplicate stock symbols"
                 )
                 return
             try:

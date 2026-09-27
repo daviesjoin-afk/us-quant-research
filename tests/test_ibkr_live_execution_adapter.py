@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -12,6 +12,7 @@ from us_quant.trading.adapters.ibkr.live_execution import (
     IBKRLiveExecutionAdapter,
     IBKRLiveExecutionError,
     IBKRLiveSubmissionUncertain,
+    _aware_execution_time,
 )
 from us_quant.trading.domain.live_safety import LiveAccountFingerprint
 from us_quant.trading.domain.orders import OrderIntent, OrderStatus, Side
@@ -21,11 +22,20 @@ ENDPOINT = "ibkr-live-loopback:127.0.0.1:4001"
 
 
 class _Repository:
-    def __init__(self, maximum: int = 42) -> None:
+    def __init__(
+        self,
+        maximum: int = 42,
+        unreconciled: tuple[int, ...] = (),
+    ) -> None:
         self.maximum = maximum
+        self.unreconciled = unreconciled
 
     def max_broker_order_id(self) -> int:
         return self.maximum
+
+    def unreconciled_broker_order_ids(self, account_alias: str) -> tuple[int, ...]:
+        del account_alias
+        return self.unreconciled
 
 
 class _FakeGateway:
@@ -275,6 +285,17 @@ def test_startup_refuses_any_existing_open_order_for_bound_account():
     assert gateway.placed == []
 
 
+def test_startup_refuses_durable_orders_missing_completed_reconciliation():
+    adapter, gateway, _ = _adapter(repository=_Repository(unreconciled=(43,)))
+
+    with pytest.raises(IBKRLiveExecutionError, match="持久化订单"):
+        _connect(adapter)
+
+    assert not adapter.connected
+    assert not adapter.halted
+    assert gateway.placed == []
+
+
 @pytest.mark.parametrize(
     "positions",
     [(("AAPL", Decimal("-1")),), (("AAPL", Decimal("1.5")),)],
@@ -302,6 +323,38 @@ def test_non_usd_stock_startup_position_fails_closed(positions):
         _connect(adapter)
 
     assert not adapter.connected
+
+
+def test_duplicate_stock_symbol_rows_fail_closed():
+    adapter, _, _ = _adapter(
+        positions=(
+            ("AAPL", Decimal("-1")),
+            ("AAPL", Decimal("2")),
+        )
+    )
+
+    with pytest.raises(IBKRLiveExecutionError, match="duplicate stock symbols"):
+        _connect(adapter)
+
+    assert not adapter.connected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("20260115  12:30:00", datetime(2026, 1, 15, 12, 30, tzinfo=timezone.utc)),
+        (
+            "20260115  12:30:00 US/Eastern",
+            datetime(2026, 1, 15, 17, 30, tzinfo=timezone.utc),
+        ),
+        (
+            "20260715 12:30:00 America/New_York",
+            datetime(2026, 7, 15, 16, 30, tzinfo=timezone.utc),
+        ),
+    ],
+)
+def test_broker_execution_time_parses_naive_and_named_timezones(value, expected):
+    assert _aware_execution_time(value) == expected
 
 
 def test_reserve_only_allocates_id_and_submit_builds_one_live_lmt_order():
@@ -427,6 +480,7 @@ def test_broker_order_status_and_fill_callbacks_are_normalized_and_deduplicated(
         Decimal("100"),
     )
     assert adapter._positions["AAPL"] == Decimal("3")
+    assert adapter._errors == []
     adapter.disconnect()
 
 

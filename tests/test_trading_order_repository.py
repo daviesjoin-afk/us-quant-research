@@ -219,6 +219,31 @@ def test_reconciliation_reason_codes_stay_distinguishable() -> None:
         assert repository.reconciliation_summary().terminal_unreconciled == 1
 
 
+def test_startup_order_guard_is_account_scoped_and_checks_durable_fills() -> None:
+    with TemporaryDirectory() as directory:
+        repository = SQLiteOrderRepository(Path(directory) / "orders.sqlite3")
+        repository.record_intent(
+            _intent(), broker_order_id=10, account_alias="LIVE***17"
+        )
+        repository.record_intent(
+            _intent(order_id="i-2", session_id="s-2", idempotency_key="k-2"),
+            broker_order_id=11,
+            account_alias="PAPER***17",
+        )
+
+        # A durable intent with no final broker status must block Live startup.
+        assert repository.unreconciled_broker_order_ids("LIVE***17") == (10,)
+        # The same unresolved row for another account must not block this one.
+        assert repository.unreconciled_broker_order_ids("PAPER***17") == (11,)
+
+        repository.record_event(_update(status="Filled", filled=Decimal("1")))
+        # A terminal status without its durable execution is still unresolved.
+        assert repository.unreconciled_broker_order_ids("LIVE***17") == (10,)
+
+        repository.record_fill(_execution())
+        assert repository.unreconciled_broker_order_ids("LIVE***17") == ()
+
+
 def test_reconciliation_rows_are_scoped_to_the_requested_session() -> None:
     """Scoping silently disappearing would mix two sessions' orders together."""
 

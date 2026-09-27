@@ -54,7 +54,10 @@ $mutations = @(
     @{ name='startup permits pre-existing broker orders'; find='if self\._open_order_ids:'; repl='if False:'; select='test_startup_refuses_any_existing_open_order_for_bound_account' },
     @{ name='inconsistent terminal order facts are accepted'; find='and status_facts_valid'; repl='and True'; select='test_inconsistent_terminal_status_halts_without_releasing_sell_capacity' },
     @{ name='definitive sell rejection keeps reserved shares locked'; find='self\._release_sell_reservation_locked\(request_id\)'; repl='pass'; select='test_definitive_rejection_releases_sell_reservation' },
-    @{ name='cancel error terminal does not require reconciliation HALT'; find='elif status is OrderStatus\.CANCELED:'; repl='elif False:'; select='test_partial_fill_cancel_event_reports_remaining_quantity' }
+    @{ name='cancel error terminal does not require reconciliation HALT'; find='elif status is OrderStatus\.CANCELED:'; repl='elif False:'; select='test_partial_fill_cancel_event_reports_remaining_quantity' },
+    @{ name='M27 unresolved durable orders are ignored at startup'; find='if unresolved_orders:'; repl='if False:'; select='test_startup_refuses_durable_orders_missing_completed_reconciliation' },
+    @{ name='M28 duplicate position symbols overwrite each other'; find='if symbol in self\._positions:'; repl='if False:'; select='test_duplicate_stock_symbol_rows_fail_closed' },
+    @{ name='M29 named broker timezone is relabeled as UTC'; find='parsed\.replace\(tzinfo=ZoneInfo\(zone_name\)\)\.astimezone\(timezone\.utc\)'; repl='parsed.replace(tzinfo=timezone.utc)'; select='test_broker_execution_time_parses_naive_and_named_timezones' }
 )
 
 $results = @()

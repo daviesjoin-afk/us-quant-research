@@ -5075,3 +5075,30 @@ authorization、账户指纹绑定、kill latch、startup proof、recovery barri
 单笔名义金额/每日亏损/同时持仓上限、Live adapter、endpoint/account proof、人工控制的
 初次 canary 与小额真钱验证。本阶段不提前引入这些功能，也不再复制 Risk、Execution、
 OrderDispatch 或 TradingRuntime。
+
+### 8.31 Stage 4-A Live Safety Foundation
+
+Stage 4 从 Stage 3 Final 的真实 merge baseline 开始：Stage 3 Final PR 为 #62，merge SHA 与
+Stage 4 base 均为 `61d0b1a13e9f2be49d3c2134fdc27f4cd09813a8`；Stage 3-A baseline 为
+`f28e94adf046ca31c38ade171173e57a357c268c`。
+
+4-A 只建立安全值与持久化边界，不接入执行组合、不构造 Live broker channel，也不改变
+RiskApplication、ExecutionApplication、OrderDispatch、TradingRuntime 或
+BrokerExecutionPort。`trading/domain/live_safety.py` 负责账户指纹、人工授权、canary 上限、
+kill latch 与本次进程的 arm 状态；账户原始标识只用于生成 SHA-256 指纹，存储中保留指纹和
+掩码展示值，不保存凭据或原始账号。
+
+`LiveSafetyRepositoryPort` / `SQLiteLiveSafetyRepository` 是独立持久化 owner，只接受
+`LiveSafetyRecord`：其中有 revision、authorization 和 kill latch，没有 session arm 字段。
+读取新进程状态时必须从持久记录重新构造 `LiveAuthorizationState`，其 arm 默认 false；
+SQLite 写入通过 revision CAS 拒绝陈旧写入，损坏记录以 unreadable 错误拒绝，不回退为授权。
+
+arm 判断必须同时满足：授权存在、未撤销且未过期，账号指纹完全相同，策略版本同时位于授权
+和 limits allowlist 中，所有资金上限与仓位/订单上限均大于零，符号和策略 allowlist 非空，
+kill latch 未置位，并收到本次人工确认。默认额度均为零，因此默认状态不能 arm。kill latch
+持久保存时间与原因；置位会清除 session arm、禁止增加风险敞口，但不会阻止读取 broker truth、
+对账、撤销已跟踪订单、降低仓位、断开或收尾。清除 latch 不会自动重建 session arm。
+
+这一阶段没有 Live endpoint、IBKR Live adapter、`placeOrder`、production Live composition、
+UI、AI 或共享执行核心改动。Stage 4-A 的测试覆盖重启丢 arm、kill latch 重启保留、过期/撤销
+授权、账户指纹不匹配、默认/无效额度拒绝、陈旧写保护及损坏存储 fail closed。

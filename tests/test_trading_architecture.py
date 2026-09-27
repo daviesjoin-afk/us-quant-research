@@ -299,6 +299,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "account.py",
         "common.py",
             "execution_environment.py",
+        "live_safety.py",
         "market.py",
         "orders.py",
         "paper_autonomy.py",
@@ -314,6 +315,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "broker_account.py",
         "broker_execution.py",
         "market_data.py",
+        "live_safety_repository.py",
         "order_repository.py",
         "paper_autonomy_action_repository.py",
         "paper_autonomy_repository.py",
@@ -930,11 +932,11 @@ MARKET_DATA_ADAPTERS = _TRADING / "adapters"
 #: Adapter modules under ``trading/adapters`` that do NOT implement
 #: ``MarketDataPort``: the package inits, the shared transport state, the
 #: read-only account chain, the SQLite strategy repository, the SQLite Paper
-#: autonomy store, and -- since Execution v2 -- the execution chain (the IBKR
-#: order adapter, its gateway bridge, the SQLite order store and the two shared
-#: helpers the execution adapters use).  Listed by relative path so a new module
-#: in any of those packages cannot slip through the market-data surface guard by
-#: sharing a filename.
+#: autonomy store, the Stage 4-A Live safety repository, and -- since Execution
+#: v2 -- the execution chain (the IBKR order adapter, its gateway bridge, the
+#: SQLite order store and the two shared helpers the execution adapters use).
+#: Listed by relative path so a new module in any of those packages cannot slip
+#: through the market-data surface guard by sharing a filename.
 NON_MARKET_DATA_ADAPTER_MODULES = {
     "__init__.py",
     "market_data_state.py",
@@ -948,6 +950,7 @@ NON_MARKET_DATA_ADAPTER_MODULES = {
     "ibkr/support.py",
     "sqlite/paper_autonomy_action_repository.py",
     "sqlite/paper_autonomy_repository.py",
+    "sqlite/live_safety_repository.py",
     "alpaca/__init__.py",
     "finnhub/__init__.py",
     "sqlite/__init__.py",
@@ -1099,9 +1102,10 @@ def test_the_market_data_adapters_expose_the_port_surface() -> None:
 
     Scoped to the modules that actually implement ``MarketDataPort``.  The
     package also holds the account adapter (``ibkr/account.py``), the shared
-    IBKR support module (``ibkr/support.py``) and the SQLite strategy
-    repository (``sqlite/strategy_repository.py``), which are different chains
-    with different ports and must not be judged by this surface.
+    IBKR support module (``ibkr/support.py``), the SQLite strategy repository
+    (``sqlite/strategy_repository.py``), and the independent safety-state store
+    (``sqlite/live_safety_repository.py``), which are different chains with
+    different ports and must not be judged by this surface.
     """
 
     for path in sorted(MARKET_DATA_ADAPTERS.rglob("*.py")):

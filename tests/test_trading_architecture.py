@@ -298,6 +298,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "__init__.py",
         "account.py",
         "common.py",
+            "execution_environment.py",
         "market.py",
         "orders.py",
         "paper_autonomy.py",
@@ -3519,7 +3520,7 @@ def test_the_paper_order_channel_diagnostic_cannot_submit() -> None:
                 "cancelOrder",
             }, f"the diagnostic must not call {node.func.attr}"
     assert '"orders_submitted": 0' in source
-    assert "build_execution_candidate" in source
+    assert "build_execution_candidate_factory" in source
     assert "build_order_repository" in source
     # The real order store must not be touched: the run writes to a temporary
     # directory and opens nothing else.

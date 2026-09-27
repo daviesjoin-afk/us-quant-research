@@ -149,7 +149,7 @@ WORKFLOW_AGGREGATE_FORBIDDEN_NAMES = (
     "RiskApplication",
     "ExecutionApplication",
     "build_execution_application",
-    "build_execution_candidate",
+    "build_execution_candidate_factory",
     "build_risk_application",
     "SQLiteOrderRepository",
     "placeOrder",

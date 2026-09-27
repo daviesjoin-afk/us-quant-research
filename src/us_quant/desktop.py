@@ -138,7 +138,7 @@ from us_quant.trading.composition.session_config import (
 from us_quant.trading.application.risk import RiskApplication
 from us_quant.trading.composition.execution import (
     build_execution_application,
-    build_execution_candidate,
+    build_execution_candidate_factory,
     build_order_repository,
 )
 from us_quant.trading.composition.risk import build_risk_application
@@ -566,7 +566,10 @@ class MainWindow(QMainWindow):
         # owned *by* this service, never by the window.
         self.paper_trading = PaperTradingService(
             workflow_getter=lambda: self.paper_workflow,
-            order_service_factory=build_execution_candidate,
+            order_service_factory=build_execution_candidate_factory(
+                environment=self.config.environment,
+                live_trading_enabled=self.config.live_trading_enabled,
+            ),
         )
         # The AutoQuant candidate shortlist used to be retained here.  It is
         # ``execution_orchestrator.candidates`` now -- the one retained

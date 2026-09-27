@@ -1239,7 +1239,7 @@ def test_the_package_does_not_import_the_composition_root() -> None:
     for builder in (
         "build_trading_runtime",
         "build_execution_application",
-        "build_execution_candidate",
+        "build_execution_candidate_factory",
         "build_auto_rotation_config",
         "build_risk_application",
         "resolve_paper_session_capital",

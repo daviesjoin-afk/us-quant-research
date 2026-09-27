@@ -5020,3 +5020,58 @@ Runtime v2A / v2B / Desktop Execution v2 刻意没有做的事，留给更后面
 兼容升级。订单库这一轮唯一的结构性修正是给旧库补一个缺失的
 `idempotency_key` 列——`CREATE TABLE IF NOT EXISTS` 不会给已存在的表加列，
 而缺这一列的老库连第一张订单都写不进去。
+
+### 8.30 Stage 3-A 与 Stage 3 Final Closure 基线
+
+Stage 3-A 已通过 PR #61 的 merge commit 正式完成：
+
+- Stage 3-A merge SHA：`f28e94adf046ca31c38ade171173e57a357c268c`。
+- `Environment` 只在 deployment rule 与 composition 外围用于选择 broker capability。
+- `PAPER` 选择现有 Paper-only `IBKRExecutionAdapter`；`BACKTEST` 永远没有 broker channel；
+  `LIVE` 在 Stage 3 中始终不可执行，即使 `live_trading_enabled=True`。
+- `live_trading_enabled` 只是 deployment feature flag，不代表 operator、account、risk、
+  broker 或 canary authorization。
+
+部署决策使用稳定 blocker code，调用方不需要解析人类可读的 `reason`：
+
+| Environment | `live_trading_enabled` | Allowed | `ExecutionDeploymentBlocker` |
+|---|---:|---:|---|
+| BACKTEST | false / true | no | `backtest_has_no_broker_channel` |
+| PAPER | false / true | yes | `none` |
+| LIVE | false | no | `live_feature_disabled` |
+| LIVE | true | no | `live_adapter_unavailable` |
+
+`allowed=True` 当且仅当 blocker 为 `none`；所有拒绝结果都有非空 blocker。
+
+Stage 3 Final Closure 完成定义：
+
+```text
+RiskApplication
+      │
+      ▼
+RiskDecision → OrderDispatch → ExecutionApplication
+                                  ├── OrderRepositoryPort
+                                  └── BrokerExecutionPort
+                                              │
+                                              ▼
+                                adapter selected by composition
+```
+
+Risk、Execution、OrderDispatch 与 TradingRuntime 不按 environment 分支。共享 runtime 的
+状态/审计文案也不写死 Paper、IBKR 或 Live。生产 broker adapter 的构造只由
+`trading/composition/execution.py` 负责；生产 `placeOrder` 与 `cancelOrder` 只存在于
+当前 concrete IBKR adapter。`BrokerExecutionPort` 的冻结方法为
+`connect / disconnect / reserve / submit / cancel / events / fills`。执行路径继续保证
+`reserve → durable record → submit`、不确定提交不重试、明确拒绝不切换 fallback。
+
+Stage 3 — Live-ready Execution Core 的含义是共享执行核心已为未来 adapter 做好架构准备，
+即 **Live-ready 不等于 Live-enabled**。它不包含 Live adapter、Live endpoint/账户绑定、
+operator authorization、canary limits、Live kill/recovery 或真钱连接。Stage 3 Final PR
+在实现与验证全部通过后可以标记为“Stage 3 implementation COMPLETE，等待合并”；
+Stage 3 的正式最终 baseline 需要等该 PR 合并后再记录实际 merge SHA。
+
+下一阶段为 **Stage 4 — Small-capital Live Canary**。Stage 4 才实现持久化 Live operator
+authorization、账户指纹绑定、kill latch、startup proof、recovery barrier、canary 资金上限、
+单笔名义金额/每日亏损/同时持仓上限、Live adapter、endpoint/account proof、人工控制的
+初次 canary 与小额真钱验证。本阶段不提前引入这些功能，也不再复制 Risk、Execution、
+OrderDispatch 或 TradingRuntime。

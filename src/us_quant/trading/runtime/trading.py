@@ -153,7 +153,7 @@ class TradingRuntime:
         )
         if self.session.stop_requested:
             if not self.book.positions and not self.book.pending:
-                self.session.finish("已停止；以 IBKR Paper 回报完成对账")
+                self.session.finish("已停止；以 broker execution report 完成对账")
                 return self.snapshot(observed_at=now)
             # CR-1 regression guard: never re-submit a SELL for a symbol that
             # already has an active sell intent.  Emitting a fresh SELL on
@@ -163,18 +163,18 @@ class TradingRuntime:
             self._flatten(
                 now,
                 ready,
-                reason="用户停止；提交 Paper 限价平仓",
+                reason="用户停止；提交执行通道限价平仓",
                 skip=pending_sells,
             )
             if self.session.active and not pending_sells:
                 self.session.status = (
-                    "已请求停止；等待 fresh bid 生成 Paper 限价平仓单"
+                    "已请求停止；等待 fresh bid 生成执行通道限价平仓单"
                 )
             return self.snapshot(observed_at=now)
         if self.book.positions and not self.book.pending:
             if eastern_time >= self.config.force_flat:
                 self._flatten(
-                    now, ready, reason="收盘前提交 Paper 限价平仓"
+                    now, ready, reason="收盘前提交执行通道限价平仓"
                 )
             else:
                 self._flatten(now, ready)

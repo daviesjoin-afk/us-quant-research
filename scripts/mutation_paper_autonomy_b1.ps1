@@ -361,8 +361,8 @@ $mutations = @(
     @{
         name = 'M30 an unreadable action ledger is treated as empty'
         file = $supervisorApplication
-        find = 'return \(False, None, False\)'
-        repl = 'return (True, None, False)'
+        find = 'return \(False, None, False, PaperAutonomyControlCycles\(\)\)'
+        repl = 'return (True, None, False, PaperAutonomyControlCycles())'
         tests = @($tickBehaviour)
         select = @("-k", "unreadable_action_ledger_blocks or unreadable_ledger_blocks_even_when_only_the_day_query_fails")
     },
@@ -541,6 +541,46 @@ $mutations = @(
         repl = "from __future__ import annotations`n# PaperWorkflowPhase"
         tests = @($architecture)
         select = @("-k", "desktop_autonomy_modules_do_not_bypass_paper_owners")
+    },
+    @{
+        name = 'M53 a persistent calendar failure escapes the schedule adapter'
+        file = $scheduleAdapter
+        find = 'return PaperAutonomyScheduleFacts\(\s+trading_day=None,\s+session=None,\s+preparation_allowed=False,\s+start_allowed=False,\s+orderly_stop_due=False,\s+exceptional_schedule_uncertain=True,\s+action_day=eastern\.date\(\),\s+\)'
+        repl = 'raise PaperAutonomySupervisorError("calendar unavailable")'
+        tests = @($scheduleBehaviour, $tickBehaviour)
+        select = @("-k", "persistent_calendar_failure_returns_uncertain_facts_without_retry or persistent_calendar_failure_still_pauses_autonomous_entries")
+    },
+    @{
+        name = 'M54 a second pause reuses the first pause cycle'
+        file = $domainSupervisor
+        find = 'intent_revision,\s+control_cycles\.pause_attempt,\s+\)'
+        repl = "intent_revision,`n                0,`n            )"
+        tests = @($tickBehaviour)
+        select = @("-k", "pause_resume_pause_uses_durable_control_cycles")
+    },
+    @{
+        name = 'M55 a second resume reuses the first resume cycle'
+        file = $domainSupervisor
+        find = 'attempt=control_cycles\.resume_attempt,'
+        repl = 'attempt=0,'
+        tests = @($tickBehaviour)
+        select = @("-k", "pause_resume_pause_uses_durable_control_cycles")
+    },
+    @{
+        name = 'M56 a terminal refused safety action is silently ignored'
+        file = $supervisorApplication
+        find = 'if existing\.is_terminal and action_type in \{'
+        repl = 'if False and existing.is_terminal and action_type in {'
+        tests = @($tickBehaviour)
+        select = @("-k", "refused_pause_cycle_blocks_when_pause_is_still_required")
+    },
+    @{
+        name = 'M57 an unrelated publication conflicts with a prior terminal action'
+        file = $autonomyCompletion
+        find = 'if not matches:\s+return'
+        repl = "if not matches:`n            raise PaperAutonomyActionRepositoryError(`"unattributable completion`")"
+        tests = @($completionBehaviour)
+        select = @("-k", "manual_running_after_failed_autonomous_start_is_ignored or manual_launch_failure_after_successful_start_is_ignored or manual_prepare_ready_after_failed_autonomous_prepare_is_ignored")
     }
 )
 

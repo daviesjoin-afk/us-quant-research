@@ -139,15 +139,31 @@ def test_unmappable_canonical_session_is_uncertain_and_never_permits(policy, mon
     assert not facts.start_allowed
 
 
-def test_unknown_schedule_without_canonical_trading_day_raises(policy, monkeypatch):
+def test_persistent_calendar_failure_returns_uncertain_facts_without_retry(
+    policy, monkeypatch
+):
+    calls = []
+
+    def unavailable(_moment=None):
+        calls.append(_moment)
+        raise RuntimeError("unavailable")
+
     monkeypatch.setattr(
         paper_autonomy_schedule,
         "us_equity_session",
-        lambda _moment=None: (_ for _ in ()).throw(RuntimeError("unavailable")),
+        unavailable,
     )
 
-    with pytest.raises(PaperAutonomySupervisorError):
-        _schedule(policy, datetime(2026, 9, 28, 10, 0, tzinfo=ET))
+    moment = datetime(2026, 9, 28, 10, 0, tzinfo=ET)
+    facts = _schedule(policy, moment)
+
+    assert calls == [moment]
+    assert facts.trading_day is None
+    assert facts.action_day == date(2026, 9, 28)
+    assert facts.session is None
+    assert facts.exceptional_schedule_uncertain
+    assert not facts.preparation_allowed
+    assert not facts.start_allowed
 
 
 def test_session_mapping_is_exact_and_complete():

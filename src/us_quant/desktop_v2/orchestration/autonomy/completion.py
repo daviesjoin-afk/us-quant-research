@@ -42,9 +42,6 @@ class PaperAutonomyCompletionObserver:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._pending: dict[str, _PendingCompletion] = {}
         self._completed: dict[str, PaperAutonomyActionStatus] = {}
-        self._last_terminal_by_type: dict[
-            PaperAutonomyActionType, PaperAutonomyActionStatus
-        ] = {}
 
     def preparation_ready(self) -> None:
         self._observe(
@@ -132,11 +129,6 @@ class PaperAutonomyCompletionObserver:
             row for row in self._actions.unresolved() if row.action is action
         )
         if not matches:
-            terminal = self._last_terminal_by_type.get(action)
-            if terminal is not None and terminal is not status:
-                raise PaperAutonomyActionRepositoryError(
-                    "conflicting terminal canonical publications were observed"
-                )
             return
         if len(matches) != 1:
             raise PaperAutonomyActionRepositoryError(
@@ -178,7 +170,6 @@ class PaperAutonomyCompletionObserver:
         )
         self._pending.pop(completion.action_key, None)
         self._completed[completion.action_key] = completion.status
-        self._last_terminal_by_type[completion.action] = completion.status
         self._emit_event(completion.event_code, completion.detail)
 
     def _emit_event(self, code: PaperAutonomyEventCode, detail: str) -> None:

@@ -34,6 +34,7 @@ from us_quant.sqlite_support import connect_sqlite
 from us_quant.trading.adapters.clock import from_stored_text, to_stored_text
 from us_quant.trading.domain.paper_autonomy_supervisor import (
     NON_TERMINAL_ACTION_STATUSES,
+    PaperAutonomyControlCycles,
     PaperAutonomyActionStatus,
     PaperAutonomyActionType,
 )
@@ -47,7 +48,7 @@ TABLENAME = "paper_autonomy_action"
 
 _COLUMNS = (
     "action_key, intent_revision, trading_day, action, status, "
-    "claimed_at, completed_at, detail"
+    "claimed_at, completed_at, detail, action_day"
 )
 
 _SELECT_ONE = f"SELECT {_COLUMNS} FROM {TABLENAME} WHERE action_key = ?"
@@ -120,14 +121,18 @@ class SQLitePaperAutonomyActionRepository:
                     f"""
                     INSERT INTO {TABLENAME}(
                         action_key, intent_revision, trading_day, action,
-                        status, claimed_at, completed_at, detail
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        status, claimed_at, completed_at, detail, action_day
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(action_key) DO NOTHING
                     """,
                     (
                         record.action_key,
                         record.intent_revision,
-                        record.trading_day.isoformat(),
+                        (
+                            record.trading_day.isoformat()
+                            if record.trading_day is not None
+                            else None
+                        ),
                         str(record.action),
                         str(record.status),
                         to_stored_text(record.claimed_at),
@@ -137,6 +142,7 @@ class SQLitePaperAutonomyActionRepository:
                             else to_stored_text(record.completed_at)
                         ),
                         record.detail,
+                        record.action_day.isoformat(),
                     ),
                 )
                 won = cursor.rowcount == 1
@@ -316,6 +322,10 @@ class SQLitePaperAutonomyActionRepository:
 
     # -- reads ----------------------------------------------------------
 
+    def get(self, action_key: str) -> PaperAutonomyActionRecord | None:
+        rows = self._read(_SELECT_ONE, (action_key,))
+        return rows[0] if rows else None
+
     def unresolved(self) -> tuple[PaperAutonomyActionRecord, ...]:
         """Every claimed-but-unfinished action, oldest first.
 
@@ -364,6 +374,27 @@ class SQLitePaperAutonomyActionRepository:
             for record in records
         )
 
+    def control_cycles(self, action_day: date) -> PaperAutonomyControlCycles:
+        """Derive control attempts from the complete canonical ledger history."""
+
+        records = self._read(_SELECT_ALL, ())
+        day_rows = tuple(record for record in records if record.action_day == action_day)
+        pauses = sum(
+            record.action is PaperAutonomyActionType.PAUSE_ENTRIES
+            and record.status is PaperAutonomyActionStatus.SUCCEEDED
+            for record in day_rows
+        )
+        resumes = sum(
+            record.action is PaperAutonomyActionType.RESUME_ENTRIES
+            and record.status is PaperAutonomyActionStatus.SUCCEEDED
+            for record in day_rows
+        )
+        return PaperAutonomyControlCycles(
+            pause_attempt=resumes,
+            resume_attempt=pauses,
+            stop_attempt=pauses + resumes,
+        )
+
     def _read(
         self, statement: str, parameters: tuple
     ) -> tuple[PaperAutonomyActionRecord, ...]:
@@ -387,14 +418,71 @@ class SQLitePaperAutonomyActionRepository:
                         CREATE TABLE IF NOT EXISTS {TABLENAME}(
                             action_key TEXT PRIMARY KEY,
                             intent_revision INTEGER NOT NULL,
-                            trading_day TEXT NOT NULL,
+                            trading_day TEXT,
                             action TEXT NOT NULL,
                             status TEXT NOT NULL,
                             claimed_at TEXT NOT NULL,
                             completed_at TEXT,
-                            detail TEXT NOT NULL
+                            detail TEXT NOT NULL,
+                            action_day TEXT
                         )
                         """
+                    )
+                    columns = {
+                        row[1]
+                        for row in connection.execute(
+                            f"PRAGMA table_info({TABLENAME})"
+                        ).fetchall()
+                    }
+                    schema = connection.execute(
+                        f"PRAGMA table_info({TABLENAME})"
+                    ).fetchall()
+                    trading_day_not_null = any(
+                        row[1] == "trading_day" and bool(row[3])
+                        for row in schema
+                    )
+                    if trading_day_not_null:
+                        legacy = f"{TABLENAME}_legacy"
+                        connection.execute(
+                            f"ALTER TABLE {TABLENAME} RENAME TO {legacy}"
+                        )
+                        connection.execute(
+                            f"""
+                            CREATE TABLE {TABLENAME}(
+                                action_key TEXT PRIMARY KEY,
+                                intent_revision INTEGER NOT NULL,
+                                trading_day TEXT,
+                                action TEXT NOT NULL,
+                                status TEXT NOT NULL,
+                                claimed_at TEXT NOT NULL,
+                                completed_at TEXT,
+                                detail TEXT NOT NULL,
+                                action_day TEXT
+                            )
+                            """
+                        )
+                        old_action_day = (
+                            "action_day" if "action_day" in columns else "trading_day"
+                        )
+                        connection.execute(
+                            f"""
+                            INSERT INTO {TABLENAME}(
+                                action_key, intent_revision, trading_day, action,
+                                status, claimed_at, completed_at, detail, action_day
+                            ) SELECT action_key, intent_revision, trading_day, action,
+                                status, claimed_at, completed_at, detail,
+                                {old_action_day} FROM {legacy}
+                            """
+                        )
+                        connection.execute(f"DROP TABLE {legacy}")
+                        columns.add("action_day")
+                    elif "action_day" not in columns:
+                        connection.execute(
+                            f"ALTER TABLE {TABLENAME} ADD COLUMN action_day TEXT"
+                        )
+                    connection.execute(
+                        f"UPDATE {TABLENAME} SET action_day = trading_day "
+                        "WHERE action_day IS NULL AND trading_day IS NOT NULL"
                     )
                     connection.execute(
                         f"""
@@ -450,16 +538,27 @@ def _record_from_row(row: object) -> PaperAutonomyActionRecord:
         ) from error
 
     completed_at = _optional_timestamp(row[6])  # type: ignore[index]
+    trading_day_text = row[2]  # type: ignore[index]
+    action_day_text = row[8]  # type: ignore[index]
     try:
         return PaperAutonomyActionRecord(
             action_key=str(row[0]),  # type: ignore[index]
             intent_revision=revision,
-            trading_day=date.fromisoformat(str(row[2])),  # type: ignore[index]
+            trading_day=(
+                date.fromisoformat(str(trading_day_text))
+                if trading_day_text is not None
+                else None
+            ),
             action=action,
             status=status,
             claimed_at=_timestamp(row[5]),  # type: ignore[index]
             completed_at=completed_at,
             detail=str(row[7]) if row[7] is not None else "",  # type: ignore[index]
+            action_day=(
+                date.fromisoformat(str(action_day_text))
+                if action_day_text is not None
+                else None
+            ),
         )
     except PaperAutonomyActionStoreUnreadable:
         raise

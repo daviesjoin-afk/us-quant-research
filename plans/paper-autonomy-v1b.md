@@ -19,14 +19,15 @@ Complete the remaining v1-B autonomy supervisor implementation on the existing f
 - [x] M3: Implement authorization, facts/startup adapters, Qt host, composition wiring, async completion.
 - [x] M4: Add focused behavior/architecture cases and update docs.
 - [x] M5: Run requested mutation, historical, FAC, Python 3.14, doctor, compileall, and offscreen checks.
-- [ ] M6: Prepare clean branch, push, create PR, and attach it.
-- [ ] M7: Wait for required GitHub CI and report exact results; stop for review.
+- [ ] M6: Commit and push the reviewed fixes to PR #60; resolve both P1 threads after confirming behavior.
+- [ ] M7: Wait for new GitHub CI, update PR evidence, confirm OPEN/zero unresolved threads, and stop without merging.
 
 ## Decision log
 - 2026-09-27: Continue from exact reviewed HEAD `03841c90f48804f15b5bd6154eadb1f7429a27d4`.
 - 2026-09-27: Preserve pre-existing untracked workspace files; stage only task-owned source/docs/tests after inspecting status.
 - 2026-09-27: Startup broker safety is established asynchronously through the existing read-only Paper channel probe; no default autonomy schedule is added.
-- 2026-09-27: Full Python 3.14.5 suite passes (5,136 tests plus 14 subtests); requested mutation and ancillary checks pass.
+- 2026-09-27: Review follow-up uses explicit `action_day` only for deterministic safety-control identity; canonical `trading_day` remains unknown on calendar failure.
+- 2026-09-27: Local Python 3.14.5 suite passes (5,146 tests plus 14 subtests, zero skips); B1 55, A1 26, G2-B 35, E2 12, E3 41, E4 11, and FAC 42 mutations caught.
 
 ## Completion record
-- Inventory in progress.
+- Implementation and local verification complete; push, review-thread resolution, and remote CI remain.

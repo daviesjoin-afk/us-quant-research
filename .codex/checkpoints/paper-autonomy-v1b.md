@@ -1,47 +1,21 @@
 # Task checkpoint: Paper Autonomous Trading v1-B
 
-## Goal
-Complete the remaining v1-B implementation on `feat/paper-autonomy-supervisor`, verify safety/architecture and Python 3.14 requirements, open a PR against `main`, wait for Windows/Python 3.14 CI, then stop for review without merging.
+## Goal and constraints
+Fix the review findings on PR #60 (`feat/paper-autonomy-supervisor`), update its evidence, wait for Windows/Python 3.14 CI, then stop for final review. Do not merge. Preserve unrelated untracked workspace files. Keep manual Paper and canonical Risk → Execution → Paper ownership unchanged.
 
-## Constraints
-- Preserve existing untracked user files; do not stage them.
-- No merge, Live/real money, AI/strategy evolution, OCR, OpenCodeReview, or `scripts/review.ps1`.
-- Retain canonical Risk → Execution path, Paper/Shadow shared lease, and manual behavior.
-- Follow user-provided phases 1–82 in the pasted attachment.
-
-## Current phase
-Implementation and requested local verification are complete on `feat/paper-autonomy-supervisor`; the branch started from reviewed SHA `03841c90f48804f15b5bd6154eadb1f7429a27d4`. GitHub CLI is authenticated and the repository default branch is `main`. Existing unrelated untracked files are preserved. `.venv313` runs Python 3.14.5 and includes PySide6.
-
-## Decisions
-- Use this checkpoint because the request spans many dependent implementation, verification, and PR/CI phases.
-- The schedule adapter calls canonical `us_equity_session` for each classification and uses Eastern time; unknown classification cannot grant permissions.
-- The shared preparation request is `trading.domain.paper_preparation.PaperPreparationRequest`; manual and explicit request preparation share `request_prepare_with` and capture the request in the async callback.
-- `PaperLaunchAuthorization` is part of canonical Paper start with manual as default; AUTONOMOUS preflight rereads A1 at both gates.
-- Startup uses the existing Paper channel probe on the broker worker. A failed, incomplete, or unavailable probe cannot start the Qt host; no production schedule defaults are invented.
-- Completion observer buffers only synchronous CLAIMED publications in process memory and writes terminal success only after REQUESTED.
-
-## Changed files
-- `.codex/checkpoints/paper-autonomy-v1b.md` (task tracking only)
-- `src/us_quant/trading/adapters/paper_autonomy_schedule.py`
-- `src/us_quant/trading/domain/paper_preparation.py`
-- `src/us_quant/trading/runtime/preflight.py`
-- `src/us_quant/desktop_v2/orchestration/execution/orchestrator.py`
-- `src/us_quant/desktop_v2/orchestration/paper/{queries.py,orchestrator.py}`
-- `src/us_quant/desktop_v2/orchestration/autonomy/`
-- `src/us_quant/trading/composition/paper_autonomy_supervisor.py`
-- `src/us_quant/config.py`, `src/us_quant/desktop.py`
-- focused and architecture tests, affected historical mutation harnesses, and `docs/TRADING_ARCHITECTURE_V2.md`
-- `.codex/checkpoints/paper-autonomy-v1b.md`, `plans/paper-autonomy-v1b.md`
+## Current state
+- Branch is based on exact reviewed HEAD `eb567919ac622e6fa50d717a1d2d5b9a3321ec28`.
+- PR #60 is OPEN, non-draft, mergeable/CLEAN before this update. Two unresolved P1 review threads identify schedule outage handling and repeated control-action keys.
+- Implemented: separate canonical `trading_day` from civil `action_day`; persistent calendar failure returns uncertain facts after one read; control attempts derive from fully parsed durable ledger history; terminal same-cycle safety refusals block; unrelated publications are ignored; startup-unsafe does not start the host; SQLite legacy rows migrate.
+- Updated B mutation harness with five relevant mutants. PR remains unmerged.
 
 ## Verification
-- `.venv313\Scripts\python.exe -m pytest -q` — 5,136 passed, 14 subtests passed (Python 3.14.5).
-- B1 mutation — 50/50 caught; A1 — 26/26; G2-B — 35/35; Paper E2 — 12/12; E3 — 41/41; E4 — 11/11.
-- `tests/test_final_architecture_closure.py` and autonomy architecture/behavior suites — 130 passed.
-- `python -m compileall -q src tests`, `python -m us_quant doctor`, Qt offscreen self-test, and `git diff --check` passed.
-- ruff unavailable in the environment; no dependency was installed.
+- Python 3.14.5 full suite: `5146 passed, 14 subtests passed, 0 skipped` (630.64s).
+- Targeted attachment suites: 622 passed across two runs.
+- Mutations: B1 55/55; A1 26/26; G2-B 35/35; E2 12/12; E3 41/41; E4 11/11; FAC 42/42. No survivors or harness errors.
+- `doctor`, `compileall`, offscreen desktop self-test, and `git diff --check` passed. Ruff is unavailable; no dependency installed.
 
-## Blockers
-- None identified yet.
-
-## Next action
-Stage only task-owned files, commit and push the feature branch, create/attach a PR against `main`, then wait for Windows/Python 3.14 CI and stop without merging.
+## Next actions
+1. Stage only the 14 changed task files, commit and push to the existing PR branch.
+2. Resolve the two P1 review threads after verifying the pushed code; confirm zero unresolved threads.
+3. Wait for the new GitHub CI run, update PR body with exact results, verify PR stays OPEN and do not merge.

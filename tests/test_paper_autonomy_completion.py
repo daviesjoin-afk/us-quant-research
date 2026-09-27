@@ -127,16 +127,77 @@ def test_wrong_publication_type_does_not_complete_action(tmp_path):
     assert store.unresolved()[0].status is PaperAutonomyActionStatus.REQUESTED
 
 
-def test_same_completion_is_idempotent_but_conflict_fails_closed(tmp_path):
+def test_publication_after_terminal_action_is_unattributable_and_ignored(tmp_path):
     store = _store(tmp_path)
     _claim(store, PaperAutonomyActionType.PREPARE, status=PaperAutonomyActionStatus.REQUESTED)
     observer = _observer(store)
 
     observer.preparation_ready()
     observer.preparation_ready()
+    observer.preparation_failed("unrelated later manual failure")
 
-    with pytest.raises(PaperAutonomyActionRepositoryError):
-        observer.preparation_failed("conflicting publication")
+    assert store.recent()[0].status is PaperAutonomyActionStatus.SUCCEEDED
+
+
+def test_manual_running_after_failed_autonomous_start_is_ignored(tmp_path):
+    store = _store(tmp_path)
+    key = _claim(
+        store,
+        PaperAutonomyActionType.START,
+        status=PaperAutonomyActionStatus.REQUESTED,
+    )
+    store.complete(
+        action_key=key,
+        status=PaperAutonomyActionStatus.FAILED,
+        completed_at=NOW,
+        detail="autonomous launch failed",
+    )
+    observer = _observer(store)
+
+    observer.session_running()
+
+    assert len(store.recent()) == 1
+    assert store.recent()[0].status is PaperAutonomyActionStatus.FAILED
+
+
+def test_manual_launch_failure_after_successful_start_is_ignored(tmp_path):
+    store = _store(tmp_path)
+    key = _claim(
+        store,
+        PaperAutonomyActionType.START,
+        status=PaperAutonomyActionStatus.REQUESTED,
+    )
+    store.complete(
+        action_key=key,
+        status=PaperAutonomyActionStatus.SUCCEEDED,
+        completed_at=NOW,
+        detail="autonomous session running",
+    )
+
+    _observer(store).launch_failed("unrelated manual launch failure")
+
+    assert len(store.recent()) == 1
+    assert store.recent()[0].status is PaperAutonomyActionStatus.SUCCEEDED
+
+
+def test_manual_prepare_ready_after_failed_autonomous_prepare_is_ignored(tmp_path):
+    store = _store(tmp_path)
+    key = _claim(
+        store,
+        PaperAutonomyActionType.PREPARE,
+        status=PaperAutonomyActionStatus.REQUESTED,
+    )
+    store.complete(
+        action_key=key,
+        status=PaperAutonomyActionStatus.FAILED,
+        completed_at=NOW,
+        detail="autonomous preparation failed",
+    )
+
+    _observer(store).preparation_ready()
+
+    assert len(store.recent()) == 1
+    assert store.recent()[0].status is PaperAutonomyActionStatus.FAILED
 
 
 def test_duplicate_pending_completion_is_safe_but_conflict_is_rejected(tmp_path):

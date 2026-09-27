@@ -3695,8 +3695,18 @@ Supervisor 在调用 owner 前先原子 claim action。请求接受只记 `REQUE
 Paper 发布 `READY`、`RUNNING`、暂停/恢复或 `session_finalized` 后，completion observer 才写
 成功。若完成信号先于请求返回，observer 仅将一个进程内 pending completion 暂存，等 ledger
 转到 `REQUESTED` 再提交；进程崩溃则未完成 action 留在 unresolved 状态，重启后 fail closed。
-失败发布写 terminal failure；重复的同结果信号安全忽略，冲突结果报错，不触碰 broker、风险、
-reconciliation 或 lease。
+只有存在同类型 unresolved autonomy action 时，publication 才能归属该 action。`CLAIMED` 时暂存，
+`REQUESTED` 时完成；没有匹配 action 的 publication 无法区分人工操作与旧自治请求，因此忽略。
+同一个 unresolved action 收到冲突 publication 会报错。owner 调用抛异常时 action 保持 `CLAIMED`，
+不推断为失败。
+
+日历不可读时 schedule facts 保留 `trading_day=None`，另带 Eastern civil `action_day`，后者只用于
+安全动作的 key 与 ledger 分桶。它不授权准备或启动。暂停、恢复和停止的 action attempt 根据该日
+完整 ledger 中已成功的暂停/恢复次数计算，因此一个 pause→resume→pause 周期会得到不同 pause key，
+同一周期并发 tick 仍竞争同一个原子 claim。日历不可读且自治会话仍在运行时仍能请求暂停新开仓。
+
+如果启动探测不能证明安全，Desktop 记录一次 `AUTONOMY_STARTUP_UNSAFE` 并不启动 host；人工 Paper
+功能继续由既有路径提供。
 
 配置只从显式 `[paper.autonomy]` 读取，缺少或无效时不造默认时刻、不启动 host，并记录
 `AUTONOMY_SUPERVISOR_UNAVAILABLE`。必须显式提供以下值：

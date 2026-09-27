@@ -26,6 +26,8 @@ import pytest
 from us_quant.trading.adapters.sqlite.paper_autonomy_action_repository import (
     SQLitePaperAutonomyActionRepository,
 )
+from us_quant.trading.adapters import paper_autonomy_schedule
+from us_quant.trading.adapters.paper_autonomy_schedule import PaperAutonomyScheduleAdapter
 from us_quant.trading.application.paper_autonomy_supervisor import (
     PaperAutonomySupervisor,
 )
@@ -610,6 +612,48 @@ def test_two_ticks_racing_ask_the_owner_once(
     assert len(harness.rows()) == 1
 
 
+def test_two_ticks_racing_for_same_pause_cycle_claim_once(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _Harness(
+        tmp_path,
+        runtime=_runtime_facts(
+            session_running=True,
+            session_provenance=PaperAutonomySessionProvenance.AUTONOMOUS,
+        ),
+        schedule=_schedule_facts(
+            trading_day=None,
+            action_day=_DAY,
+            session=None,
+            preparation_allowed=False,
+            start_allowed=False,
+            exceptional_schedule_uncertain=True,
+        ),
+    )
+    workers = 4
+    barrier = threading.Barrier(workers)
+    claim_barrier = threading.Barrier(workers)
+    original_claim = harness.ledger.claim
+
+    def synchronized_claim(record):
+        claim_barrier.wait()
+        return original_claim(record)
+
+    monkeypatch.setattr(harness.ledger, "claim", synchronized_claim)
+
+    def attempt(_index: int):
+        barrier.wait()
+        return harness.tick()
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(attempt, range(workers)))
+
+    assert len({result.decision.action_key for result in results}) == 1
+    assert sum(result.claimed for result in results) == 1
+    assert [name for name, _ in harness.executor.calls] == ["request_pause"]
+    assert len(harness.rows()) == 1
+
+
 def test_an_owner_refusal_is_terminal_and_recorded_as_a_refusal(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -625,6 +669,36 @@ def test_an_owner_refusal_is_terminal_and_recorded_as_a_refusal(
     ]
     assert harness.ledger.unresolved() == ()
     assert harness.codes() == ["AUTONOMY_ACTION_REFUSED"]
+
+
+def test_refused_pause_cycle_blocks_when_pause_is_still_required(
+    tmp_path: pathlib.Path,
+) -> None:
+    harness = _Harness(
+        tmp_path,
+        runtime=_runtime_facts(
+            session_running=True,
+            session_provenance=PaperAutonomySessionProvenance.AUTONOMOUS,
+        ),
+        schedule=_schedule_facts(
+            trading_day=None,
+            action_day=_DAY,
+            session=None,
+            preparation_allowed=False,
+            start_allowed=False,
+            exceptional_schedule_uncertain=True,
+        ),
+        executor=_Executor(accepted=False, detail="owner refused pause"),
+    )
+
+    first = harness.tick()
+    second = harness.tick()
+
+    assert first.decision.action is PaperAutonomyAction.PAUSE_ENTRIES
+    assert first.status is PaperAutonomyActionStatus.REFUSED
+    assert second.decision.action is PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR
+    assert "already ended as refused" in second.decision.reason
+    assert [name for name, _ in harness.executor.calls] == ["request_pause"]
 
 
 def test_an_owner_exception_leaves_the_claim_unresolved(
@@ -790,7 +864,7 @@ def test_an_unresolved_action_blocks_and_is_reported_as_recovery(
 
     harness = _Harness(tmp_path, runtime=_runtime_facts(preparation_ready=True))
     key = action_key_for(
-        trading_day=_DAY,
+        action_day=_DAY,
         intent_revision=4,
         action=PaperAutonomyActionType.START,
         slot=PaperAutonomyActionSlot.SESSION,
@@ -916,6 +990,131 @@ def test_an_uncertain_calendar_closes_entries(tmp_path: pathlib.Path) -> None:
 
     assert result.decision.action is PaperAutonomyAction.PAUSE_ENTRIES
     assert [name for name, _ in harness.executor.calls] == ["request_pause"]
+
+
+def test_persistent_calendar_failure_still_pauses_autonomous_entries(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _Harness(
+        tmp_path,
+        runtime=_runtime_facts(
+            session_running=True,
+            session_provenance=PaperAutonomySessionProvenance.AUTONOMOUS,
+        ),
+    )
+    calls = []
+
+    def unavailable(moment=None):
+        calls.append(moment)
+        raise RuntimeError("calendar is unavailable")
+
+    monkeypatch.setattr(paper_autonomy_schedule, "us_equity_session", unavailable)
+    harness.schedule_port = PaperAutonomyScheduleAdapter(_policy())
+    harness.supervisor._schedule = harness.schedule_port
+
+    result = harness.tick()
+
+    assert len(calls) == 1
+    assert result.decision.action is PaperAutonomyAction.PAUSE_ENTRIES
+    assert result.decision.trading_day is None
+    assert harness.rows()[0].trading_day is None
+    assert harness.rows()[0].action_day == _DAY
+    assert [name for name, _ in harness.executor.calls] == ["request_pause"]
+
+
+def test_paused_autonomous_session_stays_paused_during_uncertainty(
+    tmp_path: pathlib.Path,
+) -> None:
+    harness = _Harness(
+        tmp_path,
+        runtime=_runtime_facts(
+            session_paused=True,
+            session_provenance=PaperAutonomySessionProvenance.AUTONOMOUS,
+        ),
+        schedule=_schedule_facts(
+            trading_day=None,
+            action_day=_DAY,
+            session=None,
+            preparation_allowed=False,
+            start_allowed=False,
+            exceptional_schedule_uncertain=True,
+        ),
+    )
+
+    result = harness.tick()
+
+    assert result.decision.action is PaperAutonomyAction.NOOP
+    assert harness.executor.calls == []
+
+
+def test_pause_resume_pause_uses_durable_control_cycles(
+    tmp_path: pathlib.Path,
+) -> None:
+    running = _runtime_facts(
+        session_running=True,
+        session_provenance=PaperAutonomySessionProvenance.AUTONOMOUS,
+    )
+    paused = _runtime_facts(
+        session_paused=True,
+        session_provenance=PaperAutonomySessionProvenance.AUTONOMOUS,
+    )
+    uncertain = _schedule_facts(
+        trading_day=None,
+        action_day=_DAY,
+        session=None,
+        preparation_allowed=False,
+        start_allowed=False,
+        exceptional_schedule_uncertain=True,
+    )
+    harness = _Harness(tmp_path, runtime=running, schedule=uncertain)
+
+    first_pause = harness.tick()
+    first_pause_key = harness.rows()[-1].action_key
+    harness.ledger.complete(
+        action_key=first_pause_key,
+        status=PaperAutonomyActionStatus.SUCCEEDED,
+        completed_at=_MOMENT,
+        detail="canonical pause publication",
+    )
+
+    harness.rebuild(runtime=paused, schedule=_schedule_facts())
+    resume = harness.tick()
+    resume_key = resume.decision.action_key
+    harness.ledger.complete(
+        action_key=resume_key,
+        status=PaperAutonomyActionStatus.SUCCEEDED,
+        completed_at=_MOMENT,
+        detail="canonical resume publication",
+    )
+
+    harness.rebuild(runtime=running, schedule=uncertain)
+    second_pause = harness.tick()
+    second_pause_key = second_pause.decision.action_key
+    harness.ledger.complete(
+        action_key=second_pause_key,
+        status=PaperAutonomyActionStatus.SUCCEEDED,
+        completed_at=_MOMENT,
+        detail="canonical second pause publication",
+    )
+
+    assert first_pause.decision.action is PaperAutonomyAction.PAUSE_ENTRIES
+    assert resume.decision.action is PaperAutonomyAction.RESUME_ENTRIES
+    assert second_pause.decision.action is PaperAutonomyAction.PAUSE_ENTRIES
+    assert first_pause_key.endswith("pause_entries:operator")
+    assert second_pause_key.endswith("pause_entries:operator#1")
+    assert second_pause_key != first_pause_key
+    cycles = harness.ledger.control_cycles(_DAY)
+    assert cycles.pause_attempt == 1
+    assert cycles.resume_attempt == 2
+    assert cycles.stop_attempt == 3
+
+    harness.rebuild(runtime=paused, schedule=_schedule_facts())
+    second_resume = harness.tick()
+    assert second_resume.decision.action is PaperAutonomyAction.RESUME_ENTRIES
+    assert second_resume.decision.action_key.endswith(
+        "resume_entries:operator#2"
+    )
+    assert second_resume.decision.action_key != resume.decision.action_key
 
 
 def test_the_supervisor_only_ever_calls_one_executor_request_per_tick(

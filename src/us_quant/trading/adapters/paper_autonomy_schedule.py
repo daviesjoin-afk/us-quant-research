@@ -45,18 +45,17 @@ class PaperAutonomyScheduleAdapter:
         try:
             canonical_session = us_equity_session(eastern)
             session = _SESSION_MAP[canonical_session]
+            trading_day = self._trading_day(eastern, canonical_session)
         except Exception:  # noqa: BLE001 - calendar is an external fact
-            trading_day = self._trading_day_from_midday(eastern.date())
             return PaperAutonomyScheduleFacts(
-                trading_day=trading_day,
+                trading_day=None,
                 session=None,
                 preparation_allowed=False,
                 start_allowed=False,
                 orderly_stop_due=False,
                 exceptional_schedule_uncertain=True,
+                action_day=eastern.date(),
             )
-
-        trading_day = self._trading_day(eastern, canonical_session)
         eastern_time = eastern.timetz().replace(tzinfo=None)
         orderly_stop_due = (
             eastern.date() == trading_day
@@ -84,6 +83,7 @@ class PaperAutonomyScheduleAdapter:
             start_allowed=start_allowed,
             orderly_stop_due=orderly_stop_due,
             exceptional_schedule_uncertain=False,
+            action_day=eastern.date(),
         )
 
     def _trading_day(
@@ -103,21 +103,6 @@ class PaperAutonomyScheduleAdapter:
         ):
             return current_day
         return self._next_canonical_trading_day(current_day + timedelta(days=1))
-
-    def _trading_day_from_midday(self, day: date) -> date:
-        """Recover a date only when the canonical provider confirms it."""
-
-        try:
-            session = us_equity_session(
-                datetime.combine(day, time(12), tzinfo=_EASTERN)
-            )
-            if session is USEquitySession.REGULAR:
-                return day
-        except Exception as error:  # noqa: BLE001 - preserve fail-closed result
-            raise PaperAutonomySupervisorError(
-                "the canonical schedule could not establish a trading day"
-            ) from error
-        return self._next_canonical_trading_day(day + timedelta(days=1))
 
     @staticmethod
     def _next_canonical_trading_day(first_day: date) -> date:

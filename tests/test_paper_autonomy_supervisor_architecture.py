@@ -1009,7 +1009,9 @@ def test_production_schedule_and_preparation_seams_stay_canonical() -> None:
         encoding="utf-8"
     )
     assert "us_equity_session" in schedule
-    assert schedule.count("us_equity_session(") == 3
+    assert schedule.count("us_equity_session(") == 2
+    assert "_trading_day_from_midday" not in schedule
+    assert "trading_day=None" in schedule
     assert "holiday_calendar" not in schedule.lower()
     assert "is_holiday" not in schedule.lower()
     assert "early_close" not in schedule.lower()
@@ -1170,6 +1172,16 @@ def test_startup_probe_is_async_and_precedes_host_admission() -> None:
     assert "on_success=self._paper_autonomy_startup_probe_succeeded" in source
     assert "open_broker_orders=lambda: open_orders" in source
     assert source.index("startup = startup_facts.startup_facts()") < source.index(
+        "self.paper_autonomy_host.start()"
+    )
+    unsafe = next(
+        node
+        for node in ast.walk(initialize)
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test) == "not startup.proven_safe"
+    )
+    assert any(isinstance(node, ast.Return) for node in unsafe.body)
+    assert source.index("if not startup.proven_safe:") < source.index(
         "self.paper_autonomy_host.start()"
     )
     assert "_paper_autonomy_startup_probe_task" in desktop_source

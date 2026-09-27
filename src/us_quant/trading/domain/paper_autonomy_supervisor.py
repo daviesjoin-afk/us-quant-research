@@ -462,14 +462,30 @@ class PaperAutonomyScheduleFacts:
     as a closed market, and both are not the same as an open one.
     """
 
-    trading_day: date
+    trading_day: date | None
     session: PaperAutonomySessionWindow | None
     preparation_allowed: bool
     start_allowed: bool
     orderly_stop_due: bool
     exceptional_schedule_uncertain: bool
+    action_day: date | None = None
 
     def __post_init__(self) -> None:
+        # This Eastern civil day is an identity bucket for safety controls only;
+        # it cannot authorize PREPARE or START.
+        if self.action_day is None and self.trading_day is not None:
+            object.__setattr__(self, "action_day", self.trading_day)
+        if self.action_day is None:
+            raise PaperAutonomySupervisorViolation(
+                "a schedule needs an Eastern civil action day"
+            )
+        if self.trading_day is None and (
+            not self.exceptional_schedule_uncertain or self.session is not None
+        ):
+            raise PaperAutonomySupervisorViolation(
+                "a missing canonical trading day requires an uncertain schedule "
+                "with no guessed session"
+            )
         # The window limits are enforced on the *value*, not left to whoever
         # builds it.  While ``start_allowed`` was the only thing the decision
         # read, "regular only" was a promise the adapter made; a fact carrying
@@ -576,6 +592,7 @@ class PaperAutonomyDecision:
     trading_day: date | None
     intent_revision: int
     action_key: str | None
+    action_day: date | None = None
 
     def __post_init__(self) -> None:
         if self.action is PaperAutonomyAction.NOOP:
@@ -587,10 +604,17 @@ class PaperAutonomyDecision:
                 f"an executable decision needs a deterministic action key: "
                 f"{self.action.value}"
             )
-        if self.trading_day is None:
+        if self.action_day is None:
             raise PaperAutonomySupervisorViolation(
-                f"an executable decision needs the trading day it belongs to: "
+                f"an executable decision needs its deterministic action day: "
                 f"{self.action.value}"
+            )
+        if (
+            self.action in (PaperAutonomyAction.PREPARE, PaperAutonomyAction.START)
+            and self.trading_day is None
+        ):
+            raise PaperAutonomySupervisorViolation(
+                f"{self.action.value} requires a canonical trading day"
             )
 
     @property
@@ -611,6 +635,20 @@ class PaperAutonomyDecision:
         return PaperAutonomyActionType(self.action.value)
 
 
+@dataclass(frozen=True, slots=True)
+class PaperAutonomyControlCycles:
+    """Durable identities for repeated entry-control requests in one day."""
+
+    pause_attempt: int = 0
+    resume_attempt: int = 0
+    stop_attempt: int = 0
+
+    def __post_init__(self) -> None:
+        if min(self.pause_attempt, self.resume_attempt, self.stop_attempt) < 0:
+            raise PaperAutonomySupervisorViolation(
+                "control-cycle attempts cannot be negative"
+            )
+
 #: The windows in which an action key is allowed to repeat.
 #:
 #: The slot is part of the key so that a retry *after* a policy backoff is a
@@ -626,7 +664,7 @@ class PaperAutonomyActionSlot(StrEnum):
 
 def action_key_for(
     *,
-    trading_day: date,
+    action_day: date,
     intent_revision: int,
     action: PaperAutonomyActionType,
     slot: PaperAutonomyActionSlot,
@@ -651,7 +689,7 @@ def action_key_for(
             "an action key cannot be built from a negative attempt"
         )
     base = (
-        f"paper:{trading_day.isoformat()}:r{intent_revision}:"
+        f"paper:{action_day.isoformat()}:r{intent_revision}:"
         f"{action.value}:{slot.value}"
     )
     return base if attempt == 0 else f"{base}#{attempt}"
@@ -669,6 +707,7 @@ def decide_paper_autonomy(
     start_already_attempted_today: bool,
     control_plane_readable: bool,
     action_store_readable: bool = True,
+    control_cycles: PaperAutonomyControlCycles = PaperAutonomyControlCycles(),
 ) -> PaperAutonomyDecision:
     """The one precedence order, evaluated top to bottom.
 
@@ -734,6 +773,7 @@ def decide_paper_autonomy(
     """
 
     day = schedule.trading_day
+    action_day = schedule.action_day
 
     if not control_plane_readable:
         return _blocked(
@@ -787,8 +827,10 @@ def decide_paper_autonomy(
                 PaperAutonomyAction.STOP,
                 "the kill switch is latched; winding the autonomous session "
                 "down through the canonical stop",
-                day,
+                action_day,
                 intent_revision,
+                trading_day=day,
+                attempt=control_cycles.stop_attempt,
             )
         return _noop(
             "the kill switch is latched; no autonomous work will be requested",
@@ -852,8 +894,10 @@ def decide_paper_autonomy(
                 PaperAutonomyAction.STOP,
                 "the operator disabled autonomy; winding the autonomous session "
                 "down through the canonical stop",
-                day,
+                action_day,
                 intent_revision,
+                trading_day=day,
+                attempt=control_cycles.stop_attempt,
             )
         return _noop(
             "the operator has not authorised autonomous Paper trading",
@@ -880,16 +924,20 @@ def decide_paper_autonomy(
                     "the orderly stop boundary has arrived while the operator's "
                     "intent is paused; winding the autonomous session down "
                     "through the canonical stop",
-                    day,
+                    action_day,
                     intent_revision,
+                    trading_day=day,
+                    attempt=control_cycles.stop_attempt,
                 )
             if runtime.session_running:
                 return _act(
                     PaperAutonomyAction.PAUSE_ENTRIES,
                     "the operator paused autonomy; closing new entries through "
                     "the canonical pause",
-                    day,
+                    action_day,
                     intent_revision,
+                    trading_day=day,
+                    attempt=control_cycles.pause_attempt,
                 )
             return _noop(
                 "the operator paused autonomy and its session is already paused",
@@ -921,18 +969,28 @@ def decide_paper_autonomy(
                 PaperAutonomyAction.STOP,
                 "the orderly stop boundary has arrived; winding the autonomous "
                 "session down through the canonical stop",
-                day,
+                action_day,
                 intent_revision,
+                trading_day=day,
+                attempt=control_cycles.stop_attempt,
             )
         if schedule.exceptional_schedule_uncertain:
-            return _uncertain_active_session(runtime, day, intent_revision)
+            return _uncertain_active_session(
+                runtime,
+                day,
+                action_day,
+                intent_revision,
+                control_cycles.pause_attempt,
+            )
         if runtime.session_paused:
             return _act(
                 PaperAutonomyAction.RESUME_ENTRIES,
                 "the operator re-enabled autonomy and its session is paused; "
                 "resuming entries through the canonical resume",
-                day,
+                action_day,
                 intent_revision,
+                trading_day=day,
+                attempt=control_cycles.resume_attempt,
             )
         return _noop(
             "an autonomous Paper session is already running under this intent",
@@ -981,6 +1039,7 @@ def decide_paper_autonomy(
                 "autonomous launch",
                 day,
                 intent_revision,
+                trading_day=day,
             )
         return _noop(
             f"candidates are ready but this session "
@@ -1001,6 +1060,7 @@ def decide_paper_autonomy(
             "permits preparation",
             day,
             intent_revision,
+            trading_day=day,
         )
 
     return _noop(
@@ -1014,8 +1074,10 @@ def decide_paper_autonomy(
 
 def _uncertain_active_session(
     runtime: PaperAutonomyRuntimeFacts,
-    day: date,
+    day: date | None,
+    action_day: date,
     intent_revision: int,
+    pause_attempt: int,
 ) -> PaperAutonomyDecision:
     """What an unreadable calendar does to a session that is already up.
 
@@ -1034,8 +1096,10 @@ def _uncertain_active_session(
             PaperAutonomyAction.PAUSE_ENTRIES,
             "the trading calendar could not be read; closing new entries while "
             "the existing exits and risk logic keep running",
-            day,
+            action_day,
             intent_revision,
+            trading_day=day,
+            attempt=pause_attempt,
         )
     return _noop(
         "the trading calendar could not be read and the autonomous session is "
@@ -1047,7 +1111,7 @@ def _uncertain_active_session(
 
 def _not_our_session(
     runtime: PaperAutonomyRuntimeFacts,
-    day: date,
+    day: date | None,
     intent_revision: int,
     *,
     manual_reason: str,
@@ -1082,7 +1146,7 @@ def _not_our_session(
 
 
 def _noop(
-    reason: str, day: date, intent_revision: int
+    reason: str, day: date | None, intent_revision: int
 ) -> PaperAutonomyDecision:
     return PaperAutonomyDecision(
         action=PaperAutonomyAction.NOOP,
@@ -1094,7 +1158,7 @@ def _noop(
 
 
 def _blocked(
-    reason: str, day: date, intent_revision: int
+    reason: str, day: date | None, intent_revision: int
 ) -> PaperAutonomyDecision:
     return PaperAutonomyDecision(
         action=PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR,
@@ -1110,6 +1174,9 @@ def _act(
     reason: str,
     day: date,
     intent_revision: int,
+    *,
+    trading_day: date | None,
+    attempt: int = 0,
 ) -> PaperAutonomyDecision:
     slot = (
         PaperAutonomyActionSlot.OPERATOR
@@ -1124,14 +1191,16 @@ def _act(
     return PaperAutonomyDecision(
         action=action,
         reason=reason,
-        trading_day=day,
+        trading_day=trading_day,
         intent_revision=intent_revision,
         action_key=action_key_for(
-            trading_day=day,
+            action_day=day,
             intent_revision=intent_revision,
             action=PaperAutonomyActionType(action.value),
             slot=slot,
+            attempt=attempt,
         ),
+        action_day=day,
     )
 
 
@@ -1173,6 +1242,7 @@ def shuts_down_action(action: PaperAutonomyAction) -> bool:
 
 
 __all__ = [
+    "PaperAutonomyControlCycles",
     "AUTONOMOUS_PREPARE_WINDOWS",
     "AUTONOMOUS_START_WINDOWS",
     "MAXIMUM_TICK_INTERVAL_SECONDS",

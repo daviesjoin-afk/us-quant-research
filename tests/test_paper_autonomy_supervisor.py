@@ -810,6 +810,7 @@ def test_an_executable_decision_needs_a_key_and_a_day() -> None:
             action=PaperAutonomyAction.START,
             reason="because",
             trading_day=_DAY,
+            action_day=_DAY,
             intent_revision=1,
             action_key=None,
         )
@@ -843,7 +844,7 @@ def test_the_same_situation_produces_the_same_action_key() -> None:
 
 def test_an_action_key_names_the_day_revision_action_and_slot() -> None:
     key = action_key_for(
-        trading_day=_DAY,
+        action_day=_DAY,
         intent_revision=7,
         action=PaperAutonomyActionType.PREPARE,
         slot=PaperAutonomyActionSlot.SESSION,
@@ -854,14 +855,14 @@ def test_an_action_key_names_the_day_revision_action_and_slot() -> None:
 def test_an_action_key_refuses_a_negative_attempt_and_revision() -> None:
     with pytest.raises(PaperAutonomySupervisorViolation):
         action_key_for(
-            trading_day=_DAY,
+            action_day=_DAY,
             intent_revision=-1,
             action=PaperAutonomyActionType.PREPARE,
             slot=PaperAutonomyActionSlot.SESSION,
         )
     with pytest.raises(PaperAutonomySupervisorViolation):
         action_key_for(
-            trading_day=_DAY,
+            action_day=_DAY,
             intent_revision=1,
             action=PaperAutonomyActionType.PREPARE,
             slot=PaperAutonomyActionSlot.SESSION,
@@ -871,13 +872,13 @@ def test_an_action_key_refuses_a_negative_attempt_and_revision() -> None:
 
 def test_a_backoff_attempt_is_a_different_key() -> None:
     base = action_key_for(
-        trading_day=_DAY,
+        action_day=_DAY,
         intent_revision=1,
         action=PaperAutonomyActionType.PREPARE,
         slot=PaperAutonomyActionSlot.SESSION,
     )
     retry = action_key_for(
-        trading_day=_DAY,
+        action_day=_DAY,
         intent_revision=1,
         action=PaperAutonomyActionType.PREPARE,
         slot=PaperAutonomyActionSlot.SESSION,
@@ -1152,6 +1153,57 @@ def _ledger(tmp_path: pathlib.Path) -> SQLitePaperAutonomyActionRepository:
     return SQLitePaperAutonomyActionRepository(tmp_path / "actions.sqlite3")
 
 
+def test_legacy_action_ledger_migrates_without_losing_rows_or_null_day_support(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "actions.sqlite3"
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE paper_autonomy_action(
+                action_key TEXT PRIMARY KEY,
+                intent_revision INTEGER NOT NULL,
+                trading_day TEXT NOT NULL,
+                action TEXT NOT NULL,
+                status TEXT NOT NULL,
+                claimed_at TEXT NOT NULL,
+                completed_at TEXT,
+                detail TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO paper_autonomy_action VALUES (
+                'legacy', 4, '2026-09-28', 'prepare', 'requested',
+                '2026-09-28T13:45:00+00:00', NULL, 'legacy row'
+            )
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    store = SQLitePaperAutonomyActionRepository(path)
+    assert store.get("legacy").action_day == _DAY
+    assert store.get("legacy").trading_day == _DAY
+    assert store.claim(
+        PaperAutonomyActionRecord(
+            action_key="uncertain-pause",
+            intent_revision=4,
+            trading_day=None,
+            action=PaperAutonomyActionType.PAUSE_ENTRIES,
+            status=PaperAutonomyActionStatus.CLAIMED,
+            claimed_at=_NOW,
+            completed_at=None,
+            detail="calendar unavailable; pause entries",
+            action_day=_DAY,
+        )
+    )
+    assert store.get("uncertain-pause").trading_day is None
+
+
 def _claim(
     store: SQLitePaperAutonomyActionRepository,
     key: str,
@@ -1369,6 +1421,27 @@ def test_a_start_attempt_is_scoped_to_its_trading_day(
     assert store.start_attempted(_DAY + timedelta(days=1)) is False
 
 
+def test_control_cycles_parse_the_full_ledger_before_counting(tmp_path):
+    store = _ledger(tmp_path)
+    _claim(
+        store,
+        "pause",
+        action=PaperAutonomyActionType.PAUSE_ENTRIES,
+    )
+    store.mark_requested(action_key="pause", detail="accepted")
+    store.complete(
+        action_key="pause",
+        status=PaperAutonomyActionStatus.SUCCEEDED,
+        completed_at=_NOW,
+        detail="paused",
+    )
+    assert store.control_cycles(_DAY).resume_attempt == 1
+
+    _corrupt(store, "status = ?", "BROKEN", key="pause")
+    with pytest.raises(PaperAutonomyActionStoreUnreadable):
+        store.control_cycles(_DAY)
+
+
 def test_a_preparation_is_not_a_start(tmp_path: pathlib.Path) -> None:
     store = _ledger(tmp_path)
     _claim(store, "p", action=PaperAutonomyActionType.PREPARE)
@@ -1395,6 +1468,7 @@ def test_the_ledger_records_no_session_truth(tmp_path: pathlib.Path) -> None:
         "claimed_at",
         "completed_at",
         "detail",
+        "action_day",
     }
     for forbidden in (
         "symbols",

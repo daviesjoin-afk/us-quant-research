@@ -47,9 +47,11 @@ from us_quant.trading.domain.paper_autonomy_supervisor import (
     REQUESTED_EVENT_CODES,
     PaperAutonomyAction,
     PaperAutonomyActionStatus,
+    PaperAutonomyActionType,
     PaperAutonomyDecision,
     PaperAutonomyEventCode,
     PaperAutonomyPolicy,
+    PaperAutonomyControlCycles,
     PaperAutonomyRuntimeFacts,
     PaperAutonomyStartupFacts,
     PaperAutonomySupervisorError,
@@ -154,8 +156,9 @@ class PaperAutonomySupervisor:
 
         runtime = self._runtime_facts.facts()
         schedule = self._schedule.schedule(now=moment)
-        action_store_readable, unresolved, attempted = self._read_action_state(
-            schedule.trading_day
+        action_store_readable, unresolved, attempted, control_cycles = self._read_action_state(
+            trading_day=schedule.trading_day,
+            action_day=schedule.action_day,
         )
 
         decision = decide_paper_autonomy(
@@ -169,6 +172,7 @@ class PaperAutonomySupervisor:
             start_already_attempted_today=attempted,
             control_plane_readable=True,
             action_store_readable=action_store_readable,
+            control_cycles=control_cycles,
         )
 
         if decision.action is PaperAutonomyAction.NOOP:
@@ -217,7 +221,7 @@ class PaperAutonomySupervisor:
         self, decision: PaperAutonomyDecision, *, moment: datetime
     ) -> PaperAutonomyTickResult:
         assert decision.action_key is not None  # guaranteed by is_executable
-        assert decision.trading_day is not None  # ditto
+        assert decision.action_day is not None  # guaranteed by is_executable
         action_type = decision.action_type
         assert action_type is not None  # ditto
 
@@ -231,13 +235,35 @@ class PaperAutonomySupervisor:
                 claimed_at=moment,
                 completed_at=None,
                 detail=decision.reason,
+                action_day=decision.action_day,
             )
         )
         if not claimed:
             # An earlier tick, or an earlier process, already asked.  Not a
-            # failure and not a retry: the answer is on the ledger.
+            # failure and not a retry while it is unresolved.  A terminal
+            # result for the same safety cycle means the requested protection
+            # still has not taken effect and needs an operator.
+            existing = self._actions.get(decision.action_key)
+            if existing is None:
+                return self._blocked_after_terminal_safety_action(
+                    decision, "the claimed action disappeared from the ledger"
+                )
+            if existing.is_terminal and action_type in {
+                PaperAutonomyActionType.PAUSE_ENTRIES,
+                PaperAutonomyActionType.RESUME_ENTRIES,
+                PaperAutonomyActionType.STOP,
+            }:
+                return self._blocked_after_terminal_safety_action(
+                    decision,
+                    "the current safety control cycle already ended as "
+                    f"{existing.status.value}, while the canonical state still "
+                    "requires the action",
+                )
             return PaperAutonomyTickResult(
-                decision=decision, claimed=False, status=None, outcome=None
+                decision=decision,
+                claimed=False,
+                status=existing.status,
+                outcome=None,
             )
 
         try:
@@ -330,6 +356,24 @@ class PaperAutonomySupervisor:
             f"no owner request exists for {action.value}"
         )
 
+    def _blocked_after_terminal_safety_action(
+        self, decision: PaperAutonomyDecision, detail: str
+    ) -> PaperAutonomyTickResult:
+        blocked = PaperAutonomyDecision(
+            action=PaperAutonomyAction.BLOCKED_REQUIRES_OPERATOR,
+            reason=detail,
+            trading_day=decision.trading_day,
+            intent_revision=decision.intent_revision,
+            action_key=None,
+        )
+        self._report(blocked, code=PaperAutonomyEventCode.TICK_BLOCKED)
+        return PaperAutonomyTickResult(
+            decision=blocked,
+            claimed=False,
+            status=None,
+            outcome=None,
+        )
+
     # -- reads ----------------------------------------------------------
 
     def _read_intent(self):
@@ -355,7 +399,7 @@ class PaperAutonomySupervisor:
             return (False, 0, PaperAutonomyMode.DISABLED, False)
         return (True, intent.revision, intent.mode, intent.kill_switch_latched)
 
-    def _read_action_state(self, trading_day):
+    def _read_action_state(self, *, trading_day, action_day):
         """The ledger's view, or the fact that it could not be read.
 
         The one place the ledger's failures are turned into a fact.  Letting
@@ -367,13 +411,19 @@ class PaperAutonomySupervisor:
 
         try:
             unresolved = self._actions.unresolved()
-            attempted = self._actions.start_attempted(trading_day)
+            attempted = (
+                self._actions.start_attempted(trading_day)
+                if trading_day is not None
+                else False
+            )
+            cycles = self._actions.control_cycles(action_day)
         except PaperAutonomyActionRepositoryError:
-            return (False, None, False)
+            return (False, None, False, PaperAutonomyControlCycles())
         return (
             True,
             unresolved[0].action_key if unresolved else None,
             attempted,
+            cycles,
         )
 
     # -- reporting ------------------------------------------------------

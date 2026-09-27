@@ -1737,6 +1737,18 @@ class MainWindow(QMainWindow):
             )
             return
 
+        if not startup.proven_safe:
+            self.runtime_events_orchestrator.record(
+                severity="warning",
+                component="paper-autonomy",
+                code="AUTONOMY_STARTUP_UNSAFE",
+                message=(
+                    "Paper autonomy host not started because startup facts "
+                    "were unknown or unsafe; restart after manual review"
+                ),
+            )
+            return
+
         self.paper_orchestrator.launch_authorization_published.connect(
             runtime_facts.on_launch_authorization_published
         )
@@ -1764,16 +1776,6 @@ class MainWindow(QMainWindow):
         self.execution_orchestrator.preparation_failed_published.connect(
             completion.preparation_failed
         )
-        if not startup.proven_safe:
-            self.runtime_events_orchestrator.record(
-                severity="warning",
-                component="paper-autonomy",
-                code="AUTONOMY_STARTUP_UNSAFE",
-                message=(
-                    "Paper autonomy supervisor is blocked because startup "
-                    "facts were unknown or unsafe; restart after manual review"
-                ),
-            )
         self.paper_autonomy_host = PaperAutonomyHost(
             composition.supervisor,
             tick_interval_seconds=policy.bounded_tick_interval_seconds,

@@ -36,6 +36,7 @@ from typing import Protocol, runtime_checkable
 from us_quant.trading.domain.paper_autonomy import INITIAL_REVISION
 from us_quant.trading.domain.paper_autonomy_supervisor import (
     NON_TERMINAL_ACTION_STATUSES,
+    PaperAutonomyControlCycles,
     PaperAutonomyActionStatus,
     PaperAutonomyActionType,
     PaperAutonomySupervisorError,
@@ -69,17 +70,31 @@ class PaperAutonomyActionRecord:
 
     action_key: str
     intent_revision: int
-    trading_day: date
+    trading_day: date | None
     action: PaperAutonomyActionType
     status: PaperAutonomyActionStatus
     claimed_at: datetime
     completed_at: datetime | None
     detail: str
+    action_day: date | None = None
 
     def __post_init__(self) -> None:
         if not str(self.action_key).strip():
             raise PaperAutonomySupervisorViolation(
                 "an action record needs the deterministic key it was claimed under"
+            )
+        if self.action_day is None and self.trading_day is not None:
+            object.__setattr__(self, "action_day", self.trading_day)
+        if self.action_day is None:
+            raise PaperAutonomySupervisorViolation(
+                "an action record needs its deterministic action day"
+            )
+        if (
+            self.action in (PaperAutonomyActionType.PREPARE, PaperAutonomyActionType.START)
+            and self.trading_day is None
+        ):
+            raise PaperAutonomySupervisorViolation(
+                f"{self.action.value} requires a canonical trading day"
             )
         # A negative revision is not a revision any operator intent could have.
         # The decision layer already refuses to build a key from one, and a
@@ -156,6 +171,9 @@ class PaperAutonomyActionRepositoryPort(Protocol):
         state a crash analysis cannot detect.
         """
 
+    def get(self, action_key: str) -> PaperAutonomyActionRecord | None:
+        """Read one previously claimed action by its durable identity."""
+
     def mark_requested(self, *, action_key: str, detail: str) -> None:
         """Record that the owner accepted a claimed action's request.
 
@@ -185,9 +203,9 @@ class PaperAutonomyActionRepositoryPort(Protocol):
         contract, because it is what keeps "the owner accepted the request" and
         "the action succeeded" apart:
 
-        * ``CLAIMED`` may go to ``REFUSED`` or ``FAILED`` -- an owner can refuse
-          a request, or the call can raise, without the request ever being
-          accepted;
+        * ``CLAIMED`` may go to ``REFUSED`` or ``FAILED`` only when the owner
+          proves the request was not accepted. A Python exception from the owner
+          call does not prove that, so the supervisor leaves that claim open;
         * ``REQUESTED`` may go to any terminal state, including ``SUCCEEDED``,
           because that is the only state from which a canonical finished fact
           can have been observed;
@@ -222,6 +240,13 @@ class PaperAutonomyActionRepositoryPort(Protocol):
         own authority: a request whose outcome is unknown or unhappy is a
         question for the operator, and the manual route is how a second session
         is asked for.
+        """
+
+    def control_cycles(self, action_day: date) -> PaperAutonomyControlCycles:
+        """Count successful pause/resume controls after fully parsing history.
+
+        Implementations must parse the complete ledger before filtering by day;
+        a corrupt unrelated row makes the cycle identity untrustworthy.
         """
 
     def recent(

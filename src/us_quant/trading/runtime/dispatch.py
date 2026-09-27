@@ -307,8 +307,8 @@ class OrderDispatch:
             return DispatchOutcome(
                 halt=True,
                 status=(
-                    "Paper 订单提交结果不确定；已停机并保留在途意图，"
-                    f"等待券商对账（Order {error.broker_order_id}）"
+                    "订单提交结果不确定；已停机并保留在途意图，"
+                    f"等待执行通道对账（Broker Order {error.broker_order_id}）"
                 ),
                 intent=error.intent,
             )
@@ -316,7 +316,7 @@ class OrderDispatch:
             return DispatchOutcome(
                 halt=True,
                 status=(
-                    f"Paper 订单提交被阻断：{error}；"
+                    f"订单提交被阻断：{error}；"
                     "会话已停机，避免自动重试形成重复订单"
                 ),
             )
@@ -324,10 +324,10 @@ class OrderDispatch:
         return DispatchOutcome(
             submitted=True,
             status=(
-                f"已提交 IBKR Paper {intent.side.order_text} "
+                f"已提交{intent.side.order_text} "
                 f"{intent.execution_symbol} "
                 f"{intent.quantity} 股 @ {intent.limit_price} · "
-                f"Order {result.broker_order_id}"
+                f"Broker Order {result.broker_order_id}"
             ),
             intent=intent,
         )

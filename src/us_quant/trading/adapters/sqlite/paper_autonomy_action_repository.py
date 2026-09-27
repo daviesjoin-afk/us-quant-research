@@ -233,9 +233,12 @@ class SQLitePaperAutonomyActionRepository:
     ) -> None:
         """Record a terminal outcome for an action in progress."""
 
-        if status in NON_TERMINAL_ACTION_STATUSES:
+        if (
+            status in NON_TERMINAL_ACTION_STATUSES
+            or status is PaperAutonomyActionStatus.OPERATOR_RESOLVED
+        ):
             raise PaperAutonomyActionRepositoryError(
-                f"an action outcome must be terminal, not {status.value}"
+                f"this action outcome cannot be recorded as {status.value}"
             )
         if completed_at.tzinfo is None:
             raise PaperAutonomyActionRepositoryError(
@@ -314,6 +317,91 @@ class SQLitePaperAutonomyActionRepository:
                     raise PaperAutonomyActionRepositoryError(
                         f"the action under {action_key!r} changed while its "
                         f"outcome was being recorded"
+                    )
+                connection.execute("COMMIT")
+            except BaseException:
+                _rollback_quietly(connection)
+                raise
+
+    def resolve_unknown(
+        self,
+        *,
+        action_key: str,
+        expected_status: PaperAutonomyActionStatus,
+        resolved_at: datetime,
+        detail: str,
+    ) -> None:
+        """Atomically close one reviewed unknown without inventing an outcome."""
+
+        if expected_status not in NON_TERMINAL_ACTION_STATUSES:
+            raise PaperAutonomyActionRepositoryError(
+                "only claimed or requested actions can be resolved"
+            )
+        if resolved_at.tzinfo is None:
+            raise PaperAutonomyActionRepositoryError(
+                "an action resolution needs a timezone-aware timestamp"
+            )
+        if not str(detail).strip():
+            raise PaperAutonomyActionRepositoryError(
+                "an action resolution must record the operator's reason"
+            )
+        try:
+            self._resolve_unknown(
+                action_key, expected_status, resolved_at, detail
+            )
+        except PaperAutonomyActionRepositoryError:
+            raise
+        except sqlite3.Error as error:
+            raise PaperAutonomyActionRepositoryError(
+                "the Paper autonomy action resolution could not be stored"
+            ) from error
+
+    def _resolve_unknown(
+        self,
+        action_key: str,
+        expected_status: PaperAutonomyActionStatus,
+        resolved_at: datetime,
+        detail: str,
+    ) -> None:
+        with closing(connect_sqlite(self.path)) as connection:
+            connection.isolation_level = None
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    _SELECT_ONE, (action_key,)
+                ).fetchone()
+                if row is None:
+                    raise PaperAutonomyActionRepositoryError(
+                        f"no action is stored under {action_key!r}"
+                    )
+                stored = _record_from_row(row)
+                if stored.status not in NON_TERMINAL_ACTION_STATUSES:
+                    raise PaperAutonomyActionRepositoryError(
+                        f"the action under {action_key!r} is already terminal "
+                        f"({stored.status.value})"
+                    )
+                if stored.status is not expected_status:
+                    raise PaperAutonomyActionRepositoryError(
+                        f"the action under {action_key!r} changed status from "
+                        f"{expected_status.value} to {stored.status.value}"
+                    )
+                cursor = connection.execute(
+                    f"""
+                    UPDATE {TABLENAME}
+                    SET status = ?, completed_at = ?, detail = ?
+                    WHERE action_key = ?
+                    """,
+                    (
+                        PaperAutonomyActionStatus.OPERATOR_RESOLVED.value,
+                        to_stored_text(resolved_at),
+                        detail,
+                        action_key,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise PaperAutonomyActionRepositoryError(
+                        f"the action under {action_key!r} changed while it was "
+                        "being resolved"
                     )
                 connection.execute("COMMIT")
             except BaseException:

@@ -1,33 +1,33 @@
 # Exec plan: Paper Autonomous Trading v1-B
 
-## Purpose and success criteria
-Complete the remaining v1-B autonomy supervisor implementation on the existing feature branch, preserving canonical Paper/Execution/Risk ownership, manual behavior, and fail-closed semantics. Pass the requested safety, mutation, architecture, full Python 3.14, and ancillary checks; create a PR against `main`; wait for Windows/Python 3.14 CI and stop for review without merging.
+## Goal and completion criteria
+Complete the reviewed PR #60 recovery closure on `feat/paper-autonomy-supervisor`, starting from exact HEAD `6f0226454a83526ed562f9bc41880459bf8fdc63`. Add an explicit, disabled-only operator resolution for old `CLAIMED`/`REQUESTED` actions, preserving fail-closed startup, canonical Paper ownership and all existing scope limits. Update evidence, push the branch, wait for CI on the new HEAD, and stop without merging.
+
+## Constraints
+- No OCR, OpenCodeReview, Live, real-money execution, AI, or strategy evolution.
+- Resolution records `OPERATOR_RESOLVED`; it never claims success/failure/refusal, enables autonomy, clears kill, starts a host/session, removes history, or permits a same-day unattended START retry.
+- Preserve unrelated untracked workspace content and keep changes limited to this review.
+- Record blocked-event dedup as future observability cleanup; do not widen this patch.
 
 ## Context map
-- `src/us_quant/trading/domain/paper_autonomy_supervisor.py` — policy, facts, decisions and supervisor core.
-- `src/us_quant/trading/composition/paper_autonomy.py` — current Qt-free composition.
-- `src/us_quant/extended_hours.py` — canonical US equity session calendar/classifier.
-- `src/us_quant/desktop_v2/orchestration/execution/` — canonical candidate preparation path.
-- `src/us_quant/desktop_v2/orchestration/paper/` — canonical Paper lifecycle and launch preflight.
-- `src/us_quant/desktop.py` — desktop composition and shutdown wiring.
-- `tests/test_paper_autonomy_supervisor*.py` — behavior and architecture guards.
-- `docs/TRADING_ARCHITECTURE_V2.md` — ownership and topology documentation.
+- `src/us_quant/trading/application/paper_autonomy_recovery.py` — recovery authority.
+- `src/us_quant/trading/ports/paper_autonomy_action_repository.py` and `src/us_quant/trading/adapters/sqlite/paper_autonomy_action_repository.py` — atomic resolution contract and storage.
+- `src/us_quant/cli.py` and `src/us_quant/trading/composition/paper_autonomy.py` — operator surface and wiring.
+- `tests/test_paper_autonomy_recovery.py` — recovery behavior and authority guards.
+- `scripts/mutation_paper_autonomy_b1.ps1` — B1 safety mutants.
+- `docs/TRADING_ARCHITECTURE_V2.md` — exact control-cycle formulas and crash recovery.
 
-## Milestones
-- [x] M1: Inventory current production implementation and exact remaining gaps.
-- [x] M2: Implement canonical schedule adapter and shared preparation seam.
-- [x] M3: Implement authorization, facts/startup adapters, Qt host, composition wiring, async completion.
-- [x] M4: Add focused behavior/architecture cases and update docs.
-- [x] M5: Run requested mutation, historical, FAC, Python 3.14, doctor, compileall, and offscreen checks.
-- [ ] M6: Commit and push the reviewed fixes to PR #60; resolve both P1 threads after confirming behavior.
-- [ ] M7: Wait for new GitHub CI, update PR evidence, confirm OPEN/zero unresolved threads, and stop without merging.
+## Status
+- [x] Reviewed exact HEAD and preserved existing unrelated untracked files.
+- [x] Implemented operator-resolved terminal status, atomic stale-checked SQLite update, Qt-free recovery application, CLI commands, documentation and regression/architecture cases.
+- [x] B1 mutation harness: 65/65 red, 0 survivors, 0 harness errors.
+- [x] Targeted autonomy, CLI and FAC checks: 350 passed.
+- [x] Python 3.14.7 full suite: 5,172 passed, 0 skipped; doctor, compileall, Qt offscreen and diff check passed.
+- [x] Mutation suites: B1 65/65, A1 26/26, G2-B 35/35, E2 12/12, E3 41/41, E4 11/11, FAC 42/42; no survivors or harness errors. Ten-item recovery and scope audit passed.
+- [ ] Commit and push only task-owned files; do not merge.
+- [ ] Wait for new Windows/Python 3.14 CI, update PR evidence, confirm PR #60 remains OPEN and review threads are clear.
 
 ## Decision log
-- 2026-09-27: Continue from exact reviewed HEAD `03841c90f48804f15b5bd6154eadb1f7429a27d4`.
-- 2026-09-27: Preserve pre-existing untracked workspace files; stage only task-owned source/docs/tests after inspecting status.
-- 2026-09-27: Startup broker safety is established asynchronously through the existing read-only Paper channel probe; no default autonomy schedule is added.
-- 2026-09-27: Review follow-up uses explicit `action_day` only for deterministic safety-control identity; canonical `trading_day` remains unknown on calendar failure.
-- 2026-09-27: Local Python 3.14.5 suite passes (5,146 tests plus 14 subtests, zero skips); B1 55, A1 26, G2-B 35, E2 12, E3 41, E4 11, and FAC 42 mutations caught.
-
-## Completion record
-- Implementation and local verification complete; push, review-thread resolution, and remote CI remain.
+- 2026-09-27: Prior PR #60 review findings are addressed on the branch; current GitHub review-thread count was zero before this update. Do not report the historical two P1 threads as unresolved.
+- 2026-09-27: Disabled intent is required immediately before resolving; a latched kill with `DISABLED` is allowed and remains latched.
+- 2026-09-27: `OPERATOR_RESOLVED` counts as a terminal history row and as a same-day START attempt, but never as a successful control cycle.

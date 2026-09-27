@@ -219,6 +219,22 @@ class PaperAutonomyActionRepositoryPort(Protocol):
         rules above forbid.
         """
 
+    def resolve_unknown(
+        self,
+        *,
+        action_key: str,
+        expected_status: PaperAutonomyActionStatus,
+        resolved_at: datetime,
+        detail: str,
+    ) -> None:
+        """Close a CLAIMED or REQUESTED action after explicit operator review.
+
+        This is deliberately separate from ``complete``: operator review does
+        not establish whether the action succeeded, failed or was refused.
+        The implementation must compare ``expected_status`` and change only an
+        unresolved row to ``OPERATOR_RESOLVED`` atomically.
+        """
+
     def unresolved(self) -> tuple[PaperAutonomyActionRecord, ...]:
         """Every claimed-but-unfinished action, oldest first.
 
@@ -235,7 +251,8 @@ class PaperAutonomyActionRepositoryPort(Protocol):
     def start_attempted(self, trading_day: date) -> bool:
         """Whether an autonomous start was already attempted on that day.
 
-        Any status counts, including ``REFUSED`` and ``FAILED``.  v1 permits one
+        Any status counts, including ``REFUSED``, ``FAILED`` and
+        ``OPERATOR_RESOLVED``. v1 permits one
         unattended start per trading day and does not retry a failed one on its
         own authority: a request whose outcome is unknown or unhappy is a
         question for the operator, and the manual route is how a second session

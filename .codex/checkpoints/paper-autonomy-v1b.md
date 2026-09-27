@@ -1,21 +1,34 @@
-# Task checkpoint: Paper Autonomous Trading v1-B
+# Task checkpoint: Paper autonomy v1-B recovery closure
 
-## Goal and constraints
-Fix the review findings on PR #60 (`feat/paper-autonomy-supervisor`), update its evidence, wait for Windows/Python 3.14 CI, then stop for final review. Do not merge. Preserve unrelated untracked workspace files. Keep manual Paper and canonical Risk → Execution → Paper ownership unchanged.
+## Goal
+Finish the latest PR #60 recovery review on `feat/paper-autonomy-supervisor`, push the verified change, wait for new-head CI, and stop without merging.
 
-## Current state
-- Branch is based on exact reviewed HEAD `eb567919ac622e6fa50d717a1d2d5b9a3321ec28`.
-- PR #60 is OPEN, non-draft, mergeable/CLEAN before this update. Two unresolved P1 review threads identify schedule outage handling and repeated control-action keys.
-- Implemented: separate canonical `trading_day` from civil `action_day`; persistent calendar failure returns uncertain facts after one read; control attempts derive from fully parsed durable ledger history; terminal same-cycle safety refusals block; unrelated publications are ignored; startup-unsafe does not start the host; SQLite legacy rows migrate.
-- Updated B mutation harness with five relevant mutants. PR remains unmerged.
+## Constraints
+- Preserve NO OCR / NO OpenCodeReview / NO Live / NO real money / NO AI / NO strategy evolution.
+- Resolution requires freshly read `DISABLED` intent; it never enables, clears kill, starts a host/session, asserts an outcome, deletes history, or releases the same-day START limit.
+- Preserve canonical Paper / Execution / Risk ownership, unrelated untracked files, and minimal scope. Block-event dedup remains future cleanup.
+
+## Current phase
+Handoff; implementation and local verification are complete. Starting reviewed HEAD was `6f0226454a83526ed562f9bc41880459bf8fdc63`; the recovery commit is created and push is pending.
+
+## Decisions
+- `OPERATOR_RESOLVED` is terminal and distinct from owner outcomes; same-day START still counts, while successful control-cycle counts remain unchanged.
+- Kill-latched + `DISABLED` permits resolution and leaves kill latched. Only a new Desktop process reruns startup proof.
+- PR #60 was OPEN, non-draft, mergeable/CLEAN with zero unresolved review threads before this update; old P1 findings are historical, not current. Do not merge.
+
+## Changed or inspected files
+- Recovery: `src/us_quant/trading/application/paper_autonomy_recovery.py`, `src/us_quant/trading/ports/paper_autonomy_intent_reader.py`, action repository port/SQLite adapter, enum, composition, CLI.
+- Guards/evidence: recovery and CLI tests, `tests/test_trading_architecture.py`, B1 mutation harness, `docs/TRADING_ARCHITECTURE_V2.md`, plan and this checkpoint.
+- Preserve unrelated untracked content listed by `git status` under `.codex/`, `00_项目档案/`, and `plans/desktop-research-v2*`.
 
 ## Verification
-- Python 3.14.5 full suite: `5146 passed, 14 subtests passed, 0 skipped` (630.64s).
-- Targeted attachment suites: 622 passed across two runs.
-- Mutations: B1 55/55; A1 26/26; G2-B 35/35; E2 12/12; E3 41/41; E4 11/11; FAC 42/42. No survivors or harness errors.
-- `doctor`, `compileall`, offscreen desktop self-test, and `git diff --check` passed. Ruff is unavailable; no dependency installed.
+- Python 3.14.7 `pytest -q` — 5,172 passed, 0 skipped.
+- B1 65/65; A1 26/26; G2-B 35/35; E2 12/12; E3 41/41; E4 11/11; FAC 42/42 — no survivors or harness errors.
+- Targeted suites — 350 passed; `doctor`, `compileall`, Qt offscreen Desktop self-test, and `git diff --check` — passed.
+- Checkpoint validation — passed; 2,391 bytes (<4 KB).
 
-## Next actions
-1. Stage only the 14 changed task files, commit and push to the existing PR branch.
-2. Resolve the two P1 review threads after verifying the pushed code; confirm zero unresolved threads.
-3. Wait for the new GitHub CI run, update PR body with exact results, verify PR stays OPEN and do not merge.
+## Blockers or risks
+- New-head Windows/Python 3.14 CI is pending; old run `36298205206` is not evidence for the next commit.
+
+## Next action
+Push the recovery commit to the existing PR branch, wait for its Windows/Python 3.14 CI and update PR evidence; do not merge.

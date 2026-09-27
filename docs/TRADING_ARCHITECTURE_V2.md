@@ -3566,6 +3566,8 @@ revision 的页面不能覆盖它之后才按下的 kill switch。application �
 
 ```text
 python -m us_quant paper-autonomy status
+python -m us_quant paper-autonomy unresolved
+python -m us_quant paper-autonomy resolve-action --key "<action-key>" --expected-status requested --reason "..."
 python -m us_quant paper-autonomy enable      --reason "..."
 python -m us_quant paper-autonomy pause       --reason "..."
 python -m us_quant paper-autonomy disable     --reason "..."
@@ -3573,12 +3575,16 @@ python -m us_quant paper-autonomy kill        --reason "..."
 python -m us_quant paper-autonomy clear-kill  --reason "..."
 ```
 
-六个命令都是"先读当前 revision → 调 application mutation → 打印新 revision/state"。
+六个意图变更命令都是"先读当前 revision → 调 application mutation → 打印新 revision/state"。
 CLI 里没有任何到达 store 的路径：它不 import sqlite adapter，也不调用
 `load_intent` / `commit_transition` / `recent_events`（结构 + 行为双向 guard）。
 拒绝返回 exit 2 且 `applied=false`，存储不可读返回 exit 9，非 paper 配置下直接拒绝。
 `clear-kill` 作用在未置位的 latch 上同样是 exit 2 / `applied=false`，且不产生任何
 audit event。
+
+`unresolved` 和 `resolve-action` 通过独立的 recovery application 读取和更新 action ledger；
+CLI 不 import 其 SQLite adapter。resolution 仍受 Paper-only 配置检查，并要求 `--key`、
+`--expected-status claimed|requested` 和非空 `--reason`。
 
 #### 8.28.8 本轮刻意不做的事
 
@@ -3702,11 +3708,33 @@ Paper 发布 `READY`、`RUNNING`、暂停/恢复或 `session_finalized` 后，co
 
 日历不可读时 schedule facts 保留 `trading_day=None`，另带 Eastern civil `action_day`，后者只用于
 安全动作的 key 与 ledger 分桶。它不授权准备或启动。暂停、恢复和停止的 action attempt 根据该日
-完整 ledger 中已成功的暂停/恢复次数计算，因此一个 pause→resume→pause 周期会得到不同 pause key，
-同一周期并发 tick 仍竞争同一个原子 claim。日历不可读且自治会话仍在运行时仍能请求暂停新开仓。
+完整 ledger 中的成功结果计数计算，具体为：
+
+```text
+pause_attempt  = 当日 SUCCEEDED 的 PAUSE_ENTRIES 数量
+resume_attempt = 当日 SUCCEEDED 的 RESUME_ENTRIES 数量
+stop_attempt   = 当日 SUCCEEDED 的 STOP 数量
+```
+
+失败、拒绝和人工关闭未知结果都不推进这些周期计数。因此一个
+pause→resume→pause 周期会得到不同 pause key，同一周期并发 tick 仍竞争同一个原子 claim。
+日历不可读且自治会话仍在运行时仍能请求暂停新开仓。
 
 如果启动探测不能证明安全，Desktop 记录一次 `AUTONOMY_STARTUP_UNSAFE` 并不启动 host；人工 Paper
 功能继续由既有路径提供。
+
+前一进程遗留的 `CLAIMED` 或 `REQUESTED` action 表示是否已执行未知。新进程因此判为 startup unsafe，
+不启动 `PaperAutonomyHost`，也不连接 READY/RUNNING 等 completion observer。操作员先人工检查
+broker、账户、订单和持仓；若自治仍为 `ENABLED` 或 `PAUSED`，先显式 disable 或 kill。随后可用
+`paper-autonomy unresolved` 查看账本事实，并通过 `paper-autonomy resolve-action --key ...
+--expected-status claimed|requested --reason ...` 将指定行原位标记为 `OPERATOR_RESOLVED`。
+这个终态只表示操作员已检查并关闭未知记录，不代表成功、失败或拒绝，不删除历史、不推进控制周期，
+也不释放当日 START 限额。resolution 前会重新读取 intent，且只允许其已经是 `DISABLED`；kill
+已锁定且为 DISABLED 时允许 resolution，但不会清除 kill。
+
+resolution 不重新授权、不启动 session 或 host。完成后重启 Desktop，由新进程重新做完整 startup
+安全检查；只有检查通过后才可能启动 host。若 kill 仍锁定，操作员先显式 clear kill，再单独显式
+enable。若需要当天再次交易，使用既有人工 Paper 路径，不能因 resolution 自动重试自治 START。
 
 配置只从显式 `[paper.autonomy]` 读取，缺少或无效时不造默认时刻、不启动 host，并记录
 `AUTONOMY_SUPERVISOR_UNAVAILABLE`。必须显式提供以下值：

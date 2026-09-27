@@ -89,6 +89,9 @@ $autonomyExecutor = Join-Path $src "desktop_v2\orchestration\autonomy\executor.p
 $autonomyFacts = Join-Path $src "desktop_v2\orchestration\autonomy\facts.py"
 $autonomyCompletion = Join-Path $src "desktop_v2\orchestration\autonomy\completion.py"
 $autonomyHost = Join-Path $src "desktop_v2\orchestration\autonomy\host.py"
+$autonomyRecovery = Join-Path $src "trading\application\paper_autonomy_recovery.py"
+$actionRecovery = Join-Path $src "trading\adapters\sqlite\paper_autonomy_action_repository.py"
+$recoveryBehaviour = Join-Path $projectRoot "tests/test_paper_autonomy_recovery.py"
 
 $behaviour = Join-Path $projectRoot "tests/test_paper_autonomy_supervisor.py"
 $tickBehaviour = Join-Path $projectRoot "tests/test_paper_autonomy_supervisor_tick.py"
@@ -613,6 +616,54 @@ $mutations = @(
         repl = 'if False and not startup.proven_safe:'
         tests = @($architecture)
         select = @("-k", "startup_with_unresolved_action_never_wires_completion_or_starts_host")
+    },
+    @{
+        name = 'M62 unknown action resolution is allowed while autonomy is enabled'
+        file = $autonomyRecovery
+        find = 'if intent\.mode is not PaperAutonomyMode\.DISABLED:'
+        repl = 'if False:'
+        tests = @($recoveryBehaviour)
+        select = @("-k", "resolve_requires_disabled_intent")
+    },
+    @{
+        name = 'M63 operator resolution is written as canonical success'
+        file = $actionRecovery
+        find = 'PaperAutonomyActionStatus\.OPERATOR_RESOLVED\.value'
+        repl = 'PaperAutonomyActionStatus.SUCCEEDED.value'
+        tests = @($recoveryBehaviour)
+        select = @("-k", "operator_resolution_is_not_success")
+    },
+    @{
+        name = 'M64 resolution ignores the expected current status'
+        file = $actionRecovery
+        find = 'if stored\.status is not expected_status:'
+        repl = 'if False:'
+        tests = @($recoveryBehaviour)
+        select = @("-k", "resolution_uses_expected_status")
+    },
+    @{
+        name = 'M65 resolution deletes the action history row'
+        file = $actionRecovery
+        find = 'cursor = connection\.execute\(\s+f"""\s+UPDATE \{TABLENAME\}\s+SET status = \?, completed_at = \?, detail = \?\s+WHERE action_key = \?\s+""",\s+\(\s+PaperAutonomyActionStatus\.OPERATOR_RESOLVED\.value,\s+to_stored_text\(resolved_at\),\s+detail,\s+action_key,\s+\),\s+\)'
+        repl = 'cursor = connection.execute(f"DELETE FROM {TABLENAME} WHERE action_key = ?", (action_key,))'
+        tests = @($recoveryBehaviour)
+        select = @("-k", "history_is_preserved_as_operator_resolved")
+    },
+    @{
+        name = 'M66 an operator-resolved START no longer counts against the day'
+        file = $actionRecovery
+        find = 'record\.trading_day == trading_day\s+and record\.action is PaperAutonomyActionType\.START'
+        repl = "record.trading_day == trading_day`n            and record.action is PaperAutonomyActionType.START`n            and record.status is PaperAutonomyActionStatus.SUCCEEDED"
+        tests = @($recoveryBehaviour)
+        select = @("-k", "resolved_start_still_counts_as_attempted")
+    },
+    @{
+        name = 'M67 an unsafe process falls through to completion signal wiring'
+        file = $desktop
+        find = '            \)\s+return\s+\s+def reset_block_event_after_recovery'
+        repl = "            )`n            pass`n`n        def reset_block_event_after_recovery"
+        tests = @($recoveryBehaviour)
+        select = @("-k", "unsafe_startup_returns_before_completion_signals_are_connected")
     }
 )
 

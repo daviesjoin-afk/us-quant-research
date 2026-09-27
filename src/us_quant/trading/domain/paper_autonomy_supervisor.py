@@ -163,6 +163,7 @@ class PaperAutonomyActionStatus(StrEnum):
     SUCCEEDED = "succeeded"
     REFUSED = "refused"
     FAILED = "failed"
+    OPERATOR_RESOLVED = "operator_resolved"
 
 
 #: The states an action can still move out of.
@@ -176,6 +177,7 @@ TERMINAL_ACTION_STATUSES = (
     PaperAutonomyActionStatus.SUCCEEDED,
     PaperAutonomyActionStatus.REFUSED,
     PaperAutonomyActionStatus.FAILED,
+    PaperAutonomyActionStatus.OPERATOR_RESOLVED,
 )
 
 

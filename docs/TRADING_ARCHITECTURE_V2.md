@@ -5112,7 +5112,7 @@ Stage 4-A PR #63 已通过 merge commit 正式完成，Stage 4-A baseline 与 St
 4-B 在 `trading/domain/live_startup.py` 建立不可变 `LiveStartupProof`。它只记录一次
 启动检查捕获的事实，不连接 broker、不构造 adapter、不 arm session，也不提交订单。Stage 4
 v1 endpoint 固定为 IBKR Gateway loopback `127.0.0.1:4001`；不接受远端地址或其他端口。
-managed account 列表必须恰好包含一个与持久授权 fingerprint 匹配的账户。Proof 只保留指纹，
+managed account 列表必须只含一个账户，且它与持久授权 fingerprint 完全匹配。Proof 只保留指纹，
 不保留原始账户标识；broker 当前选用的账户也必须是这个唯一匹配项，所有账号级 broker truth
 都按该绑定捕获。
 

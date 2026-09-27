@@ -32,7 +32,7 @@ function Set-Text([string]$path, [string]$text) {
 $mutations = @(
     @{ name='M1 disconnected broker is accepted'; find='if not broker_connected:'; repl='if False:'; select='any_missing_or_unsafe_startup_fact_blocks_proof and BROKER_DISCONNECTED' },
     @{ name='M2 stale account truth is accepted'; find='elif not _fresh\(account_truth_observed_at, now=now\):'; repl='elif False:'; select='any_missing_or_unsafe_startup_fact_blocks_proof and ACCOUNT_TRUTH_STALE' },
-    @{ name='M3 multiple exact account matches are accepted'; find='elif len\(expected_managed_matches\) > 1:'; repl='elif False:'; select='any_missing_or_unsafe_startup_fact_blocks_proof and ACCOUNT_IDENTITY_AMBIGUOUS' },
+    @{ name='M3 additional managed accounts are accepted'; find='if len\(managed_account_ids\) > 1:'; repl='if False:'; select='any_missing_or_unsafe_startup_fact_blocks_proof and MULTIPLE_MANAGED_ACCOUNTS' },
     @{ name='M4 unknown open orders are accepted'; find='if not open_orders_known:'; repl='if False:'; select='any_missing_or_unsafe_startup_fact_blocks_proof and OPEN_ORDERS_UNKNOWN' },
     @{ name='M5 dirty reconciliation is accepted'; find='if not reconciliation_clean:'; repl='if False:'; select='any_missing_or_unsafe_startup_fact_blocks_proof and RECONCILIATION_UNCLEAN' },
     @{ name='M6 kill latch is ignored'; find='if authorization_state\.kill_latch\.is_latched:'; repl='if False:'; select='any_missing_or_unsafe_startup_fact_blocks_proof and KILL_LATCHED' },
@@ -44,7 +44,7 @@ $mutations = @(
     @{ name='M12 unknown market truth is accepted'; find='if not market_truth_known:'; repl='if False:'; select='any_missing_or_unsafe_startup_fact_blocks_proof and MARKET_TRUTH_UNKNOWN' },
     @{ name='M13 callers can forge a startup proof constructor'; find='raise LiveStartupError\("LiveStartupProof must be created by capture"\)'; repl='return object.__new__(cls)'; select='callers_cannot_construct_a_startup_proof_without_capture' },
     @{ name='M14 expired startup proof remains fresh at expiry'; find='self\.observed_at <= now < self\.expires_at'; repl='self.observed_at <= now <= self.expires_at'; select='startup_proof_captures_current_exact_account_facts_without_raw_account_id' },
-    @{ name='M15 broker-selected account is not fingerprint checked'; find='elif selected_fingerprint != expected:'; repl='elif False:'; select='broker_truth_must_be_scoped_to_the_exactly_matched_managed_account' }
+    @{ name='M15 startup facts remain fresh at their expiry instant'; find='timedelta\(0\) <= age < LIVE_STARTUP_PROOF_TTL'; repl='timedelta(0) <= age <= LIVE_STARTUP_PROOF_TTL'; select='any_missing_or_unsafe_startup_fact_blocks_proof and ACCOUNT_TRUTH_STALE' }
 )
 
 $results = @()

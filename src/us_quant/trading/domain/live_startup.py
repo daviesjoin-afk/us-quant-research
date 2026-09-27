@@ -29,7 +29,7 @@ class LiveStartupBlocker(StrEnum):
     BROKER_CONNECTION_STALE = "broker_connection_stale"
     BROKER_ACCOUNT_UNAVAILABLE = "broker_account_unavailable"
     EXPECTED_ACCOUNT_UNAVAILABLE = "expected_account_unavailable"
-    ACCOUNT_IDENTITY_AMBIGUOUS = "account_identity_ambiguous"
+    MULTIPLE_MANAGED_ACCOUNTS = "multiple_managed_accounts"
     ACCOUNT_MISMATCH = "account_mismatch"
     ACCOUNT_TRUTH_UNKNOWN = "account_truth_unknown"
     ACCOUNT_TRUTH_STALE = "account_truth_stale"
@@ -83,7 +83,7 @@ def _fresh(observed_at: datetime | None, *, now: datetime) -> bool:
     if observed_at is None:
         return False
     age = now - observed_at
-    return timedelta(0) <= age <= LIVE_STARTUP_PROOF_TTL
+    return timedelta(0) <= age < LIVE_STARTUP_PROOF_TTL
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -228,14 +228,14 @@ class LiveStartupProof:
 
         if expected is None:
             blockers.append(LiveStartupBlocker.EXPECTED_ACCOUNT_UNAVAILABLE)
-        elif not expected_managed_matches:
+        if len(managed_account_ids) > 1:
+            blockers.append(LiveStartupBlocker.MULTIPLE_MANAGED_ACCOUNTS)
+        elif expected is not None and not expected_managed_matches:
             if not managed_account_ids:
                 blockers.append(LiveStartupBlocker.EXPECTED_ACCOUNT_UNAVAILABLE)
             else:
                 blockers.append(LiveStartupBlocker.ACCOUNT_MISMATCH)
-        elif len(expected_managed_matches) > 1:
-            blockers.append(LiveStartupBlocker.ACCOUNT_IDENTITY_AMBIGUOUS)
-        elif selected_fingerprint != expected:
+        elif expected is not None and selected_fingerprint != expected:
             blockers.append(LiveStartupBlocker.ACCOUNT_MISMATCH)
         if broker_account_id is None:
             blockers.append(LiveStartupBlocker.BROKER_ACCOUNT_UNAVAILABLE)
@@ -285,6 +285,7 @@ class LiveStartupProof:
             authorization_valid = authorization.is_valid_at(now)
             if expected is not None and (
                 selected_fingerprint != expected
+                or len(managed_account_ids) != 1
                 or len(expected_managed_matches) != 1
                 or len(selected_managed_matches) != 1
             ):
@@ -321,7 +322,8 @@ class LiveStartupProof:
             "endpoint_identity": endpoint_identity,
             "account_fingerprint": (
                 selected_fingerprint
-                if selected_fingerprint == expected
+                if len(managed_account_ids) == 1
+                and selected_fingerprint == expected
                 and len(expected_managed_matches) == 1
                 and len(selected_managed_matches) == 1
                 else None

@@ -159,10 +159,7 @@ def test_account_fingerprint_is_bound_to_the_configured_endpoint():
 
 
 def test_broker_truth_must_be_scoped_to_the_exactly_matched_managed_account():
-    proof = _capture(
-        managed_account_ids=(ACCOUNT_ID, "DU0000000"),
-        broker_account_id="DU0000000",
-    )
+    proof = _capture(broker_account_id="DU0000000")
 
     assert LiveStartupBlocker.ACCOUNT_MISMATCH in proof.blockers
     assert LiveStartupBlocker.AUTHORIZATION_ACCOUNT_MISMATCH in proof.blockers
@@ -179,8 +176,12 @@ def test_broker_truth_must_be_scoped_to_the_exactly_matched_managed_account():
         ),
         ({"managed_account_ids": ()}, LiveStartupBlocker.EXPECTED_ACCOUNT_UNAVAILABLE),
         (
+            {"managed_account_ids": (ACCOUNT_ID, "DU0000000")},
+            LiveStartupBlocker.MULTIPLE_MANAGED_ACCOUNTS,
+        ),
+        (
             {"managed_account_ids": (ACCOUNT_ID, ACCOUNT_ID)},
-            LiveStartupBlocker.ACCOUNT_IDENTITY_AMBIGUOUS,
+            LiveStartupBlocker.MULTIPLE_MANAGED_ACCOUNTS,
         ),
         (
             {"managed_account_ids": ("DU0000000",)},
@@ -196,6 +197,10 @@ def test_broker_truth_must_be_scoped_to_the_exactly_matched_managed_account():
         ),
         (
             {"account_truth_observed_at": NOW - LIVE_STARTUP_PROOF_TTL - timedelta(seconds=1)},
+            LiveStartupBlocker.ACCOUNT_TRUTH_STALE,
+        ),
+        (
+            {"account_truth_observed_at": NOW - LIVE_STARTUP_PROOF_TTL},
             LiveStartupBlocker.ACCOUNT_TRUTH_STALE,
         ),
         (

@@ -299,6 +299,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "account.py",
         "common.py",
             "execution_environment.py",
+        "live_startup.py",
         "live_safety.py",
         "market.py",
         "orders.py",

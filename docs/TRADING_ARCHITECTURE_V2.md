@@ -5102,3 +5102,24 @@ kill latch 未置位，并收到本次人工确认。默认额度均为零，因
 这一阶段没有 Live endpoint、IBKR Live adapter、`placeOrder`、production Live composition、
 UI、AI 或共享执行核心改动。Stage 4-A 的测试覆盖重启丢 arm、kill latch 重启保留、过期/撤销
 授权、账户指纹不匹配、默认/无效额度拒绝、陈旧写保护及损坏存储 fail closed。
+
+### 8.32 Stage 4-A baseline 与 Stage 4-B Live Startup Proof
+
+Stage 4-A PR #63 已通过 merge commit 正式完成，Stage 4-A baseline 与 Stage 4-B base
+均为 `193fff1b7c0ed4a53980b806e51aa56d825c81ae`。Stage 4-B 从该 SHA 的独立分支
+`refactor/live-canary-startup-proof` 开始。
+
+4-B 在 `trading/domain/live_startup.py` 建立不可变 `LiveStartupProof`。它只记录一次
+启动检查捕获的事实，不连接 broker、不构造 adapter、不 arm session，也不提交订单。Stage 4
+v1 endpoint 固定为 IBKR Gateway loopback `127.0.0.1:4001`；不接受远端地址或其他端口。
+managed account 列表必须只含一个账户，且它与持久授权 fingerprint 完全匹配。Proof 只保留指纹，
+不保留原始账户标识；broker 当前选用的账户也必须是这个唯一匹配项，所有账号级 broker truth
+都按该绑定捕获。
+
+Proof 同时要求 broker 已连接，account truth、market truth、open orders 和 positions 均已知，
+连接、account truth、market truth、open orders、positions 和 reconciliation 各自有 30 秒内的
+观察时间，reconciliation clean、kill latch clear、持久授权有效、本进程 session arm 存在以及
+canary limits 有效。Proof
+有效期不超过任何一项事实的 freshness window，也不能超过授权过期时间。任一事实缺失、过期
+或不安全都会留下 blocker，proof 不能报告 ready；ready proof 过期后也不能再作为当前证据。
+后续 4-D 仍须在执行边界重新读取并检查动态安全事实；4-B 本身不建立真钱 submission 路径。

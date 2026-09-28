@@ -88,6 +88,7 @@ def _armed_state(
 
 def _arm(state: LiveAuthorizationState) -> LiveAuthorizationState:
     return state.request_session_arm(
+        safety_revision=1,
         now=NOW,
         account_fingerprint=_fingerprint(),
         strategy_version_id="strategy-v1",
@@ -113,6 +114,7 @@ def test_session_arm_is_not_a_persistable_field_and_restart_drops_it(tmp_path):
     armed = _arm(_armed_state())
     assert armed.session_armed
     assert "session_armed" not in {field.name for field in fields(LiveSafetyRecord)}
+    assert "session_arm_revision" not in {field.name for field in fields(LiveSafetyRecord)}
 
     repository = SQLiteLiveSafetyRepository(tmp_path / "live-safety.sqlite3")
     persisted = LiveSafetyRecord(
@@ -126,6 +128,7 @@ def test_session_arm_is_not_a_persistable_field_and_restart_drops_it(tmp_path):
     restarted = LiveAuthorizationState(durable.authorization, durable.kill_latch)
 
     assert restarted.session_armed is False
+    assert restarted.session_arm_revision is None
     assert armed.after_restart().session_armed is False
     assert _arm(restarted).session_armed
 

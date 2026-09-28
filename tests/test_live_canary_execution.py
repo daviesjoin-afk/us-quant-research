@@ -11,6 +11,9 @@ import pytest
 from us_quant.trading.application.live_canary_execution import (
     LiveCanaryExecutionGuard,
 )
+from us_quant.trading.adapters.sqlite.live_safety_repository import (
+    SQLiteLiveSafetyRepository,
+)
 from us_quant.trading.domain.live_canary import (
     LiveCanaryOpenOrder,
     LiveCanaryPosition,
@@ -146,6 +149,7 @@ def _armed_state(
 ) -> LiveAuthorizationState:
     state = LiveAuthorizationState(_authorization(limits))
     return state.request_session_arm(
+        safety_revision=1,
         now=NOW,
         account_fingerprint=FINGERPRINT,
         strategy_version_id="strategy-v1",
@@ -205,13 +209,14 @@ def _truth(
 def _open_order(
     broker_order_id: int,
     *,
+    symbol: str = "AAPL",
     side: Side = Side.BUY,
     quantity: int = 1,
     price: str = "200",
 ) -> LiveCanaryOpenOrder:
     return LiveCanaryOpenOrder(
         broker_order_id=broker_order_id,
-        symbol="AAPL",
+        symbol=symbol,
         side=side,
         remaining_quantity=quantity,
         limit_price=Decimal(price),
@@ -253,7 +258,7 @@ def _guard(
     safety_repository = _SafetyRepository(lambda: state_holder[0])
     guard = LiveCanaryExecutionGuard(
         underlying,
-        authorization_state=lambda: state_holder[0],
+        authorization_state=lambda _record: state_holder[0],
         safety_repository=safety_repository,
         startup_proof=lambda: live_proof,
         truth=broker_truth,
@@ -301,6 +306,29 @@ def test_broker_visible_active_order_is_counted_once_by_its_identity():
 
     assert len(broker.reservations) == 2
     assert second_reservation.broker_order_id != reservation.broker_order_id
+
+
+def test_broker_visible_open_buy_counts_toward_position_cap():
+    guard, broker, _, _ = _guard(
+        state=_armed_state(
+            limits=_limits(
+                max_positions=1,
+                max_open_orders=2,
+                allowed_symbols=("AAPL", "MSFT"),
+            )
+        ),
+        truth=_Truth(
+            _truth(
+                positions=(LiveCanaryPosition("AAPL", 0, Decimal("0")),),
+                open_orders=(_open_order(900, symbol="AAPL"),),
+            )
+        ),
+    )
+
+    with pytest.raises(ExecutionRefused, match="position limit"):
+        guard.reserve(_intent(symbol="MSFT"))
+
+    assert broker.reservations == []
 
 
 @pytest.mark.parametrize(
@@ -354,6 +382,7 @@ def test_guard_rechecks_ephemeral_session_arm_before_submit():
     assert broker.submissions == []
 
     state_holder[0] = original_state.request_session_arm(
+        safety_revision=1,
         now=NOW,
         account_fingerprint=FINGERPRINT,
         strategy_version_id="strategy-v1",
@@ -401,7 +430,7 @@ def test_persistent_kill_writer_is_serialized_with_submit():
     proof = _proof(state)
     guard = LiveCanaryExecutionGuard(
         broker,
-        authorization_state=lambda: state_holder[0],
+        authorization_state=lambda _record: state_holder[0],
         safety_repository=safety_repository,
         startup_proof=lambda: proof,
         truth=truth,
@@ -417,6 +446,38 @@ def test_persistent_kill_writer_is_serialized_with_submit():
     assert state_holder[0].kill_latch.is_latched
 
 
+def test_clear_kill_does_not_restore_arm_from_an_older_safety_revision(tmp_path):
+    armed = _armed_state()
+    repository = SQLiteLiveSafetyRepository(tmp_path / "live-safety.sqlite3")
+    repository.save(
+        expected_revision=0,
+        replacement=LiveSafetyRecord(1, armed.authorization, armed.kill_latch),
+    )
+    latched = armed.engage_kill(at=NOW, reason="operator kill")
+    repository.save(
+        expected_revision=1,
+        replacement=LiveSafetyRecord(2, latched.authorization, latched.kill_latch),
+    )
+    cleared_record = LiveSafetyRecord(
+        3, armed.authorization, latched.kill_latch.clear()
+    )
+    repository.save(expected_revision=2, replacement=cleared_record)
+
+    broker = _Broker()
+    guard = LiveCanaryExecutionGuard(
+        broker,
+        authorization_state=lambda _record: armed,
+        safety_repository=repository,
+        startup_proof=lambda: _proof(armed),
+        truth=_Truth(_truth()),
+        now=lambda: NOW,
+    )
+    with pytest.raises(ExecutionRefused, match="safety revision changed"):
+        guard.reserve(_intent())
+
+    assert broker.reservations == []
+
+
 def test_old_startup_proof_cannot_authorize_a_replaced_limit_set():
     original_state = _armed_state()
     old_proof = _proof(original_state)
@@ -425,6 +486,7 @@ def test_old_startup_proof_cannot_authorize_a_replaced_limit_set():
         approved_canary_limits=_limits(max_order_notional=Decimal("100")),
     )
     updated_state = LiveAuthorizationState(updated_authorization).request_session_arm(
+        safety_revision=1,
         now=NOW,
         account_fingerprint=FINGERPRINT,
         strategy_version_id="strategy-v1",
@@ -528,6 +590,23 @@ def test_reserved_sell_capacity_prevents_two_concurrent_exits_from_overselling()
         guard.reserve(_intent(side=Side.SELL, quantity=1))
 
     assert len(broker.reservations) == 1
+
+
+def test_broker_visible_sell_reservation_is_subtracted_from_owned_shares():
+    guard, broker, _, _ = _guard(
+        state=_armed_state(limits=_limits(max_open_orders=2)),
+        truth=_Truth(
+            _truth(
+                positions=(LiveCanaryPosition("AAPL", 2, Decimal("400")),),
+                open_orders=(_open_order(900, side=Side.SELL, quantity=2),),
+            )
+        ),
+    )
+
+    with pytest.raises(ExecutionRefused, match="SELL exceeds"):
+        guard.reserve(_intent(side=Side.SELL, quantity=1))
+
+    assert broker.reservations == []
 
 
 def test_terminal_order_event_releases_guard_local_reservation():

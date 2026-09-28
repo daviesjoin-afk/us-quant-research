@@ -39,7 +39,7 @@ class LiveCanaryExecutionGuard(BrokerExecutionPort):
         self,
         broker: BrokerExecutionPort,
         *,
-        authorization_state: Callable[[], LiveAuthorizationState],
+        authorization_state: Callable[[LiveSafetyRecord], LiveAuthorizationState],
         safety_repository: LiveSafetyRepositoryPort,
         startup_proof: Callable[[], LiveStartupProof],
         truth: LiveCanaryTruthPort,
@@ -116,7 +116,7 @@ class LiveCanaryExecutionGuard(BrokerExecutionPort):
         durable_state: LiveSafetyRecord,
     ) -> None:
         try:
-            state = self._authorization_state()
+            state = self._authorization_state(durable_state)
             proof = self._startup_proof()
             truth = self._truth.snapshot()
             now = self._now()
@@ -160,9 +160,22 @@ class LiveCanaryExecutionGuard(BrokerExecutionPort):
         if intent.side not in {Side.BUY, Side.SELL}:
             raise ExecutionRefused("Live canary supports BUY and reducing SELL only")
 
-        reserved_sells = self._reserved_sell_quantity(
-            normalized_symbol, excluding=own_reservation
+        broker_open_ids = {order.broker_order_id for order in truth.open_orders}
+        broker_reserved_sells = sum(
+            order.remaining_quantity
+            for order in truth.open_orders
+            if order.side is Side.SELL
+            and order.symbol.strip().upper() == normalized_symbol
         )
+        local_unrepresented_sells = sum(
+            active_intent.quantity
+            for broker_id, (active_intent, _) in self._active.items()
+            if broker_id != own_reservation
+            and broker_id not in broker_open_ids
+            and active_intent.side is Side.SELL
+            and active_intent.execution_symbol.strip().upper() == normalized_symbol
+        )
+        reserved_sells = broker_reserved_sells + local_unrepresented_sells
         owned = truth.quantity_for(normalized_symbol)
         reducing = intent.side is Side.SELL and intent.quantity <= owned - reserved_sells
         if intent.side is Side.SELL and not reducing:
@@ -184,6 +197,13 @@ class LiveCanaryExecutionGuard(BrokerExecutionPort):
                 raise ExecutionRefused("Live canary session requires explicit operator arm")
             if state.kill_latch.is_latched:
                 raise ExecutionRefused("Live kill latch blocks exposure increase")
+            if (
+                state.session_arm_revision != durable_state.revision
+                or proof.session_arm_revision != durable_state.revision
+            ):
+                raise ExecutionRefused(
+                    "Live canary safety revision changed; explicit re-arm and startup proof required"
+                )
             if limits.blockers():
                 raise ExecutionRefused("Live canary limits are invalid or zero")
             if (
@@ -232,16 +252,24 @@ class LiveCanaryExecutionGuard(BrokerExecutionPort):
             if daily_loss >= limits.max_daily_loss:
                 raise ExecutionRefused("Live canary daily loss limit is reached")
             active_symbols = {
+                order.symbol.strip().upper()
+                for order in truth.open_orders
+                if order.side is Side.BUY
+            } | {
                 active_intent.execution_symbol.strip().upper()
                 for broker_id, (active_intent, _) in self._active.items()
                 if broker_id in unrepresented_active and active_intent.side is Side.BUY
             }
+            held_symbols = {
+                position.symbol.strip().upper()
+                for position in truth.positions
+                if position.quantity > 0
+            }
             projected_positions = truth.position_count + sum(
-                symbol not in {p.symbol.strip().upper() for p in truth.positions}
-                for symbol in active_symbols
+                symbol not in held_symbols for symbol in active_symbols
             )
             if (
-                truth.quantity_for(normalized_symbol) == 0
+                normalized_symbol not in held_symbols
                 and normalized_symbol not in active_symbols
             ):
                 projected_positions += 1
@@ -282,20 +310,5 @@ class LiveCanaryExecutionGuard(BrokerExecutionPort):
                 proof.reconciliation_clean,
             )
         )
-
-    def _reserved_sell_quantity(
-        self,
-        symbol: str,
-        *,
-        excluding: int | None,
-    ) -> int:
-        return sum(
-            intent.quantity
-            for broker_id, (intent, _) in self._active.items()
-            if broker_id != excluding
-            and intent.side is Side.SELL
-            and intent.execution_symbol.strip().upper() == symbol
-        )
-
 
 __all__ = ["LiveCanaryExecutionGuard"]

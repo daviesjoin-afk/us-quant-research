@@ -76,6 +76,7 @@ def _armed_state(
         kill_latch=kill_latch or LiveKillLatch(),
     )
     return state.request_session_arm(
+        safety_revision=1,
         now=NOW,
         account_fingerprint=_fingerprint(),
         strategy_version_id="strategy-v1",

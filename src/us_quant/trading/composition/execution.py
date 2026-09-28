@@ -37,7 +37,10 @@ from us_quant.trading.domain.execution_environment import (
     ExecutionDeploymentError,
     evaluate_execution_deployment,
 )
-from us_quant.trading.domain.live_safety import LiveAuthorizationState
+from us_quant.trading.domain.live_safety import (
+    LiveAuthorizationState,
+    LiveSafetyRecord,
+)
 from us_quant.trading.domain.live_startup import (
     LiveEndpointIdentity,
     LiveStartupError,
@@ -111,7 +114,7 @@ def build_live_execution_candidate_factory(
     *,
     environment: Environment,
     live_trading_enabled: bool,
-    live_authorization_state: Callable[[], LiveAuthorizationState] | None = None,
+    live_authorization_state: Callable[[LiveSafetyRecord], LiveAuthorizationState] | None = None,
     live_safety_repository: LiveSafetyRepositoryPort | None = None,
     live_startup_proof: Callable[[], LiveStartupProof] | None = None,
     live_truth: LiveCanaryTruthPort | None = None,
@@ -157,7 +160,8 @@ def build_live_execution_candidate_factory(
                 "Live canary requires the explicit non-readonly Live Gateway profile"
             )
         try:
-            state = live_authorization_state()
+            durable_state = live_safety_repository.load()
+            state = live_authorization_state(durable_state)
         except Exception as error:
             raise ExecutionDeploymentError(
                 "Live authorization state is unavailable"

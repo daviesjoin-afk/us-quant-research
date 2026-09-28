@@ -261,6 +261,7 @@ class LiveAuthorizationState:
     kill_latch: LiveKillLatch = LiveKillLatch()
     session_armed: bool = field(default=False, init=False)
     session_arm_id: str | None = field(default=None, init=False, repr=False)
+    session_arm_revision: int | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.authorization is not None and not isinstance(
@@ -309,13 +310,20 @@ class LiveAuthorizationState:
             blockers.append(LiveArmBlocker.OPERATOR_CONFIRMATION_REQUIRED)
         return tuple(dict.fromkeys(blockers))
 
-    def request_session_arm(self, **facts: object) -> "LiveAuthorizationState":
+    def request_session_arm(
+        self, *, safety_revision: int, **facts: object
+    ) -> "LiveAuthorizationState":
+        """Arm once against the exact persisted revision approved by the operator."""
+
+        if type(safety_revision) is not int or safety_revision < 1:
+            raise LiveSafetyError("safety_revision must be a persisted positive revision")
         blockers = self.arm_blockers(**facts)  # type: ignore[arg-type]
         if blockers:
             raise LiveArmRefused(blockers)
         armed = LiveAuthorizationState(self.authorization, self.kill_latch)
         object.__setattr__(armed, "session_armed", True)
         object.__setattr__(armed, "session_arm_id", uuid4().hex)
+        object.__setattr__(armed, "session_arm_revision", safety_revision)
         return armed
 
     def after_restart(self) -> "LiveAuthorizationState":

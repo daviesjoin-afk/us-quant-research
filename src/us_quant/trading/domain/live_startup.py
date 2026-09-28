@@ -96,6 +96,7 @@ class LiveStartupProof:
     account_fingerprint: LiveAccountFingerprint | None
     authorization_fingerprint: str | None
     session_arm_id: str | None
+    session_arm_revision: int | None
     broker_connected: bool
     connection_observed_at: datetime | None
     account_truth_known: bool
@@ -336,6 +337,7 @@ class LiveStartupProof:
                 else authorization.authorization_fingerprint
             ),
             "session_arm_id": authorization_state.session_arm_id,
+            "session_arm_revision": authorization_state.session_arm_revision,
             "broker_connected": broker_connected,
             "connection_observed_at": connection_observed_at,
             "account_truth_known": account_truth_known,

@@ -60,6 +60,7 @@ def _live_build_context():
         approved_canary_limits=limits,
     )
     state = LiveAuthorizationState(authorization).request_session_arm(
+        safety_revision=1,
         now=now,
         account_fingerprint=fingerprint,
         strategy_version_id="strategy-v1",
@@ -264,7 +265,7 @@ def test_live_feature_flag_remains_required_when_all_canary_facts_are_present() 
         build_live_execution_candidate_factory(
             environment=Environment.LIVE,
             live_trading_enabled=False,
-            live_authorization_state=lambda: state,
+            live_authorization_state=lambda _record: state,
             live_startup_proof=lambda: proof,
             live_truth=truth,
         )
@@ -276,7 +277,7 @@ def test_backtest_never_selects_live_even_with_authorization_context() -> None:
         build_live_execution_candidate_factory(
             environment=Environment.BACKTEST,
             live_trading_enabled=True,
-            live_authorization_state=lambda: state,
+            live_authorization_state=lambda _record: state,
             live_startup_proof=lambda: proof,
             live_truth=truth,
         )
@@ -289,7 +290,7 @@ def test_live_composition_wraps_only_the_concrete_live_adapter_in_the_canary_gua
     factory = build_live_execution_candidate_factory(
         environment=Environment.LIVE,
         live_trading_enabled=True,
-        live_authorization_state=lambda: state,
+        live_authorization_state=lambda _record: state,
         live_safety_repository=_live_safety_repository(tmp_path, state),
         live_startup_proof=lambda: proof,
         live_truth=truth,
@@ -316,7 +317,7 @@ def test_live_composition_rejects_paper_profile_and_extended_hours(tmp_path) -> 
     factory = build_live_execution_candidate_factory(
         environment=Environment.LIVE,
         live_trading_enabled=True,
-        live_authorization_state=lambda: state,
+        live_authorization_state=lambda _record: state,
         live_safety_repository=_live_safety_repository(tmp_path, state),
         live_startup_proof=lambda: proof,
         live_truth=truth,

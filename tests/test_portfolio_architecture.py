@@ -7,6 +7,8 @@ from us_quant.trading.ports.broker_execution import BrokerExecutionPort
 SOURCE = Path(__file__).resolve().parents[1] / "src" / "us_quant"
 PORTFOLIO_DOMAIN = SOURCE / "trading" / "domain" / "portfolio.py"
 PORTFOLIO_APPLICATION = SOURCE / "trading" / "application" / "portfolio.py"
+PORTFOLIO_REPOSITORY_PORT = SOURCE / "trading" / "ports" / "portfolio_repository.py"
+PORTFOLIO_SQLITE_REPOSITORY = SOURCE / "trading" / "adapters" / "sqlite" / "portfolio_repository.py"
 
 
 def _all_python_files():
@@ -120,3 +122,28 @@ def test_portfolio_has_no_ai_dependency():
             name.startswith(("openai", "langchain", "llama_index"))
             for name in imports
         )
+
+
+def test_portfolio_state_repository_port_is_sqlite_free_and_has_one_adapter():
+    imports = _imports(ast.parse(PORTFOLIO_REPOSITORY_PORT.read_text(encoding="utf-8")))
+    assert not any("sqlite" in name.casefold() or name == "sqlite3" for name in imports)
+    owners = []
+    for path in _all_python_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        owners.extend(
+            _module(path)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == "SQLitePortfolioRepository"
+        )
+    assert owners == ["trading.adapters.sqlite.portfolio_repository"]
+
+
+def test_portfolio_persistence_has_no_execution_or_live_safety_authority():
+    imports = _imports(ast.parse(PORTFOLIO_SQLITE_REPOSITORY.read_text(encoding="utf-8")))
+    assert not any(
+        "BrokerExecutionPort" in name
+        or "ExecutionApplication" in name
+        or "LiveAuthorization" in name
+        or name.startswith("us_quant.trading.adapters.ibkr")
+        for name in imports
+    )

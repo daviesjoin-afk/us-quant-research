@@ -5333,3 +5333,17 @@ Risk REJECT 不得被组合决策覆盖。Stage 4 `RiskApplication`、`Execution
 **Stage 5-A 尚未把 Portfolio Runtime 接入 production execution。** 本阶段没有 OrderDispatch 或
 ExecutionApplication integration、broker/IBKR、Desktop 多策略 runner、Live 权限、AI allocation、
 strategy promotion/parameter mutation，也没有 Kelly、risk parity 或 mean-variance optimizer。
+
+### 8.39 Stage 5-A / 5-B Portfolio Ledger
+
+Stage 5-A PR #70 已通过 GitHub merge commit 合并。Stage 4 Final PR #69 的 baseline
+仍为 `b4d8112a180273947afd56b879d2fd155ad06d13`；Stage 5-A 实际 merge SHA 与
+Stage 5-B 起点均为 `0e7b5b7ade3705f9083a70fa935d58783777817b`。
+
+Stage 5-B 在独立分支 `feat/portfolio-state-attribution-persistence` 建立
+`PortfolioStateRepositoryPort` 与 `SQLitePortfolioRepository`，持久化组合决策、逐策略 proposal
+签名数量归因、周期与观察时间、策略身份/版本、创建时间，以及后续风险结果和订单关联。决策身份重复写入
+同一内容时幂等；同 ID 不同内容 fail closed。后续风险/订单链接只能使用记录 revision 做 CAS 更新。
+读入损坏 JSON、缺失归因、数量不一致、动作边不一致或非规范 symbol 时抛出
+`PortfolioStoreUnreadable`，不能把账本解释为空组合。组合 domain 和 port 不依赖 SQLite；账本没有
+账户凭据或原始 Live account identity 字段。Stage 5-B 不接 Risk、Execution、Desktop scheduler 或 broker。

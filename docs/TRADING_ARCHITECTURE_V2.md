@@ -5182,3 +5182,21 @@ Live 账户授权存在、proof/truth providers 存在且 Gateway 配置为 loop
 构造 IBKR Live adapter 与 canary guard。当前桌面尚未提供这些 Live providers，因此桌面路径仍拒绝
 真钱启动；operator controls 将在 4-F 接入。RiskApplication、ExecutionApplication、OrderDispatch、
 TradingRuntime 与七方法 `BrokerExecutionPort` 保持唯一共享核心。
+
+### 8.35 Stage 4-D baseline 与 Stage 4-E Live Recovery
+
+Stage 4-D PR #66 已通过 merge commit 完成，实际 merge SHA 为
+`4332fb66a3b383bb263a6d17f10719ee2b3d13b2`。Stage 4-E 从该 SHA 的独立分支
+`refactor/live-canary-recovery` 开始。
+
+4-E 在独立的 `LiveRecoveryLatch` 中持久记录断线或提交结果不确定后的 recovery barrier，和 operator
+kill latch 分开保存。Live guard 断开前先写入 barrier；不确定 submission 保留原 reservation 与 durable
+intent、不重试，并在释放 execution lease 后记录 recovery barrier。guard 在 barrier 未清除时拒绝所有新提交；
+重新 connect 不会自动清除。安全记录每次变化都推进 revision，因此旧 session arm 和旧 startup proof
+不能跨越断线/不确定提交/恢复确认继续有效。
+
+清除 barrier 必须提供最近 30 秒内的当前 Live 账户对账证据：连接、open orders、positions、fills 均已知，
+对账 clean，且不确定提交已被明确解决；证据账户必须与持久授权的 fingerprint 完全相同，并需要本次显式
+operator confirmation。清除只移除 recovery barrier，不修改 kill latch，也不恢复 session arm。之后必须从
+最新 safety revision 重新 arm 并生成 fresh startup proof。损坏的 recovery 记录视为不可读，不允许 Live。
+Stage 4-E 不改共享执行核心，也不让自动 reconnect、自动对账或旧的 reservation 触发第二次 submission。

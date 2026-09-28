@@ -29,6 +29,7 @@ from us_quant.trading.domain.live_safety import (
     LiveAuthorizationState,
     LiveCanaryLimits,
     LiveOperatorAuthorization,
+    LiveRecoveryLatch,
     LiveSafetyRecord,
 )
 from us_quant.trading.domain.live_startup import LiveEndpointIdentity, LiveStartupProof
@@ -362,3 +363,85 @@ def test_deployment_decision_is_immutable() -> None:
     )
     with pytest.raises((AttributeError, TypeError)):
         decision.broker_submission_allowed = True
+
+
+def test_live_composition_constructs_recovery_channel_while_barrier_is_persisted(
+    tmp_path,
+) -> None:
+    state, proof, truth = _live_build_context()
+    safety_repository = _live_safety_repository(tmp_path, state)
+    current = safety_repository.load()
+    safety_repository.save(
+        expected_revision=current.revision,
+        replacement=LiveSafetyRecord(
+            current.revision + 1,
+            current.authorization,
+            current.kill_latch,
+            LiveRecoveryLatch().require(
+                at=datetime.now(timezone.utc), reason="test disconnect"
+            ),
+        ),
+    )
+    factory = build_live_execution_candidate_factory(
+        environment=Environment.LIVE,
+        live_trading_enabled=True,
+        live_authorization_state=lambda _record: state,
+        live_safety_repository=safety_repository,
+        live_startup_proof=lambda: proof,
+        live_truth=truth,
+    )
+    repository = SQLiteOrderRepository(tmp_path / "orders.sqlite3")
+    config = IBKRConnectionConfig(
+        host="127.0.0.1",
+        port=4001,
+        client_id=98,
+        api_read_only=False,
+        paper_order_submission_enabled=False,
+        connection_timeout_seconds=3,
+    )
+
+    expected_broker = object()
+    with patch(
+        "us_quant.trading.composition.execution.IBKRLiveExecutionAdapter",
+        return_value=expected_broker,
+    ) as adapter:
+        channel = factory(config, repository=repository)
+
+    assert isinstance(channel, LiveCanaryExecutionGuard)
+    assert channel._broker is expected_broker
+    adapter.assert_called_once()
+    assert safety_repository.load().recovery_latch.is_required
+
+
+def test_live_composition_latches_fresh_reconciliation_on_process_start(tmp_path) -> None:
+    state, proof, truth = _live_build_context()
+    safety_repository = _live_safety_repository(tmp_path, state)
+    factory = build_live_execution_candidate_factory(
+        environment=Environment.LIVE,
+        live_trading_enabled=True,
+        live_authorization_state=lambda _record: state,
+        live_safety_repository=safety_repository,
+        live_startup_proof=lambda: proof,
+        live_truth=truth,
+    )
+    repository = SQLiteOrderRepository(tmp_path / "orders.sqlite3")
+    config = IBKRConnectionConfig(
+        host="127.0.0.1",
+        port=4001,
+        client_id=99,
+        api_read_only=False,
+        paper_order_submission_enabled=False,
+        connection_timeout_seconds=3,
+    )
+
+    with patch(
+        "us_quant.trading.composition.execution.IBKRLiveExecutionAdapter",
+        return_value=object(),
+    ):
+        factory(config, repository=repository)
+
+    durable = safety_repository.load()
+    assert durable.recovery_latch.is_required
+    assert durable.recovery_latch.reason == (
+        "Live process start requires fresh broker reconciliation"
+    )

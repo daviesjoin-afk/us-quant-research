@@ -11,6 +11,7 @@ import pytest
 from us_quant.trading.application.live_canary_execution import (
     LiveCanaryExecutionGuard,
 )
+from us_quant.trading.application.live_recovery import LiveCanaryRecovery
 from us_quant.trading.adapters.sqlite.live_safety_repository import (
     SQLiteLiveSafetyRepository,
 )
@@ -25,8 +26,10 @@ from us_quant.trading.domain.live_safety import (
     LiveAuthorizationState,
     LiveCanaryLimits,
     LiveOperatorAuthorization,
+    LiveRecoveryLatch,
     LiveSafetyRecord,
 )
+from us_quant.trading.domain.live_recovery import LiveRecoveryEvidence
 from us_quant.trading.domain.live_startup import (
     LiveEndpointIdentity,
     LiveStartupProof,
@@ -40,6 +43,7 @@ from us_quant.trading.domain.orders import (
 from us_quant.trading.ports.broker_execution import (
     BrokerOrderReservation,
     ExecutionRefused,
+    ExecutionSubmissionUncertain,
 )
 
 
@@ -81,6 +85,8 @@ class _Broker:
         self.pending_events: tuple[OrderEvent, ...] = ()
         self.connection_calls = 0
         self.disconnect_calls = 0
+        self.submit_error: Exception | None = None
+        self.submit_calls = 0
 
     def connect(self) -> None:
         self.connection_calls += 1
@@ -96,6 +102,9 @@ class _Broker:
         return reservation
 
     def submit(self, reservation: BrokerOrderReservation) -> None:
+        self.submit_calls += 1
+        if self.submit_error is not None:
+            raise self.submit_error
         self.submissions.append(reservation)
 
     def cancel(self, order_id: str) -> bool:
@@ -267,6 +276,33 @@ def _guard(
     return guard, underlying, state_holder, broker_truth
 
 
+def _guard_with_durable_safety(
+    tmp_path,
+    broker: _Broker,
+    *,
+    truth: _Truth | None = None,
+    proof: LiveStartupProof | None = None,
+    state: LiveAuthorizationState | None = None,
+):
+    repository = SQLiteLiveSafetyRepository(tmp_path / "live-safety.sqlite3")
+    state = state or _armed_state()
+    repository.save(
+        expected_revision=0,
+        replacement=LiveSafetyRecord(1, state.authorization, state.kill_latch),
+    )
+    state_holder = [state]
+    broker_truth = truth or _Truth(_truth())
+    guard = LiveCanaryExecutionGuard(
+        broker,
+        authorization_state=lambda _record: state_holder[0],
+        safety_repository=repository,
+        startup_proof=lambda: proof or _proof(state_holder[0]),
+        truth=broker_truth,
+        now=lambda: NOW,
+    )
+    return guard, repository, state_holder, broker_truth
+
+
 def test_guard_preserves_the_shared_reserve_durable_submit_boundary():
     guard, broker, _, _ = _guard()
     intent = _intent()
@@ -277,6 +313,236 @@ def test_guard_preserves_the_shared_reserve_durable_submit_boundary():
 
     assert broker.reservations == [reservation]
     assert broker.submissions == [reservation]
+
+
+def test_disconnect_persists_recovery_barrier_and_reconnect_does_not_clear_it(tmp_path):
+    broker = _Broker()
+    guard, repository, _, _ = _guard_with_durable_safety(tmp_path, broker)
+
+    guard.disconnect()
+    guard.connect()
+
+    assert broker.disconnect_calls == 1
+    assert broker.connection_calls == 1
+    assert repository.load().recovery_latch.is_required
+    with pytest.raises(ExecutionRefused, match="recovery"):
+        guard.reserve(_intent())
+
+
+def test_fresh_execution_check_that_observes_disconnected_broker_latches_recovery(tmp_path):
+    broker = _Broker()
+    state = _armed_state()
+    guard, repository, _, _ = _guard_with_durable_safety(
+        tmp_path, broker, proof=_proof(state, connected=False)
+    )
+
+    with pytest.raises(ExecutionRefused, match="disconnected"):
+        guard.reserve(_intent())
+
+    assert repository.load().recovery_latch.is_required
+    assert broker.reservations == []
+
+
+def test_uncertain_submission_persists_recovery_and_is_never_retried(tmp_path):
+    broker = _Broker()
+    guard, repository, state_holder, _ = _guard_with_durable_safety(tmp_path, broker)
+    intent = _intent()
+    reservation = guard.reserve(intent)
+    broker.submit_error = ExecutionSubmissionUncertain(
+        "connection lost after send",
+        order_id=intent.order_id,
+        broker_order_id=reservation.broker_order_id,
+        intent=intent,
+    )
+
+    with pytest.raises(ExecutionSubmissionUncertain):
+        guard.submit(reservation)
+
+    assert len(broker.reservations) == 1
+    assert len(broker.submissions) == 0
+    assert broker.submit_calls == 1
+    recovery_latch = repository.load().recovery_latch
+    assert recovery_latch.is_required
+    assert recovery_latch.broker_order_id == reservation.broker_order_id
+    with pytest.raises(ExecutionRefused, match="recovery"):
+        guard.reserve(_intent())
+
+    evidence = LiveRecoveryEvidence.capture(
+        observed_at=NOW + timedelta(seconds=1),
+        account_fingerprint=FINGERPRINT,
+        broker_connected=True,
+        open_orders_known=True,
+        positions_known=True,
+        fills_known=True,
+        reconciliation_clean=True,
+        uncertain_submission_resolved=True,
+        reconciled_broker_order_ids=(reservation.broker_order_id,),
+    )
+    cleared = LiveCanaryRecovery(
+        repository, now=lambda: NOW + timedelta(seconds=2)
+    ).confirm_reconciled(evidence, operator_confirmed=True)
+    refreshed_state = LiveAuthorizationState(
+        cleared.authorization, cleared.kill_latch, cleared.recovery_latch
+    ).request_session_arm(
+        safety_revision=cleared.revision,
+        now=NOW,
+        account_fingerprint=FINGERPRINT,
+        strategy_version_id="strategy-v1",
+        operator_confirmed=True,
+    )
+    state_holder[0] = refreshed_state
+
+    with pytest.raises(ExecutionRefused, match="already been submitted"):
+        guard.submit(reservation)
+    assert broker.submit_calls == 1
+
+
+def test_uncertain_submission_barrier_serializes_other_guard_instances(tmp_path):
+    first_entered = Event()
+    release_first = Event()
+
+    class _BlockingBroker(_Broker):
+        intent_by_id: dict[int, OrderIntent] = {}
+        submit_attempts = 0
+
+        def reserve(self, intent: OrderIntent) -> BrokerOrderReservation:
+            reservation = super().reserve(intent)
+            self.intent_by_id[reservation.broker_order_id] = intent
+            return reservation
+
+        def submit(self, reservation: BrokerOrderReservation) -> None:
+            self.submit_attempts += 1
+            if reservation.broker_order_id == 40:
+                first_entered.set()
+                assert release_first.wait(timeout=2)
+                intent = self.intent_by_id[reservation.broker_order_id]
+                raise ExecutionSubmissionUncertain(
+                    "connection lost after send",
+                    order_id=intent.order_id,
+                    broker_order_id=reservation.broker_order_id,
+                    intent=intent,
+                )
+            super().submit(reservation)
+
+    broker = _BlockingBroker()
+    state = _armed_state(limits=_limits(max_open_orders=2))
+    first_guard, repository, _, truth = _guard_with_durable_safety(
+        tmp_path, broker, state=state
+    )
+    second_guard = LiveCanaryExecutionGuard(
+        broker,
+        authorization_state=lambda _record: state,
+        safety_repository=repository,
+        startup_proof=lambda: _proof(state),
+        truth=truth,
+        now=lambda: NOW,
+    )
+    first_reservation = first_guard.reserve(_intent())
+    second_reservation = second_guard.reserve(_intent())
+    errors: list[Exception] = []
+
+    def first_submit():
+        try:
+            first_guard.submit(first_reservation)
+        except Exception as error:
+            errors.append(error)
+
+    def second_submit():
+        try:
+            second_guard.submit(second_reservation)
+        except Exception as error:
+            errors.append(error)
+
+    first_thread = Thread(target=first_submit)
+    first_thread.start()
+    assert first_entered.wait(timeout=1)
+    second_thread = Thread(target=second_submit)
+    second_thread.start()
+    release_first.set()
+    first_thread.join(timeout=2)
+    second_thread.join(timeout=2)
+
+    assert not first_thread.is_alive() and not second_thread.is_alive()
+    assert len(errors) == 2
+    assert broker.submit_attempts == 1
+    assert repository.load().recovery_latch.broker_order_id == first_reservation.broker_order_id
+
+
+def _persist_kill_latch(repository, state_holder, reason: str = "kill drill"):
+    current = repository.load()
+    latch = current.kill_latch.engage(at=NOW, reason=reason)
+    replacement = LiveSafetyRecord(
+        current.revision + 1,
+        current.authorization,
+        latch,
+        current.recovery_latch,
+    )
+    repository.save(expected_revision=current.revision, replacement=replacement)
+    state_holder[0] = LiveAuthorizationState(
+        current.authorization, latch, current.recovery_latch
+    )
+    return replacement
+
+
+def test_kill_drill_blocks_when_latched_before_reserve(tmp_path):
+    broker = _Broker()
+    guard, repository, state_holder, _ = _guard_with_durable_safety(tmp_path, broker)
+    _persist_kill_latch(repository, state_holder)
+
+    with pytest.raises(ExecutionRefused):
+        guard.reserve(_intent())
+    assert broker.reservations == []
+
+
+def test_kill_drill_blocks_after_reserve_and_before_submit(tmp_path):
+    broker = _Broker()
+    guard, repository, state_holder, _ = _guard_with_durable_safety(tmp_path, broker)
+    reservation = guard.reserve(_intent())
+    _persist_kill_latch(repository, state_holder)
+
+    with pytest.raises(ExecutionRefused):
+        guard.submit(reservation)
+    assert broker.submissions == []
+
+
+def test_kill_drill_cancels_a_tracked_pending_order(tmp_path):
+    broker = _Broker()
+    guard, repository, state_holder, _ = _guard_with_durable_safety(tmp_path, broker)
+    reservation = guard.reserve(_intent())
+    guard.submit(reservation)
+    _persist_kill_latch(repository, state_holder)
+
+    assert guard.cancel(reservation.order_id)
+    assert broker.cancellations == [reservation.order_id]
+
+
+def test_kill_drill_keeps_confirmed_risk_reducing_exit_available(tmp_path):
+    broker = _Broker()
+    truth = _Truth(
+        _truth(positions=(LiveCanaryPosition("AAPL", 2, Decimal("400")),))
+    )
+    guard, repository, state_holder, _ = _guard_with_durable_safety(
+        tmp_path, broker, truth=truth
+    )
+    _persist_kill_latch(repository, state_holder)
+
+    reservation = guard.reserve(_intent(side=Side.SELL, quantity=2))
+    guard.submit(reservation)
+
+    assert broker.submissions == [reservation]
+    assert repository.load().kill_latch.is_latched
+
+
+def test_kill_drill_reconnect_does_not_remove_the_durable_kill(tmp_path):
+    broker = _Broker()
+    guard, repository, state_holder, _ = _guard_with_durable_safety(tmp_path, broker)
+    _persist_kill_latch(repository, state_holder)
+
+    guard.connect()
+
+    with pytest.raises(ExecutionRefused):
+        guard.reserve(_intent())
+    assert repository.load().kill_latch.is_latched
 
 
 def test_external_open_buy_notional_counts_against_the_capital_limit():

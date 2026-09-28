@@ -17,16 +17,85 @@ from us_quant.trading.domain.live_safety import (
     LiveCanaryLimits,
     LiveKillLatch,
     LiveOperatorAuthorization,
+    LiveRecoveryLatch,
     LiveSafetyError,
     LiveSafetyRecord,
 )
 from us_quant.trading.ports.live_safety_repository import (
     LiveSafetyConflict,
+    LiveSafetyExecutionLease,
     LiveSafetyRepositoryError,
     LiveSafetyStoreUnreadable,
 )
 
 _KEY = "live"
+
+
+class _SQLiteLiveSafetyExecutionLease:
+    def __init__(self, connection: sqlite3.Connection, record: LiveSafetyRecord) -> None:
+        self._connection = connection
+        self._record = record
+
+    @property
+    def record(self) -> LiveSafetyRecord:
+        return self._record
+
+    def require_reconciliation(
+        self,
+        *,
+        at: datetime,
+        reason: str,
+        broker_order_id: int | None = None,
+    ) -> LiveSafetyRecord:
+        recovery = self._record.recovery_latch.require(
+            at=at,
+            reason=reason,
+            broker_order_id=broker_order_id,
+        )
+        replacement = LiveSafetyRecord(
+            self._record.revision + 1,
+            self._record.authorization,
+            self._record.kill_latch,
+            recovery,
+        )
+        if self._record.revision == 0:
+            self._connection.execute(
+                """INSERT INTO live_safety_state(
+                       key, revision, authorization_json, kill_latched,
+                       kill_latched_at, kill_reason, recovery_latched,
+                       recovery_required_at, recovery_reason, recovery_broker_order_id
+                   ) VALUES (?, ?, NULL, 0, NULL, NULL, 1, ?, ?, ?)""",
+                (
+                    _KEY,
+                    replacement.revision,
+                    to_stored_text(recovery.required_at),
+                    recovery.reason,
+                    recovery.broker_order_id,
+                ),
+            )
+        else:
+            cursor = self._connection.execute(
+                """UPDATE live_safety_state
+                   SET revision = ?, recovery_latched = 1,
+                       recovery_required_at = ?, recovery_reason = ?,
+                       recovery_broker_order_id = ?
+                   WHERE key = ? AND revision = ?""",
+                (
+                    replacement.revision,
+                    to_stored_text(recovery.required_at),
+                    recovery.reason,
+                    recovery.broker_order_id,
+                    _KEY,
+                    self._record.revision,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise LiveSafetyConflict("Live recovery barrier lost its safety revision")
+        self._record = replacement
+        return replacement
+
+    def __eq__(self, other: object) -> bool:
+        return self._record == other
 
 
 class SQLiteLiveSafetyRepository:
@@ -46,10 +115,30 @@ class SQLiteLiveSafetyRepository:
                             authorization_json TEXT,
                             kill_latched INTEGER NOT NULL,
                             kill_latched_at TEXT,
-                            kill_reason TEXT
+                            kill_reason TEXT,
+                            recovery_latched INTEGER NOT NULL DEFAULT 0,
+                            recovery_required_at TEXT,
+                            recovery_reason TEXT,
+                            recovery_broker_order_id INTEGER
                         )
                         """
                     )
+                    columns = {
+                        row[1]
+                        for row in connection.execute(
+                            "PRAGMA table_info(live_safety_state)"
+                        ).fetchall()
+                    }
+                    for name, declaration in (
+                        ("recovery_latched", "INTEGER NOT NULL DEFAULT 0"),
+                        ("recovery_required_at", "TEXT"),
+                        ("recovery_reason", "TEXT"),
+                        ("recovery_broker_order_id", "INTEGER"),
+                    ):
+                        if name not in columns:
+                            connection.execute(
+                                f"ALTER TABLE live_safety_state ADD COLUMN {name} {declaration}"
+                            )
         except sqlite3.Error as error:
             raise LiveSafetyRepositoryError(
                 "the Live safety store could not be prepared"
@@ -63,7 +152,9 @@ class SQLiteLiveSafetyRepository:
                 try:
                     row = connection.execute(
                         """SELECT revision, authorization_json, kill_latched,
-                                  kill_latched_at, kill_reason
+                                  kill_latched_at, kill_reason, recovery_latched,
+                                  recovery_required_at, recovery_reason,
+                                  recovery_broker_order_id
                            FROM live_safety_state WHERE key = ?""",
                         (_KEY,),
                     ).fetchone()
@@ -88,7 +179,7 @@ class SQLiteLiveSafetyRepository:
             ) from error
 
     @contextmanager
-    def execution_lease(self) -> Iterator[LiveSafetyRecord]:
+    def execution_lease(self) -> Iterator[LiveSafetyExecutionLease]:
         """Hold SQLite's write reservation until the broker submit is decided.
 
         Every durable safety update uses ``BEGIN IMMEDIATE`` in ``save``. This
@@ -104,12 +195,15 @@ class SQLiteLiveSafetyRepository:
                 try:
                     row = connection.execute(
                         """SELECT revision, authorization_json, kill_latched,
-                                  kill_latched_at, kill_reason
+                                  kill_latched_at, kill_reason, recovery_latched,
+                                  recovery_required_at, recovery_reason,
+                                  recovery_broker_order_id
                            FROM live_safety_state WHERE key = ?""",
                         (_KEY,),
                     ).fetchone()
                     record = LiveSafetyRecord() if row is None else _record_from_row(row)
-                    yield record
+                    lease = _SQLiteLiveSafetyExecutionLease(connection, record)
+                    yield lease
                     connection.execute("COMMIT")
                 except BaseException:
                     _rollback_quietly(connection)
@@ -141,13 +235,16 @@ class SQLiteLiveSafetyRepository:
                 )
             )
             latch = replacement.kill_latch
+            recovery = replacement.recovery_latch
             with closing(connect_sqlite(self.path)) as connection:
                 connection.isolation_level = None
                 connection.execute("BEGIN IMMEDIATE")
                 try:
                     current = connection.execute(
                         """SELECT revision, authorization_json, kill_latched,
-                                  kill_latched_at, kill_reason
+                                  kill_latched_at, kill_reason, recovery_latched,
+                                  recovery_required_at, recovery_reason,
+                                  recovery_broker_order_id
                            FROM live_safety_state WHERE key = ?""",
                         (_KEY,),
                     ).fetchone()
@@ -161,14 +258,20 @@ class SQLiteLiveSafetyRepository:
                     connection.execute(
                         """INSERT INTO live_safety_state(
                                key, revision, authorization_json, kill_latched,
-                               kill_latched_at, kill_reason
-                           ) VALUES (?, ?, ?, ?, ?, ?)
+                               kill_latched_at, kill_reason, recovery_latched,
+                               recovery_required_at, recovery_reason,
+                               recovery_broker_order_id
+                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                            ON CONFLICT(key) DO UPDATE SET
                                revision=excluded.revision,
                                authorization_json=excluded.authorization_json,
                                kill_latched=excluded.kill_latched,
                                kill_latched_at=excluded.kill_latched_at,
-                               kill_reason=excluded.kill_reason""",
+                               kill_reason=excluded.kill_reason,
+                               recovery_latched=excluded.recovery_latched,
+                               recovery_required_at=excluded.recovery_required_at,
+                               recovery_reason=excluded.recovery_reason,
+                               recovery_broker_order_id=excluded.recovery_broker_order_id""",
                         (
                             _KEY,
                             replacement.revision,
@@ -176,6 +279,12 @@ class SQLiteLiveSafetyRepository:
                             int(latch.is_latched),
                             None if latch.latched_at is None else to_stored_text(latch.latched_at),
                             latch.reason,
+                            int(recovery.is_required),
+                            None
+                            if recovery.required_at is None
+                            else to_stored_text(recovery.required_at),
+                            recovery.reason,
+                            recovery.broker_order_id,
                         ),
                     )
                     connection.execute("COMMIT")
@@ -265,7 +374,7 @@ def _stored_string_array(value: object, name: str) -> tuple[str, ...]:
 
 
 def _record_from_row(row: sqlite3.Row | tuple[object, ...]) -> LiveSafetyRecord:
-    revision, authorization_json, latched, latched_at, reason = row
+    revision, authorization_json, latched, latched_at, reason, *recovery_values = row
     if type(revision) is not int or revision < 1:
         raise LiveSafetyStoreUnreadable("invalid Live safety revision")
     if type(latched) is not int or latched not in (0, 1):
@@ -282,7 +391,30 @@ def _record_from_row(row: sqlite3.Row | tuple[object, ...]) -> LiveSafetyRecord:
         if not latched
         else LiveKillLatch(_timestamp(latched_at), reason)
     )
-    return LiveSafetyRecord(revision, authorization, kill_latch)
+    if recovery_values:
+        if len(recovery_values) == 3:
+            recovery_latched, recovery_at, recovery_reason = recovery_values
+            recovery_order_id = None
+        elif len(recovery_values) == 4:
+            recovery_latched, recovery_at, recovery_reason, recovery_order_id = recovery_values
+        else:
+            raise LiveSafetyStoreUnreadable("invalid Live recovery latch shape")
+        if type(recovery_latched) is not int or recovery_latched not in (0, 1):
+            raise LiveSafetyStoreUnreadable("invalid Live recovery latch flag")
+        if recovery_latched == 0 and (
+            recovery_at is not None or recovery_reason is not None or recovery_order_id is not None
+        ):
+            raise LiveSafetyStoreUnreadable("unlatched recovery state contains latch details")
+        if recovery_latched == 1 and (recovery_at is None or recovery_reason is None):
+            raise LiveSafetyStoreUnreadable("latched recovery state is missing details")
+        recovery_latch = (
+            LiveRecoveryLatch()
+            if not recovery_latched
+            else LiveRecoveryLatch(_timestamp(recovery_at), recovery_reason, recovery_order_id)
+        )
+    else:
+        recovery_latch = LiveRecoveryLatch()
+    return LiveSafetyRecord(revision, authorization, kill_latch, recovery_latch)
 
 
 def _timestamp(value: str) -> datetime:

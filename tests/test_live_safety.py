@@ -23,6 +23,7 @@ from us_quant.trading.domain.live_safety import (
     LiveKillLatch,
     LiveOperation,
     LiveOperatorAuthorization,
+    LiveRecoveryLatch,
     LiveSafetyRecord,
 )
 from us_quant.trading.ports.live_safety_repository import (
@@ -340,7 +341,7 @@ def test_corrupt_record_fails_closed(tmp_path):
     repository = SQLiteLiveSafetyRepository(path)
     with sqlite3.connect(path) as connection:
         connection.execute(
-            "INSERT INTO live_safety_state VALUES ('live', 1, '{broken', 0, NULL, NULL)"
+            "INSERT INTO live_safety_state(key, revision, authorization_json, kill_latched, kill_latched_at, kill_reason) VALUES ('live', 1, '{broken', 0, NULL, NULL)"
         )
 
     with pytest.raises(LiveSafetyStoreUnreadable):
@@ -387,7 +388,7 @@ def test_write_does_not_overwrite_an_unreadable_safety_record(tmp_path):
     repository = SQLiteLiveSafetyRepository(path)
     with sqlite3.connect(path) as connection:
         connection.execute(
-            "INSERT INTO live_safety_state VALUES ('live', 1, '{broken', 0, NULL, NULL)"
+            "INSERT INTO live_safety_state(key, revision, authorization_json, kill_latched, kill_latched_at, kill_reason) VALUES ('live', 1, '{broken', 0, NULL, NULL)"
         )
 
     with pytest.raises(LiveSafetyStoreUnreadable):

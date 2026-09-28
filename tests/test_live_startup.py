@@ -11,6 +11,7 @@ from us_quant.trading.domain.live_safety import (
     LiveCanaryLimits,
     LiveKillLatch,
     LiveOperatorAuthorization,
+    LiveRecoveryLatch,
 )
 from us_quant.trading.domain.live_startup import (
     LIVE_STARTUP_PROOF_TTL,
@@ -124,6 +125,20 @@ def test_startup_proof_captures_current_exact_account_facts_without_raw_account_
     assert ACCOUNT_ID not in repr(proof)
     assert proof.is_fresh_at(NOW + LIVE_STARTUP_PROOF_TTL - timedelta(microseconds=1))
     assert not proof.is_fresh_at(NOW + LIVE_STARTUP_PROOF_TTL)
+
+
+def test_startup_proof_is_blocked_while_recovery_barrier_is_latched():
+    state = LiveAuthorizationState(
+        authorization=_authorization(),
+        recovery_latch=LiveRecoveryLatch().require(
+            at=NOW - timedelta(seconds=1), reason="disconnect"
+        ),
+    )
+
+    proof = _capture(authorization_state=state)
+
+    assert not proof.ready
+    assert LiveStartupBlocker.RECOVERY_REQUIRED in proof.blockers
 
 
 def test_proof_cannot_outlive_its_authorization():

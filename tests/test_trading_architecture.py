@@ -300,6 +300,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "common.py",
             "execution_environment.py",
         "live_canary.py",
+        "live_recovery.py",
         "live_startup.py",
         "live_safety.py",
         "market.py",

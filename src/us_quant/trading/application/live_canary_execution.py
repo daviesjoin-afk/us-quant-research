@@ -53,44 +53,114 @@ class LiveCanaryExecutionGuard(BrokerExecutionPort):
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._active: dict[int, tuple[OrderIntent, bool]] = {}
         self._lock = RLock()
+        self._local_recovery_required = False
+        self._recovery_recorded_this_check = False
 
     def connect(self) -> None:
         self._broker.connect()
 
     def disconnect(self) -> None:
-        self._broker.disconnect()
+        self._local_recovery_required = True
+        persist_error: Exception | None = None
+        try:
+            with self._safety_repository.execution_lease() as lease:
+                lease.require_reconciliation(
+                    at=self._now(),
+                    reason="Live broker disconnected",
+                )
+            self._local_recovery_required = False
+        except Exception as error:
+            persist_error = error
+        try:
+            self._broker.disconnect()
+        finally:
+            if persist_error is not None:
+                raise ExecutionRefused(
+                    "Live disconnected but the recovery barrier could not be persisted"
+                ) from persist_error
 
     def reserve(self, intent: OrderIntent) -> BrokerOrderReservation:
-        with self._safety_repository.execution_lease() as durable_state:
+        deferred_refusal: ExecutionRefused | None = None
+        with self._safety_repository.execution_lease() as lease:
             with self._lock:
-                self._validate(intent, durable_state=durable_state)
-                reservation = self._broker.reserve(intent)
-                if reservation.broker_order_id in self._active:
-                    raise ExecutionRefused("Live canary received a duplicate broker order id")
-                self._active[reservation.broker_order_id] = (intent, False)
-                return reservation
+                durable_state = getattr(lease, "record", lease)
+                try:
+                    self._validate(
+                        intent, durable_state=durable_state, safety_lease=lease
+                    )
+                except ExecutionRefused as error:
+                    if self._recovery_recorded_this_check:
+                        deferred_refusal = error
+                    else:
+                        raise
+                if deferred_refusal is None:
+                    reservation = self._broker.reserve(intent)
+                    if reservation.broker_order_id in self._active:
+                        raise ExecutionRefused("Live canary received a duplicate broker order id")
+                    self._active[reservation.broker_order_id] = (intent, False)
+                    return reservation
+        if deferred_refusal is not None:
+            raise deferred_refusal
 
     def submit(self, reservation: BrokerOrderReservation) -> None:
-        with self._safety_repository.execution_lease() as durable_state:
+        uncertain: ExecutionSubmissionUncertain | None = None
+        recovery_persist_error: Exception | None = None
+        deferred_refusal: ExecutionRefused | None = None
+        with self._safety_repository.execution_lease() as lease:
             with self._lock:
+                durable_state = getattr(lease, "record", lease)
                 active = self._active.get(reservation.broker_order_id)
                 if active is None or active[0].order_id != reservation.order_id:
                     raise ExecutionRefused("Live canary reservation is not tracked")
+                if active[1]:
+                    raise ExecutionRefused(
+                        "Live canary reservation has already been submitted and cannot be retried"
+                    )
                 intent = active[0]
                 try:
                     self._validate(
                         intent,
                         own_reservation=reservation.broker_order_id,
                         durable_state=durable_state,
+                        safety_lease=lease,
                     )
                     self._broker.submit(reservation)
-                except ExecutionSubmissionUncertain:
+                except ExecutionSubmissionUncertain as error:
                     self._active[reservation.broker_order_id] = (intent, True)
-                    raise
-                except ExecutionRefused:
-                    self._active.pop(reservation.broker_order_id, None)
-                    raise
-                self._active[reservation.broker_order_id] = (intent, True)
+                    self._local_recovery_required = True
+                    uncertain = error
+                    try:
+                        lease.require_reconciliation(
+                            at=self._now(),
+                            reason=(
+                                "Uncertain Live submission for broker order "
+                                f"{reservation.broker_order_id}"
+                            ),
+                            broker_order_id=reservation.broker_order_id,
+                        )
+                    except Exception as recovery_error:
+                        recovery_persist_error = recovery_error
+                    else:
+                        self._local_recovery_required = False
+                except ExecutionRefused as error:
+                    if self._recovery_recorded_this_check:
+                        deferred_refusal = error
+                    else:
+                        self._active.pop(reservation.broker_order_id, None)
+                        raise
+                else:
+                    self._active[reservation.broker_order_id] = (intent, True)
+        if uncertain is not None:
+            if recovery_persist_error is not None:
+                raise ExecutionSubmissionUncertain(
+                    "Live submission outcome is uncertain and recovery could not be persisted",
+                    order_id=uncertain.order_id,
+                    broker_order_id=uncertain.broker_order_id,
+                    intent=uncertain.intent,
+                ) from recovery_persist_error
+            raise uncertain
+        if deferred_refusal is not None:
+            raise deferred_refusal
 
     def cancel(self, order_id: str) -> bool:
         # Tracked cancellation is a safety operation and remains available while
@@ -114,11 +184,16 @@ class LiveCanaryExecutionGuard(BrokerExecutionPort):
         *,
         own_reservation: int | None = None,
         durable_state: LiveSafetyRecord,
+        safety_lease: object,
     ) -> None:
+        self._recovery_recorded_this_check = False
+        if self._local_recovery_required:
+            raise ExecutionRefused(
+                "Live recovery requires fresh broker reconciliation and operator confirmation"
+            )
         try:
             state = self._authorization_state(durable_state)
             proof = self._startup_proof()
-            truth = self._truth.snapshot()
             now = self._now()
         except Exception as error:
             raise ExecutionRefused(
@@ -127,16 +202,30 @@ class LiveCanaryExecutionGuard(BrokerExecutionPort):
 
         if not isinstance(state, LiveAuthorizationState):
             raise ExecutionRefused("Live canary authorization state is invalid")
+        if not isinstance(durable_state, LiveSafetyRecord):
+            raise ExecutionRefused("Live durable safety state is invalid")
+        if durable_state.recovery_latch.is_required:
+            raise ExecutionRefused(
+                "Live recovery requires fresh broker reconciliation and operator confirmation"
+            )
         if (
-            not isinstance(durable_state, LiveSafetyRecord)
-            or state.authorization != durable_state.authorization
+            state.authorization != durable_state.authorization
             or state.kill_latch != durable_state.kill_latch
+            or state.recovery_latch != durable_state.recovery_latch
         ):
             raise ExecutionRefused("Live canary state differs from locked durable safety state")
-        if not isinstance(proof, LiveStartupProof) or not isinstance(
-            truth, LiveCanaryTruth
-        ):
-            raise ExecutionRefused("Live startup proof or account truth is invalid")
+        if not isinstance(proof, LiveStartupProof):
+            raise ExecutionRefused("Live startup proof is invalid")
+        if not proof.broker_connected:
+            self._require_recovery(safety_lease, "Live broker disconnected during execution check")
+            raise ExecutionRefused("Live broker is disconnected; reconciliation is required")
+        try:
+            truth = self._truth.snapshot()
+        except Exception as error:
+            self._require_recovery(safety_lease, "Live broker truth unavailable during execution check")
+            raise ExecutionRefused("Live broker truth is unavailable; reconciliation is required") from error
+        if not isinstance(truth, LiveCanaryTruth):
+            raise ExecutionRefused("Live account truth is invalid")
         if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
             raise ExecutionRefused("Live canary clock is unavailable")
         authorization = state.authorization
@@ -275,6 +364,18 @@ class LiveCanaryExecutionGuard(BrokerExecutionPort):
                 projected_positions += 1
             if projected_positions > limits.max_positions:
                 raise ExecutionRefused("Live canary position limit would be exceeded")
+
+    def _require_recovery(self, safety_lease: object, reason: str) -> None:
+        require = getattr(safety_lease, "require_reconciliation", None)
+        if not callable(require):
+            self._local_recovery_required = True
+            raise ExecutionRefused("Live recovery barrier cannot be persisted")
+        try:
+            require(at=self._now(), reason=reason)
+        except Exception as error:
+            self._local_recovery_required = True
+            raise ExecutionRefused("Live recovery barrier could not be persisted") from error
+        self._recovery_recorded_this_check = True
 
     @staticmethod
     def _proof_facts_are_fresh(

@@ -5200,3 +5200,19 @@ intent、不重试，并在释放 execution lease 后记录 recovery barrier。g
 operator confirmation。清除只移除 recovery barrier，不修改 kill latch，也不恢复 session arm。之后必须从
 最新 safety revision 重新 arm 并生成 fresh startup proof。损坏的 recovery 记录视为不可读，不允许 Live。
 Stage 4-E 不改共享执行核心，也不让自动 reconnect、自动对账或旧的 reservation 触发第二次 submission。
+
+### 8.36 Stage 4-E baseline 与 Stage 4-F Desktop Live Operator Controls
+
+Stage 4-E PR #67 已通过 merge commit 完成，实际 merge SHA 为
+`44e68bcfc3c3f5cb9cd9fcbe37108a758e08f676`。Stage 4-F 从该 SHA 的独立分支
+`refactor/desktop-live-canary-controls` 开始。
+
+4-F 在 Execution 页面增加 Live 操作状态面板：部署环境、feature flag、脱敏账户与指纹、持久授权、
+进程级 session arm、持久 kill latch、启动证明、reconciliation、各项 canary limits、策略/标的白名单和
+Live 连接状态。页面只渲染 view model 并发出 arm/kill/refresh intents；持久 kill 由
+`LiveOperatorControlsApplication` 写入既有 Live safety repository，页面不接触数据库或 broker。
+
+当前 Desktop 尚未接入 Live broker、账户 truth 和 startup-proof providers。面板据实显示 provider 不可用，
+session arm 按钮保持禁用；即使有人程序化触发 arm intent，orchestrator 也拒绝并说明缺少哪些事实。
+因此 Stage 4-F 不会把 Paper account/market facts 当作 Live proof，也不会让 Desktop 建立 Live broker channel。
+紧急 kill 控件仍可持久触发，阻止未来 Live exposure。

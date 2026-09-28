@@ -2,9 +2,10 @@
 
 This page replaced ``MainWindow._auto_quant_tab``, a builder that both assembled
 the widgets and was reached into by name from a dozen handlers elsewhere in the
-window.  The page now owns its controls outright, and the window owns the
-orchestration: every button emits an intent and none of them calls a service, a
-workflow or a window method.
+window. The page now owns its controls outright, and orchestration owns the
+decisions: every button emits an intent and none of them calls a service, a
+workflow or a window method. Paper controls and Live operator-safety controls
+report to separate orchestrators.
 
 Three boundaries are load-bearing.  It **renders and reports intent**: it holds
 no service, workflow, runtime, repository or broker import, so it draws a view
@@ -33,14 +34,18 @@ from __future__ import annotations
 from decimal import Decimal
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
 
 from us_quant.desktop_v2.pages.execution.controls import ExecutionControls
+from us_quant.desktop_v2.pages.execution.live_operator import LiveOperatorControls
 from us_quant.desktop_v2.pages.execution.models import (
     ExecutionCandidatesView,
     ExecutionControlState,
     ExecutionDetailWorkspace,
     ExecutionRuntimeView,
+)
+from us_quant.desktop_v2.pages.execution.live_operator_models import (
+    LiveOperatorControlView,
 )
 from us_quant.desktop_v2.pages.execution.tables import ExecutionDetailTabs
 from us_quant.desktop_widgets import MetricCard
@@ -90,6 +95,9 @@ class ExecutionPage(QWidget):
 
     reconcile_requested = Signal()
     resume_reconciliation_requested = Signal()
+    live_arm_requested = Signal()
+    live_kill_requested = Signal()
+    live_status_refresh_requested = Signal()
 
     def __init__(
         self,
@@ -105,16 +113,35 @@ class ExecutionPage(QWidget):
     # -- construction ---------------------------------------------------
 
     def _build(self) -> None:
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setObjectName("executionPageScrollArea")
+        self.scroll_area.setWidgetResizable(True)
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.addLayout(self._build_cards())
         layout.addLayout(self._build_health_cards())
         self.controls = ExecutionControls()
         for own, forwarded in FORWARDED_SIGNALS:
             getattr(self.controls, forwarded).connect(getattr(self, own))
         layout.addWidget(self.controls)
+        self.live_operator_controls = LiveOperatorControls()
+        self.live_operator_controls.arm_requested.connect(
+            self.live_arm_requested.emit
+        )
+        self.live_operator_controls.kill_requested.connect(
+            self.live_kill_requested.emit
+        )
+        self.live_operator_controls.refresh_requested.connect(
+            self.live_status_refresh_requested.emit
+        )
+        layout.addWidget(self.live_operator_controls)
         self.details = ExecutionDetailTabs(palette=self._palette)
         self.details.reconcile_requested.connect(self.reconcile_requested.emit)
         layout.addWidget(self.details)
+        self.scroll_area.setWidget(content)
+        outer.addWidget(self.scroll_area)
 
     def _build_cards(self) -> QHBoxLayout:
         cards = QHBoxLayout()
@@ -169,6 +196,11 @@ class ExecutionPage(QWidget):
         """
 
         self.details.render_candidates(view)
+
+    def render_live_operator(self, view: LiveOperatorControlView) -> None:
+        """Draw the current Live safety facts without deciding them."""
+
+        self.live_operator_controls.render(view)
 
     def render_context(self, **lines: str | None) -> None:
         """Replace the context lines written outside a session render."""

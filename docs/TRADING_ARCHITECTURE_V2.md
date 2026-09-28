@@ -5382,9 +5382,10 @@ reconciliation 与 `PortfolioReconciliationApplication`。每次调用都会重�
 数量不相等时标记 `attribution_mismatch`。订单状态未知、订单/决策链接缺失、成交数量与持久状态不一致、
 以及 account/position snapshot 未来时间或超过五分钟时均 fail closed。
 
-部分成交按事件发生时间与 execution id 排序；对每个累计成交数量重新以原始签名贡献作 whole-share
+全部订单成交按事件发生时间与 execution id 全局排序（不依赖随机 order id）；对每个订单的累计成交数量重新以原始签名贡献作 whole-share
 largest-remainder 分配，再以累计分配差得到本次 fill 归属。余数相同时按 strategy version id、proposal id
-稳定排序，回调到达顺序不会影响策略持仓与成本。SELL 的负数量只从该策略的持仓扣减；超出该策略归属股数
+稳定排序，回调到达顺序不会影响策略持仓与成本。Intent、event、fill 的 broker order id 必须相互吻合。
+SELL 的负数量只从该策略的持仓扣减；超出该策略归属股数
 会产生归因 blocker，不会转扣其他策略的股份。按策略维护均价成本、成交股数、realized P&L、费用和
 相对 portfolio action reference price 的 slippage；缺少 broker fee 时费用标为不完整证据，不伪造为完整零费用。
 订单 SQLite 表以兼容式 `ADD COLUMN fee` 迁移保存可用费用；既有 fill 仍保留且读取为 fee unknown。

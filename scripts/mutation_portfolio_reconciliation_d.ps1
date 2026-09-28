@@ -13,11 +13,14 @@ $tests = Join-Path $projectRoot "tests\test_portfolio_reconciliation.py"
 $mutations = @(
     @{ name='M1 position mismatch ignored'; file=$domain; find='elif broker_quantity != Decimal\(attributed_quantity\):'; repl='elif False:'; select='matching_broker_position_passes_and_mismatch_blocks' },
     @{ name='M2 unknown broker position accepted'; file=$domain; find='if symbol in broker_quantities and symbol not in strategy_quantities and broker_quantity != 0:'; repl='if False:'; select='unknown_external_position_blocks_without_assigning_strategy' },
-    @{ name='M3 partial fill attribution depends on callback order'; file=$domain; find='fills = tuple\(sorted\(order\.fills, key=lambda fill: \(fill\.occurred_at, fill\.execution_id\)\)\)'; repl='fills = order.fills'; select='partial_fill_largest_remainder_is_callback_order_independent' },
+    @{ name='M3 partial fill attribution depends on callback order'; file=$domain; find='for _occurred_at, _execution_id, order_id, fill in sorted\(replay_batches\):'; repl='for _occurred_at, _execution_id, order_id, fill in replay_batches:'; select='partial_fill_largest_remainder_is_callback_order_independent' },
     @{ name='M4 SELL reduces wrong strategy'; file=$domain; find='key = \(strategy_id, fill\.symbol\.strip\(\)\.upper\(\)\)'; repl='key = ("wrong-strategy", fill.symbol.strip().upper())'; select='partial_sell_reduces_only_selling_strategy' },
     @{ name='M5 fees discarded'; file=$domain; find='accounting\[\(strategy_id, fill\.symbol\.strip\(\)\.upper\(\)\)\]\.fees \+= fee'; repl='pass'; select='fee_and_realized_pnl_are_deterministic' },
     @{ name='M6 restart trusts process memory'; file=$application; find='order_truth=self\._order_truth\.portfolio_order_truth\(\),'; repl='order_truth=type(self._order_truth.portfolio_order_truth())(orders=()),'; select='restart_rebuilds_positions_from_durable_portfolio_and_order_facts' },
-    @{ name='M7 reconciliation blocker bypassed'; file=$domain; find='return not self\.blockers'; repl='return True'; select='matching_broker_position_passes_and_mismatch_blocks' }
+    @{ name='M7 reconciliation blocker bypassed'; file=$domain; find='return not self\.blockers'; repl='return True'; select='matching_broker_position_passes_and_mismatch_blocks' },
+    @{ name='M8 fills replay by random order id'; file=$domain; find='for _occurred_at, _execution_id, order_id, fill in sorted\(replay_batches\):'; repl='for _occurred_at, _execution_id, order_id, fill in sorted(replay_batches, key=lambda batch: batch[2]):'; select='fill_history_replays_globally_by_time_not_random_order_id' },
+    @{ name='M9 wrong broker event link accepted'; file=$domain; find='if event is not None and event\.broker_order_id != order\.broker_order_id:'; repl='if False:'; select='callback_with_wrong_broker_order_id_is_unexplained' },
+    @{ name='M10 wrong broker fill link accepted'; file=$domain; find='or fill\.broker_order_id != order\.broker_order_id'; repl='or False'; select='fill_with_wrong_broker_order_id_is_unexplained' }
 )
 
 function Get-Text([string]$path) { [System.IO.File]::ReadAllText($path) }

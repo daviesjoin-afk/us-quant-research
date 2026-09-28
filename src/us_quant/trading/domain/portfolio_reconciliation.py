@@ -32,6 +32,7 @@ class PortfolioOrderTruthRecord:
 
     intent: OrderIntent | None
     account_alias: str | None
+    broker_order_id: int | None = None
     events: tuple[OrderEvent, ...] = ()
     fills: tuple[ExecutionFill, ...] = ()
 
@@ -164,15 +165,19 @@ def reconcile_portfolio_truth(
             blockers.add(PortfolioReconciliationBlocker.PENDING_UNKNOWN_EXECUTION)
 
     seen_execution_ids: set[str] = set()
+    replay_batches = []
+    replay_state = {}
     for order_id in sorted(order_by_id):
         order = order_by_id[order_id]
         intent = order.intent
         assert intent is not None
         attribution = attribution_by_order.get(order_id)
-        fills = tuple(sorted(order.fills, key=lambda fill: (fill.occurred_at, fill.execution_id)))
+        fills = order.fills
         event = _latest_event(order.events)
         if event is None or event.status is OrderStatus.UNKNOWN:
             blockers.add(PortfolioReconciliationBlocker.PENDING_UNKNOWN_EXECUTION)
+        if event is not None and event.broker_order_id != order.broker_order_id:
+            blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
         if attribution is None:
             if fills:
                 blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_FILL)
@@ -194,6 +199,8 @@ def reconcile_portfolio_truth(
             or intent.execution_symbol != attribution.symbol
             or intent.side.value != attribution.side.value
             or intent.quantity != attribution.quantity
+            or order.broker_order_id is None
+            or order.broker_order_id <= 0
             or action.symbol != attribution.symbol
             or action.side.value != attribution.side.value
         ):
@@ -208,6 +215,7 @@ def reconcile_portfolio_truth(
                 or not isinstance(fill.quantity, Decimal)
                 or fill.symbol.strip().upper() != attribution.symbol
                 or fill.side is not intent.side
+                or fill.broker_order_id != order.broker_order_id
                 or not fill.quantity.is_finite()
                 or fill.quantity <= 0
                 or fill.quantity != fill.quantity.to_integral_value()
@@ -243,32 +251,48 @@ def reconcile_portfolio_truth(
             (item.strategy_version_id, item.proposal_id): item.signed_quantity
             for item in attribution.contributions
         }
-        prior_allocations = {key: 0 for key in contribution_by_key}
-        cumulative_fill = 0
-        for fill in fills:
-            cumulative_fill += int(fill.quantity)
-            signed_total = cumulative_fill if intent.side.value == "buy" else -cumulative_fill
-            current_allocations = _scale_contributions(
-                attribution.contributions,
-                signed_target=signed_total,
-                source_total=(
-                    attribution.quantity
-                    if attribution.side.value == "buy"
-                    else -attribution.quantity
-                ),
-            )
-            deltas = {
-                key: current_allocations.get(key, 0) - prior_allocations.get(key, 0)
-                for key in contribution_by_key
-            }
-            prior_allocations = current_allocations
-            _apply_fill(
-                accounting=accounting,
-                fill=fill,
-                deltas=deltas,
-                reference_price=action.reference_price,
-                blockers=blockers,
-            )
+        replay_state[order_id] = (
+            attribution,
+            action,
+            intent,
+            0,
+            {key: 0 for key in contribution_by_key},
+        )
+        replay_batches.extend((fill.occurred_at, fill.execution_id, order_id, fill) for fill in fills)
+
+    # A sell's strategy ownership depends on earlier fills from every order,
+    # not on UUID order. Replay the complete durable fill stream globally.
+    for _occurred_at, _execution_id, order_id, fill in sorted(replay_batches):
+        attribution, action, intent, cumulative_fill, prior_allocations = replay_state[order_id]
+        cumulative_fill += int(fill.quantity)
+        signed_total = cumulative_fill if intent.side.value == "buy" else -cumulative_fill
+        current_allocations = _scale_contributions(
+            attribution.contributions,
+            signed_target=signed_total,
+            source_total=(
+                attribution.quantity
+                if attribution.side.value == "buy"
+                else -attribution.quantity
+            ),
+        )
+        deltas = {
+            key: current_allocations.get(key, 0) - prior_allocations.get(key, 0)
+            for key in prior_allocations.keys() | current_allocations.keys()
+        }
+        replay_state[order_id] = (
+            attribution,
+            action,
+            intent,
+            cumulative_fill,
+            current_allocations,
+        )
+        _apply_fill(
+            accounting=accounting,
+            fill=fill,
+            deltas=deltas,
+            reference_price=action.reference_price,
+            blockers=blockers,
+        )
 
     broker_quantities: dict[str, Decimal] = {}
     for position in broker.positions:
@@ -354,7 +378,14 @@ def _latest_event(events: tuple[OrderEvent, ...]) -> OrderEvent | None:
     latest_at = ordered[-1].occurred_at
     latest = tuple(item for item in ordered if item.occurred_at == latest_at)
     latest_facts = {
-        (item.status, item.filled, item.remaining, item.average_fill_price, item.last_fill_price)
+        (
+            item.status,
+            item.broker_order_id,
+            item.filled,
+            item.remaining,
+            item.average_fill_price,
+            item.last_fill_price,
+        )
         for item in latest
     }
     if len(latest_facts) > 1:

@@ -172,7 +172,12 @@ def linked_order(
         events = (
             OrderEvent(
                 order_id=decision.order_id or "",
-                status=status or OrderStatus.PARTIALLY_FILLED,
+                broker_order_id=7,
+                status=status or (
+                    OrderStatus.FILLED
+                    if fill_quantity == Decimal(action.quantity)
+                    else OrderStatus.PARTIALLY_FILLED
+                ),
                 filled=fill_quantity,
                 remaining=Decimal(action.quantity) - fill_quantity,
                 occurred_at=NOW,
@@ -199,6 +204,7 @@ def linked_order(
         PortfolioOrderTruthRecord(
             intent=intent,
             account_alias=account_alias,
+            broker_order_id=7,
             events=events,
             fills=fills,
         ),
@@ -403,6 +409,60 @@ def test_durable_intent_without_broker_status_blocks_as_unknown_execution():
     assert Blocker.PENDING_UNKNOWN_EXECUTION in result.blockers
     assert result.open_order_ids == ("o",)
     assert not result.can_open_exposure
+
+
+def test_callback_with_wrong_broker_order_id_is_unexplained():
+    record = decision_record("d", (("a", "pa", 1),), order_id="o")
+    order, attribution = linked_order(
+        record,
+        fills=(fill("e", "o", 1),),
+        status=OrderStatus.FILLED,
+    )
+    bad_event = replace(order.events[0], broker_order_id=8)
+    result = reconcile(
+        {"AAPL": 1},
+        records=(record,),
+        orders=(replace(order, events=(bad_event,)),),
+        attributions=(attribution,),
+    )
+    assert Blocker.UNEXPLAINED_ORDER in result.blockers
+    assert not result.can_open_exposure
+
+
+def test_fill_with_wrong_broker_order_id_is_unexplained():
+    record = decision_record("d", (("a", "pa", 1),), order_id="o")
+    order, attribution = linked_order(
+        record,
+        fills=(replace(fill("e", "o", 1), broker_order_id=8),),
+        status=OrderStatus.FILLED,
+    )
+    result = reconcile(
+        {"AAPL": 1}, records=(record,), orders=(order,), attributions=(attribution,)
+    )
+    assert Blocker.UNEXPLAINED_FILL in result.blockers
+    assert not result.can_open_exposure
+
+
+def test_fill_history_replays_globally_by_time_not_random_order_id():
+    buy = decision_record("buy", (("a", "ba", 6),), order_id="z-buy")
+    sell = decision_record("sell", (("a", "sa", -4),), order_id="a-sell")
+    buy_order, buy_link = linked_order(
+        buy,
+        fills=(fill("buy-e", "z-buy", 6, occurred_at=NOW - timedelta(minutes=2)),),
+    )
+    sell_order, sell_link = linked_order(
+        sell,
+        fills=(fill("sell-e", "a-sell", 4, side=Side.SELL, price="12", occurred_at=NOW - timedelta(minutes=1)),),
+    )
+    result = reconcile(
+        {"AAPL": 2},
+        records=(buy, sell),
+        orders=(buy_order, sell_order),
+        attributions=(buy_link, sell_link),
+    )
+    assert result.can_open_exposure
+    assert result.strategy_accounting[0].quantity == 2
+    assert result.strategy_accounting[0].realized_pnl == Decimal("8")
 
 
 def test_unknown_fee_is_reported_as_incomplete_evidence():

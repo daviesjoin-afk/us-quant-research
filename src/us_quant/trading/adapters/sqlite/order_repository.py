@@ -239,7 +239,7 @@ class SQLiteOrderRepository:
             intents = connection.execute(
                 """SELECT intent_id, session_id, strategy_version_id, symbol,
                           side, quantity, limit_price, reason, generated_at,
-                          idempotency_key, account_alias
+                          idempotency_key, broker_order_id, account_alias
                    FROM paper_order_intent ORDER BY intent_id"""
             ).fetchall()
             updates = connection.execute(
@@ -255,6 +255,7 @@ class SQLiteOrderRepository:
 
         intent_by_id = {}
         alias_by_id = {}
+        broker_order_id_by_id = {}
         for row in intents:
             intent_by_id[str(row[0])] = _intent_from_columns(
                 order_id=str(row[0]), session_id=str(row[1]),
@@ -262,7 +263,8 @@ class SQLiteOrderRepository:
                 side=str(row[4]), quantity=int(row[5]), limit_price=str(row[6]),
                 reason=str(row[7]), generated_at=str(row[8]), idempotency_key=row[9],
             )
-            alias_by_id[str(row[0])] = str(row[10])
+            broker_order_id_by_id[str(row[0])] = int(row[10])
+            alias_by_id[str(row[0])] = str(row[11])
 
         events_by_id = {}
         for row in updates:
@@ -291,6 +293,7 @@ class SQLiteOrderRepository:
                 PortfolioOrderTruthRecord(
                     intent=intent_by_id.get(order_id),
                     account_alias=alias_by_id.get(order_id),
+                    broker_order_id=broker_order_id_by_id.get(order_id),
                     events=tuple(events_by_id.get(order_id, ())),
                     fills=tuple(fills_by_id.get(order_id, ())),
                 )

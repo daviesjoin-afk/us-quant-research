@@ -99,8 +99,14 @@ def _assert_desktop_paper_composition(path: Path, *, source_text: str | None = N
     tree = ast.parse(
         source_text if source_text is not None else path.read_text(encoding="utf-8")
     )
+    builder = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_build_paper_session"
+    )
+    builder_calls = _called_symbols(path, builder, source_text=source_text)
+    assert "build_portfolio_paper_session" in builder_calls
+
     calls = _called_symbols(path, tree, source_text=source_text)
-    assert "build_portfolio_paper_session" in calls
     assert not calls.intersection({
         "PortfolioPaperEngine", "PortfolioRuntime", "CapitalAllocator",
         "OrderDispatch", "SessionBook", "TradingRuntime",
@@ -173,6 +179,17 @@ def helper(): return LegacyRuntime()
 )
 def test_desktop_composition_guard_rejects_constructors_in_local_helpers(source_text):
     desktop_path = SOURCE / "desktop.py"
+    with pytest.raises(AssertionError):
+        _assert_desktop_paper_composition(desktop_path, source_text=source_text)
+
+
+def test_desktop_composition_guard_requires_builder_to_delegate_itself():
+    desktop_path = SOURCE / "desktop.py"
+    source_text = """
+def build_portfolio_paper_session(): pass
+def _build_paper_session(): pass
+def unrelated_helper(): return build_portfolio_paper_session()
+"""
     with pytest.raises(AssertionError):
         _assert_desktop_paper_composition(desktop_path, source_text=source_text)
 

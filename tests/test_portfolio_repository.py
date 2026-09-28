@@ -142,6 +142,22 @@ def test_corrupt_json_row_is_unreadable_not_an_empty_ledger(tmp_path):
         repository.decisions()
 
 
+def test_row_key_must_match_embedded_decision_id(tmp_path):
+    path = tmp_path / "portfolio.sqlite"
+    repository = SQLitePortfolioRepository(path)
+    repository.record_decision(_record())
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE portfolio_decision SET decision_id = ? WHERE decision_id = ?",
+            ("other-key", "decision-a"),
+        )
+
+    with pytest.raises(PortfolioStoreUnreadable):
+        repository.decision("other-key")
+    with pytest.raises(PortfolioStoreUnreadable):
+        repository.decisions()
+
+
 @pytest.mark.parametrize(
     "corrupt",
     [

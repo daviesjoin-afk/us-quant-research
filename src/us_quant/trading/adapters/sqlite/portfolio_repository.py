@@ -66,11 +66,18 @@ def _record_payload(record: PortfolioDecisionRecord) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
-def _from_payload(raw: str) -> PortfolioDecisionRecord:
+def _from_payload(
+    raw: str, *, expected_decision_id: str | None = None
+) -> PortfolioDecisionRecord:
     try:
         value = json.loads(raw)
         if not isinstance(value, dict):
             raise ValueError("portfolio row must be a JSON object")
+        if (
+            expected_decision_id is not None
+            and value.get("decision_id") != expected_decision_id
+        ):
+            raise ValueError("portfolio row key does not match its decision ID")
         attribution_data = value["attribution"]
         if not isinstance(attribution_data, list) or not attribution_data:
             raise ValueError("decision attribution is missing")
@@ -147,17 +154,20 @@ class SQLitePortfolioRepository:
     def decision(self, decision_id: str) -> PortfolioDecisionRecord | None:
         with closing(connect_sqlite(self.path)) as connection:
             row = connection.execute(
-                "SELECT payload FROM portfolio_decision WHERE decision_id = ?",
+                "SELECT decision_id, payload FROM portfolio_decision WHERE decision_id = ?",
                 (decision_id,),
             ).fetchone()
-        return _from_payload(row[0]) if row else None
+        return _from_payload(row[1], expected_decision_id=row[0]) if row else None
 
     def decisions(self) -> tuple[PortfolioDecisionRecord, ...]:
         with closing(connect_sqlite(self.path)) as connection:
             rows = connection.execute(
-                "SELECT payload FROM portfolio_decision ORDER BY decision_id"
+                "SELECT decision_id, payload FROM portfolio_decision ORDER BY decision_id"
             ).fetchall()
-        return tuple(_from_payload(row[0]) for row in rows)
+        return tuple(
+            _from_payload(payload, expected_decision_id=decision_id)
+            for decision_id, payload in rows
+        )
 
     def record_decision(self, record: PortfolioDecisionRecord) -> PortfolioDecisionRecord:
         if not isinstance(record, PortfolioDecisionRecord):
@@ -165,11 +175,11 @@ class SQLitePortfolioRepository:
         with closing(connect_sqlite(self.path)) as connection:
             with connection:
                 row = connection.execute(
-                    "SELECT payload FROM portfolio_decision WHERE decision_id = ?",
+                    "SELECT decision_id, payload FROM portfolio_decision WHERE decision_id = ?",
                     (record.decision.decision_id,),
                 ).fetchone()
                 if row:
-                    stored = _from_payload(row[0])
+                    stored = _from_payload(row[1], expected_decision_id=row[0])
                     # Risk/execution facts may have been appended after the
                     # original decision; retrying the original append remains
                     # idempotent and must preserve those later facts.
@@ -200,12 +210,12 @@ class SQLitePortfolioRepository:
         with closing(connect_sqlite(self.path)) as connection:
             with connection:
                 row = connection.execute(
-                    "SELECT payload FROM portfolio_decision WHERE decision_id = ?",
+                    "SELECT decision_id, payload FROM portfolio_decision WHERE decision_id = ?",
                     (record.decision.decision_id,),
                 ).fetchone()
                 if row is None:
                     raise ValueError("portfolio decision does not exist")
-                current = _from_payload(row[0])
+                current = _from_payload(row[1], expected_decision_id=row[0])
                 if current.revision != expected_revision:
                     raise ValueError("stale portfolio decision revision")
                 if (
@@ -221,7 +231,7 @@ class SQLitePortfolioRepository:
                 updated = replace(record, revision=current.revision + 1)
                 cursor = connection.execute(
                     "UPDATE portfolio_decision SET payload = ? WHERE decision_id = ? AND payload = ?",
-                    (_record_payload(updated), record.decision.decision_id, row[0]),
+                    (_record_payload(updated), record.decision.decision_id, row[1]),
                 )
                 if cursor.rowcount != 1:
                     raise ValueError("stale portfolio decision revision")

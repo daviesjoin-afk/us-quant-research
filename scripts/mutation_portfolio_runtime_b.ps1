@@ -18,7 +18,8 @@ $mutations = @(
     @{ name='M4 corrupt state is returned as empty'; file=$repo; find='raise PortfolioStoreUnreadable\("stored portfolio decision is unreadable"\) from exc'; repl='return None'; select='corrupt_json_row_is_unreadable_not_an_empty_ledger' },
     @{ name='M5 signed attribution is converted to absolute quantity'; file=$repo; find='"signed_requested_quantity": item\.signed_requested_quantity'; repl='"signed_requested_quantity": abs(item.signed_requested_quantity)'; select='round_trip_survives_repository_restart' },
     @{ name='M6 zero-net decision reconstructs an action'; file=$repo; find='if action_data is not None'; repl='if action_data is not None or value["net_quantity"] == 0'; select='zero_net_decision_persists_without_action' },
-    @{ name='M7 domain symbol canonicalization is bypassed'; file=$domain; find='return value\.strip\(\)\.upper\(\)'; repl='return value'; select='round_trip_survives_repository_restart' }
+    @{ name='M7 domain symbol canonicalization is bypassed'; file=$domain; find='return value\.strip\(\)\.upper\(\)'; repl='return value'; select='round_trip_survives_repository_restart' },
+    @{ name='M8 SQL key mismatch is accepted'; file=$repo; find='if \(\s+expected_decision_id is not None\s+and value\.get\("decision_id"\) != expected_decision_id\s+\):'; repl='if False:'; select='row_key_must_match_embedded_decision_id' }
 )
 
 function Get-Text([string]$path) { [System.IO.File]::ReadAllText($path) }

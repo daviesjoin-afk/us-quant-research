@@ -605,6 +605,7 @@ class IBKRExecutionAdapter:
                 raise IBKRPaperOrderError("对账快照连接已失效")
         for contract, execution in attempt.executions:
             self._record_execution(contract, execution)
+        open_orders = self._open_orders_with_current_remaining(attempt)
         with self._state_lock:
             if (
                 self._refresh_attempt is not attempt
@@ -632,21 +633,6 @@ class IBKRExecutionAdapter:
             captured_at = self._broker_observed_at
             positions = tuple(
                 sorted(self._broker_positions.values(), key=lambda row: row.symbol)
-            )
-            open_orders = tuple(
-                sorted(
-                    (
-                        replace(
-                            order,
-                            status=attempt.order_statuses[order_id][0],
-                            remaining_quantity=attempt.order_statuses[order_id][2],
-                        )
-                        if order_id in attempt.order_statuses
-                        else order
-                        for order_id, order in attempt.open_orders.items()
-                    ),
-                    key=lambda row: row.broker_order_id,
-                )
             )
             completed_orders = tuple(
                 sorted(
@@ -683,6 +669,45 @@ class IBKRExecutionAdapter:
             state_version=state_version,
             digest=digest,
         )
+
+    def _open_orders_with_current_remaining(
+        self, attempt: _ReconciliationRefreshAttempt
+    ) -> tuple[PaperBrokerOrder, ...]:
+        """Use broker status or durable executions from this refresh for remaining.
+
+        IBKR's openOrder callback has no remaining field. If its optional
+        orderStatus callback was absent, the completed reqExecutions refresh has
+        already been durably recorded above, so total quantity minus all known
+        broker fills remains a reproducible current observation.
+        """
+
+        with self._correlation_lock:
+            intents = dict(self._intent_by_order)
+        result = []
+        for order_id, order in attempt.open_orders.items():
+            status = attempt.order_statuses.get(order_id)
+            remaining = status[2] if status is not None else None
+            if remaining is None:
+                intent = intents.get(order_id)
+                if intent is not None:
+                    fills = self.repository.fills(intent.order_id)
+                    filled = sum(
+                        (
+                            fill.quantity
+                            for fill in fills
+                            if fill.broker_order_id == order_id
+                        ),
+                        Decimal("0"),
+                    )
+                    remaining = order.quantity - filled
+            result.append(
+                replace(
+                    order,
+                    status=status[0] if status is not None else order.status,
+                    remaining_quantity=remaining,
+                )
+            )
+        return tuple(sorted(result, key=lambda row: row.broker_order_id))
 
     def _is_current_connection(self, app: Any, epoch: int) -> bool:
         with self._state_lock:

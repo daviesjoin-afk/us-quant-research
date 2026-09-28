@@ -95,6 +95,7 @@ class PaperBrokerOrder:
     side: str
     quantity: Decimal
     status: str
+    remaining_quantity: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)

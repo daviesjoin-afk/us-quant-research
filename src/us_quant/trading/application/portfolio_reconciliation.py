@@ -9,6 +9,7 @@ from us_quant.trading.domain.portfolio_reconciliation import (
     PortfolioReconciliationResult,
     reconcile_portfolio_truth,
 )
+from us_quant.trading.ports.broker_open_order_truth import BrokerOpenOrderTruthSource
 from us_quant.trading.ports.portfolio_order_truth import PortfolioOrderTruthSource
 from us_quant.trading.ports.portfolio_repository import PortfolioStateRepositoryPort
 
@@ -21,10 +22,12 @@ class PortfolioReconciliationApplication:
         *,
         portfolio_repository: PortfolioStateRepositoryPort,
         order_truth: PortfolioOrderTruthSource,
+        broker_order_truth: BrokerOpenOrderTruthSource,
         max_snapshot_age: timedelta = timedelta(minutes=5),
     ) -> None:
         self._portfolio_repository = portfolio_repository
         self._order_truth = order_truth
+        self._broker_order_truth = broker_order_truth
         self._max_snapshot_age = max_snapshot_age
 
     def reconcile(
@@ -37,6 +40,7 @@ class PortfolioReconciliationApplication:
         return reconcile_portfolio_truth(
             now=now,
             broker=broker,
+            broker_order_truth=self._broker_order_truth.broker_open_order_truth(),
             order_truth=self._order_truth.portfolio_order_truth(),
             decisions=self._portfolio_repository.decisions(),
             execution_attributions=self._portfolio_repository.execution_attributions(),

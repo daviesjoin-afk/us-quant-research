@@ -99,6 +99,7 @@ def test_migrated_models_keep_their_exact_field_contract() -> None:
             ("side", "str", None),
             ("quantity", "Decimal", None),
             ("status", "str", None),
+            ("remaining_quantity", "Decimal | None", None),
         ],
         "ReconciliationSummary": [
             ("session_id", "str", None),
@@ -149,6 +150,7 @@ def test_models_keep_their_declared_defaults() -> None:
             "observed_at": "",
         },
         "PaperReconciliationSnapshot": {"snapshot_complete": True},
+        "PaperBrokerOrder": {"remaining_quantity": None},
     }
 
     seen: set[tuple[str, str]] = set()

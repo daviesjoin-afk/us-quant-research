@@ -33,7 +33,7 @@ margin-borrowing surface.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
@@ -119,6 +119,7 @@ class _ReconciliationRefreshAttempt:
     open_orders: dict[int, PaperBrokerOrder]
     completed_orders: dict[int, PaperBrokerOrder]
     executions: list[tuple[Any, Any]]
+    order_statuses: dict[int, tuple[str, Decimal, Decimal]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -633,7 +634,19 @@ class IBKRExecutionAdapter:
                 sorted(self._broker_positions.values(), key=lambda row: row.symbol)
             )
             open_orders = tuple(
-                sorted(attempt.open_orders.values(), key=lambda row: row.broker_order_id)
+                sorted(
+                    (
+                        replace(
+                            order,
+                            status=attempt.order_statuses[order_id][0],
+                            remaining_quantity=attempt.order_statuses[order_id][2],
+                        )
+                        if order_id in attempt.order_statuses
+                        else order
+                        for order_id, order in attempt.open_orders.items()
+                    ),
+                    key=lambda row: row.broker_order_id,
+                )
             )
             completed_orders = tuple(
                 sorted(
@@ -821,6 +834,11 @@ class IBKRExecutionAdapter:
         market_cap_price: Any,
     ) -> None:
         del perm_id, parent_id, client_id, market_cap_price
+        attempt = self._refresh_attempt_for(app, epoch)
+        if attempt is not None:
+            attempt.order_statuses[int(order_id)] = (
+                str(status), Decimal(str(filled)), Decimal(str(remaining))
+            )
         self._record_order_status(
             orderId=order_id,
             status=status,
@@ -1801,6 +1819,11 @@ def _paper_broker_order(
         side=str(order.action).upper(),
         quantity=Decimal(str(order.totalQuantity)),
         status=str(order_state.status),
+        remaining_quantity=(
+            Decimal(str(order_state.remaining))
+            if getattr(order_state, "remaining", None) is not None
+            else None
+        ),
     )
 
 
@@ -1837,6 +1860,9 @@ def _reconciliation_snapshot_digest(
                 row.side,
                 str(row.quantity),
                 row.status,
+                str(row.remaining_quantity)
+                if row.remaining_quantity is not None
+                else None,
             )
             for row in open_orders
         ],

@@ -7,6 +7,18 @@ import sqlite3
 
 import pytest
 
+from us_quant.paper_order_models import (
+    PaperBrokerOrder,
+    PaperOrderConnection,
+    PaperReconciliationSnapshot,
+    ReconciliationSummary,
+)
+from us_quant.trading.adapters.ibkr.portfolio_reconciliation_mapping import (
+    broker_open_order_truth_from_snapshot,
+)
+from us_quant.trading.adapters.ibkr.portfolio_reconciliation import (
+    IBKRPaperOpenOrderTruthSource,
+)
 from us_quant.trading.adapters.sqlite.order_repository import SQLiteOrderRepository
 from us_quant.trading.adapters.sqlite.portfolio_repository import SQLitePortfolioRepository
 from us_quant.trading.application.portfolio_reconciliation import (
@@ -39,6 +51,8 @@ from us_quant.trading.domain.portfolio_ledger import (
     execution_contributions_for_quantity,
 )
 from us_quant.trading.domain.portfolio_reconciliation import (
+    BrokerOpenOrder,
+    BrokerOpenOrderTruth,
     PortfolioOrderTruth,
     PortfolioOrderTruthRecord,
     PortfolioReconciliationBlocker as Blocker,
@@ -242,14 +256,33 @@ def reconcile(
     orders: tuple[PortfolioOrderTruthRecord, ...] = (),
     attributions: tuple[PortfolioExecutionAttribution, ...] = (),
     observed_at: datetime = NOW,
+    broker_orders: tuple[BrokerOpenOrder, ...] = (),
+    broker_orders_complete: bool = True,
+    broker_orders_observed_at: datetime = NOW,
 ):
     return reconcile_portfolio_truth(
         now=NOW,
         broker=broker(quantities=quantities, observed_at=observed_at),
+        broker_order_truth=BrokerOpenOrderTruth(
+            account_alias=ACCOUNT_ALIAS,
+            observed_at=broker_orders_observed_at,
+            snapshot_complete=broker_orders_complete,
+            open_orders=broker_orders,
+        ),
         order_truth=PortfolioOrderTruth(orders),
         decisions=records,
         execution_attributions=attributions,
     )
+
+
+class _BrokerOrderSource:
+    def __init__(self, truth: BrokerOpenOrderTruth):
+        self.truth = truth
+        self.calls = 0
+
+    def broker_open_order_truth(self) -> BrokerOpenOrderTruth:
+        self.calls += 1
+        return self.truth
 
 
 def test_restart_rebuilds_positions_from_durable_portfolio_and_order_facts(tmp_path):
@@ -280,12 +313,25 @@ def test_restart_rebuilds_positions_from_durable_portfolio_and_order_facts(tmp_p
     orders_writer.record_fill(order.fills[0])
 
     # New instances model a process restart: no in-memory holdings are supplied.
+    broker_order_source = _BrokerOrderSource(
+        BrokerOpenOrderTruth(
+            ACCOUNT_ALIAS,
+            NOW,
+            True,
+            (BrokerOpenOrder(7, ACCOUNT_ALIAS, "AAPL", Side.BUY, Decimal("10"), Decimal("6")),),
+        )
+    )
     recovered = PortfolioReconciliationApplication(
         portfolio_repository=SQLitePortfolioRepository(portfolio_db),
         order_truth=SQLiteOrderRepository(orders_db),
-    ).reconcile(broker=broker(quantities={"AAPL": 4}), now=NOW)
+        broker_order_truth=broker_order_source,
+    ).reconcile(
+        broker=broker(quantities={"AAPL": 4}),
+        now=NOW,
+    )
 
     assert recovered.can_open_exposure
+    assert broker_order_source.calls == 1
     assert recovered.positions[0].attributed_quantity == 4
     assert [(item.strategy_version_id, item.quantity) for item in recovered.strategy_accounting] == [
         ("strategy-a", 3), ("strategy-b", 1)
@@ -295,7 +341,12 @@ def test_restart_rebuilds_positions_from_durable_portfolio_and_order_facts(tmp_p
 def test_matching_broker_position_passes_and_mismatch_blocks():
     record = decision_record("d", (("a", "pa", 7), ("b", "pb", 3)), order_id="o")
     order, attribution = linked_order(record, fills=(fill("e", "o", 4),))
-    matched = reconcile({"AAPL": 4}, records=(record,), orders=(order,), attributions=(attribution,))
+    matched = reconcile(
+        {"AAPL": 4}, records=(record,), orders=(order,), attributions=(attribution,),
+        broker_orders=(
+            BrokerOpenOrder(7, ACCOUNT_ALIAS, "AAPL", Side.BUY, Decimal("10"), Decimal("6")),
+        ),
+    )
     mismatched = reconcile({"AAPL": 5}, records=(record,), orders=(order,), attributions=(attribution,))
     assert matched.can_open_exposure
     assert Blocker.ATTRIBUTION_MISMATCH in mismatched.blockers
@@ -306,6 +357,222 @@ def test_unknown_external_position_blocks_without_assigning_strategy():
     result = reconcile({"AAPL": 5})
     assert Blocker.UNEXPLAINED_POSITION in result.blockers
     assert result.positions[0].attributed_quantity == 0
+
+
+def test_unknown_broker_open_order_blocks_even_when_local_ledger_is_empty():
+    result = reconcile(
+        {},
+        broker_orders=(
+            BrokerOpenOrder(
+                broker_order_id=91,
+                account_alias=ACCOUNT_ALIAS,
+                symbol="AAPL",
+                side=Side.BUY,
+                quantity=Decimal("100"),
+                remaining_quantity=Decimal("100"),
+            ),
+        ),
+    )
+    assert Blocker.UNEXPLAINED_ORDER in result.blockers
+    assert not result.can_open_exposure
+
+
+def test_local_and_broker_open_order_truth_must_match_all_identities_and_remaining():
+    record = decision_record("d-open", (("a", "pa", 5),), order_id="open-order")
+    order, attribution = linked_order(
+        record,
+        fills=(fill("open-fill", "open-order", 1),),
+        status=OrderStatus.PARTIALLY_FILLED,
+    )
+    matching_broker_order = BrokerOpenOrder(
+        broker_order_id=7,
+        account_alias=ACCOUNT_ALIAS,
+        symbol="AAPL",
+        side=Side.BUY,
+        quantity=Decimal("5"),
+        remaining_quantity=Decimal("4"),
+    )
+    matched = reconcile(
+        {"AAPL": 1}, records=(record,), orders=(order,), attributions=(attribution,),
+        broker_orders=(matching_broker_order,),
+    )
+    assert matched.can_open_exposure
+
+    for altered in (
+        replace(matching_broker_order, broker_order_id=8),
+        replace(matching_broker_order, account_alias="DU***99"),
+        replace(matching_broker_order, symbol="MSFT"),
+        replace(matching_broker_order, side=Side.SELL),
+        replace(matching_broker_order, quantity=Decimal("6")),
+        replace(matching_broker_order, remaining_quantity=Decimal("3")),
+        replace(matching_broker_order, remaining_quantity=None),
+    ):
+        result = reconcile(
+            {"AAPL": 1}, records=(record,), orders=(order,), attributions=(attribution,),
+            broker_orders=(altered,),
+        )
+        assert Blocker.UNEXPLAINED_ORDER in result.blockers
+        assert not result.can_open_exposure
+
+
+def test_missing_or_incomplete_broker_open_order_snapshot_blocks():
+    record = decision_record("d-open", (("a", "pa", 5),), order_id="open-order")
+    order, attribution = linked_order(record, fills=(), status=OrderStatus.ACKNOWLEDGED)
+    missing = reconcile(
+        {}, records=(record,), orders=(order,), attributions=(attribution,),
+    )
+    incomplete = reconcile({}, broker_orders_complete=False)
+    stale = reconcile({}, broker_orders_observed_at=NOW - timedelta(minutes=6))
+    for result in (missing, incomplete, stale):
+        assert Blocker.UNEXPLAINED_ORDER in result.blockers or Blocker.STALE_SNAPSHOT in result.blockers
+        assert not result.can_open_exposure
+
+
+def test_ibkr_snapshot_projects_external_orders_and_requires_remaining_truth():
+    summary = ReconciliationSummary("session", 0, 0, 0, 0, 0, 0, NOW.isoformat())
+    complete_snapshot = PaperReconciliationSnapshot(
+        account_fingerprint="opaque",
+        connection_generation=2,
+        reconciliation_generation=4,
+        captured_at=NOW.isoformat(),
+        broker_positions=(),
+        open_broker_orders=(
+            PaperBrokerOrder(
+                91, "AAPL", "BUY", Decimal("100"), "Submitted", Decimal("60")
+            ),
+        ),
+        completed_broker_orders=(),
+        reconciliation_summary=summary,
+        state_version=8,
+        digest="digest",
+    )
+    truth = broker_open_order_truth_from_snapshot(
+        complete_snapshot, account_alias=ACCOUNT_ALIAS
+    )
+    assert truth.snapshot_complete
+    assert truth.open_orders == (
+        BrokerOpenOrder(
+            91, ACCOUNT_ALIAS, "AAPL", Side.BUY, Decimal("100"), Decimal("60")
+        ),
+    )
+    assert not reconcile({}, broker_orders=truth.open_orders).can_open_exposure
+
+    missing_remaining = replace(
+        complete_snapshot,
+        open_broker_orders=(
+            replace(complete_snapshot.open_broker_orders[0], remaining_quantity=None),
+        ),
+    )
+    incomplete_truth = broker_open_order_truth_from_snapshot(
+        missing_remaining, account_alias=ACCOUNT_ALIAS
+    )
+    assert not incomplete_truth.snapshot_complete
+    result = reconcile(
+        {},
+        broker_orders=incomplete_truth.open_orders,
+        broker_orders_complete=incomplete_truth.snapshot_complete,
+    )
+    assert Blocker.UNEXPLAINED_ORDER in result.blockers
+    assert not result.can_open_exposure
+
+
+def test_ibkr_order_truth_source_rejects_connection_generation_drift():
+    snapshot = PaperReconciliationSnapshot(
+        account_fingerprint="opaque",
+        connection_generation=2,
+        reconciliation_generation=4,
+        captured_at=NOW.isoformat(),
+        broker_positions=(),
+        open_broker_orders=(),
+        completed_broker_orders=(),
+        reconciliation_summary=ReconciliationSummary(
+            "session", 0, 0, 0, 0, 0, 0, NOW.isoformat()
+        ),
+        state_version=8,
+        digest="digest",
+    )
+    connection = PaperOrderConnection(
+        True, ACCOUNT_ALIAS, 176, "connected", 1,
+        connection_generation=2, snapshot_complete=True,
+    )
+
+    class OrderPort:
+        current = True
+
+        def refresh_reconciliation_snapshot(self, session_id):
+            assert session_id == "session"
+            return snapshot
+
+        def connection_snapshot(self):
+            return connection
+
+        def reconciliation_snapshot_is_current(self, value):
+            assert value is snapshot
+            return self.current
+
+    orders = OrderPort()
+    source = IBKRPaperOpenOrderTruthSource(orders=orders, session_id="session")
+    assert source.broker_open_order_truth().snapshot_complete
+    orders.current = False
+    assert not source.broker_open_order_truth().snapshot_complete
+
+
+def test_opposing_contributor_slippage_uses_signed_strategy_direction():
+    buy_seed = decision_record("buy-seed", (("b", "seed", 4),), order_id="seed-b")
+    buy_seed_order, buy_seed_link = linked_order(
+        buy_seed,
+        fills=(fill("seed-fill", "seed-b", 4, price="10"),),
+    )
+    net_buy = decision_record(
+        "net-buy", (("a", "buy-a", 6), ("b", "sell-b", -4)), order_id="net-buy-order"
+    )
+    buy_fills = (
+        fill("buy-fill-2", "net-buy-order", 1, price="11", occurred_at=NOW),
+        fill("buy-fill-1", "net-buy-order", 1, price="11", occurred_at=NOW - timedelta(seconds=1)),
+    )
+    buy_order, buy_link = linked_order(
+        net_buy, fills=buy_fills, status=OrderStatus.FILLED
+    )
+    buy_results = (
+        reconcile(
+            {"AAPL": 6}, records=(buy_seed, net_buy),
+            orders=(buy_seed_order, buy_order),
+            attributions=(buy_seed_link, buy_link),
+        ),
+        reconcile(
+            {"AAPL": 6}, records=(net_buy, buy_seed),
+            orders=(buy_order, buy_seed_order),
+            attributions=(buy_link, buy_seed_link),
+        ),
+    )
+    for result in buy_results:
+        slippage = {item.strategy_version_id: item.slippage for item in result.strategy_accounting}
+        assert slippage == {"a": Decimal("6"), "b": Decimal("-4")}
+    assert buy_results[0].strategy_accounting == buy_results[1].strategy_accounting
+
+    sell_seed = decision_record("sell-seed", (("a", "seed", 6),), order_id="seed-a")
+    sell_seed_order, sell_seed_link = linked_order(
+        sell_seed,
+        fills=(fill("seed-fill-a", "seed-a", 6, price="10"),),
+    )
+    net_sell = decision_record(
+        "net-sell", (("a", "sell-a", -6), ("b", "buy-b", 4)), order_id="net-sell-order"
+    )
+    sell_order, sell_link = linked_order(
+        net_sell,
+        fills=(
+            fill("sell-fill-2", "net-sell-order", 1, side=Side.SELL, price="9", occurred_at=NOW),
+            fill("sell-fill-1", "net-sell-order", 1, side=Side.SELL, price="9", occurred_at=NOW - timedelta(seconds=1)),
+        ),
+        status=OrderStatus.FILLED,
+    )
+    sell_result = reconcile(
+        {"AAPL": 4}, records=(sell_seed, net_sell),
+        orders=(sell_seed_order, sell_order),
+        attributions=(sell_seed_link, sell_link),
+    )
+    sell_slippage = {item.strategy_version_id: item.slippage for item in sell_result.strategy_accounting}
+    assert sell_slippage == {"a": Decimal("6"), "b": Decimal("-4")}
 
 
 def test_unknown_order_and_fill_block():

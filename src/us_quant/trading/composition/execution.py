@@ -32,6 +32,7 @@ from us_quant.trading.application.execution import ExecutionApplication
 from us_quant.trading.application.live_canary_execution import (
     LiveCanaryExecutionGuard,
 )
+from us_quant.trading.application.live_recovery import LiveCanaryRecovery
 from us_quant.trading.domain.common import Environment
 from us_quant.trading.domain.execution_environment import (
     ExecutionDeploymentError,
@@ -168,6 +169,11 @@ def build_live_execution_candidate_factory(
             ) from error
         if not isinstance(state, LiveAuthorizationState):
             raise ExecutionDeploymentError("Live authorization state is invalid")
+        # Every process starts behind a durable reconciliation barrier. Keep the
+        # broker channel available so the operator can reconnect and inspect it.
+        durable_state = LiveCanaryRecovery(live_safety_repository).require_reconciliation(
+            reason="Live process start requires fresh broker reconciliation"
+        )
         authorization = state.authorization
         if authorization is None:
             raise ExecutionDeploymentError(

@@ -242,6 +242,46 @@ class LiveKillLatch:
         return LiveKillLatch()
 
 
+@dataclass(frozen=True, slots=True)
+class LiveRecoveryLatch:
+    """Durable barrier requiring fresh reconciliation after an unsafe event."""
+
+    required_at: datetime | None = None
+    reason: str | None = None
+    broker_order_id: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.required_at is None) != (self.reason is None):
+            raise LiveSafetyError("recovery time and reason must be set together")
+        if self.required_at is not None:
+            _aware(self.required_at, "required_at")
+            if not self.reason or not self.reason.strip():
+                raise LiveSafetyError("recovery reason must not be blank")
+        if self.broker_order_id is not None and (
+            type(self.broker_order_id) is not int or self.broker_order_id <= 0
+        ):
+            raise LiveSafetyError("recovery broker order id must be a positive integer")
+
+    @property
+    def is_required(self) -> bool:
+        return self.required_at is not None
+
+    def require(
+        self,
+        *,
+        at: datetime,
+        reason: str,
+        broker_order_id: int | None = None,
+    ) -> "LiveRecoveryLatch":
+        _aware(at, "at")
+        if not isinstance(reason, str) or not reason.strip():
+            raise LiveSafetyError("recovery barrier requires a reason")
+        return LiveRecoveryLatch(at, reason.strip(), broker_order_id)
+
+    def clear(self) -> "LiveRecoveryLatch":
+        return LiveRecoveryLatch()
+
+
 class LiveArmBlocker(StrEnum):
     AUTHORIZATION_MISSING = "authorization_missing"
     AUTHORIZATION_EXPIRED = "authorization_expired"
@@ -250,6 +290,7 @@ class LiveArmBlocker(StrEnum):
     STRATEGY_NOT_APPROVED = "strategy_not_approved"
     INVALID_LIMITS = "invalid_limits"
     KILL_LATCHED = "kill_latched"
+    RECOVERY_REQUIRED = "recovery_required"
     OPERATOR_CONFIRMATION_REQUIRED = "operator_confirmation_required"
 
 
@@ -259,6 +300,7 @@ class LiveAuthorizationState:
 
     authorization: LiveOperatorAuthorization | None = None
     kill_latch: LiveKillLatch = LiveKillLatch()
+    recovery_latch: LiveRecoveryLatch = LiveRecoveryLatch()
     session_armed: bool = field(default=False, init=False)
     session_arm_id: str | None = field(default=None, init=False, repr=False)
     session_arm_revision: int | None = field(default=None, init=False, repr=False)
@@ -270,6 +312,8 @@ class LiveAuthorizationState:
             raise LiveSafetyError("authorization has an invalid type")
         if not isinstance(self.kill_latch, LiveKillLatch):
             raise LiveSafetyError("kill_latch has an invalid type")
+        if not isinstance(self.recovery_latch, LiveRecoveryLatch):
+            raise LiveSafetyError("recovery_latch has an invalid type")
 
     def arm_blockers(
         self,
@@ -306,6 +350,8 @@ class LiveAuthorizationState:
             blockers.extend(authorization.approved_canary_limits.blockers())
         if self.kill_latch.is_latched:
             blockers.append(LiveArmBlocker.KILL_LATCHED)
+        if self.recovery_latch.is_required:
+            blockers.append(LiveArmBlocker.RECOVERY_REQUIRED)
         if not operator_confirmed:
             blockers.append(LiveArmBlocker.OPERATOR_CONFIRMATION_REQUIRED)
         return tuple(dict.fromkeys(blockers))
@@ -320,7 +366,9 @@ class LiveAuthorizationState:
         blockers = self.arm_blockers(**facts)  # type: ignore[arg-type]
         if blockers:
             raise LiveArmRefused(blockers)
-        armed = LiveAuthorizationState(self.authorization, self.kill_latch)
+        armed = LiveAuthorizationState(
+            self.authorization, self.kill_latch, self.recovery_latch
+        )
         object.__setattr__(armed, "session_armed", True)
         object.__setattr__(armed, "session_arm_id", uuid4().hex)
         object.__setattr__(armed, "session_arm_revision", safety_revision)
@@ -329,7 +377,9 @@ class LiveAuthorizationState:
     def after_restart(self) -> "LiveAuthorizationState":
         """Rebuild process-local state from durable facts without an arm."""
 
-        return LiveAuthorizationState(self.authorization, self.kill_latch)
+        return LiveAuthorizationState(
+            self.authorization, self.kill_latch, self.recovery_latch
+        )
 
     def engage_kill(self, *, at: datetime, reason: str) -> "LiveAuthorizationState":
         """Latch the kill and drop this process's arm in the same value change."""
@@ -337,6 +387,7 @@ class LiveAuthorizationState:
         return LiveAuthorizationState(
             self.authorization,
             self.kill_latch.engage(at=at, reason=reason),
+            self.recovery_latch,
         )
 
 
@@ -353,6 +404,7 @@ class LiveSafetyRecord:
     revision: int = 0
     authorization: LiveOperatorAuthorization | None = None
     kill_latch: LiveKillLatch = LiveKillLatch()
+    recovery_latch: LiveRecoveryLatch = LiveRecoveryLatch()
 
     def __post_init__(self) -> None:
         if type(self.revision) is not int or self.revision < 0:
@@ -363,6 +415,8 @@ class LiveSafetyRecord:
             raise LiveSafetyError("authorization has an invalid type")
         if not isinstance(self.kill_latch, LiveKillLatch):
             raise LiveSafetyError("kill_latch has an invalid type")
+        if not isinstance(self.recovery_latch, LiveRecoveryLatch):
+            raise LiveSafetyError("recovery_latch has an invalid type")
 
 
 __all__ = [
@@ -372,6 +426,7 @@ __all__ = [
     "LiveAuthorizationState",
     "LiveCanaryLimits",
     "LiveKillLatch",
+    "LiveRecoveryLatch",
     "LiveOperation",
     "LiveOperatorAuthorization",
     "LiveSafetyError",

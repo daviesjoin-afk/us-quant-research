@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from us_quant.trading.domain.live_safety import LiveSafetyRecord
@@ -21,6 +22,22 @@ class LiveSafetyStoreUnreadable(LiveSafetyRepositoryError):
 
 
 @runtime_checkable
+class LiveSafetyExecutionLease(Protocol):
+    """Locked durable state and atomic recovery-barrier mutation."""
+
+    @property
+    def record(self) -> LiveSafetyRecord: ...
+
+    def require_reconciliation(
+        self,
+        *,
+        at: datetime,
+        reason: str,
+        broker_order_id: int | None = None,
+    ) -> LiveSafetyRecord: ...
+
+
+@runtime_checkable
 class LiveSafetyRepositoryPort(Protocol):
     """Store authorization and kill latch only, never process-local arm state."""
 
@@ -30,12 +47,13 @@ class LiveSafetyRepositoryPort(Protocol):
     def save(self, *, expected_revision: int, replacement: LiveSafetyRecord) -> None:
         """Atomically compare-and-swap the complete durable safety record."""
 
-    def execution_lease(self) -> AbstractContextManager[LiveSafetyRecord]:
+    def execution_lease(self) -> AbstractContextManager[LiveSafetyExecutionLease]:
         """Serialize a broker submit against every durable authorization update."""
 
 
 __all__ = [
     "LiveSafetyConflict",
+    "LiveSafetyExecutionLease",
     "LiveSafetyRepositoryError",
     "LiveSafetyRepositoryPort",
     "LiveSafetyStoreUnreadable",

@@ -43,6 +43,7 @@ class LiveStartupBlocker(StrEnum):
     RECONCILIATION_STALE = "reconciliation_stale"
     RECONCILIATION_UNCLEAN = "reconciliation_unclean"
     KILL_LATCHED = "kill_latched"
+    RECOVERY_REQUIRED = "recovery_required"
     AUTHORIZATION_MISSING = "authorization_missing"
     AUTHORIZATION_EXPIRED = "authorization_expired"
     AUTHORIZATION_REVOKED = "authorization_revoked"
@@ -299,6 +300,8 @@ class LiveStartupProof:
 
         if authorization_state.kill_latch.is_latched:
             blockers.append(LiveStartupBlocker.KILL_LATCHED)
+        if authorization_state.recovery_latch.is_required:
+            blockers.append(LiveStartupBlocker.RECOVERY_REQUIRED)
         if not authorization_state.session_armed:
             blockers.append(LiveStartupBlocker.SESSION_NOT_ARMED)
 

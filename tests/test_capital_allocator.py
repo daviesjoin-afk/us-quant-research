@@ -154,11 +154,31 @@ def test_governed_but_disabled_strategy_is_not_allocated():
 def test_strategy_cap_is_checked_against_existing_attributed_exposure():
     snapshot = _snapshot(
         positions=(PortfolioPosition("AAPL", 30, Decimal("300")),),
-        strategy_exposure=(PortfolioStrategyExposure("strategy-a", "AAPL", Decimal("300")),),
+        strategy_exposure=(
+            PortfolioStrategyExposure("strategy-a", "AAPL", Decimal("300"), 30),
+        ),
     )
     result = _decision(
         (_intent("strategy-a", "AAPL", PortfolioSide.BUY, 11, "over-cap"),),
         snapshot=snapshot,
+    )
+
+    assert result[0].blocker is PortfolioBlocker.STRATEGY_ALLOCATION_EXCEEDED
+
+
+def test_strategy_concentration_uses_current_snapshot_equity():
+    policy = _policy(
+        total_capital_limit=Decimal("2000"),
+        max_gross_exposure=Decimal("2000"),
+        allocations=(
+            _allocation("strategy-a", weight="0.8", capital="1500", gross="1500"),
+            _allocation("strategy-b", weight="0.2", capital="500", gross="500"),
+        ),
+    )
+    result = _decision(
+        (_intent("strategy-a", "AAPL", PortfolioSide.BUY, 60, "equity-concentration"),),
+        snapshot=_snapshot(equity="1000"),
+        policy=policy,
     )
 
     assert result[0].blocker is PortfolioBlocker.STRATEGY_ALLOCATION_EXCEEDED
@@ -180,7 +200,9 @@ def test_total_capital_limit_rejects_without_resizing():
 def test_symbol_concentration_is_portfolio_wide():
     snapshot = _snapshot(
         positions=(PortfolioPosition("AAPL", 40, Decimal("400")),),
-        strategy_exposure=(PortfolioStrategyExposure("strategy-b", "AAPL", Decimal("400")),),
+        strategy_exposure=(
+            PortfolioStrategyExposure("strategy-b", "AAPL", Decimal("400"), 40),
+        ),
     )
     result = _decision(
         (_intent("strategy-a", "AAPL", PortfolioSide.BUY, 11, "concentration"),),
@@ -204,7 +226,9 @@ def test_position_and_open_order_limits_count_at_portfolio_symbol_level():
 
     with_open_order = _snapshot(
         open_orders=(
-            PortfolioOpenOrder("strategy-a", "MSFT", PortfolioSide.BUY, Decimal("10")),
+            PortfolioOpenOrder(
+                "strategy-a", "MSFT", PortfolioSide.BUY, Decimal("10"), 1
+            ),
         ),
     )
     order_limited = _decision(
@@ -245,7 +269,9 @@ def test_same_direction_intents_aggregate_to_one_deterministic_action():
 def test_opposite_intents_net_and_keep_strategy_attribution():
     snapshot = _snapshot(
         positions=(PortfolioPosition("AAPL", 6, Decimal("60")),),
-        strategy_exposure=(PortfolioStrategyExposure("strategy-b", "AAPL", Decimal("60")),),
+        strategy_exposure=(
+            PortfolioStrategyExposure("strategy-b", "AAPL", Decimal("60"), 6),
+        ),
     )
     result = _decision(
         (
@@ -269,7 +295,9 @@ def test_opposite_intents_net_and_keep_strategy_attribution():
 def test_fully_offset_intents_approve_without_creating_an_action():
     snapshot = _snapshot(
         positions=(PortfolioPosition("AAPL", 10, Decimal("100")),),
-        strategy_exposure=(PortfolioStrategyExposure("strategy-a", "AAPL", Decimal("100")),),
+        strategy_exposure=(
+            PortfolioStrategyExposure("strategy-a", "AAPL", Decimal("100"), 10),
+        ),
     )
     try:
         result = _decision(
@@ -329,7 +357,9 @@ def test_snapshot_must_have_a_timezone_aware_as_of():
 def test_sell_cannot_exceed_strategy_owned_exposure():
     snapshot = _snapshot(
         positions=(PortfolioPosition("AAPL", 5, Decimal("50")),),
-        strategy_exposure=(PortfolioStrategyExposure("strategy-a", "AAPL", Decimal("50")),),
+        strategy_exposure=(
+            PortfolioStrategyExposure("strategy-a", "AAPL", Decimal("50"), 5),
+        ),
     )
     result = _decision(
         (_intent("strategy-a", "AAPL", PortfolioSide.SELL, 6, "oversell"),),
@@ -339,10 +369,50 @@ def test_sell_cannot_exceed_strategy_owned_exposure():
     assert result[0].blocker is PortfolioBlocker.STRATEGY_ALLOCATION_EXCEEDED
 
 
+def test_sell_cannot_liquidate_shares_owned_by_another_strategy():
+    snapshot = _snapshot(
+        positions=(PortfolioPosition("AAPL", 7, Decimal("700")),),
+        strategy_exposure=(
+            PortfolioStrategyExposure("strategy-a", "AAPL", Decimal("500"), 5),
+            PortfolioStrategyExposure("strategy-b", "AAPL", Decimal("200"), 2),
+        ),
+    )
+    result = _decision(
+        (_intent("strategy-a", "AAPL", PortfolioSide.SELL, 6, "sell-other", "50"),),
+        snapshot=snapshot,
+    )
+
+    assert result[0].blocker is PortfolioBlocker.STRATEGY_ALLOCATION_EXCEEDED
+    assert result[0].action is None
+
+
+def test_open_sell_order_reserves_strategy_owned_shares():
+    snapshot = _snapshot(
+        positions=(PortfolioPosition("AAPL", 5, Decimal("50")),),
+        open_orders=(
+            PortfolioOpenOrder(
+                "strategy-a", "AAPL", PortfolioSide.SELL, Decimal("40"), 4
+            ),
+        ),
+        strategy_exposure=(
+            PortfolioStrategyExposure("strategy-a", "AAPL", Decimal("50"), 5),
+        ),
+    )
+    result = _decision(
+        (_intent("strategy-a", "AAPL", PortfolioSide.SELL, 2, "sell-reserved"),),
+        snapshot=snapshot,
+    )
+
+    assert result[0].blocker is PortfolioBlocker.STRATEGY_ALLOCATION_EXCEEDED
+    assert result[0].action is None
+
+
 def test_sell_cannot_be_backed_by_an_unfilled_buy_order():
     snapshot = _snapshot(
         open_orders=(
-            PortfolioOpenOrder("strategy-a", "AAPL", PortfolioSide.BUY, Decimal("100")),
+            PortfolioOpenOrder(
+                "strategy-a", "AAPL", PortfolioSide.BUY, Decimal("100"), 10
+            ),
         ),
     )
     result = _decision(

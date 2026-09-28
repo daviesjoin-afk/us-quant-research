@@ -147,30 +147,27 @@ class CapitalAllocator:
         policy: PortfolioCapitalPolicy,
     ) -> PortfolioBlocker | None:
         deltas: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-        symbol_deltas: dict[tuple[str, str], Decimal] = defaultdict(
-            lambda: Decimal("0")
-        )
+        quantity_deltas: dict[tuple[str, str], int] = defaultdict(int)
         for intent in intents:
             sign = Decimal("1") if intent.side is PortfolioSide.BUY else Decimal("-1")
+            quantity_sign = 1 if intent.side is PortfolioSide.BUY else -1
             notional = sign * intent.reference_price * intent.requested_quantity
             deltas[intent.strategy_version_id] += notional
-            symbol_deltas[(intent.strategy_version_id, intent.symbol)] += notional
+            quantity_deltas[(intent.strategy_version_id, intent.symbol)] += (
+                quantity_sign * intent.requested_quantity
+            )
         existing: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-        existing_by_symbol: dict[tuple[str, str], Decimal] = defaultdict(
-            lambda: Decimal("0")
-        )
+        existing_quantity_by_symbol: dict[tuple[str, str], int] = defaultdict(int)
         for exposure in sorted(
             snapshot.strategy_exposure,
             key=lambda item: (item.strategy_version_id, item.symbol),
         ):
             existing[exposure.strategy_version_id] += exposure.notional
-            existing_by_symbol[(exposure.strategy_version_id, exposure.symbol)] += (
-                exposure.notional
+            existing_quantity_by_symbol[(exposure.strategy_version_id, exposure.symbol)] += (
+                exposure.quantity
             )
         reserved_buys: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-        reserved_sells_by_symbol: dict[tuple[str, str], Decimal] = defaultdict(
-            lambda: Decimal("0")
-        )
+        reserved_sell_quantities: dict[tuple[str, str], int] = defaultdict(int)
         for order in sorted(
             snapshot.open_orders,
             key=lambda item: (
@@ -183,8 +180,8 @@ class CapitalAllocator:
             if order.side is PortfolioSide.BUY:
                 reserved_buys[order.strategy_version_id] += order.notional
             else:
-                reserved_sells_by_symbol[(order.strategy_version_id, order.symbol)] += (
-                    order.notional
+                reserved_sell_quantities[(order.strategy_version_id, order.symbol)] += (
+                    order.quantity
                 )
         for strategy_id, delta in deltas.items():
             allocation = policy.allocation_for(strategy_id)
@@ -193,18 +190,18 @@ class CapitalAllocator:
                 allocation.max_capital,
                 policy.total_capital_limit * allocation.capital_weight,
                 allocation.max_gross_exposure,
-                policy.total_capital_limit * policy.max_strategy_concentration,
+                snapshot.equity * policy.max_strategy_concentration,
             )
             held = existing.get(strategy_id, Decimal("0"))
             projected = held + reserved_buys[strategy_id] + delta
             if projected > ceiling:
                 return PortfolioBlocker.STRATEGY_ALLOCATION_EXCEEDED
-        for (strategy_id, symbol), delta in symbol_deltas.items():
-            if delta < Decimal("0") and (
-                existing_by_symbol[(strategy_id, symbol)]
-                - reserved_sells_by_symbol[(strategy_id, symbol)]
-                + delta
-                < Decimal("0")
+        for (strategy_id, symbol), quantity_delta in quantity_deltas.items():
+            if quantity_delta < 0 and (
+                existing_quantity_by_symbol[(strategy_id, symbol)]
+                - reserved_sell_quantities[(strategy_id, symbol)]
+                + quantity_delta
+                < 0
             ):
                 return PortfolioBlocker.STRATEGY_ALLOCATION_EXCEEDED
         return None
@@ -216,8 +213,9 @@ class CapitalAllocator:
         policy: PortfolioCapitalPolicy,
     ) -> PortfolioBlocker | None:
         held_positions = {item.symbol: item.notional for item in snapshot.positions}
+        held_quantities = {item.symbol: item.quantity for item in snapshot.positions}
         positions = dict(held_positions)
-        reserved_sells: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+        reserved_sell_quantities: dict[str, int] = defaultdict(int)
         for order in sorted(
             snapshot.open_orders,
             key=lambda item: (
@@ -230,7 +228,7 @@ class CapitalAllocator:
             if order.side is PortfolioSide.BUY:
                 positions[order.symbol] = positions.get(order.symbol, Decimal("0")) + order.notional
             else:
-                reserved_sells[order.symbol] += order.notional
+                reserved_sell_quantities[order.symbol] += order.quantity
         net_deltas: dict[str, Decimal] = {}
         actions = 0
         for symbol, items in groups.items():
@@ -245,8 +243,8 @@ class CapitalAllocator:
             actions += 1
             reference_price = items[0].reference_price
             delta = reference_price * net_quantity
-            if delta < Decimal("0") and -delta > (
-                held_positions.get(symbol, Decimal("0")) - reserved_sells[symbol]
+            if net_quantity < 0 and -net_quantity > (
+                held_quantities.get(symbol, 0) - reserved_sell_quantities[symbol]
             ):
                 return PortfolioBlocker.POSITION_LIMIT_EXCEEDED
             projected_symbol = positions.get(symbol, Decimal("0")) + delta

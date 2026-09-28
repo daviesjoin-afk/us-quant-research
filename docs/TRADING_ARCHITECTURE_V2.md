@@ -5318,7 +5318,8 @@ proposal、strategy 与签名数量 attribution。完全抵消的净额可批准
 Portfolio policy 覆盖 total/gross/net exposure、单标的金额、symbol/strategy concentration、
 position/open-order 数，以及各治理版本自己的 capital weight、capital ceiling、gross ceiling 和
 enabled 状态。集中度按当前 snapshot equity 计算；真实账户持仓和 open-order exposure 以 symbol-level
-聚合，strategy attribution 独立保留。snapshot 必须显式提供带时区的观察时间与账户事实。
+聚合，strategy attribution 独立保留金额与股数。卖出股数受策略已归属持仓及该策略未成交卖单预留股数约束，
+账户总持仓股数也会单独校验。snapshot 必须显式提供带时区的观察时间与账户事实。
 
 Stage 5-A 不验证或改变 `StrategyVersion` lifecycle；只有上游治理正式放入 allocation 的版本才可进入。
 PortfolioDecision 仍须经过唯一的 `RiskApplication → OrderDispatch → ExecutionApplication` 路径；

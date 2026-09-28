@@ -203,6 +203,7 @@ class PortfolioOpenOrder:
     symbol: str
     side: PortfolioSide
     notional: Decimal
+    quantity: int
 
     def __post_init__(self) -> None:
         _text(self.strategy_version_id, "strategy_version_id")
@@ -210,6 +211,8 @@ class PortfolioOpenOrder:
         if not isinstance(self.side, PortfolioSide):
             raise PortfolioError("open-order side must be PortfolioSide")
         _decimal(self.notional, "open-order notional")
+        if type(self.quantity) is not int or self.quantity <= 0:
+            raise PortfolioError("open-order quantity must be a positive integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,11 +220,14 @@ class PortfolioStrategyExposure:
     strategy_version_id: str
     symbol: str
     notional: Decimal
+    quantity: int
 
     def __post_init__(self) -> None:
         _text(self.strategy_version_id, "strategy_version_id")
         _text(self.symbol, "symbol")
         _decimal(self.notional, "strategy exposure")
+        if type(self.quantity) is not int or self.quantity <= 0:
+            raise PortfolioError("strategy exposure quantity must be a positive integer")
 
 
 @dataclass(frozen=True, slots=True)

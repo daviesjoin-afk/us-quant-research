@@ -6,9 +6,11 @@ import pytest
 from us_quant.trading.domain.portfolio import (
     PortfolioCapitalPolicy,
     PortfolioError,
+    PortfolioOpenOrder,
     PortfolioPosition,
     PortfolioSnapshot,
     PortfolioStrategyAllocation,
+    PortfolioStrategyExposure,
     StrategyPortfolioIntent,
     PortfolioSide,
 )
@@ -101,3 +103,16 @@ def test_strategy_intent_is_a_proposal_without_broker_order_fields() -> None:
     assert not hasattr(intent, "broker_order_id")
     assert not hasattr(intent, "client_id")
     assert not hasattr(intent, "account_credentials")
+
+
+@pytest.mark.parametrize("quantity", [True, 0, -1])
+def test_snapshot_attribution_and_open_order_quantities_must_be_positive_integers(
+    quantity,
+):
+    with pytest.raises(PortfolioError):
+        PortfolioStrategyExposure("strategy-a", "AAPL", Decimal("10"), quantity)
+
+    with pytest.raises(PortfolioError):
+        PortfolioOpenOrder(
+            "strategy-a", "AAPL", PortfolioSide.SELL, Decimal("10"), quantity
+        )

@@ -47,9 +47,7 @@ class _SQLiteLiveSafetyExecutionLease:
         reason: str,
         broker_order_id: int | None = None,
     ) -> LiveSafetyRecord:
-        if self._record.recovery_latch.is_required:
-            return self._record
-        recovery = LiveRecoveryLatch().require(
+        recovery = self._record.recovery_latch.require(
             at=at,
             reason=reason,
             broker_order_id=broker_order_id,
@@ -70,9 +68,9 @@ class _SQLiteLiveSafetyExecutionLease:
                 (
                     _KEY,
                     replacement.revision,
-                    to_stored_text(at),
-                    reason.strip(),
-                    broker_order_id,
+                    to_stored_text(recovery.required_at),
+                    recovery.reason,
+                    recovery.broker_order_id,
                 ),
             )
         else:
@@ -84,9 +82,9 @@ class _SQLiteLiveSafetyExecutionLease:
                    WHERE key = ? AND revision = ?""",
                 (
                     replacement.revision,
-                    to_stored_text(at),
-                    reason.strip(),
-                    broker_order_id,
+                    to_stored_text(recovery.required_at),
+                    recovery.reason,
+                    recovery.broker_order_id,
                     _KEY,
                     self._record.revision,
                 ),

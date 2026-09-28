@@ -43,13 +43,11 @@ class LiveCanaryRecovery:
             raise LiveSafetyError("recovery reason must not be blank")
         for _ in range(8):
             current = self._repository.load()
-            if current.recovery_latch.is_required:
-                return current
             replacement = LiveSafetyRecord(
                 current.revision + 1,
                 current.authorization,
                 current.kill_latch,
-                LiveRecoveryLatch().require(
+                current.recovery_latch.require(
                     at=at, reason=reason, broker_order_id=broker_order_id
                 ),
             )

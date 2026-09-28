@@ -171,6 +171,33 @@ def test_recovery_rejects_clean_evidence_captured_before_the_barrier(tmp_path):
     assert repository.load().recovery_latch.is_required
 
 
+def test_later_unsafe_event_refreshes_barrier_and_invalidates_earlier_evidence(tmp_path):
+    repository = _repository(tmp_path / "live.sqlite3")
+    first_event = LiveCanaryRecovery(repository, now=lambda: NOW).require_reconciliation(
+        reason="process restart"
+    )
+    earlier_evidence = _evidence(observed_at=NOW + timedelta(seconds=1))
+
+    with repository.execution_lease() as lease:
+        refreshed = lease.require_reconciliation(
+            at=NOW + timedelta(seconds=2), reason="broker disconnected"
+        )
+
+    assert refreshed.revision == first_event.revision + 1
+    assert refreshed.recovery_latch.required_at == NOW + timedelta(seconds=2)
+    assert refreshed.recovery_latch.reason == "broker disconnected"
+    with pytest.raises(LiveRecoveryRefused, match="predates"):
+        LiveCanaryRecovery(repository, now=lambda: NOW + timedelta(seconds=3)).confirm_reconciled(
+            earlier_evidence, operator_confirmed=True
+        )
+    assert repository.load().recovery_latch.is_required
+
+
+def test_recovery_order_id_cannot_exist_without_active_barrier():
+    with pytest.raises(ValueError, match="requires an active barrier"):
+        LiveRecoveryLatch(broker_order_id=814)
+
+
 def test_uncertain_order_must_be_present_in_reconciliation_evidence(tmp_path):
     repository = _repository(tmp_path / "live.sqlite3")
     clock = [NOW]

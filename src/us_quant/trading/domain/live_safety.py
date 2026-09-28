@@ -10,7 +10,7 @@ by the persistence port.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 import hashlib
@@ -261,6 +261,8 @@ class LiveRecoveryLatch:
             type(self.broker_order_id) is not int or self.broker_order_id <= 0
         ):
             raise LiveSafetyError("recovery broker order id must be a positive integer")
+        if not self.is_required and self.broker_order_id is not None:
+            raise LiveSafetyError("recovery broker order id requires an active barrier")
 
     @property
     def is_required(self) -> bool:
@@ -276,7 +278,16 @@ class LiveRecoveryLatch:
         _aware(at, "at")
         if not isinstance(reason, str) or not reason.strip():
             raise LiveSafetyError("recovery barrier requires a reason")
-        return LiveRecoveryLatch(at, reason.strip(), broker_order_id)
+        required_at = at
+        if self.required_at is not None and required_at <= self.required_at:
+            required_at = self.required_at + timedelta(microseconds=1)
+        return LiveRecoveryLatch(
+            required_at,
+            reason.strip(),
+            broker_order_id
+            if broker_order_id is not None
+            else self.broker_order_id,
+        )
 
     def clear(self) -> "LiveRecoveryLatch":
         return LiveRecoveryLatch()

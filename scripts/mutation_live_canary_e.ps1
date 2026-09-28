@@ -10,7 +10,9 @@ if (-not (Test-Path -LiteralPath $py)) { $py = (Get-Command python -ErrorAction 
 $guard = Join-Path $projectRoot "src\us_quant\trading\application\live_canary_execution.py"
 $startup = Join-Path $projectRoot "src\us_quant\trading\domain\live_startup.py"
 $recovery = Join-Path $projectRoot "src\us_quant\trading\application\live_recovery.py"
+$safetyRepository = Join-Path $projectRoot "src\us_quant\trading\adapters\sqlite\live_safety_repository.py"
 $composition = Join-Path $projectRoot "src\us_quant\trading\composition\execution.py"
+$safety = Join-Path $projectRoot "src\us_quant\trading\domain\live_safety.py"
 $behaviour = Join-Path $projectRoot "tests\test_live_canary_execution.py"
 $recoveryTests = Join-Path $projectRoot "tests\test_live_recovery.py"
 $startupTests = Join-Path $projectRoot "tests\test_live_startup.py"
@@ -31,6 +33,8 @@ $mutations = @(
     @{ file=$recovery; name='E7 recovery can clear without explicit operator confirmation'; find='if type\(operator_confirmed\) is not bool or not operator_confirmed:'; repl='if False:'; tests=$recoveryTests; select='test_recovery_requires_fresh_evidence_and_explicit_operator_confirmation' },
     @{ file=$recovery; name='E8 uncertain broker order id is not matched to reconciliation'; find='and current\.recovery_latch\.broker_order_id\s+not in evidence\.reconciled_broker_order_ids'; repl='and False'; tests=$recoveryTests; select='test_uncertain_order_must_be_present_in_reconciliation_evidence' },
     @{ file=$composition; name='E9 Live process starts without a fresh reconciliation barrier'; find='durable_state = LiveCanaryRecovery\(live_safety_repository\)\.require_reconciliation\(\s+reason="Live process start requires fresh broker reconciliation"\s+\)'; repl='durable_state = durable_state'; tests=$deploymentTests; select='test_live_composition_latches_fresh_reconciliation_on_process_start' }
+    @{ file=$safetyRepository; name='E10 a later unsafe event does not refresh an existing barrier'; find='recovery = self\._record\.recovery_latch\.require\(\s+at=at,\s+reason=reason,\s+broker_order_id=broker_order_id,\s+\)'; repl='recovery = self._record.recovery_latch'; tests=$recoveryTests; select='test_later_unsafe_event_refreshes_barrier_and_invalidates_earlier_evidence' }
+    @{ file=$safety; name='E11 an inactive recovery latch accepts a broker order id'; find='if not self\.is_required and self\.broker_order_id is not None:'; repl='if False:'; tests=$recoveryTests; select='test_recovery_order_id_cannot_exist_without_active_barrier' }
 )
 
 $results = @()

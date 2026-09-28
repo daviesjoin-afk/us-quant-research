@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src" / "us_quant"
@@ -93,6 +95,24 @@ def _called_symbols(path: Path, scope: ast.AST, *, source_text: str | None = Non
     return targets
 
 
+def _assert_desktop_paper_composition(path: Path, *, source_text: str | None = None):
+    tree = ast.parse(
+        source_text if source_text is not None else path.read_text(encoding="utf-8")
+    )
+    builder = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_build_paper_session"
+    )
+    builder_calls = _called_symbols(path, builder, source_text=source_text)
+    assert "build_portfolio_paper_session" in builder_calls
+
+    calls = _called_symbols(path, tree, source_text=source_text)
+    assert not calls.intersection({
+        "PortfolioPaperEngine", "PortfolioRuntime", "CapitalAllocator",
+        "OrderDispatch", "SessionBook", "TradingRuntime",
+    })
+
+
 def test_stage5_and_shared_execution_authorities_have_one_owner():
     expected = {
         "Environment": "trading/domain/common.py",
@@ -129,17 +149,7 @@ def test_broker_execution_port_remains_exactly_seven_provider_neutral_methods():
 
 def test_production_paper_delegates_to_one_portfolio_composition_root():
     desktop_path = SOURCE / "desktop.py"
-    desktop_tree = ast.parse(desktop_path.read_text(encoding="utf-8"))
-    build = next(
-        node for node in ast.walk(desktop_tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "_build_paper_session"
-    )
-    calls = _called_symbols(desktop_path, build)
-    assert "build_portfolio_paper_session" in calls
-    assert not calls.intersection({
-        "PortfolioPaperEngine", "PortfolioRuntime", "CapitalAllocator",
-        "OrderDispatch", "SessionBook", "TradingRuntime",
-    })
+    _assert_desktop_paper_composition(desktop_path)
 
     composition_path = SOURCE / "trading" / "composition" / "portfolio_paper.py"
     composition_tree = ast.parse(composition_path.read_text(encoding="utf-8"))
@@ -148,6 +158,40 @@ def test_production_paper_delegates_to_one_portfolio_composition_root():
         "PortfolioPaperEngine", "build_portfolio_runtime", "OrderDispatch", "SessionBook"
     } <= composition_calls
     assert "TradingRuntime" not in composition_calls
+
+
+@pytest.mark.parametrize(
+    "source_text",
+    (
+        """
+import us_quant.trading.runtime as runtime
+def build_portfolio_paper_session(): pass
+def _build_paper_session(): return build_portfolio_paper_session()
+def helper(): return runtime.TradingRuntime()
+""",
+        """
+from us_quant.trading.runtime.trading import TradingRuntime as LegacyRuntime
+def build_portfolio_paper_session(): pass
+def _build_paper_session(): return build_portfolio_paper_session()
+def helper(): return LegacyRuntime()
+""",
+    ),
+)
+def test_desktop_composition_guard_rejects_constructors_in_local_helpers(source_text):
+    desktop_path = SOURCE / "desktop.py"
+    with pytest.raises(AssertionError):
+        _assert_desktop_paper_composition(desktop_path, source_text=source_text)
+
+
+def test_desktop_composition_guard_requires_builder_to_delegate_itself():
+    desktop_path = SOURCE / "desktop.py"
+    source_text = """
+def build_portfolio_paper_session(): pass
+def _build_paper_session(): pass
+def unrelated_helper(): return build_portfolio_paper_session()
+"""
+    with pytest.raises(AssertionError):
+        _assert_desktop_paper_composition(desktop_path, source_text=source_text)
 
 
 def test_signal_workers_and_paper_engine_do_not_own_risk_execution_or_adapters():
@@ -251,6 +295,7 @@ def test_final_mutation_aggregate_contains_every_stage_and_fails_closed():
     path = ROOT / "scripts" / "mutation_stage5_final.ps1"
     script = path.read_text(encoding="utf-8")
     for child in (
+        "mutation_stage5_final_composition_guard.ps1",
         "mutation_portfolio_runtime_a.ps1",
         "mutation_portfolio_runtime_b.ps1",
         "mutation_portfolio_runtime_c.ps1",

@@ -23,6 +23,7 @@ $env:PYTHONUTF8 = "1"
 $env:QT_QPA_PLATFORM = "offscreen"
 
 $harnesses = @(
+    "mutation_stage5_final_composition_guard.ps1",
     "mutation_portfolio_runtime_a.ps1",
     "mutation_portfolio_runtime_b.ps1",
     "mutation_portfolio_runtime_c.ps1",

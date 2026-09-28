@@ -20,6 +20,7 @@ from us_quant.trading.domain.portfolio_ledger import (
     PortfolioDecisionRecord,
     PortfolioExecutionAttribution,
     PortfolioStoreUnreadable,
+    execution_contributions_for_quantity,
 )
 from us_quant.trading.domain.risk import RiskDecision
 
@@ -128,7 +129,11 @@ def test_dispatch_outcome_and_execution_attribution_commit_together(tmp_path):
         replace(
             saved,
             risk_outcome="approved",
-            risk_decision=RiskDecision.approve(requested_quantity=4),
+            risk_decision=RiskDecision.approve(
+                requested_quantity=4,
+                approved_quantity=2,
+                adjustments=("portfolio cap",),
+            ),
         ),
         expected_revision=saved.revision,
     )
@@ -145,8 +150,8 @@ def test_dispatch_outcome_and_execution_attribution_commit_together(tmp_path):
         portfolio_decision_id="decision-a",
         symbol="aapl",
         side=PortfolioSide.BUY,
-        net_quantity=4,
-        attributions=_record().decision.attribution,
+        quantity=2,
+        contributions=execution_contributions_for_quantity(_record().decision, 2),
     )
 
     committed = repository.record_dispatch_outcome(

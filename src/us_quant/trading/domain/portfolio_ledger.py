@@ -96,15 +96,40 @@ class PortfolioDecisionRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class PortfolioExecutionContribution:
+    """One strategy/proposal's signed whole-share part of a submitted order."""
+
+    portfolio_decision_id: str
+    strategy_version_id: str
+    proposal_id: str
+    symbol: str
+    signed_quantity: int
+
+    def __post_init__(self) -> None:
+        for name in (
+            "portfolio_decision_id",
+            "strategy_version_id",
+            "proposal_id",
+            "symbol",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be nonblank")
+        object.__setattr__(self, "symbol", self.symbol.strip().upper())
+        if type(self.signed_quantity) is not int or self.signed_quantity == 0:
+            raise ValueError("signed_quantity must be a non-zero integer")
+
+
+@dataclass(frozen=True, slots=True)
 class PortfolioExecutionAttribution:
-    """Durable link from one net order to its portfolio decision contributors."""
+    """Durable link from one order to its actual approved strategy quantities."""
 
     order_id: str
     portfolio_decision_id: str
     symbol: str
     side: PortfolioSide
-    net_quantity: int
-    attributions: tuple[PortfolioOrderAttribution, ...]
+    quantity: int
+    contributions: tuple[PortfolioExecutionContribution, ...]
 
     def __post_init__(self) -> None:
         for name in ("order_id", "portfolio_decision_id"):
@@ -116,18 +141,58 @@ class PortfolioExecutionAttribution:
         object.__setattr__(self, "symbol", self.symbol.strip().upper())
         if not isinstance(self.side, PortfolioSide):
             raise ValueError("side must be PortfolioSide")
-        if type(self.net_quantity) is not int or self.net_quantity == 0:
-            raise ValueError("net_quantity must be a non-zero integer")
-        if not isinstance(self.attributions, tuple) or not self.attributions:
-            raise ValueError("attributions must be a non-empty tuple")
+        if type(self.quantity) is not int or self.quantity <= 0:
+            raise ValueError("quantity must be a positive integer")
+        if not isinstance(self.contributions, tuple) or not self.contributions:
+            raise ValueError("contributions must be a non-empty tuple")
         if any(
-            not isinstance(item, PortfolioOrderAttribution)
+            not isinstance(item, PortfolioExecutionContribution)
             or item.portfolio_decision_id != self.portfolio_decision_id
             or item.symbol != self.symbol
-            for item in self.attributions
+            for item in self.contributions
         ):
-            raise ValueError("attributions must belong to this decision and symbol")
-        if sum(item.signed_requested_quantity for item in self.attributions) != self.net_quantity:
-            raise ValueError("attributions must sum to net_quantity")
-        if self.side is not (PortfolioSide.BUY if self.net_quantity > 0 else PortfolioSide.SELL):
-            raise ValueError("side must match net_quantity")
+            raise ValueError("contributions must belong to this decision and symbol")
+        signed_total = sum(item.signed_quantity for item in self.contributions)
+        expected_total = self.quantity if self.side is PortfolioSide.BUY else -self.quantity
+        if signed_total != expected_total:
+            raise ValueError("contributions must sum to the approved order quantity")
+
+
+def execution_contributions_for_quantity(
+    decision: PortfolioDecision, approved_quantity: int
+) -> tuple[PortfolioExecutionContribution, ...]:
+    """Scale signed proposal attribution to Risk's approved quantity deterministically."""
+
+    if decision.net_quantity == 0:
+        raise ValueError("zero-net decision cannot have execution attribution")
+    if type(approved_quantity) is not int or not 0 < approved_quantity <= abs(decision.net_quantity):
+        raise ValueError("approved quantity must fit the portfolio net action")
+    denominator = abs(decision.net_quantity)
+    signed_target = approved_quantity if decision.net_quantity > 0 else -approved_quantity
+    allocated = []
+    for item in sorted(
+        decision.attribution,
+        key=lambda entry: (entry.strategy_version_id, entry.proposal_id),
+    ):
+        base, remainder = divmod(
+            item.signed_requested_quantity * approved_quantity,
+            denominator,
+        )
+        allocated.append([item, base, remainder])
+    remaining = signed_target - sum(entry[1] for entry in allocated)
+    for entry in sorted(
+        allocated,
+        key=lambda value: (-value[2], value[0].strategy_version_id, value[0].proposal_id),
+    )[:remaining]:
+        entry[1] += 1
+    return tuple(
+        PortfolioExecutionContribution(
+            portfolio_decision_id=decision.decision_id,
+            strategy_version_id=item.strategy_version_id,
+            proposal_id=item.proposal_id,
+            symbol=item.symbol,
+            signed_quantity=quantity,
+        )
+        for item, quantity, _ in allocated
+        if quantity != 0
+    )

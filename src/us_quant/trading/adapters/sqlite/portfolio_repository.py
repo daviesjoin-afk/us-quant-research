@@ -23,7 +23,9 @@ from us_quant.trading.domain.risk import RiskDecision
 from us_quant.trading.domain.portfolio_ledger import (
     PortfolioDecisionRecord,
     PortfolioExecutionAttribution,
+    PortfolioExecutionContribution,
     PortfolioStoreUnreadable,
+    execution_contributions_for_quantity,
 )
 
 
@@ -94,14 +96,16 @@ def _execution_payload(item: PortfolioExecutionAttribution) -> str:
             "portfolio_decision_id": item.portfolio_decision_id,
             "symbol": item.symbol,
             "side": item.side.value,
-            "net_quantity": item.net_quantity,
-            "attributions": [
+            "quantity": item.quantity,
+            "contributions": [
                 {
+                    "portfolio_decision_id": entry.portfolio_decision_id,
                     "strategy_version_id": entry.strategy_version_id,
                     "proposal_id": entry.proposal_id,
-                    "signed_requested_quantity": entry.signed_requested_quantity,
+                    "symbol": entry.symbol,
+                    "signed_quantity": entry.signed_quantity,
                 }
-                for entry in item.attributions
+                for entry in item.contributions
             ],
         },
         sort_keys=True,
@@ -114,25 +118,24 @@ def _from_execution_payload(raw: str, *, expected_order_id: str) -> PortfolioExe
         value = json.loads(raw)
         if not isinstance(value, dict) or value.get("order_id") != expected_order_id:
             raise ValueError("execution attribution key does not match its order ID")
-        decision_id = value["portfolio_decision_id"]
         symbol = value["symbol"]
-        attributions = tuple(
-            PortfolioOrderAttribution(
-                portfolio_decision_id=decision_id,
+        contributions = tuple(
+            PortfolioExecutionContribution(
+                portfolio_decision_id=entry["portfolio_decision_id"],
                 strategy_version_id=entry["strategy_version_id"],
                 proposal_id=entry["proposal_id"],
-                symbol=symbol,
-                signed_requested_quantity=entry["signed_requested_quantity"],
+                symbol=entry["symbol"],
+                signed_quantity=entry["signed_quantity"],
             )
-            for entry in value["attributions"]
+            for entry in value["contributions"]
         )
         item = PortfolioExecutionAttribution(
             order_id=value["order_id"],
-            portfolio_decision_id=decision_id,
+            portfolio_decision_id=value["portfolio_decision_id"],
             symbol=symbol,
             side=PortfolioSide(value["side"]),
-            net_quantity=value["net_quantity"],
-            attributions=attributions,
+            quantity=value["quantity"],
+            contributions=contributions,
         )
         if _execution_payload(item) != json.dumps(value, sort_keys=True, separators=(",", ":")):
             raise ValueError("execution attribution contains non-canonical fields")
@@ -384,10 +387,14 @@ class SQLitePortfolioRepository:
             execution_attribution.order_id != record.order_id
             or execution_attribution.portfolio_decision_id != record.decision.decision_id
             or execution_attribution.symbol != record.decision.symbol
-            or execution_attribution.attributions != record.decision.attribution
+            or record.risk_decision is None
+            or execution_attribution.quantity != record.risk_decision.approved_quantity
             or record.decision.action is None
             or execution_attribution.side is not record.decision.action.side
-            or execution_attribution.net_quantity != record.decision.net_quantity
+            or execution_attribution.contributions
+            != execution_contributions_for_quantity(
+                record.decision, record.risk_decision.approved_quantity
+            )
         ):
             raise ValueError("execution attribution does not match its portfolio decision")
         if type(expected_revision) is not int or expected_revision <= 0:

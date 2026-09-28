@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -389,10 +390,75 @@ def test_uncertain_execution_and_restart_do_not_regenerate_action(tmp_path):
     execution_attribution = repo.execution_attribution("uncertain-order")
     assert execution_attribution is not None
     assert execution_attribution.portfolio_decision_id == persisted_id
-    assert execution_attribution.net_quantity == 10
     assert sum(
-        item.signed_requested_quantity for item in execution_attribution.attributions
-    ) == execution_attribution.net_quantity
+        item.signed_quantity for item in execution_attribution.contributions
+    ) == execution_attribution.quantity
+    assert execution_attribution.quantity == 10
+
+
+def test_risk_trim_is_allocated_across_execution_attribution(tmp_path):
+    alpha = _version("alpha")
+    beta = _version("beta")
+    source = _ProposalSource(
+        {
+            alpha.version_id: (_proposal(alpha, quantity=7),),
+            beta.version_id: (_proposal(beta, quantity=3),),
+        }
+    )
+    risk = RiskDecision.approve(
+        requested_quantity=10,
+        approved_quantity=4,
+        adjustments=("portfolio cap",),
+    )
+    runtime, repository, _, _ = _runtime(
+        tmp_path, (alpha, beta), source, risk_path=_RiskPath(risk=risk)
+    )
+
+    result = _evaluate(runtime, (alpha, beta))
+    attribution = repository.execution_attribution("order-1")
+
+    assert result.actions[0].risk.approved_quantity == 4
+    assert attribution is not None
+    assert attribution.quantity == 4
+    assert [item.signed_quantity for item in attribution.contributions] == [3, 1]
+    assert sum(item.signed_quantity for item in attribution.contributions) == 4
+
+
+def test_dispatch_halt_stops_later_actions_and_recovered_halt_stays_stopped(tmp_path):
+    alpha = _version("alpha")
+    beta = _version("beta")
+    source = _ProposalSource(
+        {
+            alpha.version_id: (_proposal(alpha, symbol="AAPL"),),
+            beta.version_id: (_proposal(beta, symbol="MSFT"),),
+        }
+    )
+    path = tmp_path / "portfolio.sqlite"
+    dispatch = _RiskPath(
+        dispatch=PortfolioDispatchResult(
+            submitted=False, halt=True, order_id="uncertain-order", status="reconcile"
+        )
+    )
+    runtime, repository, snapshots, _ = _runtime(
+        tmp_path, (alpha, beta), source, risk_path=dispatch
+    )
+
+    first = _evaluate(runtime, (alpha, beta))
+    assert first.halted is True
+    assert len(dispatch.evaluations) == len(dispatch.submissions) == 1
+    assert len(first.actions) == 1
+
+    restarted = PortfolioRuntime(
+        strategies=_Strategies((alpha, beta)),
+        proposals=source,
+        snapshots=snapshots,
+        repository=SQLitePortfolioRepository(path),
+        risk_path=dispatch,
+    )
+    recovered = _evaluate(restarted, (alpha, beta))
+    assert recovered.halted is True
+    assert len(recovered.actions) == 1
+    assert len(dispatch.evaluations) == len(dispatch.submissions) == 1
 
 
 def test_unlinked_approved_buy_reserves_cash_for_the_next_cycle(tmp_path):
@@ -414,6 +480,34 @@ def test_unlinked_approved_buy_reserves_cash_for_the_next_cycle(tmp_path):
     assert second.decisions[0].blocker is not None
     assert second.decisions[0].blocker.value == "insufficient_cash"
     assert len(path.evaluations) == 1
+
+
+def test_unlinked_approved_buy_reserves_net_exposure_for_the_next_cycle(tmp_path):
+    version = _version("alpha")
+    source = _ProposalSource(
+        {version.version_id: (_proposal(version, quantity=6, price="10"),)}
+    )
+    snapshots = _Snapshots(cash=Decimal("1000"))
+    path = _RiskPath(
+        dispatch=PortfolioDispatchResult(submitted=False, halt=True, status="unknown")
+    )
+    runtime, _, _, _ = _runtime(tmp_path, (version,), source, risk_path=path, snapshots=snapshots)
+    _evaluate(runtime, (version,), cycle="cycle-1")
+
+    source.mapping[version.version_id] = (
+        _proposal(version, quantity=4, at=NOW + timedelta(seconds=1), price="10"),
+    )
+    second = _evaluate(
+        runtime,
+        (version,),
+        at=NOW + timedelta(seconds=1),
+        cycle="cycle-2",
+        policy=replace(_policy((version,)), max_net_exposure=Decimal("50")),
+    )
+
+    assert second.decisions[0].decision is PortfolioVerdict.REJECT
+    assert second.decisions[0].blocker is not None
+    assert second.decisions[0].blocker.value == "portfolio_capital_exceeded"
 
 
 def test_portfolio_cycle_evaluation_is_serialized(tmp_path):

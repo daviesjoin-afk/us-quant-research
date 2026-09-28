@@ -24,6 +24,7 @@ from us_quant.trading.domain.portfolio import (
 from us_quant.trading.domain.portfolio_ledger import (
     PortfolioDecisionRecord,
     PortfolioExecutionAttribution,
+    execution_contributions_for_quantity,
 )
 from us_quant.trading.domain.portfolio_runtime import (
     PortfolioActionResult,
@@ -229,6 +230,8 @@ class PortfolioRuntime:
                             recovered=True,
                         )
                     )
+                    if recovered_dispatch is not None and recovered_dispatch.halt:
+                        break
                     continue
 
                 risk_decision = self._risk_path.evaluate(decision, observed_at=observed_at)
@@ -261,8 +264,10 @@ class PortfolioRuntime:
                         portfolio_decision_id=decision.decision_id,
                         symbol=decision.symbol,
                         side=decision.action.side,
-                        net_quantity=decision.net_quantity,
-                        attributions=decision.attribution,
+                        quantity=risk_decision.approved_quantity,
+                        contributions=execution_contributions_for_quantity(
+                            decision, risk_decision.approved_quantity
+                        ),
                     )
                     if dispatch.order_id is not None
                     else None
@@ -282,6 +287,8 @@ class PortfolioRuntime:
                 actions.append(
                     PortfolioActionResult(decision, risk_decision, dispatch)
                 )
+                if dispatch.halt:
+                    break
             return PortfolioCycleResult(
                 portfolio_cycle_id=portfolio_cycle_id,
                 snapshot_identity=snapshot_identity,
@@ -328,6 +335,7 @@ class PortfolioRuntime:
             snapshot,
             cash=max(Decimal("0"), snapshot.cash - reserved_buy),
             gross_exposure=snapshot.gross_exposure + reserved_buy,
+            net_exposure=snapshot.net_exposure + reserved_buy,
             open_orders=tuple(sorted(
                 (*snapshot.open_orders, *reservations),
                 key=lambda item: (item.strategy_version_id, item.symbol, item.side.value, item.quantity),

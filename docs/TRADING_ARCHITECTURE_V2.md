@@ -5360,7 +5360,8 @@ identity，持久化 decision/归因后才把非零 APPROVE 交给 Risk path。R
 APPROVE 先 durable 写入精确 `RiskDecision`，随后经注入的既有 `OrderDispatch` evaluate/submit seam。Dispatch
 完成后再 CAS 原子持久化 submitted/halt/status/order linkage，并把 order id、portfolio decision id 与完整
 strategy/proposal attribution 写入独立 execution-attribution ledger；两份记录在同一 SQLite transaction 提交。
-uncertain halt 在重启后仍恢复为 halt。风险结果已写入的
+Risk 缩量时用稳定 largest-remainder 规则把 signed strategy contributions 归一到实际获批股数。当前 action
+返回 halt 或从 durable state 恢复 halt 后，cycle 立即停止处理其余 symbol。uncertain halt 在重启后仍恢复为 halt。风险结果已写入的
 重启恢复只返回已保存状态，绝不再次提交。无 order linkage 的已批准 BUY 会扣减下一 cycle 可用现金并占用
-组合 open-order reservation；无 linkage 的 SELL 会阻断下一 cycle，等待 reconciliation。Stage 5-C 扩展的
+组合 open-order reservation，同时计入 net exposure；无 linkage 的 SELL 会阻断下一 cycle，等待 reconciliation。Stage 5-C 扩展的
 snapshot identity / proposal cutoff 在 SQLite 中保留，Stage 5-B 旧行以显式 legacy marker 兼容读取。

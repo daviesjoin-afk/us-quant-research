@@ -5365,3 +5365,30 @@ Risk 缩量时用稳定 largest-remainder 规则把 signed strategy contribution
 重启恢复只返回已保存状态，绝不再次提交。无 order linkage 的已批准 BUY 会扣减下一 cycle 可用现金并占用
 组合 open-order reservation，同时计入 net exposure；无 linkage 的 SELL 会阻断下一 cycle，等待 reconciliation。Stage 5-C 扩展的
 snapshot identity / proposal cutoff 在 SQLite 中保留，Stage 5-B 旧行以显式 legacy marker 兼容读取。
+
+Stage 5-C PR #72 已通过 GitHub merge commit 合并。Stage 5-C 实际 merge SHA 与
+Stage 5-D 起点均为 `c23a2cfcdbddde1a51aa3c4917dc2f010f09c00e`。
+
+#### 8.40 Stage 5-D Portfolio Risk & Reconciliation
+
+Stage 5-D 在独立分支 `feat/portfolio-risk-reconciliation` 上建立纯 domain
+reconciliation 与 `PortfolioReconciliationApplication`。每次调用都会重新读取
+`PortfolioStateRepositoryPort` 的 durable decisions / execution attribution、只读
+`PortfolioOrderTruthSource` 与本次 broker account snapshot；应用不保留进程内持仓缓存，故重启后以持久账本、订单事件/成交和 broker 事实重建组合归属。
+
+`PortfolioReconciliationBlocker` 是 typed blocker，包含未解释 position/order/fill、归因不一致、
+待确认 execution、过期 snapshot、缺失 decision 与重复 execution link。结果只有在 blocker 为空时才允许
+新增 exposure。broker 非零持仓没有任何策略成交归属时标记 `unexplained_position`；broker 数量与策略归属
+数量不相等时标记 `attribution_mismatch`。订单状态未知、订单/决策链接缺失、成交数量与持久状态不一致、
+以及 account/position snapshot 未来时间或超过五分钟时均 fail closed。
+
+部分成交按事件发生时间与 execution id 排序；对每个累计成交数量重新以原始签名贡献作 whole-share
+largest-remainder 分配，再以累计分配差得到本次 fill 归属。余数相同时按 strategy version id、proposal id
+稳定排序，回调到达顺序不会影响策略持仓与成本。SELL 的负数量只从该策略的持仓扣减；超出该策略归属股数
+会产生归因 blocker，不会转扣其他策略的股份。按策略维护均价成本、成交股数、realized P&L、费用和
+相对 portfolio action reference price 的 slippage；缺少 broker fee 时费用标为不完整证据，不伪造为完整零费用。
+订单 SQLite 表以兼容式 `ADD COLUMN fee` 迁移保存可用费用；既有 fill 仍保留且读取为 fee unknown。
+
+本阶段只产出 reconciliation/evidence，不 promotion、demotion 或修改策略。Stage 5-E 再把
+`can_open_exposure` gate 接到 Paper/Desktop 操作路径。Stage 3/4 execution 与 Live safety authority
+不变，BrokerExecutionPort 仍为七方法；Stage 5-D 不直接连接 broker，也不建立第二份 Risk 或 Execution。

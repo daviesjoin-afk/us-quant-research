@@ -10,6 +10,7 @@ PORTFOLIO_APPLICATION = SOURCE / "trading" / "application" / "portfolio.py"
 PORTFOLIO_REPOSITORY_PORT = SOURCE / "trading" / "ports" / "portfolio_repository.py"
 PORTFOLIO_SQLITE_REPOSITORY = SOURCE / "trading" / "adapters" / "sqlite" / "portfolio_repository.py"
 PORTFOLIO_RUNTIME = SOURCE / "trading" / "application" / "portfolio_runtime.py"
+PORTFOLIO_RECONCILIATION = SOURCE / "trading" / "application" / "portfolio_reconciliation.py"
 PORTFOLIO_DISPATCH_BRIDGE = SOURCE / "trading" / "runtime" / "portfolio_dispatch.py"
 
 
@@ -173,6 +174,35 @@ def test_portfolio_runtime_is_unique_and_cannot_construct_execution_authority():
     names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
     assert "OrderIntent" not in names
     assert "ExecutionApplication" not in names
+
+
+def test_portfolio_reconciliation_application_is_unique_and_reload_only():
+    owners = []
+    for path in _all_python_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        owners.extend(
+            _module(path)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef)
+            and node.name == "PortfolioReconciliationApplication"
+        )
+    assert owners == ["trading.application.portfolio_reconciliation"]
+
+    tree = ast.parse(PORTFOLIO_RECONCILIATION.read_text(encoding="utf-8"))
+    imports = _imports(tree)
+    assert not any(
+        name.startswith("us_quant.trading.adapters")
+        or "BrokerExecutionPort" in name
+        or "ExecutionApplication" in name
+        or "RiskApplication" in name
+        for name in imports
+    )
+    calls = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert {"decisions", "execution_attributions", "portfolio_order_truth"} <= calls
 
 
 def test_portfolio_risk_bridge_only_uses_existing_order_dispatch_seam():

@@ -46,21 +46,21 @@ from us_quant.trading.domain.orders import (
     OrderStatus,
     Side,
 )
+from us_quant.trading.domain.portfolio_reconciliation import (
+    PortfolioOrderTruth,
+    PortfolioOrderTruthRecord,
+)
 
 #: An unreadable stored timestamp reads as this instead of as "now".  An order
 #: whose creation time cannot be trusted must never look freshly submitted.
 _EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
-#: Columns added after the first order databases were written.
-#:
-#: ``CREATE TABLE IF NOT EXISTS`` never grows a table that already exists, so a
-#: database created before ``idempotency_key`` was introduced rejects every
-#: write that names it -- including the first order.  Adding the column in
-#: place is the one non-destructive repair available: no row is rewritten, no
-#: stored value changes, and a database that already has the column is left
-#: exactly as it was.
+#: Columns added after the first order databases were written. ``CREATE TABLE
+#: IF NOT EXISTS`` never grows an existing table, so new columns are added in
+#: place without rewriting any stored row.
 _ADDED_COLUMNS = (
     ("paper_order_intent", "idempotency_key", "TEXT"),
+    ("paper_execution", "fee", "TEXT"),
 )
 
 
@@ -151,8 +151,8 @@ class SQLiteOrderRepository:
                     INSERT OR IGNORE INTO paper_execution(
                         execution_id, intent_id, broker_order_id,
                         symbol, side, quantity, price, occurred_at,
-                        recorded_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        recorded_at, fee
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         fill.execution_id,
@@ -164,6 +164,7 @@ class SQLiteOrderRepository:
                         str(fill.price),
                         fill.occurred_at.isoformat(),
                         now_iso(),
+                        _decimal_text(fill.fee),
                     ),
                 )
                 return cursor.rowcount == 1
@@ -219,7 +220,7 @@ class SQLiteOrderRepository:
             rows = connection.execute(
                 """
                 SELECT execution_id, intent_id, broker_order_id,
-                       symbol, side, quantity, price, occurred_at
+                       symbol, side, quantity, price, occurred_at, fee
                 FROM paper_execution
                 WHERE intent_id = ?
                 ORDER BY execution_row_id ASC
@@ -227,6 +228,75 @@ class SQLiteOrderRepository:
                 (order_id,),
             ).fetchall()
         return tuple(_fill_from_row(row) for row in rows)
+
+    def portfolio_order_truth(self) -> PortfolioOrderTruth:
+        """Read every durable order observation, including orphaned rows.
+
+        This separate reconciliation read does not widen ``OrderRepositoryPort``
+        or the seven-method broker execution surface.
+        """
+        with closing(connect_sqlite(self.path)) as connection:
+            intents = connection.execute(
+                """SELECT intent_id, session_id, strategy_version_id, symbol,
+                          side, quantity, limit_price, reason, generated_at,
+                          idempotency_key, account_alias
+                   FROM paper_order_intent ORDER BY intent_id"""
+            ).fetchall()
+            updates = connection.execute(
+                """SELECT intent_id, broker_order_id, status, filled, remaining,
+                          average_fill_price, last_fill_price, message, observed_at
+                   FROM paper_order_update ORDER BY intent_id, observed_at, update_id"""
+            ).fetchall()
+            executions = connection.execute(
+                """SELECT execution_id, intent_id, broker_order_id, symbol, side,
+                          quantity, price, occurred_at, fee
+                   FROM paper_execution ORDER BY intent_id, occurred_at, execution_id"""
+            ).fetchall()
+
+        intent_by_id = {}
+        alias_by_id = {}
+        for row in intents:
+            intent_by_id[str(row[0])] = _intent_from_columns(
+                order_id=str(row[0]), session_id=str(row[1]),
+                strategy_version_id=str(row[2]), symbol=str(row[3]),
+                side=str(row[4]), quantity=int(row[5]), limit_price=str(row[6]),
+                reason=str(row[7]), generated_at=str(row[8]), idempotency_key=row[9],
+            )
+            alias_by_id[str(row[0])] = str(row[10])
+
+        events_by_id = {}
+        for row in updates:
+            order_id = str(row[0])
+            events_by_id.setdefault(order_id, []).append(
+                OrderEvent(
+                    order_id=order_id,
+                    broker_order_id=int(row[1]),
+                    broker_status=str(row[2]),
+                    status=order_status_from_text(str(row[2])),
+                    filled=Decimal(str(row[3])), remaining=Decimal(str(row[4])),
+                    average_fill_price=Decimal(str(row[5])) if row[5] is not None else None,
+                    last_fill_price=Decimal(str(row[6])) if row[6] is not None else None,
+                    message=str(row[7]),
+                    occurred_at=from_stored_text(str(row[8])) or _EPOCH_UTC,
+                )
+            )
+
+        fills_by_id = {}
+        for row in executions:
+            fill = _fill_from_row(row)
+            fills_by_id.setdefault(fill.order_id, []).append(fill)
+        all_ids = sorted(set(intent_by_id) | set(events_by_id) | set(fills_by_id))
+        return PortfolioOrderTruth(
+            orders=tuple(
+                PortfolioOrderTruthRecord(
+                    intent=intent_by_id.get(order_id),
+                    account_alias=alias_by_id.get(order_id),
+                    events=tuple(events_by_id.get(order_id, ())),
+                    fills=tuple(fills_by_id.get(order_id, ())),
+                )
+                for order_id in all_ids
+            )
+        )
 
     def intent_for_idempotency_key(
         self, idempotency_key: str
@@ -688,6 +758,7 @@ class SQLiteOrderRepository:
                         price TEXT NOT NULL,
                         occurred_at TEXT NOT NULL,
                         recorded_at TEXT NOT NULL,
+                        fee TEXT,
                         FOREIGN KEY(intent_id)
                             REFERENCES paper_order_intent(intent_id)
                     )
@@ -800,4 +871,5 @@ def _fill_from_row(row: object) -> ExecutionFill:
         quantity=Decimal(str(row[5])),
         price=Decimal(str(row[6])),
         occurred_at=from_stored_text(str(row[7])) or _EPOCH_UTC,
+        fee=Decimal(str(row[8])) if len(row) > 8 and row[8] is not None else None,
     )

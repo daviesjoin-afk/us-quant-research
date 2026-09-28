@@ -124,6 +124,11 @@ class LiveOperatorControlsOrchestrator(QObject):
                 + authorization.expected_account_fingerprint.sha256[-8:]
                 + "；当前 broker 未核验"
             )
+            effective_strategies = tuple(
+                strategy
+                for strategy in authorization.approved_strategy_version_ids
+                if strategy in set(limits.allowed_strategy_versions)
+            )
 
         return LiveOperatorControlView(
             environment=str(self._environment()).upper(),
@@ -145,7 +150,9 @@ class LiveOperatorControlsOrchestrator(QObject):
             position_limit="0 · 无持久授权" if limits is None else str(limits.max_positions),
             open_order_limit="0 · 无持久授权" if limits is None else str(limits.max_open_orders),
             allowed_strategies=(
-                "—" if authorization is None else ", ".join(authorization.approved_strategy_version_ids)
+                "—"
+                if authorization is None
+                else ", ".join(effective_strategies) or "无交集"
             ),
             allowed_symbols=(
                 "—" if limits is None else ", ".join(limits.allowed_symbols)

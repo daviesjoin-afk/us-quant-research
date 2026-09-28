@@ -34,7 +34,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
 
 from us_quant.desktop_v2.pages.execution.controls import ExecutionControls
 from us_quant.desktop_v2.pages.execution.live_operator import LiveOperatorControls
@@ -113,7 +113,13 @@ class ExecutionPage(QWidget):
     # -- construction ---------------------------------------------------
 
     def _build(self) -> None:
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setObjectName("executionPageScrollArea")
+        self.scroll_area.setWidgetResizable(True)
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.addLayout(self._build_cards())
         layout.addLayout(self._build_health_cards())
         self.controls = ExecutionControls()
@@ -134,6 +140,8 @@ class ExecutionPage(QWidget):
         self.details = ExecutionDetailTabs(palette=self._palette)
         self.details.reconcile_requested.connect(self.reconcile_requested.emit)
         layout.addWidget(self.details)
+        self.scroll_area.setWidget(content)
+        outer.addWidget(self.scroll_area)
 
     def _build_cards(self) -> QHBoxLayout:
         cards = QHBoxLayout()

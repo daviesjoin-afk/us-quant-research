@@ -15,9 +15,15 @@ function Set-Text([string]$path, [string]$text) {
     [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
 }
 
+$composition = Join-Path $projectRoot "src\us_quant\trading\composition\live_operator_controls.py"
+$page = Join-Path $projectRoot "src\us_quant\desktop_v2\pages\execution\page.py"
+
 $mutations = @(
     @{ file=$application; name='F1 desktop kill does not set the durable kill latch'; find='current\.kill_latch\.engage\(at=at, reason=reason\),'; repl='current.kill_latch.clear(),'; select='test_execution_page_displays_live_state_and_emits_operator_intents' },
-    @{ file=$orchestrator; name='F2 Live arm becomes enabled without Live proof providers'; find='arm_enabled=False,\s+arm_block_reason=ARM_UNAVAILABLE,'; repl='arm_enabled=True, arm_block_reason=ARM_UNAVAILABLE,'; select='test_execution_page_displays_live_state_and_emits_operator_intents' }
+    @{ file=$orchestrator; name='F2 Live arm becomes enabled without Live proof providers'; find='arm_enabled=False,\s+arm_block_reason=ARM_UNAVAILABLE,'; repl='arm_enabled=True, arm_block_reason=ARM_UNAVAILABLE,'; select='test_execution_page_displays_live_state_and_emits_operator_intents' },
+    @{ file=$composition; name='F3 unavailable Live store blocks the desktop'; find='repository = _UnavailableLiveSafetyRepository\(error\)'; repl='raise error'; select='test_unavailable_live_safety_store_keeps_desktop_controls_fail_closed' },
+    @{ file=$page; name='F4 execution page content cannot scroll'; find='self\.scroll_area\.setWidgetResizable\(True\)'; repl='self.scroll_area.setWidgetResizable(False)'; select='test_execution_page_displays_live_state_and_emits_operator_intents' },
+    @{ file=$orchestrator; name='F5 displayed strategy list ignores the limits allowlist'; find='if strategy in set\(limits\.allowed_strategy_versions\)'; repl='if True'; select='test_strategy_display_uses_the_intersection_of_both_authorization_lists' }
 )
 
 $results = @()
@@ -37,7 +43,8 @@ foreach ($mutation in $mutations) {
         $exitCode = $LASTEXITCODE
         $countLine = $output | Select-String -Pattern '\d+ failed' | Select-Object -First 1
         $assertionFailure = $output | Select-String -Pattern 'AssertionError|assert .* ==|assert .* is|DID NOT RAISE' -Quiet
-        $caught = ($exitCode -eq 1 -and $countLine -and $assertionFailure)
+        $expectedStoreFailure = ($mutation.name.StartsWith('F3') -and ($output | Select-String -SimpleMatch 'OSError: store unavailable' -Quiet))
+        $caught = ($exitCode -eq 1 -and $countLine -and ($assertionFailure -or $expectedStoreFailure))
         $detail = if ($caught) { $countLine.Line.Trim() } else { "exit=$exitCode; $($output -join ' ')" }
     }
     catch {

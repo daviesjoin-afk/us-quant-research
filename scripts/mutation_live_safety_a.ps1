@@ -31,7 +31,7 @@ function Set-Text([string]$path, [string]$text) {
 }
 
 $mutations = @(
-    @{ name='M1 restart preserves an existing arm'; file=$domain; find='return LiveAuthorizationState\(self\.authorization, self\.kill_latch\)'; repl='return self'; select='session_arm_is_not_a_persistable_field' },
+    @{ name='M1 restart preserves an existing arm'; file=$domain; find='return LiveAuthorizationState\(\s+self\.authorization, self\.kill_latch, self\.recovery_latch\s+\)'; repl='return self'; select='session_arm_is_not_a_persistable_field' },
     @{ name='M2 expired authorization remains valid'; file=$domain; find='elif not authorization\.is_valid_at\(now\):'; repl='elif False:'; select='invalid_authorization_account_or_limits_block_session_arm' },
     @{ name='M3 account fingerprint mismatch is ignored'; file=$domain; find='if authorization\.expected_account_fingerprint != account_fingerprint:'; repl='if False:'; select='invalid_authorization_account_or_limits_block_session_arm' },
     @{ name='M4 canary limits do not gate arm'; file=$domain; find='blockers\.extend\(authorization\.approved_canary_limits\.blockers\(\)\)'; repl='pass  # mutation'; select='invalid_authorization_account_or_limits_block_session_arm' },

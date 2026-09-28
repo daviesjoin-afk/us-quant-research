@@ -5270,3 +5270,63 @@ Live broker，也没有执行真实 canary，因此 Stage 4 **operationally COMP
 Stage 3 Final 与 FAC harness。每个子 harness 都必须 `0 survivor / 0 harness-error`。完整阶段回归
 还包括 sequential pytest、xdist pytest、FAC / Stage 4 architecture、Paper autonomy、Live safety、
 Doctor、Compile、Desktop offscreen 与 `git diff --check`；具体操作记录见 canary runbook。
+
+### 8.38 Stage 5-A Portfolio Runtime Foundation
+
+Stage 4 Final PR #69 已使用 merge commit 完成，Stage 4 Final baseline 为
+`b4d8112a180273947afd56b879d2fd155ad06d13`。Stage 5 base 同为
+`b4d8112a180273947afd56b879d2fd155ad06d13`；Stage 5-A 在独立分支
+`refactor/portfolio-runtime-foundation` 上建立组合领域模型和 deterministic hard-cap allocator。
+
+Stage 4 状态正式记录为：**implementation COMPLETE = YES**，
+**operationally COMPLETE = NO**。Stage 4 safety foundation、startup/account proof、IBKR Live
+adapter、canary guard、recovery/kill/restart、Desktop operator controls、Final Architecture Closure
+及其本地回归和 GitHub CI 均已完成；真实 supervised Live canary **NOT YET RUN**。因此 Stage 4
+operational completion 仍未达到。
+
+Stage 5-A 的生产路径目标是：
+
+```text
+Governed Strategy A ─┐
+Governed Strategy B ─┼──▶ StrategyPortfolioIntent
+Governed Strategy C ─┘              │
+                                    ▼
+                            CapitalAllocator
+                       capital / conflict / netting
+                                    │
+                                    ▼
+                             PortfolioDecision
+                                    │
+                                    ▼
+                             RiskApplication
+                                    │
+                                    ▼
+                               OrderDispatch
+                                    │
+                                    ▼
+                         ExecutionApplication
+```
+
+本阶段只实现上图至 `PortfolioDecision` 的不可变 domain contract 和
+`CapitalAllocator`。strategy 只提交 `StrategyPortfolioIntent`，不能决定最终资本使用、
+组合持仓数量或跨策略冲突结果。capital 必须由 policy 显式分配；零/空额度默认 fail closed。
+allocator 使用 Decimal 与确定性排序，对同标的同方向请求聚合、反向请求按股数净额归并，并保留
+proposal、strategy 与签名数量 attribution。完全抵消的净额可批准为零 action，不产生组合下单候选。
+不同 reference price、重复 proposal、未知/未分配策略及任一组合硬上限越界均 fail closed；不隐式缩量，
+同批次不按到达顺序挑选赢家。
+
+Portfolio policy 覆盖 total/gross/net exposure、单标的金额、symbol/strategy concentration、
+position/open-order 数，以及各治理版本自己的 capital weight、capital ceiling、gross ceiling 和
+enabled 状态。集中度按当前 snapshot equity 计算；真实账户持仓和 open-order exposure 以 symbol-level
+聚合，strategy attribution 独立保留。snapshot 必须显式提供带时区的观察时间与账户事实。
+
+Stage 5-A 不验证或改变 `StrategyVersion` lifecycle；只有上游治理正式放入 allocation 的版本才可进入。
+PortfolioDecision 仍须经过唯一的 `RiskApplication → OrderDispatch → ExecutionApplication` 路径；
+Risk REJECT 不得被组合决策覆盖。Stage 4 `RiskApplication`、`ExecutionApplication`、`OrderDispatch`、
+`TradingRuntime`、`BrokerExecutionPort` 七方法 surface、Live authorization/proof/guard/recovery/kill
+语义保持不变，顺序仍为 `reserve → durable record → submit`，uncertain submit 不重试、explicit refusal
+不 fallback、restart 不自动重新 arm。
+
+**Stage 5-A 尚未把 Portfolio Runtime 接入 production execution。** 本阶段没有 OrderDispatch 或
+ExecutionApplication integration、broker/IBKR、Desktop 多策略 runner、Live 权限、AI allocation、
+strategy promotion/parameter mutation，也没有 Kelly、risk parity 或 mean-variance optimizer。

@@ -22,14 +22,32 @@ def _definitions(name: str):
     return tuple(found)
 
 
-def _imported_modules(path: Path):
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+def _imported_modules(path: Path, *, source_text: str | None = None):
+    tree = ast.parse(
+        source_text if source_text is not None else path.read_text(encoding="utf-8")
+    )
     modules = set()
+    module_parts = ["us_quant", *path.relative_to(SOURCE).with_suffix("").parts]
+    package_parts = module_parts[:-1]
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             modules.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            modules.add(node.module)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                if node.module:
+                    modules.add(node.module)
+                continue
+            parent_parts = package_parts[: len(package_parts) - (node.level - 1)]
+            imported_parts = node.module.split(".") if node.module else []
+            base_parts = [*parent_parts, *imported_parts]
+            if node.module:
+                modules.add(".".join(base_parts))
+            else:
+                modules.update(
+                    ".".join([*base_parts, alias.name])
+                    for alias in node.names
+                    if alias.name != "*"
+                )
     return modules
 
 
@@ -114,6 +132,22 @@ def test_signal_workers_and_paper_engine_do_not_own_risk_execution_or_adapters()
         or module.endswith("application.execution")
         for module in engine_imports
     )
+
+
+def test_relative_imports_resolve_to_absolute_modules_for_layer_guards():
+    runtime_path = SOURCE / "trading" / "runtime" / "portfolio_strategies.py"
+    imports = _imported_modules(
+        runtime_path,
+        source_text=(
+            "from ..adapters.sqlite import SQLiteOrderRepository\n"
+            "from .dispatch import OrderDispatch\n"
+            "from .. import adapters\n"
+        ),
+    )
+
+    assert "us_quant.trading.adapters.sqlite" in imports
+    assert "us_quant.trading.runtime.dispatch" in imports
+    assert "us_quant.trading.adapters" in imports
 
 
 def test_execution_page_stays_render_and_intent_only():

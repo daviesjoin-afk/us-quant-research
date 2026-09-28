@@ -35,16 +35,9 @@ from decimal import Decimal
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
-    QPushButton,
-    QPlainTextEdit,
     QScrollArea,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -56,7 +49,12 @@ from us_quant.desktop_v2.pages.execution.models import (
     ExecutionControlState,
     ExecutionDetailWorkspace,
     ExecutionRuntimeView,
+)
+from us_quant.desktop_v2.pages.execution.portfolio_models import (
     PortfolioOperationsView,
+)
+from us_quant.desktop_v2.pages.execution.portfolio_panel import (
+    PortfolioOperationsPanel,
 )
 from us_quant.desktop_v2.pages.execution.live_operator_models import (
     LiveOperatorControlView,
@@ -152,127 +150,36 @@ class ExecutionPage(QWidget):
             self.live_status_refresh_requested.emit
         )
         layout.addWidget(self.live_operator_controls)
-        self.portfolio_group = self._build_portfolio_operations()
-        layout.addWidget(self.portfolio_group)
-        self.portfolio_plan_group = self._build_portfolio_plan_editor()
-        layout.addWidget(self.portfolio_plan_group)
+        self.portfolio_panel = PortfolioOperationsPanel()
+        self.portfolio_panel.plan_save_requested.connect(
+            self.portfolio_plan_save_requested.emit
+        )
+        layout.addWidget(self.portfolio_panel)
         self.details = ExecutionDetailTabs(palette=self._palette)
         self.details.reconcile_requested.connect(self.reconcile_requested.emit)
         layout.addWidget(self.details)
         self.scroll_area.setWidget(content)
         outer.addWidget(self.scroll_area)
 
-    def _build_portfolio_operations(self) -> QGroupBox:
-        group = QGroupBox("Portfolio 运行状态")
-        form = QFormLayout(group)
-        self.portfolio_summary = QLabel("尚无 Portfolio 状态")
-        self.portfolio_summary.setWordWrap(True)
-        form.addRow("账户 / 状态", self.portfolio_summary)
-        self.portfolio_strategy_table = QTableWidget(0, 11)
-        self.portfolio_strategy_table.setHorizontalHeaderLabels((
-            "策略版本", "启用", "权重", "资金上限", "总敞口上限",
-            "归属敞口", "股数", "待处理敞口", "已实现盈亏", "费用", "最近决策",
-        ))
-        self.portfolio_strategy_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        form.addRow("策略分配", self.portfolio_strategy_table)
-        self.portfolio_symbol_table = QTableWidget(0, 5)
-        self.portfolio_symbol_table.setHorizontalHeaderLabels((
-            "代码", "股数", "名义金额", "集中度", "贡献策略",
-        ))
-        self.portfolio_symbol_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        form.addRow("资产敞口", self.portfolio_symbol_table)
-        return group
-
     def render_portfolio_operations(self, view: PortfolioOperationsView) -> None:
         """Render a prebuilt portfolio read model; no authority lives on Page."""
+        self.portfolio_panel.render_operations(view)
 
-        self.portfolio_summary.setText(
-            f"模式 {view.mode}｜运行 {view.runtime_state}｜资本上限 {view.total_capital_limit}｜"
-            f"现金 {view.cash}｜权益 {view.equity}｜总敞口 {view.gross_exposure}｜"
-            f"净敞口 {view.net_exposure}\n对账：{view.reconciliation_state}｜最近周期：{view.last_cycle}\n"
-            f"开放订单：{'；'.join(view.open_orders) or '无'}\n"
-            f"待处理组合动作：{'；'.join(view.pending_actions) or '无'}"
-        )
-        self.portfolio_strategy_table.setRowCount(len(view.strategy_allocations))
-        for row_index, row in enumerate(view.strategy_allocations):
-            values = (
-                row.strategy_version_id, str(row.enabled), row.capital_weight,
-                row.capital_ceiling, row.gross_ceiling, row.exposure,
-                str(row.shares), row.pending_exposure, row.realized_pnl,
-                row.fees, row.last_decision,
-            )
-            for column, value in enumerate(values):
-                self.portfolio_strategy_table.setItem(
-                    row_index, column, QTableWidgetItem(value)
-                )
-        self.portfolio_symbol_table.setRowCount(len(view.positions))
-        for row_index, row in enumerate(view.positions):
-            values = (row.symbol, str(row.shares), row.notional, row.concentration, row.contributing_strategies)
-            for column, value in enumerate(values):
-                self.portfolio_symbol_table.setItem(
-                    row_index, column, QTableWidgetItem(value)
-                )
-
-    def _build_portfolio_plan_editor(self) -> QGroupBox:
-        group = QGroupBox("Paper Portfolio Operating Plan")
-        form = QFormLayout(group)
-        self.portfolio_plan_options = QLabel("可用 Paper Shadow 策略：尚未加载")
-        self.portfolio_plan_options.setWordWrap(True)
-        form.addRow("策略目录", self.portfolio_plan_options)
-        self.portfolio_plan_revision = QLineEdit("0")
-        self.portfolio_plan_revision.setReadOnly(True)
-        form.addRow("当前版本", self.portfolio_plan_revision)
-        self.portfolio_plan_selected = QLineEdit()
-        self.portfolio_plan_selected.setPlaceholderText("strategy-version-a, strategy-version-b")
-        form.addRow("选择版本 ID", self.portfolio_plan_selected)
-        self.portfolio_plan_limits = QLineEdit()
-        self.portfolio_plan_limits.setPlaceholderText("capital|gross|net|single|symbol_ratio|strategy_ratio|max_positions|max_orders")
-        form.addRow("硬限额", self.portfolio_plan_limits)
-        self.portfolio_plan_allocations = QPlainTextEdit()
-        self.portfolio_plan_allocations.setPlaceholderText("每行：version_id|weight|capital|gross|enabled")
-        form.addRow("策略分配", self.portfolio_plan_allocations)
-        self.portfolio_plan_reason = QLineEdit()
-        self.portfolio_plan_reason.setPlaceholderText("记录本次计划修改原因")
-        form.addRow("修改原因", self.portfolio_plan_reason)
-        self.portfolio_plan_save = QPushButton("保存计划")
-        self.portfolio_plan_save.clicked.connect(self._emit_portfolio_plan_save)
-        form.addRow(self.portfolio_plan_save)
-        return group
-
-    def render_portfolio_plan_editor(self, *, options: tuple[str, ...], plan: dict[str, object] | None) -> None:
+    def render_portfolio_plan_editor(
+        self,
+        *,
+        options: tuple[str, ...],
+        plan: dict[str, object] | None,
+        error: str | None = None,
+    ) -> None:
         """Render plan editor facts without validating or authorizing the plan."""
 
-        self.portfolio_plan_options.setText("\n".join(options) if options else "没有可用的 Paper Shadow 策略")
-        self.portfolio_plan_revision.setText(str(plan.get("revision", 0) if plan else 0))
-        if plan is None:
-            self.portfolio_plan_selected.clear()
-            self.portfolio_plan_limits.clear()
-            self.portfolio_plan_allocations.clear()
-            return
-        self.portfolio_plan_selected.setText(", ".join(plan["selected_version_ids"]))
-        self.portfolio_plan_limits.setText("|".join(str(value) for value in plan["limits"]))
-        self.portfolio_plan_allocations.setPlainText("\n".join("|".join(map(str, row)) for row in plan["allocations"]))
+        self.portfolio_panel.render_plan(options=options, plan=plan, error=error)
 
     def set_portfolio_plan_editable(self, editable: bool) -> None:
         """Enable plan inputs only when no Paper launch/session owns the plan."""
 
-        for control in (
-            self.portfolio_plan_selected,
-            self.portfolio_plan_limits,
-            self.portfolio_plan_allocations,
-            self.portfolio_plan_reason,
-            self.portfolio_plan_save,
-        ):
-            control.setEnabled(editable)
-
-    def _emit_portfolio_plan_save(self) -> None:
-        self.portfolio_plan_save_requested.emit({
-            "expected_revision": self.portfolio_plan_revision.text(),
-            "selected_version_ids": self.portfolio_plan_selected.text(),
-            "limits": self.portfolio_plan_limits.text(),
-            "allocations": self.portfolio_plan_allocations.toPlainText(),
-            "operator_reason": self.portfolio_plan_reason.text(),
-        })
+        self.portfolio_panel.set_plan_editable(editable)
 
     def _build_cards(self) -> QHBoxLayout:
         cards = QHBoxLayout()

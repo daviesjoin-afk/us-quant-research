@@ -149,6 +149,14 @@ class PortfolioOperatingPlanApplication:
         by_id = {item.version_id: item for item in versions}
         return tuple(by_id[version_id] for version_id in current.selected_version_ids)
 
+    def selected_versions_for_ids(self, version_ids: tuple[str, ...]) -> tuple:
+        """Return versions only when the ids still match the durable plan."""
+
+        current = self.load()
+        if tuple(version_ids) != current.selected_version_ids:
+            raise PortfolioPlanRefused("requested Paper strategies no longer match the portfolio plan")
+        return self.selected_versions(current)
+
     def editor_state(self) -> tuple[tuple[str, ...], dict[str, object] | None]:
         """Return display-only options and editable values for the Desktop page."""
 

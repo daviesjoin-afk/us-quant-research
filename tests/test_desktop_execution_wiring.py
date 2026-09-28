@@ -201,7 +201,7 @@ def window():
 
 
 def _engine_call_keywords() -> list[dict[str, object]]:
-    """Every ``build_trading_runtime(...)`` call in ``desktop.py``, by keyword."""
+    """Every portfolio Paper composition request in ``desktop.py``."""
 
     tree = ast.parse(_DESKTOP.read_text(encoding="utf-8"))
     calls = []
@@ -209,7 +209,7 @@ def _engine_call_keywords() -> list[dict[str, object]]:
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "build_trading_runtime"
+            and node.func.id == "build_portfolio_paper_session"
         ):
             calls.append(
                 {keyword.arg: keyword.value for keyword in node.keywords}
@@ -238,17 +238,23 @@ def test_the_window_owns_an_order_store_it_built_through_composition() -> None:
 def test_the_window_hands_the_runtime_an_execution_service_not_a_sink(
     window,
 ) -> None:
-    """The runtime must not be able to submit; the service must be injectable."""
+    """The Desktop hands its borrowed Paper service into composition."""
 
     calls = _engine_call_keywords()
-    assert calls, "no build_trading_runtime call found in desktop.py"
+    assert calls, "no build_portfolio_paper_session call found in desktop.py"
     for keywords in calls:
-        assert "order_sink" not in keywords, sorted(
-            name for name in keywords if name
-        )
-        assert "execution" in keywords, sorted(
-            name for name in keywords if name
-        )
+        assert "order_sink" not in keywords
+        assert "paper_service" in keywords
+        assert "order_repository" in keywords
+    composition = (
+        _REPO_ROOT
+        / "src"
+        / "us_quant"
+        / "trading"
+        / "composition"
+        / "portfolio_paper.py"
+    ).read_text(encoding="utf-8")
+    assert "build_execution_application(repository=order_repository, broker=paper_service)" in composition
 
 
 def test_the_engine_receives_the_application_built_from_the_windows_store(
@@ -304,11 +310,9 @@ def test_the_window_never_names_a_concrete_execution_implementation() -> None:
         "paper_order_journal",
     ):
         assert forbidden not in source, forbidden
-    for required in (
-        "build_order_repository",
-        "build_execution_application",
-    ):
+    for required in ("build_order_repository", "build_portfolio_paper_session"):
         assert required in source, required
+    assert "build_execution_application" not in source
 
 
 def test_the_session_coordinator_reads_domain_events(window) -> None:

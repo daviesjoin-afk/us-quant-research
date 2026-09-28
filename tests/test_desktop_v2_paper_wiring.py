@@ -408,7 +408,7 @@ def test_portfolio_launch_does_not_read_legacy_primary_strategy(window: MainWind
     _launch(window)
     assert window.paper_workflow.phase is PaperWorkflowPhase.RUNNING
     assert window.paper_workflow.result is not None
-    assert not window.execution_page.portfolio_plan_save.isEnabled()
+    assert not window.execution_page.portfolio_panel.save.isEnabled()
 
 
 def test_portfolio_plan_revision_drift_during_connect_disposes_candidate(

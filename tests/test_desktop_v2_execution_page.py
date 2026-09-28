@@ -41,12 +41,14 @@ from us_quant.desktop_v2.pages.execution.models import (
     LatencyRow,
     MetricView,
     OrderRow,
-    PortfolioOperationsView,
-    PortfolioStrategyOperationsRow,
-    PortfolioSymbolOperationsRow,
     PositionRow,
     ShadowRow,
     Tone,
+)
+from us_quant.desktop_v2.pages.execution.portfolio_models import (
+    PortfolioOperationsView,
+    PortfolioStrategyOperationsRow,
+    PortfolioSymbolOperationsRow,
 )
 
 _PAGE_DIR = (
@@ -631,22 +633,22 @@ def test_portfolio_operations_page_renders_allocations_reconciliation_and_pendin
         ),),
     ))
 
-    assert "HALTED" in page.portfolio_summary.text()
-    assert "strategy-a:+3, strategy-b:-1" in page.portfolio_summary.text()
-    assert page.portfolio_strategy_table.rowCount() == 1
-    assert page.portfolio_strategy_table.item(0, 0).text() == "strategy-a"
-    assert page.portfolio_symbol_table.item(0, 0).text() == "AAPL"
+    assert "HALTED" in page.portfolio_panel.summary.text()
+    assert "strategy-a:+3, strategy-b:-1" in page.portfolio_panel.summary.text()
+    assert page.portfolio_panel.strategy_table.rowCount() == 1
+    assert page.portfolio_panel.strategy_table.item(0, 0).text() == "strategy-a"
+    assert page.portfolio_panel.symbol_table.item(0, 0).text() == "AAPL"
 
 
 def test_portfolio_plan_editor_only_emits_raw_operator_values(page) -> None:
     received = []
     page.portfolio_plan_save_requested.connect(received.append)
     page.render_portfolio_plan_editor(options=("strategy-a / paper_shadow",), plan=None)
-    page.portfolio_plan_selected.setText("strategy-a")
-    page.portfolio_plan_limits.setText("1000|1000|1000|500|1|1|10|10")
-    page.portfolio_plan_allocations.setPlainText("strategy-a|1|1000|1000|true")
-    page.portfolio_plan_reason.setText("operator reviewed")
-    page.portfolio_plan_save.click()
+    page.portfolio_panel.selected.setText("strategy-a")
+    page.portfolio_panel.limits.setText("1000|1000|1000|500|1|1|10|10")
+    page.portfolio_panel.allocations.setPlainText("strategy-a|1|1000|1000|true")
+    page.portfolio_panel.reason.setText("operator reviewed")
+    page.portfolio_panel.save.click()
 
     assert received == [{
         "expected_revision": "0",
@@ -662,11 +664,11 @@ def test_portfolio_plan_editor_only_emits_raw_operator_values(page) -> None:
 
 def test_active_portfolio_session_disables_plan_edit_controls(page) -> None:
     page.set_portfolio_plan_editable(False)
-    assert not page.portfolio_plan_selected.isEnabled()
-    assert not page.portfolio_plan_limits.isEnabled()
-    assert not page.portfolio_plan_allocations.isEnabled()
-    assert not page.portfolio_plan_reason.isEnabled()
-    assert not page.portfolio_plan_save.isEnabled()
+    assert not page.portfolio_panel.selected.isEnabled()
+    assert not page.portfolio_panel.limits.isEnabled()
+    assert not page.portfolio_panel.allocations.isEnabled()
+    assert not page.portfolio_panel.reason.isEnabled()
+    assert not page.portfolio_panel.save.isEnabled()
 
     page.set_portfolio_plan_editable(True)
-    assert page.portfolio_plan_save.isEnabled()
+    assert page.portfolio_panel.save.isEnabled()

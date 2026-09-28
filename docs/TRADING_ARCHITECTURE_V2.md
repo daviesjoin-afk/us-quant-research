@@ -5442,3 +5442,10 @@ DISABLED、kill latch 或不可读控制面会立即阻止新 exposure，已持�
 手工 Paper session 不借用 autonomy authorization。Desktop execution page 只 emit 原始 plan/save/session
 意图并渲染不可变 view；repository 写入、校验和交易决策均由 application/composition 完成，未知账户金额显示
 “未知”而不是零。
+
+Composition ownership 也有明确边界：`trading/composition/portfolio_operations.py` 将计划 application
+接到 SQLite repository；`trading/composition/portfolio_paper.py` 构造 Paper book、session、broker truth
+adapters、snapshot source、dispatch bridge 和唯一的 `PortfolioRuntime`。`MainWindow` 只提供借用的
+Paper service、order repository、Risk authority 与 launch facts；不直接构造 portfolio adapter、
+`PortfolioRuntime`、`OrderDispatch` 或 `SessionBook`。`PortfolioOperationsOrchestrator` 负责计划保存与
+呈现顺序，execution page 的 portfolio panel 只渲染 view 并发出原始保存意图。

@@ -72,6 +72,9 @@ _EXECUTION_MODULE = (
 _LIVE_OPERATOR_MODULE = (
     "us_quant.desktop_v2.orchestration.execution.live_operator"
 )
+_PORTFOLIO_OPERATIONS_MODULE = (
+    "us_quant.desktop_v2.orchestration.portfolio_operations"
+)
 _BACKTEST_MODULE = (
     "us_quant.desktop_v2.orchestration.research.backtest.orchestrator"
 )
@@ -115,6 +118,15 @@ _PAGE_API_OWNERS: dict[str, set[tuple[str, str]]] = {
         (_EXECUTION_MODULE, "ExecutionOrchestrator"),
         (_BACKTEST_MODULE, "BacktestOrchestrator"),
         (_TARGETED_SESSION_MODULE, "TargetedSessionOrchestrator"),
+    },
+    "render_portfolio_operations": {
+        (_PORTFOLIO_OPERATIONS_MODULE, "PortfolioOperationsOrchestrator")
+    },
+    "render_portfolio_plan_editor": {
+        (_PORTFOLIO_OPERATIONS_MODULE, "PortfolioOperationsOrchestrator")
+    },
+    "set_portfolio_plan_editable": {
+        (_PORTFOLIO_OPERATIONS_MODULE, "PortfolioOperationsOrchestrator")
     },
 }
 
@@ -499,7 +511,12 @@ def test_the_window_declares_no_shortlist_alias_or_shim() -> None:
 
 
 def test_the_window_calls_no_execution_page_orchestration_method() -> None:
-    forbidden = set(_PAGE_API_OWNERS) | {"render"}
+    portfolio_operations_api = {
+        "render_portfolio_operations",
+        "render_portfolio_plan_editor",
+        "set_portfolio_plan_editable",
+    }
+    forbidden = (set(_PAGE_API_OWNERS) - portfolio_operations_api) | {"render"}
     called: set[str] = set()
     for method in _window_methods().values():
         for child in ast.walk(method):
@@ -522,7 +539,7 @@ def test_the_window_calls_no_execution_page_orchestration_method() -> None:
 
 
 def test_the_window_only_hands_the_execution_page_its_palette() -> None:
-    """The window's entire ``execution_page`` surface is the theme handoff."""
+    """The window passes the palette; route render calls belong to orchestrators."""
 
     allowed = {"set_palette"}
     called: set[str] = set()

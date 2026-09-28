@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from us_quant.desktop_v2.pages.execution.models import (
+from us_quant.desktop_v2.pages.execution.portfolio_models import (
     PortfolioOperationsView,
     PortfolioStrategyOperationsRow,
     PortfolioSymbolOperationsRow,

@@ -17,8 +17,8 @@ $paperEngine = Join-Path $projectRoot "src\us_quant\trading\runtime\portfolio_pa
 $registry = Join-Path $projectRoot "src\us_quant\trading\composition\runtime.py"
 $queries = Join-Path $projectRoot "src\us_quant\desktop_v2\orchestration\paper\queries.py"
 $orchestrator = Join-Path $projectRoot "src\us_quant\desktop_v2\orchestration\paper\orchestrator.py"
-$desktop = Join-Path $projectRoot "src\us_quant\desktop.py"
-$page = Join-Path $projectRoot "src\us_quant\desktop_v2\pages\execution\page.py"
+$portfolioComposition = Join-Path $projectRoot "src\us_quant\trading\composition\portfolio_paper.py"
+$portfolioPanel = Join-Path $projectRoot "src\us_quant\desktop_v2\pages\execution\portfolio_panel.py"
 $testsOperations = Join-Path $projectRoot "tests\test_portfolio_operations.py"
 $testsRuntime = Join-Path $projectRoot "tests\test_portfolio_runtime.py"
 $testsSnapshot = Join-Path $projectRoot "tests\test_portfolio_snapshot.py"
@@ -34,7 +34,7 @@ $mutations = @(
     @{ name='M3 unallocated selected strategy accepted'; file=$operations; find='if allocation is None or not allocation.enabled or allocation.capital_weight <= 0 or allocation.max_capital <= 0 or allocation.max_gross_exposure <= 0:'; repl='if False:'; tests=@($testsOperations); select='test_selected_but_unallocated_strategy_refuses_portfolio_plan' },
     @{ name='M4 stale plan CAS accepted'; file=$operations; find='if type\(expected_revision\) is not int or expected_revision != current_revision:'; repl='if False:'; tests=@($testsOperations); select='test_plan_stale_cas_and_active_session_edits_are_refused' },
     @{ name='M5 plan drift during launch ignored'; file=$orchestrator; find='if not portfolio_matches:'; repl='if False:'; tests=@($testsWiring); select='test_portfolio_plan_revision_drift_during_connect_disposes_candidate' },
-    @{ name='M6 production Paper constructs the legacy TradingRuntime'; file=$desktop; find='session_id = session\.session_id'; repl="session_id = session.session_id`n        TradingRuntime()"; tests=@($testsArchitecture); select='test_production_paper_composes_one_portfolio_engine_and_no_single_strategy_fallback' },
+    @{ name='M6 production Paper constructs the legacy TradingRuntime'; file=$portfolioComposition; find='session_id = session\.session_id'; repl="session_id = session.session_id`n    TradingRuntime()"; tests=@((Join-Path $projectRoot "tests\test_trading_architecture.py")); select='test_the_desktop_builds_the_runtimes_through_composition' },
     @{ name='M7 one PortfolioRuntime per strategy allowed'; file=$registry; find='if current is not None and current is not runtime:'; repl='if False:'; tests=@($testsOperations); select='test_one_account_cannot_register_a_second_portfolio_runtime' },
     @{ name='M8 reconciliation blocker ignored'; file=$snapshot; find='if not result\.can_open_exposure:'; repl='if False:'; tests=@($testsSnapshot); select='test_unexplained_broker_position_blocks_snapshot_and_exposure' },
     @{ name='M9 zero-net reaches Risk'; file=$portfolioRuntime; find='or decision\.action is None'; repl='or False'; tests=@($testsRuntime); select='test_zero_net_and_hold_never_reach_risk' },
@@ -44,7 +44,7 @@ $mutations = @(
     @{ name='M13 nonzero restart state accepted'; file=$queries; find='if state\.positions:'; repl='if False and state.positions:'; tests=@($testsLaunch); select='test_a_broker_gate_refuses_without_publishing' },
     @{ name='M14 strategy SELL ownership removed'; file=$allocator; find='if quantity_delta < 0 and \('; repl='if False and ('; tests=@($testsRuntime); select='test_strategy_cannot_sell_another_strategys_position' },
     @{ name='M15 partial-fill attribution uses a second rule'; file=$portfolioRuntime; find='execution_contributions_for_quantity\(\s*decision,\s*risk_decision\.approved_quantity\s*\)'; repl='()'; tests=@($testsRuntime); select='test_risk_trim_is_allocated_across_execution_attribution' },
-    @{ name='M16 Desktop page persists plan directly'; file=$page; find='self\.portfolio_plan_save_requested\.emit\('; repl='self.portfolio_plan_save_requested.save_editor('; tests=@($testsOperations); select='test_page_source_has_no_trading_authority_imports' },
+    @{ name='M16 Desktop page persists plan directly'; file=$portfolioPanel; find='from __future__ import annotations'; repl="from __future__ import annotations`n`nfrom us_quant.trading.application.portfolio_operations import PortfolioOperatingPlanApplication"; tests=@((Join-Path $projectRoot "tests\test_trading_architecture.py")); select='test_the_execution_page_package_knows_no_business_service' },
     @{ name='M17 autonomous kill allows new entries'; file=(Join-Path $projectRoot "src\us_quant\trading\runtime\portfolio_cycle.py"); find='if allow_entries and not self\._autonomous_entries_allowed\(\):'; repl='if False:'; tests=@($testsCycle); select='test_persisted_autonomy_kill_blocks_new_entries_before_portfolio_runtime' }
 )
 

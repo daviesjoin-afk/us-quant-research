@@ -5,6 +5,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $env:PYTHONPATH = Join-Path $projectRoot "src"
 $env:PYTHONUTF8 = "1"
+$env:PYTHONDONTWRITEBYTECODE = "1"
 
 function Resolve-Python {
     foreach ($candidate in @(
@@ -23,6 +24,11 @@ function Resolve-Python {
 $py = Resolve-Python
 $domain = Join-Path $projectRoot "src\us_quant\trading\domain\live_startup.py"
 $testFile = Join-Path $projectRoot "tests\test_live_startup.py"
+$domainCache = Join-Path (Split-Path -Parent $domain) "__pycache__"
+if (Test-Path -LiteralPath $domainCache) {
+    Get-ChildItem -LiteralPath $domainCache -Filter "live_startup.*.pyc" -File |
+        Remove-Item -Force
+}
 
 function Get-Text([string]$path) { [System.IO.File]::ReadAllText($path) }
 function Set-Text([string]$path, [string]$text) {

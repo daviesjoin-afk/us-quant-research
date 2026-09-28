@@ -309,6 +309,9 @@ def _launch_request() -> PaperLaunchRequest:
             parameter_hash=hash_of_parameters,
         ),
         parameters=parameters,
+        status="paper_shadow",
+        mode="paper_shadow",
+        gate_passed=True,
     )
     return PaperLaunchRequest(
         plan=build_auto_launch_plan(

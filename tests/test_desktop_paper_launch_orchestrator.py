@@ -199,6 +199,10 @@ class _Candidate:
         cash: Decimal | None = Decimal("25000"),
         positions: tuple[PaperBrokerPosition, ...] = (),
         alias: str = "DU1234567",
+        connection_alias: str | None = None,
+        open_broker_orders: int = 0,
+        unreconciled_local_orders: int = 0,
+        snapshot_complete: bool = True,
         arm_error: Exception | None = None,
     ) -> None:
         self._state = PaperBrokerState(
@@ -214,11 +218,18 @@ class _Candidate:
             observed_at="2026-01-01T00:00:00Z",
         )
         self._alias = alias
+        self._connection = type("_ConnectionFact", (), {
+            "connected": True,
+            "account_alias": connection_alias or alias,
+            "snapshot_complete": snapshot_complete,
+            "open_broker_orders": open_broker_orders,
+            "unreconciled_local_orders": unreconciled_local_orders,
+        })()
         self._arm_error = arm_error
         self.arm_calls: list[dict[str, object]] = []
 
     def connection_snapshot(self) -> object:
-        return type("_ConnectionFact", (), {"account_alias": self._alias})()
+        return self._connection
 
     def broker_state(self) -> PaperBrokerState:
         return self._state
@@ -1020,6 +1031,29 @@ def test_a_broker_gate_refuses_without_publishing(candidate, expected) -> None:
     assert harness.workflow.lease.active is False
     assert harness.events.results == []
     assert expected in harness.events.refusals[-1][1]
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        pytest.param(_Candidate(open_broker_orders=1), id="open-broker-order"),
+        pytest.param(_Candidate(unreconciled_local_orders=1), id="unreconciled-local-order"),
+        pytest.param(_Candidate(snapshot_complete=False), id="incomplete-startup-snapshot"),
+        pytest.param(_Candidate(connection_alias="DU9999999"), id="account-identity-mismatch"),
+    ],
+)
+def test_startup_requires_flat_complete_account_and_order_truth(candidate) -> None:
+    trading = _Trading()
+    trading._candidate_for = lambda candidate_id: candidate  # type: ignore[method-assign]
+    harness = _build(trading=trading)
+
+    _launch(harness)
+
+    assert harness.trading.reserved == []
+    assert harness.trading.promoted == []
+    assert harness.trading.active is None
+    assert harness.workflow.published == []
+    assert harness.workflow.phase is PaperWorkflowPhase.READY
 
 
 def test_the_capital_resolution_failure_refuses_the_launch() -> None:

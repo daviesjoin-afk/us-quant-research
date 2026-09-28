@@ -5374,7 +5374,7 @@ Stage 5-D 起点均为 `c23a2cfcdbddde1a51aa3c4917dc2f010f09c00e`。
 Stage 5-D 在独立分支 `feat/portfolio-risk-reconciliation` 上建立纯 domain
 reconciliation 与 `PortfolioReconciliationApplication`。每次调用都会重新读取
 `PortfolioStateRepositoryPort` 的 durable decisions / execution attribution、只读
-`PortfolioOrderTruthSource` 与本次 broker account snapshot；应用不保留进程内持仓缓存，故重启后以持久账本、订单事件/成交和 broker 事实重建组合归属。
+`PortfolioOrderTruthSource`、provider-neutral `BrokerOpenOrderTruthSource` 与本次 broker account snapshot；应用不保留进程内持仓缓存，故重启后以持久账本、订单事件/成交和 broker 事实重建组合归属。
 
 `PortfolioReconciliationBlocker` 是 typed blocker，包含未解释 position/order/fill、归因不一致、
 待确认 execution、过期 snapshot、缺失 decision 与重复 execution link。结果只有在 blocker 为空时才允许
@@ -5387,9 +5387,58 @@ largest-remainder 分配，再以累计分配差得到本次 fill 归属。余�
 稳定排序，回调到达顺序不会影响策略持仓与成本。Intent、event、fill 的 broker order id 必须相互吻合。
 SELL 的负数量只从该策略的持仓扣减；超出该策略归属股数
 会产生归因 blocker，不会转扣其他策略的股份。按策略维护均价成本、成交股数、realized P&L、费用和
-相对 portfolio action reference price 的 slippage；缺少 broker fee 时费用标为不完整证据，不伪造为完整零费用。
+相对 portfolio action reference price 的 slippage；slippage 方向按每个 strategy 的 signed contribution 计算，而非净额 broker order 的物理方向。缺少 broker fee 时费用标为不完整证据，不伪造为完整零费用。
 订单 SQLite 表以兼容式 `ADD COLUMN fee` 迁移保存可用费用；既有 fill 仍保留且读取为 fee unknown。
 
 本阶段只产出 reconciliation/evidence，不 promotion、demotion 或修改策略。Stage 5-E 再把
 `can_open_exposure` gate 接到 Paper/Desktop 操作路径。Stage 3/4 execution 与 Live safety authority
 不变，BrokerExecutionPort 仍为七方法；Stage 5-D 不直接连接 broker，也不建立第二份 Risk 或 Execution。
+
+#### 8.41 Stage 5-E Portfolio Operations / Desktop / Autonomous Paper
+
+本阶段起点是 Stage 5-D closure repair PR #74 的**实际 merge commit**：
+`254726b1056c47beeca1dea778bdd2f97c2bcf43`。Stage 5-E base 与该 SHA 相同。Stage 5-D closure
+修复要求 broker-side open-order 快照完整、足够新，且订单 identity、account、symbol、side、总量与剩余量
+能和 durable order / attribution truth 对上；未知或无法证明的 open order 会阻止新 exposure。
+
+Stage 3 Final baseline：PR #69 merge `61d0b1a13e9f2be49d3c2134fdc27f4cd09813a8`。
+Stage 4 Final：PR #69 merge `b4d8112a180273947afd56b879d2fd155ad06d13`。
+Stage 5-A～5-D 当前 main 链：PR #70 `0e7b5b7ade3705f9083a70fa935d58783777817b`、PR #71
+`e9deef1ec0e09f5ff51fbfd3abf658e2a1082f11`、PR #72 `c23a2cfcdbddde1a51aa3c4917dc2f010f09c00e`、
+PR #73 `6cbd1a4ddeddfc374526676b35fd5b425517e0f9`，以及 PR #74
+`254726b1056c47beeca1dea778bdd2f97c2bcf43`。本阶段只能在现有 Paper autonomy supervisor 前接入一份
+`PortfolioRuntime` 与一份共享 `CapitalAllocator` authority；任何 reconciliation failure、执行不确定、
+Paper halt、Live kill latch、Live recovery barrier 或账本不可读都必须阻断新 exposure。
+
+Stage 4 implementation complete = YES；Stage 4 operationally complete = NO，supervised Live canary 尚未运行。
+本阶段不得改变 Stage 4 的 Risk/Execution ownership、七方法 `BrokerExecutionPort`、durable-before-submit 顺序、
+unknown no-retry、refusal no-fallback 或 restart 不自动 re-arm 语义。
+
+Portfolio operating plan 独立保存在 SQLite，由窄 repository、`PortfolioOperatingPlanApplication`
+与原子 audit 组成。修改以 `expected_revision` 做 CAS；audit 保留所选版本、八项 hard limits、各版本
+allocation 和 operator reason。空 plan、未知/未治理/未分配版本、零 allocation、旧 revision、损坏存储、
+连接期间计划或参数 hash 漂移，以及 active/connecting 状态下编辑都会拒绝。当前唯一已注册的 production
+signal worker 是 `intraday-auto-rotation`；没有 worker 的策略 family 明确拒绝启动。
+
+生产 Paper launch 使用 portfolio plan 生成无单策略身份的 frozen launch request；plan 总资本上限是本次
+session 的 sizing 上限。connect 后会重读 plan 与所选版本事实，并要求 connection/account identity 一致、
+startup broker snapshot 完整、持仓为零、broker open orders 为零、本地未对账订单为零，之后才 build、arm
+和 publish。active session 不允许热改 plan。每个 session 使用一个 `PortfolioPaperEngine`、一个
+`PortfolioRuntime`/`CapitalAllocator` 和一个物理 `SessionBook`；每个选中版本只运行 signal-only
+`StrategyRuntime` worker，不能访问 Risk、Execution 或 broker。全策略共享同一 market observation/cutoff，
+entry、exit 与 stop reduction 都进入同一个 portfolio batch，再经现有 Risk → OrderDispatch → Execution。
+
+每个可能产生订单的 cycle 都先重新取得同一代 IBKR Paper account/position/open-order truth，并读取 durable
+order、fill、portfolio decision 与 execution attribution。缺失或过期 truth、未知 broker position/order、
+本地账本问题、执行不确定或任何 reconciliation blocker 都会 fail closed 并 halt；不 retry、不伪造归属、
+不切回单策略 path。持仓估值要求当前市场双边 quote 不超过 30 秒；未归属的重启持仓、悬挂 broker order
+或本地未对账订单在 launch 前拒绝。策略 accounting 从 durable fill 重建，包括成本、realized P&L、费用、
+按 signed contribution 方向记录的 slippage 与当日平仓计数，不重建进程丢失的 trailing/high-water 历史。
+
+Pause 只阻止新 entry proposal，已产生的策略 exit 仍运行；operator stop/force-flat 为每个 durable owner
+生成 reduction proposal，经过组合归因、Risk 与同一 dispatch。Autonomous Paper 继续由唯一
+`PaperAutonomySupervisor` 管理生命周期。autonomous launch 每个市场 cycle 都重读持久 Paper intent；PAUSED、
+DISABLED、kill latch 或不可读控制面会立即阻止新 exposure，已持仓的 exit/stop reduction 仍沿用组合路径。
+手工 Paper session 不借用 autonomy authorization。Desktop execution page 只 emit 原始 plan/save/session
+意图并渲染不可变 view；repository 写入、校验和交易决策均由 application/composition 完成，未知账户金额显示
+“未知”而不是零。

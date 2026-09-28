@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 import os
 from pathlib import Path
@@ -124,6 +124,26 @@ from us_quant.trading.application.strategy_selection import (
 from us_quant.trading.composition.strategies import (
     build_strategy_application,
 )
+from us_quant.trading.adapters.sqlite.portfolio_operating_plan_repository import (
+    SQLitePortfolioOperatingPlanRepository,
+)
+from us_quant.trading.adapters.sqlite.portfolio_repository import (
+    SQLitePortfolioRepository,
+)
+from us_quant.trading.adapters.ibkr.portfolio_snapshot import (
+    IBKRPaperPortfolioObservationSource,
+)
+from us_quant.trading.application.portfolio_operations import (
+    PortfolioOperatingPlanApplication,
+    PortfolioOperationsApplication,
+)
+from us_quant.trading.application.portfolio_snapshot import (
+    BrokerPortfolioSnapshotSource,
+)
+from us_quant.desktop_v2.orchestration.execution.portfolio_projection import (
+    build_portfolio_operations_view,
+    build_unavailable_portfolio_operations_view,
+)
 from us_quant.trading.domain.strategy import (
     StrategyIdentity,
     StrategyVersion,
@@ -132,7 +152,6 @@ from us_quant.runtime_events import RuntimeEvent, RuntimeEventStore
 from us_quant.export_service import export_terminal_bundle
 from us_quant.shadow.store import ShadowPaperStore
 from us_quant.trading.composition.session_config import (
-    build_auto_rotation_config,
     resolve_paper_session_capital,
 )
 from us_quant.trading.application.risk import RiskApplication
@@ -145,7 +164,18 @@ from us_quant.trading.composition.live_operator_controls import (
     build_live_operator_controls_application,
 )
 from us_quant.trading.composition.risk import build_risk_application
-from us_quant.trading.composition.runtime import build_trading_runtime
+from us_quant.trading.composition.runtime import (
+    PortfolioRuntimeRegistry,
+    build_portfolio_runtime,
+)
+from us_quant.trading.runtime.config import TradingSessionConfig
+from us_quant.trading.runtime.dispatch import OrderDispatch
+from us_quant.trading.runtime.portfolio_dispatch import PortfolioOrderDispatchBridge
+from us_quant.trading.runtime.portfolio import SessionBook
+from us_quant.trading.runtime.portfolio_paper import PortfolioPaperEngine
+from us_quant.trading.runtime.portfolio_strategies import PortfolioStrategyWorkers
+from us_quant.trading.runtime.portfolio_cycle import PortfolioPaperCycleDriver
+from us_quant.trading.runtime.session import SessionState
 from us_quant.trading.domain.risk import LayeredRiskLimits
 from us_quant.runtime_supervisor import RuntimeSnapshot, RuntimeSupervisor
 from us_quant.paper_order_models import PaperOrderReconciliation
@@ -459,6 +489,17 @@ class MainWindow(QMainWindow):
         self.strategies = build_strategy_application(
             self.paths.runtime_root / "strategies.sqlite3"
         )
+        self.portfolio_runtime_registry = PortfolioRuntimeRegistry()
+        self.portfolio_operating_plan_application = PortfolioOperatingPlanApplication(
+            repository=SQLitePortfolioOperatingPlanRepository(
+                self.paths.runtime_root / "portfolio_operating_plan.sqlite3"
+            ),
+            strategies=self.strategies,
+            active_session=lambda: (
+                self.paper_orchestrator.runtime_active
+                or self.paper_orchestrator.launch_attempt_in_flight
+            ) if hasattr(self, "paper_orchestrator") else False,
+        )
         # Runtime selection is service state, not combo state.  The combos on
         # the research and execution pages are views onto this, so asking
         # "which version does auto rotation run?" has one answer that does not
@@ -604,6 +645,11 @@ class MainWindow(QMainWindow):
             # route that runs it.  Paper never names the service and never
             # reads the combo: it receives the canonical value.
             strategy_provider=lambda: self.execution_orchestrator.current_strategy,
+            portfolio_plan_provider=self.portfolio_operating_plan_application.load,
+            portfolio_strategies_provider=lambda version_ids: tuple(
+                self.strategies.get_version(version_id)
+                for version_id in version_ids
+            ),
             candidates_provider=lambda: self.execution_orchestrator.candidates,
             capital_limit_provider=lambda: self.execution_orchestrator.capital_limit,
             order_channel_provider=self._auto_quant_order_channel,
@@ -621,9 +667,7 @@ class MainWindow(QMainWindow):
             clear_arm_confirmation=(
                 lambda: self.execution_orchestrator.clear_arm_confirmation()
             ),
-            render_launch_state=lambda: (
-                self.execution_orchestrator.refresh_controls()
-            ),
+            render_launch_state=self._refresh_paper_launch_state,
             render_launch_context=lambda summary: (
                 self.execution_orchestrator.render_launch_context(summary)
             ),
@@ -1491,6 +1535,7 @@ class MainWindow(QMainWindow):
         page.resume_reconciliation_requested.connect(
             self._confirm_paper_reconciliation_resume
         )
+        page.portfolio_plan_save_requested.connect(self._save_portfolio_operating_plan)
         page.live_arm_requested.connect(
             self.live_operator_orchestrator.request_arm
         )
@@ -1500,6 +1545,7 @@ class MainWindow(QMainWindow):
         page.live_status_refresh_requested.connect(
             self.live_operator_orchestrator.refresh
         )
+        self._refresh_portfolio_plan_editor()
         self.live_operator_orchestrator.warning_requested.connect(
             self._show_runtime_warning
         )
@@ -1540,9 +1586,45 @@ class MainWindow(QMainWindow):
         self.paper_orchestrator.presentation_refresh_requested.connect(
             execution.refresh_controls
         )
+        self.paper_orchestrator.presentation_refresh_requested.connect(
+            self._refresh_portfolio_plan_editor
+        )
         self.paper_orchestrator.session_finalized.connect(
             execution.on_paper_session_finalized
         )
+
+    def _refresh_portfolio_plan_editor(self) -> None:
+        """Render plan catalogue and current revision through the read-only Page API."""
+
+        try:
+            options, plan = self.portfolio_operating_plan_application.editor_state()
+            self.execution_page.render_portfolio_plan_editor(options=options, plan=plan)
+        except Exception as error:  # noqa: BLE001 - unreadable plan remains visible and blocked
+            self.execution_page.render_portfolio_plan_editor(options=(), plan=None)
+            self.execution_page.portfolio_plan_options.setText(
+                f"策略目录或计划读取失败，Paper start 已关闭：{error}"
+            )
+        self.execution_page.set_portfolio_plan_editable(
+            not (
+                self.paper_orchestrator.runtime_active
+                or self.paper_orchestrator.launch_attempt_in_flight
+            )
+        )
+
+    def _refresh_paper_launch_state(self) -> None:
+        self.execution_orchestrator.refresh_controls()
+        self._refresh_portfolio_plan_editor()
+
+    def _save_portfolio_operating_plan(self, command: object) -> None:
+        """Route raw Page input to the operating-plan application authority."""
+
+        try:
+            self.portfolio_operating_plan_application.save_editor(command)
+        except Exception as error:  # noqa: BLE001 - report a refused configuration edit
+            QMessageBox.warning(self, "Portfolio 计划未保存", str(error))
+            return
+        self._refresh_portfolio_plan_editor()
+        QMessageBox.information(self, "Portfolio 计划已保存", "新计划版本已持久化；下一次 Paper start 将冻结此版本。")
 
     def _apply_execution_subscription(self, symbols: object) -> None:
         """Hand the route's finished subscription set to the market capability."""
@@ -2831,19 +2913,48 @@ class MainWindow(QMainWindow):
         could not be locked down by a guard.
         """
 
-        fact = request.strategy
+        portfolio_launch = request.portfolio
+        if portfolio_launch is None:
+            raise RuntimeError("Paper portfolio launch fact is missing")
+        plan = self.portfolio_operating_plan_application.load()
+        if (
+            plan.plan_id != portfolio_launch.plan_id
+            or plan.revision != portfolio_launch.plan_revision
+            or tuple(plan.selected_version_ids) != portfolio_launch.selected_version_ids
+            or plan.policy != portfolio_launch.policy
+        ):
+            raise RuntimeError("frozen Paper portfolio plan changed before runtime composition")
+        selected_strategies = self.portfolio_operating_plan_application.selected_versions(plan)
+        if tuple(item.version_id for item in selected_strategies) != portfolio_launch.selected_version_ids:
+            raise RuntimeError("selected Paper strategy set changed before runtime composition")
+        for version, frozen in zip(selected_strategies, portfolio_launch.strategies, strict=True):
+            if (
+                version.identity != frozen.identity
+                or version.parameter_hash != frozen.parameter_hash
+                or version.status.value != frozen.status
+                or version.mode.value != frozen.mode
+                or version.gate_passed != frozen.gate_passed
+            ):
+                raise RuntimeError("selected Paper strategy facts changed before runtime composition")
         paper_capital = resolve_paper_session_capital(
             net_liquidation=reading.net_liquidation,
             cash=reading.cash,
             requested_limit=request.plan.requested_capital_limit,
         )
-        config = build_auto_rotation_config(
-            fact.parameters,
+        commission = max(
+            (
+                Decimal(str(version.parameters.get("commission_per_order", "0.35")))
+                for version in selected_strategies
+            ),
+            default=Decimal("0.35"),
+        )
+        config = TradingSessionConfig(
             initial_cash=Decimal(paper_capital),
             capital_source=(
-                f"IBKR Paper {reading.account_alias} "
-                f"现金约束；会话上限 {paper_capital}"
+                f"IBKR Paper {reading.account_alias} 现金约束；"
+                f"Portfolio plan {plan.plan_id} revision {plan.revision}"
             ),
+            commission_per_order=commission,
             daily_loss_limit=Decimal(paper_capital) * Decimal("0.01"),
         )
         # One risk authority, built from the configuration this window is actually
@@ -2856,32 +2967,127 @@ class MainWindow(QMainWindow):
             repository=self.order_repository,
             broker=service,
         )
-        runtime = build_trading_runtime(
-            config=config,
-            candidates=request.candidates,
-            identity=fact.identity,
-            risk=risk,
-            execution=execution,
-            market_reference_symbols=tuple(
-                dict.fromkeys(
-                    str(symbol).strip().upper()
-                    for symbol in fact.parameters.get(
-                        "market_reference_symbols", []
-                    )
-                    if str(symbol).strip()
-                )
-            ),
+        # PortfolioPaperEngine owns the one physical Paper book/session. The
+        # legacy single-strategy TradingRuntime stays out of this production path.
+        book = SessionBook(
+            initial_cash=config.initial_cash,
+            commission=config.commission_per_order,
         )
-        snapshot = runtime.start()
-        assert snapshot.session_id is not None
-        return PaperSessionBuildResult(
-            engine=runtime,
+        book.reset()
+        session = SessionState()
+        session.begin(
+            candidate_count=len(request.candidates),
+            warmup_minutes=config.warmup_minutes,
+        )
+        assert session.session_id is not None
+        session_id = session.session_id
+        dispatch = OrderDispatch(config=config, risk=risk, execution=execution)
+        portfolio_repository = SQLitePortfolioRepository(
+            self.paths.runtime_root / "portfolio_execution.sqlite3"
+        )
+        broker_observation = IBKRPaperPortfolioObservationSource(
             orders=service,
-            session_id=snapshot.session_id,
-            candidate_count=snapshot.candidate_count,
-            max_order_notional=(
-                Decimal(paper_capital) * config.max_position_fraction
+            session_id=session_id,
+        )
+        portfolio_snapshot = BrokerPortfolioSnapshotSource(
+            broker_portfolio=broker_observation.broker_portfolio,
+            broker_open_orders=broker_observation,
+            order_truth=self.order_repository,
+            portfolio_repository=portfolio_repository,
+        )
+
+        def publish_portfolio_operations_view() -> None:
+            current_snapshot = portfolio_snapshot.last_snapshot
+            state_label = (
+                "STOPPING" if session.stop_requested
+                else "RUNNING" if session.active
+                else "HALTED"
+            )
+            reconciliation = portfolio_snapshot.last_reconciliation
+            if (
+                current_snapshot is None
+                or reconciliation is None
+                or reconciliation.blockers
+            ):
+                self.execution_page.render_portfolio_operations(
+                    build_unavailable_portfolio_operations_view(
+                        policy=plan.policy,
+                        runtime_state=state_label,
+                        reconciliation=reconciliation,
+                    )
+                )
+                return
+            self.execution_page.render_portfolio_operations(
+                build_portfolio_operations_view(
+                    snapshot=current_snapshot,
+                    policy=plan.policy,
+                    decisions=portfolio_repository.decisions(),
+                    reconciliation=reconciliation,
+                    runtime_state=state_label,
+                )
+            )
+
+        workers = PortfolioStrategyWorkers(
+            strategies=selected_strategies,
+            candidates=request.candidates,
+            policy=plan.policy,
+        )
+        portfolio_dispatch = PortfolioOrderDispatchBridge(
+            dispatch=dispatch,
+            book=book,
+            session_id=session_id,
+            allowed_symbols=frozenset(request.candidate_symbols),
+        )
+        portfolio_runtime = build_portfolio_runtime(
+            strategies=self.strategies,
+            proposals=workers,
+            snapshots=portfolio_snapshot,
+            repository=portfolio_repository,
+            risk_path=portfolio_dispatch,
+        )
+        self.portfolio_runtime_registry.register(
+            account_alias=reading.account_alias,
+            runtime=portfolio_runtime,
+        )
+        operations = PortfolioOperationsApplication(
+            runtime=portfolio_runtime,
+            repository=portfolio_repository,
+        )
+        cycle_driver = PortfolioPaperCycleDriver(
+            operations=operations,
+            plan_application=self.portfolio_operating_plan_application,
+            frozen_plan=plan,
+            workers=workers,
+            session_id=session_id,
+            account_alias=reading.account_alias,
+            broker_observation_source=broker_observation,
+            autonomous_entries_allowed=(
+                (lambda: self.paper_autonomy_application.snapshot().allows_autonomous_work)
+                if request.autonomous
+                else (lambda: True)
             ),
+            publish_operations_view=publish_portfolio_operations_view,
+        )
+        paper_engine = PortfolioPaperEngine(
+            config=config,
+            candidate_count=len(request.candidates),
+            book=book,
+            session=session,
+            portfolio_runtime=portfolio_runtime,
+            launch_plan=plan,
+            portfolio_cycle=cycle_driver,
+        )
+        max_order_notional = min(
+            Decimal(paper_capital),
+            plan.policy.max_gross_exposure,
+            plan.policy.max_single_position_notional,
+        )
+        return PaperSessionBuildResult(
+            engine=paper_engine,
+            orders=service,
+            session_id=session_id,
+            candidate_count=len(request.candidates),
+            max_order_notional=max_order_notional,
         )
 
     def _paper_execution_health_adapter(self, **kwargs: object) -> PaperExecutionHealth:

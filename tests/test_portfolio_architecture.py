@@ -12,6 +12,9 @@ PORTFOLIO_SQLITE_REPOSITORY = SOURCE / "trading" / "adapters" / "sqlite" / "port
 PORTFOLIO_RUNTIME = SOURCE / "trading" / "application" / "portfolio_runtime.py"
 PORTFOLIO_RECONCILIATION = SOURCE / "trading" / "application" / "portfolio_reconciliation.py"
 PORTFOLIO_DISPATCH_BRIDGE = SOURCE / "trading" / "runtime" / "portfolio_dispatch.py"
+PORTFOLIO_PAPER_ENGINE = SOURCE / "trading" / "runtime" / "portfolio_paper.py"
+PORTFOLIO_STRATEGY_WORKERS = SOURCE / "trading" / "runtime" / "portfolio_strategies.py"
+DESKTOP = SOURCE / "desktop.py"
 
 
 def _all_python_files():
@@ -174,6 +177,89 @@ def test_portfolio_runtime_is_unique_and_cannot_construct_execution_authority():
     names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
     assert "OrderIntent" not in names
     assert "ExecutionApplication" not in names
+
+
+def test_production_paper_composes_one_portfolio_engine_and_no_single_strategy_fallback():
+    tree = ast.parse(DESKTOP.read_text(encoding="utf-8"))
+    build_method = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_build_paper_session"
+    )
+    calls = {
+        node.func.id for node in ast.walk(build_method)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "PortfolioPaperEngine" in calls
+    assert "build_portfolio_runtime" in calls
+    assert "OrderDispatch" in calls
+    assert "SessionBook" in calls
+    assert "SessionState" in calls
+    assert "build_trading_runtime" not in calls
+    assert "TradingRuntime" not in calls
+    assert "TradingRuntime" not in {
+        node.id for node in ast.walk(build_method) if isinstance(node, ast.Name)
+    }
+
+
+def test_portfolio_paper_engine_has_one_class_and_requires_a_unique_runtime():
+    owners = []
+    for path in _all_python_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        owners.extend(
+            _module(path) for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == "PortfolioPaperEngine"
+        )
+    assert owners == ["trading.runtime.portfolio_paper"]
+    tree = ast.parse(PORTFOLIO_PAPER_ENGINE.read_text(encoding="utf-8"))
+    imports = _imports(tree)
+    assert not any(name.startswith("us_quant.trading.adapters.ibkr") for name in imports)
+    assert "us_quant.trading.runtime.trading" not in imports
+    assert "TradingRuntime" not in {
+        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+    }
+
+
+def test_strategy_workers_are_signal_only_and_never_construct_session_authorities():
+    tree = ast.parse(PORTFOLIO_STRATEGY_WORKERS.read_text(encoding="utf-8"))
+    imports = _imports(tree)
+    assert not any(
+        "RiskApplication" in name or "ExecutionApplication" in name
+        or "BrokerExecutionPort" in name or name.startswith("us_quant.trading.adapters")
+        for name in imports
+    )
+    classes = {
+        node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)
+    }
+    assert classes == {"PortfolioStrategyWorkers"}
+
+
+def test_stage5_keeps_all_portfolio_paper_and_shared_safety_owners_unique():
+    expected = {
+        "PortfolioPaperEngine": "trading.runtime.portfolio_paper",
+        "PortfolioRuntime": "trading.application.portfolio_runtime",
+        "CapitalAllocator": "trading.application.portfolio",
+        "RiskApplication": "trading.application.risk",
+        "ExecutionApplication": "trading.application.execution",
+        "OrderDispatch": "trading.runtime.dispatch",
+        "TradingRuntime": "trading.runtime.trading",
+        "PaperAutonomySupervisor": "trading.application.paper_autonomy_supervisor",
+        "PaperOrchestrator": "desktop_v2.orchestration.paper.orchestrator",
+    }
+    definitions = {name: [] for name in expected}
+    for path in _all_python_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name in definitions:
+                definitions[node.name].append(_module(path))
+    assert definitions == {name: [owner] for name, owner in expected.items()}
+
+
+def test_autonomous_portfolio_cycles_recheck_the_persisted_paper_intent():
+    desktop = DESKTOP.read_text(encoding="utf-8")
+    cycle = (SOURCE / "trading" / "runtime" / "portfolio_cycle.py").read_text(encoding="utf-8")
+    assert "if request.autonomous" in desktop
+    assert "paper_autonomy_application.snapshot().allows_autonomous_work" in desktop
+    assert "if allow_entries and not self._autonomous_entries_allowed():" in cycle
 
 
 def test_portfolio_reconciliation_application_is_unique_and_reload_only():

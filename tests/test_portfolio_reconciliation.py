@@ -623,6 +623,30 @@ def test_partial_sell_reduces_only_selling_strategy():
     assert result.can_open_exposure
 
 
+def test_strategy_daily_trade_count_comes_from_durable_close_fills():
+    buy = decision_record("daily-buy", (("a", "ba", 4),), order_id="daily-buy-order")
+    sell = decision_record("daily-sell", (("a", "sa", -4),), order_id="daily-sell-order")
+    buy_order, buy_link = linked_order(
+        buy,
+        fills=(fill("daily-buy-fill", "daily-buy-order", 4, occurred_at=NOW - timedelta(days=1)),),
+    )
+    sell_order, sell_link = linked_order(
+        sell,
+        fills=(fill("daily-sell-fill", "daily-sell-order", 4, side=Side.SELL, occurred_at=NOW),),
+    )
+
+    result = reconcile(
+        {},
+        records=(buy, sell),
+        orders=(buy_order, sell_order),
+        attributions=(buy_link, sell_link),
+    )
+
+    assert result.can_open_exposure
+    assert result.strategy_accounting[0].quantity == 0
+    assert result.strategy_accounting[0].trades_today == 1
+
+
 def test_fee_and_realized_pnl_are_deterministic():
     buy = decision_record("buy", (("a", "ba", 7), ("b", "bb", 3)), order_id="buy-o")
     sell = decision_record("sell", (("a", "sa", -1),), order_id="sell-o")

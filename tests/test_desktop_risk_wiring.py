@@ -99,7 +99,7 @@ def window():
 
 
 def _engine_call_keywords() -> list[dict[str, object]]:
-    """Every ``build_trading_runtime(...)`` call in ``desktop.py``."""
+    """The Paper session host must receive the window's Risk authority."""
 
     tree = ast.parse(_DESKTOP.read_text(encoding="utf-8"))
     calls = []
@@ -107,7 +107,7 @@ def _engine_call_keywords() -> list[dict[str, object]]:
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "build_trading_runtime"
+            and node.func.id == "OrderDispatch"
         ):
             calls.append(
                 {keyword.arg: keyword.value for keyword in node.keywords}
@@ -271,7 +271,7 @@ def test_the_engine_call_site_passes_the_risk_application() -> None:
     assert len(calls) == 1, calls
     keywords = calls[0]
     assert "risk" in keywords
-    assert "identity" in keywords
+    assert "identity" not in keywords
     for retired in (
         "layered_risk_limits",
         "symbol_risk_multipliers",

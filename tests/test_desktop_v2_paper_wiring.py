@@ -26,6 +26,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import dataclasses
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
@@ -45,12 +46,14 @@ from us_quant.paper_order_models import PaperBrokerState
 from us_quant.trading.application.paper import PaperTradingService
 from us_quant.trading.application.paper.models import PaperTradingLifecycleError
 from us_quant.trading.runtime.models import AutoQuantCandidate
+from us_quant.trading.application.portfolio_runtime import PortfolioRuntime
 from us_quant.trading.runtime.workflow_state import (
     ExecutionLease,
     PaperWorkflowPhase,
     WorkflowStateError,
 )
-from us_quant.trading.domain.strategy import StrategyStatus
+from us_quant.trading.domain.strategy import StrategyMode, StrategyStatus
+from us_quant.trading.domain.portfolio import PortfolioCapitalPolicy, PortfolioStrategyAllocation
 
 
 _APP = QApplication.instance() or QApplication([])
@@ -63,7 +66,9 @@ class _Connection:
     def __init__(self) -> None:
         self.connected = True
         self.open_broker_orders = 0
-        self.account_alias = "DU1234567"
+        self.unreconciled_local_orders = 0
+        self.snapshot_complete = True
+        self.account_alias = "DU***67"
 
 
 class _FakeCandidateService:
@@ -82,7 +87,7 @@ class _FakeCandidateService:
         self.armed: dict[str, object] | None = None
         self.disconnected = 0
         self._state = PaperBrokerState(
-            account_alias="DU1234567",
+            account_alias="DU***67",
             net_liquidation=Decimal("25000"),
             cash=Decimal("25000"),
             available_funds=Decimal("25000"),
@@ -257,6 +262,37 @@ def window(monkeypatch, tmp_path):
     window.execution_orchestrator._candidates = (_candidate(),)
     window._test_strategy = _strategy(window)
     window.paper_orchestrator._strategy_provider = lambda: window._test_strategy
+    governed_test_version = dataclasses.replace(
+        window._test_strategy,
+        status=StrategyStatus.PAPER_SHADOW,
+        mode=StrategyMode.PAPER_SHADOW,
+        gate_passed=True,
+    )
+    # The desktop wiring test uses a pre-governed test fixture. The real strategy
+    # application remains covered by its own gate tests.
+    window.portfolio_operating_plan_application._strategies = type(
+        "GovernedTestCatalogue", (), {"list_versions": lambda _self: (governed_test_version,)}
+    )()
+    window.paper_orchestrator._portfolio_strategies_provider = lambda _ids: (governed_test_version,)
+    version_id = window._test_strategy.version_id
+    window.portfolio_operating_plan_application.save(
+        selected_version_ids=(version_id,),
+        policy=PortfolioCapitalPolicy(
+            total_capital_limit=Decimal("20000"),
+            max_gross_exposure=Decimal("20000"),
+            max_net_exposure=Decimal("20000"),
+            max_single_position_notional=Decimal("20000"),
+            max_symbol_concentration=Decimal("1"),
+            max_strategy_concentration=Decimal("1"),
+            max_positions=10,
+            max_open_orders=10,
+            allocations=(PortfolioStrategyAllocation(
+                version_id, Decimal("1"), Decimal("20000"), Decimal("20000"), True
+            ),),
+        ),
+        expected_revision=0,
+        operator_reason="test fixture plan",
+    )
     window.paper_orchestrator._preflight_provider = (
         lambda _authorization: _Preflight()
     )
@@ -292,6 +328,10 @@ def test_the_page_start_intent_reaches_the_orchestrator(window: MainWindow) -> N
     assert len(window._test_submitter.calls) == 1
     assert window._test_submitter.calls[0]["resource_group"] == "broker"
     assert window.paper_workflow.phase is PaperWorkflowPhase.RUNNING
+    assert isinstance(
+        window.portfolio_runtime_registry.runtime_for("DU***67"),
+        PortfolioRuntime,
+    )
 
 
 def test_a_launch_publishes_exactly_one_session_and_promotes_once(
@@ -341,9 +381,10 @@ def test_an_inconsistent_catalogue_version_does_not_escape_the_qt_slot(
     """
 
     real = window._test_strategy
-    window.paper_orchestrator._strategy_provider = lambda: dataclasses.replace(
+    invalid = dataclasses.replace(
         real, identity=dataclasses.replace(real.identity, parameter_hash="0" * 64)
     )
+    window.paper_orchestrator._portfolio_strategies_provider = lambda _ids: (invalid,)
 
     window._test_refusals.clear()
     _launch(window)  # must not raise
@@ -358,6 +399,65 @@ def test_an_inconsistent_catalogue_version_does_not_escape_the_qt_slot(
     assert window._test_refusals[-1][0] == PAPER_STRATEGY_INTEGRITY_TITLE
     assert window._test_events[-1].code == PAPER_STRATEGY_INTEGRITY_CODE
     assert window._test_events[-1].severity == "error"
+
+
+def test_portfolio_launch_does_not_read_legacy_primary_strategy(window: MainWindow) -> None:
+    window.paper_orchestrator._strategy_provider = lambda: (_ for _ in ()).throw(
+        AssertionError("portfolio launch read a legacy primary strategy")
+    )
+    _launch(window)
+    assert window.paper_workflow.phase is PaperWorkflowPhase.RUNNING
+    assert window.paper_workflow.result is not None
+    assert not window.execution_page.portfolio_plan_save.isEnabled()
+
+
+def test_portfolio_plan_revision_drift_during_connect_disposes_candidate(
+    window: MainWindow,
+) -> None:
+    original = window.portfolio_operating_plan_application.load()
+    changed = dataclasses.replace(
+        original, revision=original.revision + 1,
+        updated_at=original.updated_at + timedelta(minutes=1),
+    )
+    reads = 0
+
+    def plan_provider():
+        nonlocal reads
+        reads += 1
+        return original if reads == 1 else changed
+
+    window.paper_orchestrator._portfolio_plan_provider = plan_provider
+    _launch(window)
+
+    assert window.paper_workflow.phase is PaperWorkflowPhase.READY
+    assert window.paper_workflow.lease is ExecutionLease.NONE
+    assert window._test_submitter.connect_count == 1
+    assert window.paper_trading.has_order_service() is False
+    assert window._test_refusals
+
+
+def test_selected_strategy_hash_drift_during_connect_disposes_candidate(
+    window: MainWindow,
+) -> None:
+    version = window.portfolio_operating_plan_application.selected_versions()[0]
+    invalid = dataclasses.replace(
+        version, identity=dataclasses.replace(version.identity, parameter_hash="0" * 64)
+    )
+    reads = 0
+
+    def strategy_provider(_version_ids):
+        nonlocal reads
+        reads += 1
+        return (version,) if reads == 1 else (invalid,)
+
+    window.paper_orchestrator._portfolio_strategies_provider = strategy_provider
+    _launch(window)
+
+    assert window.paper_workflow.phase is PaperWorkflowPhase.READY
+    assert window.paper_workflow.lease is ExecutionLease.NONE
+    assert window._test_submitter.connect_count == 1
+    assert window.paper_trading.has_order_service() is False
+    assert window._test_refusals
 
 
 def test_the_session_reaches_the_window_through_the_result(

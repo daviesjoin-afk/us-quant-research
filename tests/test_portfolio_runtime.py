@@ -12,6 +12,7 @@ import pytest
 from us_quant.trading.adapters.sqlite.portfolio_repository import SQLitePortfolioRepository
 from us_quant.trading.application.portfolio_runtime import PortfolioRuntime, PortfolioRuntimeError
 from us_quant.trading.domain.portfolio import (
+    PortfolioBlocker,
     PortfolioCapitalPolicy,
     PortfolioPosition,
     PortfolioSide,
@@ -51,10 +52,13 @@ class _ProposalSource:
         self.mapping = mapping or {}
         self.reverse = reverse
         self.calls = []
+        self.observations = []
         self.on_call = on_call
 
-    def proposals_for(self, strategy, *, observed_at, proposal_cutoff):
+    def proposals_for(self, strategy, *, observed_at, proposal_cutoff, portfolio_snapshot):
         self.calls.append(strategy.version_id)
+        self.observations.append((observed_at, proposal_cutoff, portfolio_snapshot))
+        self.last_snapshot = portfolio_snapshot
         if self.on_call:
             self.on_call()
         values = tuple(self.mapping.get(strategy.version_id, ()))
@@ -225,6 +229,9 @@ def test_three_governed_strategies_share_one_cycle_and_net_deterministically(tmp
     result = _evaluate(runtime, versions)
 
     assert proposals.calls == sorted(version.version_id for version in versions)
+    assert len(proposals.observations) == len(versions)
+    assert all(item[0] == item[1] == NOW for item in proposals.observations)
+    assert all(item[2] is proposals.observations[0][2] for item in proposals.observations)
     assert len(result.decisions) == 1
     decision = result.decisions[0]
     assert decision.decision is PortfolioVerdict.APPROVE
@@ -292,7 +299,7 @@ def test_only_selected_governed_enabled_and_allocated_versions_run(tmp_path):
         {version.version_id: (_proposal(version),) for version in versions}
     )
     runtime, _, _, _ = _runtime(tmp_path, versions, proposals)
-    selected = frozenset(version.version_id for version in versions)
+    selected = frozenset({eligible.version_id})
 
     runtime.evaluate_cycle(
         portfolio_cycle_id="eligibility",
@@ -306,6 +313,74 @@ def test_only_selected_governed_enabled_and_allocated_versions_run(tmp_path):
     )
 
     assert proposals.calls == [eligible.version_id]
+
+    stale_selected = frozenset({research.version_id})
+    blocked, _, _, blocked_risk = _runtime(
+        tmp_path / "stale-selection", versions, proposals
+    )
+    with pytest.raises(PortfolioRuntimeError, match="no longer governed or allocated"):
+        blocked.evaluate_cycle(
+            portfolio_cycle_id="stale-selection",
+            observed_at=NOW,
+            proposal_cutoff=NOW,
+            snapshot_identity="snapshot",
+            policy=_policy(versions),
+            policy_identity="policy",
+            policy_revision="1",
+            selected_version_ids=stale_selected,
+        )
+    assert blocked_risk.evaluations == []
+
+
+def test_selected_version_with_disabled_allocation_fails_closed(tmp_path):
+    disabled = _version("disabled-allocation")
+    proposals = _ProposalSource(
+        {disabled.version_id: (_proposal(disabled),)}
+    )
+    runtime, _, _, risk = _runtime(tmp_path, (disabled,), proposals)
+    policy = _policy((disabled,), disabled={disabled.version_id})
+    assert policy.allocation_for(disabled.version_id).enabled is False
+
+    with pytest.raises(PortfolioRuntimeError, match="no longer governed or allocated"):
+        runtime.evaluate_cycle(
+            portfolio_cycle_id="disabled-allocation",
+            observed_at=NOW,
+            proposal_cutoff=NOW,
+            snapshot_identity="snapshot",
+            policy=policy,
+            policy_identity="policy",
+            policy_revision="1",
+            selected_version_ids=frozenset({disabled.version_id}),
+        )
+
+    assert proposals.calls == []
+    assert risk.evaluations == []
+
+
+def test_strategy_cannot_sell_another_strategys_position(tmp_path):
+    alpha = _version("alpha")
+    source = _ProposalSource({
+        alpha.version_id: (_proposal(alpha, action=TradeAction.SELL, quantity=1),)
+    })
+
+    class BetaOwnsPosition:
+        def snapshot(self, *, observed_at):
+            return PortfolioSnapshot(
+                cash=Decimal("900"), equity=Decimal("1000"),
+                gross_exposure=Decimal("100"), net_exposure=Decimal("100"),
+                positions=(PortfolioPosition("AAPL", 10, Decimal("100")),),
+                strategy_exposure=(
+                    PortfolioStrategyExposure("beta", "AAPL", Decimal("100"), 10),
+                ),
+                observed_at=observed_at,
+            )
+
+    runtime, _, _, risk = _runtime(
+        tmp_path, (alpha,), source, snapshots=BetaOwnsPosition()
+    )
+    result = _evaluate(runtime, (alpha,))
+    assert result.decisions[0].blocker is PortfolioBlocker.STRATEGY_ALLOCATION_EXCEEDED
+    assert risk.evaluations == []
 
 
 def test_mixed_observation_windows_are_rejected(tmp_path):

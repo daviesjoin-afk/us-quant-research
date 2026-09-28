@@ -12,8 +12,8 @@ class AutoLaunchPlan:
     """The user-approved inputs that must survive broker connection."""
 
     attempt_id: int
-    strategy_version_id: str
-    parameter_hash: str
+    strategy_version_id: str | None
+    parameter_hash: str | None
     candidate_symbols: tuple[str, ...]
     requested_capital_limit: Decimal
 
@@ -21,8 +21,8 @@ class AutoLaunchPlan:
 def build_auto_launch_plan(
     *,
     attempt_id: int,
-    strategy_version_id: str,
-    parameter_hash: str,
+    strategy_version_id: str | None,
+    parameter_hash: str | None,
     candidate_symbols: Iterable[str],
     requested_capital_limit: Decimal,
 ) -> AutoLaunchPlan:
@@ -40,8 +40,8 @@ def build_auto_launch_plan(
 def auto_launch_plan_matches(
     plan: AutoLaunchPlan,
     *,
-    strategy_version_id: str,
-    parameter_hash: str,
+    strategy_version_id: str | None,
+    parameter_hash: str | None,
     candidate_symbols: Iterable[str],
     requested_capital_limit: Decimal,
 ) -> bool:

@@ -22,6 +22,7 @@ class PortfolioProposalSource(Protocol):
         *,
         observed_at: datetime,
         proposal_cutoff: datetime,
+        portfolio_snapshot: PortfolioSnapshot,
     ) -> tuple[TradeProposal, ...]: ...
 
 

@@ -100,7 +100,7 @@ def build_snapshot(
     session,
     book: BookView,
     config: TradingSessionConfig,
-    identity: StrategyIdentity,
+    identity: StrategyIdentity | None,
     candidate_count: int,
     observed_at: datetime,
 ) -> AutoQuantSnapshot:
@@ -117,8 +117,8 @@ def build_snapshot(
         # Projected from the bound identity rather than stored a second time:
         # the artifact and UI field names are unchanged, but there is one
         # source for them.
-        strategy_version_id=identity.version_id,
-        parameter_hash=identity.parameter_hash,
+        strategy_version_id=(identity.version_id if identity is not None else "portfolio-runtime"),
+        parameter_hash=(identity.parameter_hash if identity is not None else ""),
         candidate_count=candidate_count,
         initial_equity=config.initial_cash,
         estimated_cash=book.cash,

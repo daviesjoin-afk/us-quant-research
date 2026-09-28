@@ -31,6 +31,7 @@ Two rules are deliberate rather than accidental:
 from __future__ import annotations
 
 import copy
+from hashlib import sha256
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -48,6 +49,7 @@ from us_quant.desktop_v2.orchestration.paper.models import (
     PaperLaunchIntegrityError,
     PaperLaunchRequest,
     PaperOrderChannel,
+    PaperPortfolioLaunchFact,
     PaperStrategyLaunchFact,
 )
 from us_quant.trading.domain.strategy import parameter_hash_for
@@ -266,10 +268,13 @@ def preflight_failure_text(preflight: AutoQuantPreflight) -> str:
 def freeze_launch(
     *,
     attempt_id: int,
-    strategy: Any,
+    strategy: Any | None,
     candidates: Iterable[AutoQuantCandidate],
     requested_capital_limit: Decimal,
     order_channel: PaperOrderChannel,
+    portfolio_plan: Any | None = None,
+    portfolio_strategies: Iterable[Any] = (),
+    autonomous: bool = False,
 ) -> PaperLaunchRequest:
     """Freeze every input of one attempt into an immutable request.
 
@@ -288,20 +293,82 @@ def freeze_launch(
     """
 
     rows = tuple(candidates)
-    fact = strategy_launch_fact(strategy)
+    portfolio = (
+        None
+        if portfolio_plan is None
+        else freeze_portfolio_plan(portfolio_plan, portfolio_strategies)
+    )
+    fact = strategy_launch_fact(strategy) if portfolio is None and strategy is not None else None
+    if portfolio is not None:
+        # Portfolio launch identity and capital authority come from the durable
+        # operator plan.  A legacy single-strategy selection is not a primary.
+        fact = None
+        strategy_version_id = None
+        parameter_hash = None
+        launch_capital_limit = portfolio.policy.total_capital_limit
+    else:
+        if fact is None:
+            raise PaperLaunchIntegrityError("a governed strategy is required for a legacy Paper launch")
+        strategy_version_id = fact.version_id
+        parameter_hash = fact.parameter_hash
+        launch_capital_limit = requested_capital_limit
     plan = build_auto_launch_plan(
         attempt_id=attempt_id,
-        strategy_version_id=fact.version_id,
-        parameter_hash=fact.parameter_hash,
+        strategy_version_id=strategy_version_id,
+        parameter_hash=parameter_hash,
         candidate_symbols=(row.symbol for row in rows),
-        requested_capital_limit=requested_capital_limit,
+        requested_capital_limit=launch_capital_limit,
     )
     return PaperLaunchRequest(
         plan=plan,
         strategy=fact,
         candidates=rows,
         order_channel=order_channel,
+        portfolio=portfolio,
+        autonomous=autonomous,
     )
+
+
+def freeze_portfolio_plan(plan: Any, strategies: Iterable[Any]) -> PaperPortfolioLaunchFact:
+    """Detach the durable plan and every selected governed strategy for launch."""
+
+    from us_quant.trading.domain.portfolio_operations import PortfolioOperatingPlan
+
+    if not isinstance(plan, PortfolioOperatingPlan):
+        raise PaperLaunchIntegrityError("Paper portfolio operating plan is missing or unreadable")
+    by_id = {item.version_id: item for item in strategies}
+    if set(by_id) != set(plan.selected_version_ids):
+        raise PaperLaunchIntegrityError("selected portfolio strategy versions changed while freezing launch")
+    facts = tuple(strategy_launch_fact(by_id[key]) for key in sorted(by_id))
+    if any(
+        item.status != "paper_shadow"
+        or item.mode != "paper_shadow"
+        or not item.gate_passed
+        for item in facts
+    ):
+        raise PaperLaunchIntegrityError("portfolio contains a strategy without current Paper governance")
+    policy_identity = sha256(
+        repr((plan.plan_id, plan.revision, plan.policy)).encode("utf-8")
+    ).hexdigest()
+    return PaperPortfolioLaunchFact(
+        plan_id=plan.plan_id,
+        plan_revision=plan.revision,
+        policy=plan.policy,
+        policy_identity=policy_identity,
+        policy_revision=str(plan.revision),
+        selected_version_ids=tuple(sorted(plan.selected_version_ids)),
+        strategies=facts,
+    )
+
+
+def portfolio_plan_matches(frozen: PaperPortfolioLaunchFact, current: Any, strategies: Iterable[Any]) -> bool:
+    """Recheck plan revision and selected parameter identities after connect."""
+
+    try:
+        latest = freeze_portfolio_plan(current, strategies)
+    except (PaperLaunchIntegrityError, TypeError, ValueError):
+        return False
+    return latest == frozen
 
 
 def strategy_launch_fact(strategy: Any) -> PaperStrategyLaunchFact:
@@ -329,6 +396,9 @@ def strategy_launch_fact(strategy: Any) -> PaperStrategyLaunchFact:
         parameter_hash=strategy.parameter_hash,
         identity=strategy.identity,
         parameters=parameters,
+        status=str(getattr(getattr(strategy, "status", ""), "value", getattr(strategy, "status", ""))),
+        mode=str(getattr(getattr(strategy, "mode", ""), "value", getattr(strategy, "mode", ""))),
+        gate_passed=bool(getattr(strategy, "gate_passed", False)),
     )
 
 
@@ -354,6 +424,13 @@ def current_inputs_match(
     proceed, which is the fail-closed outcome an inconsistent catalogue demands.
     """
 
+    if plan.strategy_version_id is None:
+        return (
+            plan.parameter_hash is None
+            and plan.candidate_symbols
+            == tuple(str(row.symbol).upper() for row in candidates)
+            and plan.requested_capital_limit == Decimal(requested_capital_limit)
+        )
     if strategy is None:
         return False
     try:
@@ -397,6 +474,27 @@ def validate_broker_state(state: PaperBrokerState) -> str | None:
     return None
 
 
+def validate_startup_connection(connection: Any, state: PaperBrokerState) -> str | None:
+    """Require complete, flat, account-matched broker truth before Paper starts."""
+
+    if not bool(getattr(connection, "connected", False)):
+        return "Paper broker connection is not active"
+    if getattr(connection, "snapshot_complete", False) is not True:
+        return "Paper account/open-order snapshot is incomplete"
+    account_alias = getattr(connection, "account_alias", None)
+    if not isinstance(account_alias, str) or not account_alias.strip():
+        return "Paper account identity is unknown"
+    if state.account_alias != account_alias:
+        return "Paper connection and account snapshots identify different accounts"
+    open_orders = getattr(connection, "open_broker_orders", None)
+    if type(open_orders) is not int or open_orders != 0:
+        return "Paper account has open broker orders or an unknown open-order count"
+    unreconciled = getattr(connection, "unreconciled_local_orders", None)
+    if type(unreconciled) is not int or unreconciled != 0:
+        return "Paper account has unreconciled local orders or an unknown count"
+    return None
+
+
 def account_reading(state: PaperBrokerState, *, account_alias: str) -> PaperAccountReading:
     """Project a validated broker reading into the value the build seam consumes.
 
@@ -420,13 +518,16 @@ __all__ = [
     "control_facts",
     "current_inputs_match",
     "freeze_launch",
+    "freeze_portfolio_plan",
     "launch_attempt_in_flight",
     "manual_recovery_phase",
     "preflight_failed",
+    "portfolio_plan_matches",
     "preflight_failure_text",
     "reconciliation_resume_ready",
     "runtime_obligations",
     "session_active",
     "strategy_launch_fact",
     "validate_broker_state",
+    "validate_startup_connection",
 ]

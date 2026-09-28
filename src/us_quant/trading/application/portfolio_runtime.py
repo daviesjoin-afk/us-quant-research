@@ -125,12 +125,25 @@ class PortfolioRuntime:
                 and allocation.max_capital > 0
                 and allocation.max_gross_exposure > 0
             )
+            if {item.version_id for item in eligible} != set(selected_version_ids):
+                raise PortfolioRuntimeError(
+                    "a selected strategy is no longer governed or allocated for Paper"
+                )
+            # Refresh broker, open-order and durable attribution truth before
+            # strategy workers evaluate exits or entries.  Workers need the
+            # same cycle snapshot that will constrain allocation; evaluating
+            # against yesterday's ownership and refreshing afterward creates
+            # a stale-position race at the portfolio boundary.
+            snapshot = self._snapshots.snapshot(observed_at=observed_at)
+            if not isinstance(snapshot, PortfolioSnapshot) or snapshot.observed_at != observed_at:
+                raise PortfolioRuntimeError("portfolio snapshot does not match cycle observation")
             trade_proposals: list[TradeProposal] = []
             for version in eligible:
                 generated = self._proposals.proposals_for(
                     version,
                     observed_at=observed_at,
                     proposal_cutoff=proposal_cutoff,
+                    portfolio_snapshot=snapshot,
                 )
                 if not isinstance(generated, tuple) or any(
                     not isinstance(item, TradeProposal) for item in generated
@@ -148,9 +161,6 @@ class PortfolioRuntime:
                 if (item := strategy_proposal_to_portfolio_intent(proposal)) is not None
             )
 
-            snapshot = self._snapshots.snapshot(observed_at=observed_at)
-            if not isinstance(snapshot, PortfolioSnapshot) or snapshot.observed_at != observed_at:
-                raise PortfolioRuntimeError("portfolio snapshot does not match cycle observation")
             anticipated_ids = {
                 stable_portfolio_decision_id(
                     symbol=symbol,

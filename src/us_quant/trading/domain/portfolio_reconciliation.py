@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
+from zoneinfo import ZoneInfo
 
 from us_quant.trading.domain.account import BrokerAccountPortfolio
 from us_quant.trading.domain.orders import (
@@ -89,6 +90,7 @@ class PortfolioStrategyAccounting:
     fees_complete: bool
     slippage: Decimal
     slippage_complete: bool
+    trades_today: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +108,42 @@ class PortfolioReconciliationResult:
         return not self.blockers
 
 
+def portfolio_order_truth_for_reconciliation(
+    *,
+    order_truth: PortfolioOrderTruth,
+    broker_order_truth: BrokerOpenOrderTruth,
+    decisions: tuple[PortfolioDecisionRecord, ...],
+    execution_attributions: tuple[PortfolioExecutionAttribution, ...],
+) -> PortfolioOrderTruth:
+    """Exclude only completed legacy orders outside the portfolio ledger.
+
+    Current portfolio decisions and attributions retain their full local order
+    history. Broker-observed orders and any local order without terminal proof
+    also remain in scope, so missing or unresolved order truth still blocks.
+    """
+
+    owned_order_ids = {
+        item.order_id for item in execution_attributions
+    } | {
+        item.order_id for item in decisions if item.order_id is not None
+    }
+    broker_open_ids = {
+        item.broker_order_id for item in broker_order_truth.open_orders
+    }
+    scoped = []
+    for order in order_truth.orders:
+        if order.intent is None or order.intent.order_id in owned_order_ids:
+            scoped.append(order)
+            continue
+        if order.broker_order_id in broker_open_ids:
+            scoped.append(order)
+            continue
+        latest = _latest_event(order.events)
+        if latest is None or not latest.status.is_terminal:
+            scoped.append(order)
+    return PortfolioOrderTruth(tuple(scoped))
+
+
 @dataclass(slots=True)
 class _MutableAccounting:
     quantity: int = 0
@@ -116,6 +154,7 @@ class _MutableAccounting:
     fees_complete: bool = True
     slippage: Decimal = Decimal("0")
     slippage_complete: bool = True
+    trades_today: int = 0
 
 
 def reconcile_portfolio_truth(
@@ -372,6 +411,15 @@ def reconcile_portfolio_truth(
             cumulative_fill,
             current_allocations,
         )
+        affected_strategies = {strategy_id for strategy_id, _proposal_id in deltas}
+        before_quantities = {
+            strategy_id: sum(
+                item.quantity
+                for (owner, _symbol), item in accounting.items()
+                if owner == strategy_id and _symbol == attribution.symbol
+            )
+            for strategy_id in affected_strategies
+        }
         _apply_fill(
             accounting=accounting,
             fill=fill,
@@ -379,6 +427,17 @@ def reconcile_portfolio_truth(
             reference_price=action.reference_price,
             blockers=blockers,
         )
+        trading_day = now.astimezone(ZoneInfo("America/New_York")).date()
+        fill_day = fill.occurred_at.astimezone(ZoneInfo("America/New_York")).date()
+        if fill_day == trading_day:
+            for strategy_id, before in before_quantities.items():
+                after = sum(
+                    item.quantity
+                    for (owner, symbol), item in accounting.items()
+                    if owner == strategy_id and symbol == attribution.symbol
+                )
+                if before > 0 and after == 0:
+                    accounting.setdefault((strategy_id, attribution.symbol), _MutableAccounting()).trades_today += 1
 
     broker_quantities: dict[str, Decimal] = {}
     for position in broker.positions:
@@ -430,6 +489,7 @@ def reconcile_portfolio_truth(
             fees_complete=item.fees_complete,
             slippage=item.slippage,
             slippage_complete=item.slippage_complete,
+            trades_today=item.trades_today,
         )
         for (strategy_id, symbol), item in sorted(accounting.items())
     )

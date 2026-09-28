@@ -246,6 +246,8 @@ class PaperOrchestrator(QObject):
         clear_arm_confirmation: Callable[[], None],
         render_launch_state: Callable[[], None],
         render_launch_context: Callable[[str], None],
+        portfolio_plan_provider: Callable[[], Any] | None = None,
+        portfolio_strategies_provider: Callable[[tuple[str, ...]], Sequence[Any]] | None = None,
         clock: Callable[[], float] = monotonic,
         parent: QObject | None = None,
     ) -> None:
@@ -278,6 +280,8 @@ class PaperOrchestrator(QObject):
         self._clear_arm_confirmation = clear_arm_confirmation
         self._render_launch_state = render_launch_state
         self._render_launch_context = render_launch_context
+        self._portfolio_plan_provider = portfolio_plan_provider
+        self._portfolio_strategies_provider = portfolio_strategies_provider
         # Injected so the suppression boundary is testable without sleeping: production
         # passes ``monotonic``, tests pass a clock they advance by hand.
         self._clock = clock
@@ -542,8 +546,22 @@ class PaperOrchestrator(QObject):
                 PREFLIGHT_PREFIX + queries.preflight_failure_text(preflight),
             )
             return False
-        strategy = self._strategy_provider()
-        if strategy is None:
+        try:
+            portfolio_plan = (
+                self._portfolio_plan_provider()
+                if self._portfolio_plan_provider is not None
+                else None
+            )
+        except Exception as error:  # noqa: BLE001 - unreadable plan refuses before connect
+            self._clear_arm_if_manual(authorization)
+            self.log_requested.emit(str(error))
+            self.refused.emit(PREFLIGHT_TITLE, str(error))
+            return False
+        # Portfolio launches are identified by the durable portfolio plan and
+        # its complete selected version set.  Reading the legacy single-strategy
+        # selector here would create a fake primary strategy for the session.
+        strategy = None if portfolio_plan is not None else self._strategy_provider()
+        if portfolio_plan is None and strategy is None:
             # The preflight already refuses a missing strategy, so reaching here means
             # the selection changed between the two reads.  Refusing rather than
             # asserting keeps a race an operator condition, not a crash.
@@ -552,14 +570,28 @@ class PaperOrchestrator(QObject):
             return False
         self._next_attempt += 1
         try:
+            portfolio_strategies = (
+                self._portfolio_strategies_provider(tuple(portfolio_plan.selected_version_ids))
+                if portfolio_plan is not None and self._portfolio_strategies_provider is not None
+                else ()
+            )
+            if portfolio_plan is not None and self._portfolio_strategies_provider is None:
+                raise PaperLaunchIntegrityError("portfolio strategy provider is unavailable")
             request = queries.freeze_launch(
                 attempt_id=self._next_attempt,
                 strategy=strategy,
                 candidates=self._candidates_provider(),
-                requested_capital_limit=self._capital_limit_provider(),
+                requested_capital_limit=(
+                    portfolio_plan.policy.total_capital_limit
+                    if portfolio_plan is not None
+                    else self._capital_limit_provider()
+                ),
                 order_channel=self._order_channel_provider(),
+                portfolio_plan=portfolio_plan,
+                portfolio_strategies=portfolio_strategies,
+                autonomous=(authorization is PaperLaunchAuthorization.AUTONOMOUS),
             )
-        except PaperLaunchIntegrityError as error:
+        except Exception as error:  # noqa: BLE001 - unreadable plan refuses before connect
             # A catalogue fault, caught *by name* rather than by ``Exception``.  The
             # transaction is already safe -- nothing is bound, no lease is taken and no
             # candidate exists -- but leaving it to escape would strand the UI: the
@@ -683,9 +715,17 @@ class PaperOrchestrator(QObject):
             return
         if not queries.current_inputs_match(
             request.plan,
-            strategy=self._strategy_provider(),
+            strategy=(
+                None
+                if request.portfolio is not None
+                else self._strategy_provider()
+            ),
             candidates=self._candidates_provider(),
-            requested_capital_limit=self._capital_limit_provider(),
+            requested_capital_limit=(
+                request.portfolio.policy.total_capital_limit
+                if request.portfolio is not None
+                else self._capital_limit_provider()
+            ),
         ):
             self._discard_candidate(
                 candidate_id,
@@ -695,6 +735,30 @@ class PaperOrchestrator(QObject):
                 clear_manual_confirmation=clear_manual_confirmation,
             )
             return
+        if self._portfolio_plan_provider is not None:
+            try:
+                latest_plan = self._portfolio_plan_provider()
+                latest_strategies = self._portfolio_strategies_provider(
+                    tuple(latest_plan.selected_version_ids)
+                ) if self._portfolio_strategies_provider is not None and latest_plan is not None else ()
+                portfolio_matches = (
+                    request.portfolio is not None
+                    and latest_plan is not None
+                    and queries.portfolio_plan_matches(
+                        request.portfolio, latest_plan, latest_strategies
+                    )
+                )
+            except Exception:  # noqa: BLE001 - changed/unreadable plan refuses launch
+                portfolio_matches = False
+            if not portfolio_matches:
+                self._discard_candidate(
+                    candidate_id,
+                    request,
+                    IDENTITY_CHANGED_MESSAGE,
+                    show_message=True,
+                    clear_manual_confirmation=clear_manual_confirmation,
+                )
+                return
         self._arm_and_publish(candidate_id, request, authorization=authorization)
 
     # -- the active session ----------------------------------------------
@@ -1432,9 +1496,13 @@ class PaperOrchestrator(QObject):
             refusal = queries.validate_broker_state(broker_state)
             if refusal is not None:
                 raise _LaunchRefused(refusal)
+            connection = service.connection_snapshot()
+            refusal = queries.validate_startup_connection(connection, broker_state)
+            if refusal is not None:
+                raise _LaunchRefused(refusal)
             reading = queries.account_reading(
                 broker_state,
-                account_alias=service.connection_snapshot().account_alias,
+                account_alias=connection.account_alias,
             )
             built = self._build_session(request, service, reading)
             # Explicit, and this sequence's: a step hidden in the injected callable

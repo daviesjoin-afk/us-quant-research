@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Protocol
 from us_quant.auto_launch import AutoLaunchPlan
 from us_quant.paper_order_models import PaperBrokerState
 from us_quant.trading.domain.strategy import StrategyIdentity
+from us_quant.trading.domain.portfolio import PortfolioCapitalPolicy
 from us_quant.trading.runtime.workflow_state import WorkflowStateError
 
 if TYPE_CHECKING:
@@ -300,6 +301,32 @@ class PaperStrategyLaunchFact:
     parameter_hash: str
     identity: StrategyIdentity
     parameters: Mapping[str, Any]
+    status: str
+    mode: str
+    gate_passed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PaperPortfolioLaunchFact:
+    """The immutable multi-strategy plan captured before broker connection."""
+
+    plan_id: str
+    plan_revision: int
+    policy: PortfolioCapitalPolicy
+    policy_identity: str
+    policy_revision: str
+    selected_version_ids: tuple[str, ...]
+    strategies: tuple[PaperStrategyLaunchFact, ...]
+
+    def __post_init__(self) -> None:
+        if not self.plan_id.strip() or self.plan_revision < 1:
+            raise ValueError("portfolio launch identity is invalid")
+        if not self.policy_identity.strip() or not self.policy_revision.strip():
+            raise ValueError("portfolio launch policy identity is required")
+        if tuple(sorted(self.selected_version_ids)) != self.selected_version_ids:
+            raise ValueError("portfolio strategy selection must be canonical")
+        if tuple(item.version_id for item in self.strategies) != self.selected_version_ids:
+            raise ValueError("portfolio launch strategy facts must match the frozen selection")
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,9 +334,11 @@ class PaperLaunchRequest:
     """The frozen inputs of one attempt, read exactly once."""
 
     plan: AutoLaunchPlan
-    strategy: PaperStrategyLaunchFact
+    strategy: PaperStrategyLaunchFact | None
     candidates: tuple[AutoQuantCandidate, ...]
     order_channel: PaperOrderChannel
+    portfolio: PaperPortfolioLaunchFact | None = None
+    autonomous: bool = False
 
     @property
     def candidate_symbols(self) -> tuple[str, ...]:
@@ -405,7 +434,7 @@ __all__ = [
     "PaperAccountReading", "PaperCandidateOrder",
     "PaperControlFacts",
     "PaperLaunchIntegrityError", "PaperLaunchRefusal",
-    "PaperLaunchRequest", "PaperOrderChannel", "PaperRuntimeEventRequest",
+    "PaperLaunchRequest", "PaperOrderChannel", "PaperPortfolioLaunchFact", "PaperRuntimeEventRequest",
     "PaperSessionBuildResult",
     "PaperSessionBuilder", "PaperShutdownDisposition", "PaperShutdownResult",
     "PaperStrategyLaunchFact",

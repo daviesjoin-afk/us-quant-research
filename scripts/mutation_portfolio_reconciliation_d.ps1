@@ -22,7 +22,8 @@ $mutations = @(
     @{ name='M9 wrong broker event link accepted'; file=$domain; find='if event is not None and event\.broker_order_id != order\.broker_order_id:'; repl='if False:'; select='callback_with_wrong_broker_order_id_is_unexplained' },
     @{ name='M10 wrong broker fill link accepted'; file=$domain; find='or fill\.broker_order_id != order\.broker_order_id'; repl='or False'; select='fill_with_wrong_broker_order_id_is_unexplained' },
     @{ name='M11 unknown broker-side open order is ignored'; file=$domain; find='if set\(broker_open_by_id\) != set\(local_open_by_broker_id\):'; repl='if False:'; select='unknown_broker_open_order_blocks_even_when_local_ledger_is_empty' },
-    @{ name='M12 opposing contributor slippage follows physical order side'; file=$domain; find='contribution_sign = 1 if signed_quantity > 0 else -1'; repl='contribution_sign = 1 if fill.side.value == "buy" else -1'; select='opposing_contributor_slippage_uses_signed_strategy_direction' }
+    @{ name='M12 opposing contributor slippage follows physical order side'; file=$domain; find='contribution_sign = 1 if signed_quantity > 0 else -1'; repl='contribution_sign = 1 if fill.side.value == "buy" else -1'; select='opposing_contributor_slippage_uses_signed_strategy_direction' },
+    @{ name='M13 completed legacy orders remain unscoped'; file=$domain; find='if latest is None or not latest\.status\.is_terminal:'; repl='if True:'; select='completed_unowned_legacy_order_is_scoped_out_but_open_local_order_is_retained' }
 )
 
 function Get-Text([string]$path) { [System.IO.File]::ReadAllText($path) }

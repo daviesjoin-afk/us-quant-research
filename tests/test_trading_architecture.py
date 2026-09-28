@@ -315,6 +315,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "paper_autonomy_supervisor.py",
         "paper_preparation.py",
         "portfolio.py",
+        "portfolio_operations.py",
         "portfolio_ledger.py",
         "portfolio_runtime.py",
         "portfolio_reconciliation.py",
@@ -336,6 +337,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "paper_autonomy_repository.py",
         "paper_autonomy_supervisor.py",
         "portfolio_repository.py",
+        "portfolio_operating_plan.py",
         "portfolio_runtime.py",
         "portfolio_order_truth.py",
         "strategy_repository.py",
@@ -812,6 +814,8 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "orchestration/autonomy/facts.py",
         "orchestration/autonomy/host.py",
         "orchestration/execution/queries.py",
+        "orchestration/execution/portfolio_projection.py",
+        "orchestration/portfolio_operations.py",
         "orchestration/tasking.py",
         "pages/__init__.py",
         "pages/account.py",
@@ -827,6 +831,8 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "pages/execution/live_operator.py",
         "pages/execution/live_operator_models.py",
         "pages/execution/models.py",
+        "pages/execution/portfolio_models.py",
+        "pages/execution/portfolio_panel.py",
         "pages/execution/page.py",
         "pages/execution/presenter.py",
         "pages/execution/projector.py",
@@ -968,6 +974,7 @@ NON_MARKET_DATA_ADAPTER_MODULES = {
     "ibkr/account.py",
     "ibkr/execution.py",
     "ibkr/live_execution.py",
+    "ibkr/portfolio_snapshot.py",
     "ibkr/execution_gateway.py",
     "ibkr/portfolio_reconciliation.py",
     "ibkr/portfolio_reconciliation_mapping.py",
@@ -975,6 +982,7 @@ NON_MARKET_DATA_ADAPTER_MODULES = {
     "sqlite/paper_autonomy_action_repository.py",
     "sqlite/paper_autonomy_repository.py",
     "sqlite/live_safety_repository.py",
+    "sqlite/portfolio_operating_plan_repository.py",
     "alpaca/__init__.py",
     "finnhub/__init__.py",
     "sqlite/__init__.py",
@@ -1519,6 +1527,8 @@ def test_only_composition_roots_wire_adapters_into_applications() -> None:
         "trading/composition/market_data.py",
         "trading/composition/paper_autonomy.py",
         "trading/composition/paper_autonomy_supervisor.py",
+        "trading/composition/portfolio_operations.py",
+        "trading/composition/portfolio_paper.py",
         "trading/composition/strategies.py",
     ], wiring_modules
 
@@ -2584,9 +2594,12 @@ def test_the_desktop_does_not_import_a_concrete_execution_adapter() -> None:
         "new_paper_order_intent",
     ):
         assert retired not in names, retired
-    assert "build_execution_application" in names, (
-        "the window must build the execution service through composition"
+    assert "build_portfolio_paper_session" in names, (
+        "the window must request the Paper portfolio composition"
     )
+    assert "build_execution_application" not in names
+    portfolio_composition = _identifier_names(PORTFOLIO_PAPER_COMPOSITION)
+    assert "build_execution_application" in portfolio_composition
 
 
 def test_the_strategy_and_risk_layers_cannot_reach_the_broker_channel() -> None:
@@ -2747,11 +2760,18 @@ PAPER_RECOVERY = RUNTIME_DIR / "recovery.py"
 PAPER_COORDINATOR = RUNTIME_DIR / "coordinator.py"
 PAPER_WORKFLOW_STATE = RUNTIME_DIR / "workflow_state.py"
 PAPER_WORKFLOW = RUNTIME_DIR / "workflow.py"
+PORTFOLIO_CYCLE = RUNTIME_DIR / "portfolio_cycle.py"
+PORTFOLIO_PAPER = RUNTIME_DIR / "portfolio_paper.py"
+PORTFOLIO_STRATEGIES = RUNTIME_DIR / "portfolio_strategies.py"
+SESSION_CONFIG = RUNTIME_DIR / "session_config.py"
 #: The v2O-E launch capability.  Guard N reads it because the launch transitions
 #: moved there from ``desktop.py``; the recovery/finalization half joined it in v2O-E3,
 #: and v2O-E4 added the presentation projection (``presentation.py``) beside it.
 PAPER_ORCHESTRATOR = (
     _SRC / "desktop_v2" / "orchestration" / "paper" / "orchestrator.py"
+)
+PORTFOLIO_PAPER_COMPOSITION = (
+    _TRADING / "composition" / "portfolio_paper.py"
 )
 
 #: Every production module of the runtime package.  ``__init__`` is excluded:
@@ -2776,6 +2796,10 @@ RUNTIME_MODULES = (
     PAPER_COORDINATOR,
     PAPER_WORKFLOW_STATE,
     PAPER_WORKFLOW,
+    PORTFOLIO_CYCLE,
+    PORTFOLIO_PAPER,
+    PORTFOLIO_STRATEGIES,
+    SESSION_CONFIG,
 )
 
 #: The modules a *strategy* may import.  Kept separate from the list above
@@ -2933,12 +2957,7 @@ def test_only_the_dispatch_and_the_session_call_risk_and_execution() -> None:
 
 
 def test_the_desktop_builds_the_runtimes_through_composition() -> None:
-    """Guard D: the window never assembles or constructs a session itself.
-
-    Checked as *calls* rather than as names: importing ``TradingRuntime`` to
-    annotate the attribute it holds is fine, and a name scan cannot tell that
-    from a construction.  What must never appear is ``TradingRuntime(...)``.
-    """
+    """Guard D: Desktop requests composition; it never builds a runtime."""
 
     desktop = _SRC / "desktop.py"
     source = desktop.read_text(encoding="utf-8")
@@ -2948,19 +2967,44 @@ def test_the_desktop_builds_the_runtimes_through_composition() -> None:
             if node.func.id in {
                 "StrategyRuntime",
                 "TradingRuntime",
+                "PortfolioRuntime",
+                "PortfolioPaperEngine",
                 "OrderDispatch",
+                "PortfolioOrderDispatchBridge",
+                "PortfolioStrategyWorkers",
                 "SessionBook",
             }:
                 constructed.append(node.func.id)
     assert not constructed, constructed
 
     names = _identifier_names(desktop)
-    assert "build_trading_runtime" in names, (
-        "the window must build its session through the runtime composition"
+    assert "build_portfolio_paper_session" in names, (
+        "the window must request its Paper session from portfolio composition"
     )
     assert "StrategyRuntime" not in names, (
         "the strategy runtime is built by the composition root, not the window"
     )
+    assert "PortfolioRuntime" not in names
+    assert "PortfolioPaperEngine" not in names
+    assert "OrderDispatch" not in names
+    assert "SessionBook" not in names
+
+    portfolio_composition = _identifier_names(PORTFOLIO_PAPER_COMPOSITION)
+    for required in (
+        "PortfolioPaperEngine",
+        "PortfolioStrategyWorkers",
+        "OrderDispatch",
+        "SessionBook",
+        "build_portfolio_runtime",
+    ):
+        assert required in portfolio_composition, required
+    assert "TradingRuntime" not in portfolio_composition
+    assert "build_trading_runtime" not in portfolio_composition
+    forbidden = _matches(
+        _imports(PORTFOLIO_PAPER_COMPOSITION),
+        ("PySide6", "us_quant.desktop", "us_quant.desktop_v2.pages"),
+    )
+    assert not forbidden, sorted(forbidden)
 
     composition = _identifier_names(RUNTIME_COMPOSITION)
     assert "StrategyRuntime" in composition
@@ -3579,6 +3623,8 @@ EXECUTION_PRESENTER = EXECUTION_PAGE_DIR / "presenter.py"
 EXECUTION_PROJECTOR = EXECUTION_PAGE_DIR / "projector.py"
 EXECUTION_ROWS = EXECUTION_PAGE_DIR / "rows.py"
 EXECUTION_TABLES = EXECUTION_PAGE_DIR / "tables.py"
+EXECUTION_PORTFOLIO_MODELS = EXECUTION_PAGE_DIR / "portfolio_models.py"
+EXECUTION_PORTFOLIO_PANEL = EXECUTION_PAGE_DIR / "portfolio_panel.py"
 
 EXECUTION_PAGE_MODULES = (
     EXECUTION_PAGE_DIR / "__init__.py",
@@ -3590,6 +3636,8 @@ EXECUTION_PAGE_MODULES = (
     EXECUTION_CONTROLS,
     EXECUTION_LIVE_OPERATOR,
     EXECUTION_LIVE_OPERATOR_MODELS,
+    EXECUTION_PORTFOLIO_MODELS,
+    EXECUTION_PORTFOLIO_PANEL,
     EXECUTION_PAGE,
 )
 
@@ -3601,6 +3649,8 @@ EXECUTION_PAGE_MODULES = (
 EXECUTION_MODULE_LINE_LIMITS = {
     "__init__.py": 40,
     "models.py": 220,
+    "portfolio_models.py": 100,
+    "portfolio_panel.py": 240,
     "live_operator_models.py": 60,
     "presenter.py": 320,
     "projector.py": 240,
@@ -3764,8 +3814,8 @@ def test_the_window_no_longer_names_an_execution_widget() -> None:
             offenders.append(node.attr)
     assert not offenders, sorted(set(offenders))
 
-    # The window still builds the page and serves the route, and the page is
-    # still handed the palette -- the one page call that stays composition.
+    # The window builds the page, hands it to its route owners and performs
+    # only the shared theme handoff itself.
     source = desktop.read_text(encoding="utf-8")
     assert "self.execution_page = ExecutionPage(" in source
     assert "page=self.execution_page," in source, (

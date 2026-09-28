@@ -45,6 +45,11 @@ from us_quant.desktop_v2.pages.execution.models import (
     ShadowRow,
     Tone,
 )
+from us_quant.desktop_v2.pages.execution.portfolio_models import (
+    PortfolioOperationsView,
+    PortfolioStrategyOperationsRow,
+    PortfolioSymbolOperationsRow,
+)
 
 _PAGE_DIR = (
     pathlib.Path(__file__).resolve().parents[1]
@@ -604,3 +609,66 @@ def test_the_page_adopts_the_window_palette(page) -> None:
 
     assert page._palette is theme_palette("dark")
     assert page.details._palette is theme_palette("dark")
+
+
+def test_portfolio_operations_page_renders_allocations_reconciliation_and_pending_attribution(page) -> None:
+    page.render_portfolio_operations(PortfolioOperationsView(
+        mode="PAPER",
+        runtime_state="HALTED",
+        total_capital_limit="1000",
+        cash="700",
+        equity="1000",
+        gross_exposure="300",
+        net_exposure="300",
+        positions=(PortfolioSymbolOperationsRow(
+            "AAPL", 30, "300", "30.00%", "strategy-a"
+        ),),
+        open_orders=("BUY 2 AAPL",),
+        pending_actions=("AAPL +2 / strategy-a:+3, strategy-b:-1",),
+        reconciliation_state="通过",
+        last_cycle="cycle-1",
+        strategy_allocations=(PortfolioStrategyOperationsRow(
+            "strategy-a", True, "1", "1000", "900", "300", 30,
+            "20", "5", "1", "approve / Risk approved",
+        ),),
+    ))
+
+    assert "HALTED" in page.portfolio_panel.summary.text()
+    assert "strategy-a:+3, strategy-b:-1" in page.portfolio_panel.summary.text()
+    assert page.portfolio_panel.strategy_table.rowCount() == 1
+    assert page.portfolio_panel.strategy_table.item(0, 0).text() == "strategy-a"
+    assert page.portfolio_panel.symbol_table.item(0, 0).text() == "AAPL"
+
+
+def test_portfolio_plan_editor_only_emits_raw_operator_values(page) -> None:
+    received = []
+    page.portfolio_plan_save_requested.connect(received.append)
+    page.render_portfolio_plan_editor(options=("strategy-a / paper_shadow",), plan=None)
+    page.portfolio_panel.selected.setText("strategy-a")
+    page.portfolio_panel.limits.setText("1000|1000|1000|500|1|1|10|10")
+    page.portfolio_panel.allocations.setPlainText("strategy-a|1|1000|1000|true")
+    page.portfolio_panel.reason.setText("operator reviewed")
+    page.portfolio_panel.save.click()
+
+    assert received == [{
+        "expected_revision": "0",
+        "selected_version_ids": "strategy-a",
+        "limits": "1000|1000|1000|500|1|1|10|10",
+        "allocations": "strategy-a|1|1000|1000|true",
+        "operator_reason": "operator reviewed",
+    }]
+    source = (_PAGE_DIR / "page.py").read_text(encoding="utf-8")
+    assert "PortfolioOperatingPlanApplication" not in source
+    assert "SQLitePortfolioOperatingPlanRepository" not in source
+
+
+def test_active_portfolio_session_disables_plan_edit_controls(page) -> None:
+    page.set_portfolio_plan_editable(False)
+    assert not page.portfolio_panel.selected.isEnabled()
+    assert not page.portfolio_panel.limits.isEnabled()
+    assert not page.portfolio_panel.allocations.isEnabled()
+    assert not page.portfolio_panel.reason.isEnabled()
+    assert not page.portfolio_panel.save.isEnabled()
+
+    page.set_portfolio_plan_editable(True)
+    assert page.portfolio_panel.save.isEnabled()

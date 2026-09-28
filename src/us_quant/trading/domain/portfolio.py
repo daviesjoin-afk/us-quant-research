@@ -228,11 +228,19 @@ class PortfolioStrategyExposure:
     symbol: str
     notional: Decimal
     quantity: int
+    realized_pnl: Decimal = ZERO
+    average_cost: Decimal | None = None
+    trades_today: int = 0
 
     def __post_init__(self) -> None:
         _text(self.strategy_version_id, "strategy_version_id")
         object.__setattr__(self, "symbol", _symbol(self.symbol))
         _decimal(self.notional, "strategy exposure")
+        _signed_decimal(self.realized_pnl, "strategy realized pnl")
+        if self.average_cost is not None:
+            _decimal(self.average_cost, "strategy average cost", allow_zero=False)
+        if type(self.trades_today) is not int or self.trades_today < 0:
+            raise PortfolioError("strategy trades_today must be a non-negative integer")
         if type(self.quantity) is not int or self.quantity <= 0:
             raise PortfolioError("strategy exposure quantity must be a positive integer")
 

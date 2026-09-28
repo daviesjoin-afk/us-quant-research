@@ -11,6 +11,10 @@ from us_quant.ibkr import IBKRConnectionConfig
 from us_quant.portfolio import SubstitutionRule
 from us_quant.trading.domain.risk import RiskLimits
 from us_quant.trading.domain.paper_autonomy_supervisor import PaperAutonomyPolicy
+from us_quant.trading.domain.portfolio import (
+    PortfolioCapitalPolicy,
+    PortfolioStrategyAllocation,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +57,8 @@ class AppConfig:
     substitutions: dict[str, SubstitutionRule]
     paper_autonomy_policy: PaperAutonomyPolicy | None = None
     paper_autonomy_config_error: str | None = None
+    portfolio_capital_policy: PortfolioCapitalPolicy = PortfolioCapitalPolicy()
+    portfolio_policy_config_error: str | None = None
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -67,6 +73,7 @@ def load_config(path: str | Path) -> AppConfig:
     execution = raw["execution"]
     broker = raw["broker"]
     autonomy_policy, autonomy_error = _paper_autonomy_policy(raw)
+    portfolio_policy, portfolio_error = _portfolio_capital_policy(raw)
 
     substitutions = {
         source_symbol: SubstitutionRule(
@@ -131,7 +138,52 @@ def load_config(path: str | Path) -> AppConfig:
         substitutions=substitutions,
         paper_autonomy_policy=autonomy_policy,
         paper_autonomy_config_error=autonomy_error,
+        portfolio_capital_policy=portfolio_policy,
+        portfolio_policy_config_error=portfolio_error,
     )
+
+
+def _portfolio_capital_policy(
+    raw: dict,
+) -> tuple[PortfolioCapitalPolicy, str | None]:
+    """Load explicit portfolio limits; absence stays zero and disabled."""
+
+    section = raw.get("portfolio")
+    if not isinstance(section, dict):
+        return PortfolioCapitalPolicy(), "required [portfolio] policy is missing"
+    try:
+        allocations = tuple(
+            PortfolioStrategyAllocation(
+                strategy_version_id=str(item["strategy_version_id"]),
+                capital_weight=Decimal(str(item["capital_weight"])),
+                max_capital=Decimal(str(item["max_capital"])),
+                max_gross_exposure=Decimal(str(item["max_gross_exposure"])),
+                enabled=item["enabled"],
+            )
+            for item in section.get("allocations", ())
+        )
+        policy = PortfolioCapitalPolicy(
+            total_capital_limit=Decimal(str(section["total_capital_limit"])),
+            max_gross_exposure=Decimal(str(section["max_gross_exposure"])),
+            max_net_exposure=Decimal(str(section["max_net_exposure"])),
+            max_single_position_notional=Decimal(
+                str(section["max_single_position_notional"])
+            ),
+            max_symbol_concentration=Decimal(
+                str(section["max_symbol_concentration"])
+            ),
+            max_strategy_concentration=Decimal(
+                str(section["max_strategy_concentration"])
+            ),
+            max_positions=int(section["max_positions"]),
+            max_open_orders=int(section["max_open_orders"]),
+            allocations=allocations,
+        )
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return PortfolioCapitalPolicy(), "[portfolio] policy is invalid or incomplete"
+    if not policy.is_configured:
+        return policy, "[portfolio] policy has zero limits or no enabled allocations"
+    return policy, None
 
 
 def _paper_autonomy_policy(

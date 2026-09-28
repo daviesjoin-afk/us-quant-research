@@ -34,7 +34,13 @@ from __future__ import annotations
 from decimal import Decimal
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
 
 from us_quant.desktop_v2.pages.execution.controls import ExecutionControls
 from us_quant.desktop_v2.pages.execution.live_operator import LiveOperatorControls
@@ -43,6 +49,12 @@ from us_quant.desktop_v2.pages.execution.models import (
     ExecutionControlState,
     ExecutionDetailWorkspace,
     ExecutionRuntimeView,
+)
+from us_quant.desktop_v2.pages.execution.portfolio_models import (
+    PortfolioOperationsView,
+)
+from us_quant.desktop_v2.pages.execution.portfolio_panel import (
+    PortfolioOperationsPanel,
 )
 from us_quant.desktop_v2.pages.execution.live_operator_models import (
     LiveOperatorControlView,
@@ -98,6 +110,7 @@ class ExecutionPage(QWidget):
     live_arm_requested = Signal()
     live_kill_requested = Signal()
     live_status_refresh_requested = Signal()
+    portfolio_plan_save_requested = Signal(object)
 
     def __init__(
         self,
@@ -137,11 +150,36 @@ class ExecutionPage(QWidget):
             self.live_status_refresh_requested.emit
         )
         layout.addWidget(self.live_operator_controls)
+        self.portfolio_panel = PortfolioOperationsPanel()
+        self.portfolio_panel.plan_save_requested.connect(
+            self.portfolio_plan_save_requested.emit
+        )
+        layout.addWidget(self.portfolio_panel)
         self.details = ExecutionDetailTabs(palette=self._palette)
         self.details.reconcile_requested.connect(self.reconcile_requested.emit)
         layout.addWidget(self.details)
         self.scroll_area.setWidget(content)
         outer.addWidget(self.scroll_area)
+
+    def render_portfolio_operations(self, view: PortfolioOperationsView) -> None:
+        """Render a prebuilt portfolio read model; no authority lives on Page."""
+        self.portfolio_panel.render_operations(view)
+
+    def render_portfolio_plan_editor(
+        self,
+        *,
+        options: tuple[str, ...],
+        plan: dict[str, object] | None,
+        error: str | None = None,
+    ) -> None:
+        """Render plan editor facts without validating or authorizing the plan."""
+
+        self.portfolio_panel.render_plan(options=options, plan=plan, error=error)
+
+    def set_portfolio_plan_editable(self, editable: bool) -> None:
+        """Enable plan inputs only when no Paper launch/session owns the plan."""
+
+        self.portfolio_panel.set_plan_editable(editable)
 
     def _build_cards(self) -> QHBoxLayout:
         cards = QHBoxLayout()

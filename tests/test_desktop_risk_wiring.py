@@ -1,4 +1,4 @@
-"""Desktop risk wiring tests: one risk truth, from config to the running session.
+"""Desktop risk wiring tests: one risk truth, from config to Paper composition.
 
 These exist because of a specific defect.  The window placed the account limits
 into ``ShadowConfig.layered_risk_limits`` and then constructed the runtime
@@ -99,7 +99,7 @@ def window():
 
 
 def _engine_call_keywords() -> list[dict[str, object]]:
-    """Every ``build_trading_runtime(...)`` call in ``desktop.py``."""
+    """The portfolio Paper composition must receive the window's Risk authority."""
 
     tree = ast.parse(_DESKTOP.read_text(encoding="utf-8"))
     calls = []
@@ -107,7 +107,7 @@ def _engine_call_keywords() -> list[dict[str, object]]:
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "build_trading_runtime"
+            and node.func.id == "build_portfolio_paper_session"
         ):
             calls.append(
                 {keyword.arg: keyword.value for keyword in node.keywords}
@@ -129,7 +129,7 @@ def test_the_window_builds_one_risk_application_from_its_current_config(
 
 
 def test_the_runtime_receives_the_application_the_window_built(window) -> None:
-    """The regression itself: ``Engine.risk`` is what the window configured."""
+    """A production Paper dispatch must use the Risk object the window built."""
 
     window.config = replace(window.config, risk_limits=_DISTINCTIVE)
     risk = window._build_auto_quant_risk()
@@ -271,7 +271,11 @@ def test_the_engine_call_site_passes_the_risk_application() -> None:
     assert len(calls) == 1, calls
     keywords = calls[0]
     assert "risk" in keywords
-    assert "identity" in keywords
+    risk = keywords["risk"]
+    assert isinstance(risk, ast.Call)
+    assert isinstance(risk.func, ast.Attribute)
+    assert risk.func.attr == "_build_auto_quant_risk"
+    assert "identity" not in keywords
     for retired in (
         "layered_risk_limits",
         "symbol_risk_multipliers",
@@ -279,6 +283,15 @@ def test_the_engine_call_site_passes_the_risk_application() -> None:
         "parameter_hash",
     ):
         assert retired not in keywords, retired
+    composition = (
+        _REPO_ROOT
+        / "src"
+        / "us_quant"
+        / "trading"
+        / "composition"
+        / "portfolio_paper.py"
+    ).read_text(encoding="utf-8")
+    assert "OrderDispatch(config=config, risk=risk, execution=execution)" in composition
 
 
 def test_the_window_never_hands_risk_limits_to_the_shadow_config() -> None:

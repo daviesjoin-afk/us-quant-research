@@ -20,6 +20,9 @@ layer permits" cannot be assembled from two different lists.
 
 from __future__ import annotations
 
+from threading import RLock
+from weakref import WeakValueDictionary
+
 from us_quant.trading.application.execution import ExecutionApplication
 from us_quant.trading.application.risk import RiskApplication
 from us_quant.trading.domain.strategy import StrategyIdentity
@@ -27,6 +30,36 @@ from us_quant.trading.runtime.config import TradingSessionConfig
 from us_quant.trading.runtime.models import AutoQuantCandidate
 from us_quant.trading.runtime.strategy import StrategyRuntime
 from us_quant.trading.runtime.trading import TradingRuntime
+from us_quant.trading.application.portfolio_runtime import PortfolioRuntime
+
+
+class PortfolioRuntimeRegistry:
+    """Composition-owned single runtime slot per masked trading account."""
+
+    def __init__(self) -> None:
+        self._runtimes: WeakValueDictionary[str, PortfolioRuntime] = WeakValueDictionary()
+        self._lock = RLock()
+
+    def register(self, *, account_alias: str, runtime: PortfolioRuntime) -> PortfolioRuntime:
+        if (
+            not isinstance(account_alias, str)
+            or not account_alias.strip()
+            or "*" not in account_alias
+        ):
+            raise ValueError("a masked account alias is required")
+        if not isinstance(runtime, PortfolioRuntime):
+            raise TypeError("runtime must be PortfolioRuntime")
+        key = account_alias.strip()
+        with self._lock:
+            current = self._runtimes.get(key)
+            if current is not None and current is not runtime:
+                raise ValueError("this account already has an active PortfolioRuntime")
+            self._runtimes[key] = runtime
+            return runtime
+
+    def runtime_for(self, account_alias: str) -> PortfolioRuntime | None:
+        with self._lock:
+            return self._runtimes.get(account_alias.strip())
 
 
 def build_strategy_runtime(
@@ -75,7 +108,28 @@ def build_trading_runtime(
     )
 
 
+def build_portfolio_runtime(
+    *,
+    strategies,
+    proposals,
+    snapshots,
+    repository,
+    risk_path,
+) -> PortfolioRuntime:
+    """Compose the sole allocator authority for one Paper account."""
+
+    return PortfolioRuntime(
+        strategies=strategies,
+        proposals=proposals,
+        snapshots=snapshots,
+        repository=repository,
+        risk_path=risk_path,
+    )
+
+
 __all__ = [
+    "PortfolioRuntimeRegistry",
     "build_strategy_runtime",
     "build_trading_runtime",
+    "build_portfolio_runtime",
 ]

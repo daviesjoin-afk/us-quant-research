@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 import os
 from pathlib import Path
@@ -124,6 +124,15 @@ from us_quant.trading.application.strategy_selection import (
 from us_quant.trading.composition.strategies import (
     build_strategy_application,
 )
+from us_quant.desktop_v2.orchestration.portfolio_operations import (
+    PortfolioOperationsOrchestrator,
+)
+from us_quant.trading.composition.portfolio_operations import (
+    build_portfolio_operating_plan_application,
+)
+from us_quant.trading.composition.portfolio_paper import (
+    build_portfolio_paper_session,
+)
 from us_quant.trading.domain.strategy import (
     StrategyIdentity,
     StrategyVersion,
@@ -131,13 +140,8 @@ from us_quant.trading.domain.strategy import (
 from us_quant.runtime_events import RuntimeEvent, RuntimeEventStore
 from us_quant.export_service import export_terminal_bundle
 from us_quant.shadow.store import ShadowPaperStore
-from us_quant.trading.composition.session_config import (
-    build_auto_rotation_config,
-    resolve_paper_session_capital,
-)
 from us_quant.trading.application.risk import RiskApplication
 from us_quant.trading.composition.execution import (
-    build_execution_application,
     build_execution_candidate_factory,
     build_order_repository,
 )
@@ -145,7 +149,9 @@ from us_quant.trading.composition.live_operator_controls import (
     build_live_operator_controls_application,
 )
 from us_quant.trading.composition.risk import build_risk_application
-from us_quant.trading.composition.runtime import build_trading_runtime
+from us_quant.trading.composition.runtime import (
+    PortfolioRuntimeRegistry,
+)
 from us_quant.trading.domain.risk import LayeredRiskLimits
 from us_quant.runtime_supervisor import RuntimeSnapshot, RuntimeSupervisor
 from us_quant.paper_order_models import PaperOrderReconciliation
@@ -459,6 +465,15 @@ class MainWindow(QMainWindow):
         self.strategies = build_strategy_application(
             self.paths.runtime_root / "strategies.sqlite3"
         )
+        self.portfolio_runtime_registry = PortfolioRuntimeRegistry()
+        self.portfolio_operating_plan_application = build_portfolio_operating_plan_application(
+            database_path=self.paths.runtime_root / "portfolio_operating_plan.sqlite3",
+            strategies=self.strategies,
+            active_session=lambda: (
+                self.paper_orchestrator.runtime_active
+                or self.paper_orchestrator.launch_attempt_in_flight
+            ) if hasattr(self, "paper_orchestrator") else False,
+        )
         # Runtime selection is service state, not combo state.  The combos on
         # the research and execution pages are views onto this, so asking
         # "which version does auto rotation run?" has one answer that does not
@@ -604,6 +619,10 @@ class MainWindow(QMainWindow):
             # route that runs it.  Paper never names the service and never
             # reads the combo: it receives the canonical value.
             strategy_provider=lambda: self.execution_orchestrator.current_strategy,
+            portfolio_plan_provider=self.portfolio_operating_plan_application.load,
+            portfolio_strategies_provider=(
+                self.portfolio_operating_plan_application.selected_versions_for_ids
+            ),
             candidates_provider=lambda: self.execution_orchestrator.candidates,
             capital_limit_provider=lambda: self.execution_orchestrator.capital_limit,
             order_channel_provider=self._auto_quant_order_channel,
@@ -621,9 +640,7 @@ class MainWindow(QMainWindow):
             clear_arm_confirmation=(
                 lambda: self.execution_orchestrator.clear_arm_confirmation()
             ),
-            render_launch_state=lambda: (
-                self.execution_orchestrator.refresh_controls()
-            ),
+            render_launch_state=self._refresh_paper_launch_state,
             render_launch_context=lambda summary: (
                 self.execution_orchestrator.render_launch_context(summary)
             ),
@@ -1478,6 +1495,20 @@ class MainWindow(QMainWindow):
 
         page = self.execution_page
         execution = self.execution_orchestrator
+        self.portfolio_operations_orchestrator = PortfolioOperationsOrchestrator(
+            application=self.portfolio_operating_plan_application,
+            page=page,
+            active_session=lambda: (
+                self.paper_orchestrator.runtime_active
+                or self.paper_orchestrator.launch_attempt_in_flight
+            ),
+        )
+        self.portfolio_operations_orchestrator.information_requested.connect(
+            self._show_runtime_information
+        )
+        self.portfolio_operations_orchestrator.warning_requested.connect(
+            self._show_runtime_warning
+        )
         page.strategy_selected.connect(execution.select_strategy)
         page.preflight_inputs_changed.connect(execution.refresh_preflight)
         page.prepare_requested.connect(execution.request_prepare)
@@ -1500,6 +1531,7 @@ class MainWindow(QMainWindow):
         page.live_status_refresh_requested.connect(
             self.live_operator_orchestrator.refresh
         )
+        self.portfolio_operations_orchestrator.refresh_editor()
         self.live_operator_orchestrator.warning_requested.connect(
             self._show_runtime_warning
         )
@@ -1540,9 +1572,16 @@ class MainWindow(QMainWindow):
         self.paper_orchestrator.presentation_refresh_requested.connect(
             execution.refresh_controls
         )
+        self.paper_orchestrator.presentation_refresh_requested.connect(
+            self.portfolio_operations_orchestrator.refresh_editor
+        )
         self.paper_orchestrator.session_finalized.connect(
             execution.on_paper_session_finalized
         )
+
+    def _refresh_paper_launch_state(self) -> None:
+        self.execution_orchestrator.refresh_controls()
+        self.portfolio_operations_orchestrator.refresh_editor()
 
     def _apply_execution_subscription(self, symbols: object) -> None:
         """Hand the route's finished subscription set to the market capability."""
@@ -2803,85 +2842,33 @@ class MainWindow(QMainWindow):
         service: object,
         reading: PaperAccountReading,
     ) -> PaperSessionBuildResult:
-        """The narrow session-build seam: compose the runtime over the borrowed channel.
+        """Ask composition to build the unique portfolio Paper session."""
 
-        The composition root keeps every construction that names a concrete type --
-        the auto-rotation config, the risk authority, the execution application, the
-        trading runtime -- so ``PaperOrchestrator`` imports no adapter, no risk
-        implementation and no execution implementation.  It receives an already
-        validated reading, the frozen request and a *borrowed* candidate, and returns
-        the ports publication binds plus the sizing ``arm`` needs.
-
-        Two properties are load-bearing here and must not be relaxed:
-
-        * **the capital chain stays ``Decimal``.**  ``resolve_paper_session_capital``
-          bounds the session by *cash*, never by buying power, so no margin
-          borrowing can enter through a float conversion;
-        * **the execution application is bound to the same channel being armed.**  It
-          is built over the borrowed candidate, so the engine cannot be handed an
-          application talking to a different broker session than the coordinator
-          reads.
-
-        **Arming is deliberately not done here.**  This seam starts the runtime and
-        reports the sizing it computed; ``PaperOrchestrator`` performs ``arm`` itself
-        so that ``arm -> ensure -> publish -> promote`` is one explicit sequence in
-        one place.  When the arm call lived inside this callable, the order was
-        asserted only as ``build < ensure < publish``, and the real constraint --
-        that arming precedes the promotability check and both precede publication --
-        could not be locked down by a guard.
-        """
-
-        fact = request.strategy
-        paper_capital = resolve_paper_session_capital(
-            net_liquidation=reading.net_liquidation,
-            cash=reading.cash,
-            requested_limit=request.plan.requested_capital_limit,
-        )
-        config = build_auto_rotation_config(
-            fact.parameters,
-            initial_cash=Decimal(paper_capital),
-            capital_source=(
-                f"IBKR Paper {reading.account_alias} "
-                f"现金约束；会话上限 {paper_capital}"
+        composed = build_portfolio_paper_session(
+            runtime_root=self.paths.runtime_root,
+            request=request,
+            reading=reading,
+            order_repository=self.order_repository,
+            paper_service=service,
+            strategies=self.strategies,
+            plan_application=self.portfolio_operating_plan_application,
+            runtime_registry=self.portfolio_runtime_registry,
+            risk=self._build_auto_quant_risk(),
+            autonomous_entries_allowed=(
+                (lambda: self.paper_autonomy_application.snapshot().allows_autonomous_work)
+                if request.autonomous
+                else (lambda: True)
             ),
-            daily_loss_limit=Decimal(paper_capital) * Decimal("0.01"),
-        )
-        # One risk authority, built from the configuration this window is actually
-        # running with, and injected.  It used to be split: the account limits went
-        # into ``ShadowConfig.layered_risk_limits`` while the engine read a separate
-        # constructor argument that was never passed here, so the configured
-        # ``risk_limits`` reached a field nobody read.
-        risk = self._build_auto_quant_risk()
-        execution = build_execution_application(
-            repository=self.order_repository,
-            broker=service,
-        )
-        runtime = build_trading_runtime(
-            config=config,
-            candidates=request.candidates,
-            identity=fact.identity,
-            risk=risk,
-            execution=execution,
-            market_reference_symbols=tuple(
-                dict.fromkeys(
-                    str(symbol).strip().upper()
-                    for symbol in fact.parameters.get(
-                        "market_reference_symbols", []
-                    )
-                    if str(symbol).strip()
-                )
+            publish_operations_facts=(
+                self.portfolio_operations_orchestrator.render_runtime_facts
             ),
         )
-        snapshot = runtime.start()
-        assert snapshot.session_id is not None
         return PaperSessionBuildResult(
-            engine=runtime,
-            orders=service,
-            session_id=snapshot.session_id,
-            candidate_count=snapshot.candidate_count,
-            max_order_notional=(
-                Decimal(paper_capital) * config.max_position_fraction
-            ),
+            engine=composed.engine,
+            orders=composed.orders,
+            session_id=composed.session_id,
+            candidate_count=composed.candidate_count,
+            max_order_notional=composed.max_order_notional,
         )
 
     def _paper_execution_health_adapter(self, **kwargs: object) -> PaperExecutionHealth:

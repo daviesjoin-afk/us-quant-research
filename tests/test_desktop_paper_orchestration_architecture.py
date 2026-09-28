@@ -252,6 +252,8 @@ ALLOWED_IMPORTS = (
     "collections.abc",
     # ``copy.deepcopy`` for the detached parameter snapshot.  Stdlib, no I/O.
     "copy",
+    # Stable portfolio launch identity hashing; this module has no I/O.
+    "hashlib",
     "dataclasses",
     "decimal",
     # ``Enum`` for the shutdown disposition.  A value type, not a behaviour: it exists
@@ -277,6 +279,9 @@ ALLOWED_IMPORTS = (
     # used to detach and verify the frozen parameter snapshot.  A pure value type and
     # a pure hash function -- importing them names no adapter and no service.
     "us_quant.trading.domain.strategy",
+    # Frozen plan and policy values are domain facts, not a portfolio service.
+    "us_quant.trading.domain.portfolio",
+    "us_quant.trading.domain.portfolio_operations",
     "us_quant.trading.runtime.models",
     "us_quant.trading.runtime.paper_contracts",
     "us_quant.trading.runtime.paper_models",
@@ -1400,6 +1405,8 @@ def test_the_orchestrator_stores_only_its_injected_collaborators() -> None:
         "_health_evaluator",
         "_preflight_provider",
         "_strategy_provider",
+        "_portfolio_plan_provider",
+        "_portfolio_strategies_provider",
         "_candidates_provider",
         "_capital_limit_provider",
         "_order_channel_provider",

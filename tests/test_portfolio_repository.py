@@ -18,8 +18,11 @@ from us_quant.trading.domain.portfolio import (
 )
 from us_quant.trading.domain.portfolio_ledger import (
     PortfolioDecisionRecord,
+    PortfolioExecutionAttribution,
     PortfolioStoreUnreadable,
+    execution_contributions_for_quantity,
 )
+from us_quant.trading.domain.risk import RiskDecision
 
 
 OBSERVED = datetime(2026, 9, 28, 10, 0, tzinfo=timezone.utc)
@@ -65,9 +68,11 @@ def _record(*, zero_net: bool = False) -> PortfolioDecisionRecord:
         decision=decision,
         portfolio_cycle_id="cycle-1",
         observed_at=OBSERVED,
+        snapshot_identity="snapshot-1",
         policy_identity="paper-default",
         policy_revision="7",
         created_at=OBSERVED,
+        proposal_cutoff=OBSERVED,
     )
 
 
@@ -116,6 +121,75 @@ def test_retry_after_risk_and_order_linkage_preserves_later_facts(tmp_path):
     assert repository.record_decision(_record()) == linked
 
 
+def test_dispatch_outcome_and_execution_attribution_commit_together(tmp_path):
+    path = tmp_path / "portfolio.sqlite"
+    repository = SQLitePortfolioRepository(path)
+    saved = repository.record_decision(_record())
+    approved = repository.update_decision(
+        replace(
+            saved,
+            risk_outcome="approved",
+            risk_decision=RiskDecision.approve(
+                requested_quantity=4,
+                approved_quantity=2,
+                adjustments=("portfolio cap",),
+            ),
+        ),
+        expected_revision=saved.revision,
+    )
+    dispatch = replace(
+        approved,
+        order_id="order-1",
+        dispatch_outcome_recorded=True,
+        dispatch_submitted=False,
+        dispatch_halt=True,
+        dispatch_status="reconcile",
+    )
+    attribution = PortfolioExecutionAttribution(
+        order_id="order-1",
+        portfolio_decision_id="decision-a",
+        symbol="aapl",
+        side=PortfolioSide.BUY,
+        quantity=2,
+        contributions=execution_contributions_for_quantity(_record().decision, 2),
+    )
+
+    committed = repository.record_dispatch_outcome(
+        dispatch, attribution, expected_revision=approved.revision
+    )
+    restarted = SQLitePortfolioRepository(path)
+
+    assert restarted.decision("decision-a") == committed
+    assert restarted.execution_attribution("order-1") == attribution
+    assert restarted.execution_attributions() == (attribution,)
+
+
+def test_dispatch_outcome_cannot_bypass_atomic_execution_attribution(tmp_path):
+    repository = SQLitePortfolioRepository(tmp_path / "portfolio.sqlite")
+    saved = repository.record_decision(_record())
+    approved = repository.update_decision(
+        replace(
+            saved,
+            risk_outcome="approved",
+            risk_decision=RiskDecision.approve(requested_quantity=4),
+        ),
+        expected_revision=saved.revision,
+    )
+    with pytest.raises(ValueError, match="atomic execution attribution"):
+        repository.update_decision(
+            replace(
+                approved,
+                order_id="order-1",
+                dispatch_outcome_recorded=True,
+                dispatch_submitted=False,
+                dispatch_halt=True,
+                dispatch_status="reconcile",
+            ),
+            expected_revision=approved.revision,
+        )
+    assert repository.decision("decision-a") == approved
+
+
 def test_decision_update_uses_compare_and_swap_revision(tmp_path):
     repository = SQLitePortfolioRepository(tmp_path / "portfolio.sqlite")
     saved = repository.record_decision(_record())
@@ -156,6 +230,29 @@ def test_row_key_must_match_embedded_decision_id(tmp_path):
         repository.decision("other-key")
     with pytest.raises(PortfolioStoreUnreadable):
         repository.decisions()
+
+
+def test_stage5b_rows_remain_readable_after_stage5c_cycle_fields_are_added(tmp_path):
+    path = tmp_path / "portfolio.sqlite"
+    repository = SQLitePortfolioRepository(path)
+    saved = repository.record_decision(_record())
+    with sqlite3.connect(path) as connection:
+        (payload,) = connection.execute(
+            "SELECT payload FROM portfolio_decision WHERE decision_id = ?", ("decision-a",)
+        ).fetchone()
+        value = json.loads(payload)
+        value.pop("snapshot_identity")
+        value.pop("proposal_cutoff")
+        connection.execute(
+            "UPDATE portfolio_decision SET payload = ? WHERE decision_id = ?",
+            (json.dumps(value), "decision-a"),
+        )
+
+    loaded = repository.decision("decision-a")
+    assert loaded is not None
+    assert loaded.decision == saved.decision
+    assert loaded.snapshot_identity == "legacy-unrecorded"
+    assert loaded.proposal_cutoff is None
 
 
 @pytest.mark.parametrize(

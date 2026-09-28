@@ -9,6 +9,8 @@ PORTFOLIO_DOMAIN = SOURCE / "trading" / "domain" / "portfolio.py"
 PORTFOLIO_APPLICATION = SOURCE / "trading" / "application" / "portfolio.py"
 PORTFOLIO_REPOSITORY_PORT = SOURCE / "trading" / "ports" / "portfolio_repository.py"
 PORTFOLIO_SQLITE_REPOSITORY = SOURCE / "trading" / "adapters" / "sqlite" / "portfolio_repository.py"
+PORTFOLIO_RUNTIME = SOURCE / "trading" / "application" / "portfolio_runtime.py"
+PORTFOLIO_DISPATCH_BRIDGE = SOURCE / "trading" / "runtime" / "portfolio_dispatch.py"
 
 
 def _all_python_files():
@@ -147,3 +149,50 @@ def test_portfolio_persistence_has_no_execution_or_live_safety_authority():
         or name.startswith("us_quant.trading.adapters.ibkr")
         for name in imports
     )
+
+
+def test_portfolio_runtime_is_unique_and_cannot_construct_execution_authority():
+    owners = []
+    for path in _all_python_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        owners.extend(
+            _module(path)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == "PortfolioRuntime"
+        )
+    assert owners == ["trading.application.portfolio_runtime"]
+
+    tree = ast.parse(PORTFOLIO_RUNTIME.read_text(encoding="utf-8"))
+    imports = _imports(tree)
+    assert not any(
+        "BrokerExecutionPort" in name
+        or "ExecutionApplication" in name
+        or name.startswith("us_quant.trading.adapters")
+        for name in imports
+    )
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    assert "OrderIntent" not in names
+    assert "ExecutionApplication" not in names
+
+
+def test_portfolio_risk_bridge_only_uses_existing_order_dispatch_seam():
+    tree = ast.parse(PORTFOLIO_DISPATCH_BRIDGE.read_text(encoding="utf-8"))
+    imports = _imports(tree)
+    assert "us_quant.trading.runtime.dispatch" in imports
+    assert not any(
+        "ExecutionApplication" in name
+        or "BrokerExecutionPort" in name
+        or name.startswith("us_quant.trading.adapters")
+        for name in imports
+    )
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    assert "OrderIntent" not in names
+    dispatch_calls = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "_dispatch"
+    }
+    assert dispatch_calls == {"evaluate", "submit"}

@@ -18,6 +18,7 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
+from unittest.mock import patch
 
 from us_quant.desktop_targeted_session_service import (
     DesktopTargetedSessionService,
@@ -181,20 +182,10 @@ class TargetedSessionServiceTests(unittest.TestCase):
         way, so a local re-derivation -- a renamed gate, a re-ordered list, a
         "simplified" decision string -- fails here.
 
-        **Two fields are excluded, and only these two**, because both are functions of
-        the *call's own* ``now`` rather than of anything a caller passed: ``generated_at``
-        is the call's timestamp, and ``account_age_seconds`` is
-        ``round(now - observed_at, 3)`` while ``_account()`` stamps ``observed_at`` from
-        the wall clock.  Two calls a fraction of a millisecond apart therefore differ
-        in it by construction -- and at the 0.5 ms rounding boundary they round to
-        *adjacent* milliseconds (measured: ``0.0`` vs ``0.001`` at a 0.6 ms gap, on 3.12,
-        3.13 and 3.14 alike).  That is a property of the machine under load, not of the
-        delegation, and it made this test flake roughly whenever the gap between the two
-        calls crossed a half millisecond.
-
-        Excluding them is the honest expression of "these two calls agree modulo the
-        clock".  The age is still asserted *present*, so the exclusion cannot hide a
-        silently-None field, and everything else is compared field for field.
+        ``generated_at`` is the only excluded field because it is each call's own
+        timestamp. Account age is fixed in this delegation test: the age calculation
+        is tested separately, and reading it twice from a wall-clock-stamped fixture
+        otherwise makes the rendered requirement differ by a few milliseconds.
         """
 
         store = _Store(_summary(12, 15))
@@ -207,20 +198,21 @@ class TargetedSessionServiceTests(unittest.TestCase):
             exposure_multiplier=Decimal("1"),
         )
 
-        delegated = service.evaluate_preflight("AAPL", **arguments)
-        direct = evaluate_target_preflight(
-            "AAPL",
-            minute_summary=store.summary("AAPL"),
-            broker_orders_available=False,
-            **arguments,
-        )
+        with patch(
+            "us_quant.targeted_preflight._age_seconds", return_value=Decimal("0")
+        ):
+            delegated = service.evaluate_preflight("AAPL", **arguments)
+            direct = evaluate_target_preflight(
+                "AAPL",
+                minute_summary=store.summary("AAPL"),
+                broker_orders_available=False,
+                **arguments,
+            )
 
         self.assertIsNotNone(delegated.account_age_seconds)
         self.assertEqual(
-            replace(
-                delegated, generated_at="", account_age_seconds=None
-            ),
-            replace(direct, generated_at="", account_age_seconds=None),
+            replace(delegated, generated_at=""),
+            replace(direct, generated_at=""),
         )
 
     def test_the_broker_route_is_hard_disabled_and_not_a_parameter(self) -> None:

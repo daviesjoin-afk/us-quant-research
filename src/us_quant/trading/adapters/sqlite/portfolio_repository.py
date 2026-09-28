@@ -19,9 +19,13 @@ from us_quant.trading.domain.portfolio import (
     PortfolioSide,
     PortfolioVerdict,
 )
+from us_quant.trading.domain.risk import RiskDecision
 from us_quant.trading.domain.portfolio_ledger import (
     PortfolioDecisionRecord,
+    PortfolioExecutionAttribution,
+    PortfolioExecutionContribution,
     PortfolioStoreUnreadable,
+    execution_contributions_for_quantity,
 )
 
 
@@ -56,14 +60,88 @@ def _record_payload(record: PortfolioDecisionRecord) -> str:
         ),
         "portfolio_cycle_id": record.portfolio_cycle_id,
         "observed_at": record.observed_at.isoformat(),
+        "snapshot_identity": record.snapshot_identity,
         "policy_identity": record.policy_identity,
         "policy_revision": record.policy_revision,
         "created_at": record.created_at.isoformat(),
         "revision": record.revision,
+        "proposal_cutoff": (
+            record.proposal_cutoff.isoformat() if record.proposal_cutoff else None
+        ),
         "risk_outcome": record.risk_outcome,
+        "risk_decision": (
+            {
+                "approved": record.risk_decision.approved,
+                "requested_quantity": record.risk_decision.requested_quantity,
+                "approved_quantity": record.risk_decision.approved_quantity,
+                "reasons": list(record.risk_decision.reasons),
+                "adjustments": list(record.risk_decision.adjustments),
+            }
+            if record.risk_decision is not None
+            else None
+        ),
         "order_id": record.order_id,
+        "dispatch_outcome_recorded": record.dispatch_outcome_recorded,
+        "dispatch_submitted": record.dispatch_submitted,
+        "dispatch_halt": record.dispatch_halt,
+        "dispatch_status": record.dispatch_status,
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _execution_payload(item: PortfolioExecutionAttribution) -> str:
+    return json.dumps(
+        {
+            "order_id": item.order_id,
+            "portfolio_decision_id": item.portfolio_decision_id,
+            "symbol": item.symbol,
+            "side": item.side.value,
+            "quantity": item.quantity,
+            "contributions": [
+                {
+                    "portfolio_decision_id": entry.portfolio_decision_id,
+                    "strategy_version_id": entry.strategy_version_id,
+                    "proposal_id": entry.proposal_id,
+                    "symbol": entry.symbol,
+                    "signed_quantity": entry.signed_quantity,
+                }
+                for entry in item.contributions
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _from_execution_payload(raw: str, *, expected_order_id: str) -> PortfolioExecutionAttribution:
+    try:
+        value = json.loads(raw)
+        if not isinstance(value, dict) or value.get("order_id") != expected_order_id:
+            raise ValueError("execution attribution key does not match its order ID")
+        symbol = value["symbol"]
+        contributions = tuple(
+            PortfolioExecutionContribution(
+                portfolio_decision_id=entry["portfolio_decision_id"],
+                strategy_version_id=entry["strategy_version_id"],
+                proposal_id=entry["proposal_id"],
+                symbol=entry["symbol"],
+                signed_quantity=entry["signed_quantity"],
+            )
+            for entry in value["contributions"]
+        )
+        item = PortfolioExecutionAttribution(
+            order_id=value["order_id"],
+            portfolio_decision_id=value["portfolio_decision_id"],
+            symbol=symbol,
+            side=PortfolioSide(value["side"]),
+            quantity=value["quantity"],
+            contributions=contributions,
+        )
+        if _execution_payload(item) != json.dumps(value, sort_keys=True, separators=(",", ":")):
+            raise ValueError("execution attribution contains non-canonical fields")
+        return item
+    except Exception as exc:
+        raise PortfolioStoreUnreadable("stored portfolio execution attribution is unreadable") from exc
 
 
 def _from_payload(
@@ -73,6 +151,14 @@ def _from_payload(
         value = json.loads(raw)
         if not isinstance(value, dict):
             raise ValueError("portfolio row must be a JSON object")
+        # Stage 5-B rows predate these Stage 5-C observation facts.
+        value.setdefault("snapshot_identity", "legacy-unrecorded")
+        value.setdefault("proposal_cutoff", None)
+        value.setdefault("risk_decision", None)
+        value.setdefault("dispatch_outcome_recorded", False)
+        value.setdefault("dispatch_submitted", False)
+        value.setdefault("dispatch_halt", False)
+        value.setdefault("dispatch_status", None)
         if (
             expected_decision_id is not None
             and value.get("decision_id") != expected_decision_id
@@ -104,6 +190,18 @@ def _from_payload(
             if action_data is not None
             else None
         )
+        risk_data = value["risk_decision"]
+        risk_decision = (
+            RiskDecision(
+                approved=risk_data["approved"],
+                requested_quantity=risk_data["requested_quantity"],
+                approved_quantity=risk_data["approved_quantity"],
+                reasons=tuple(risk_data["reasons"]),
+                adjustments=tuple(risk_data["adjustments"]),
+            )
+            if risk_data is not None
+            else None
+        )
         decision = PortfolioDecision(
             decision_id=decision_id,
             decision=PortfolioVerdict(value["decision"]),
@@ -119,12 +217,23 @@ def _from_payload(
             decision=decision,
             portfolio_cycle_id=value["portfolio_cycle_id"],
             observed_at=datetime.fromisoformat(value["observed_at"]),
+            snapshot_identity=value["snapshot_identity"],
             policy_identity=value["policy_identity"],
             policy_revision=value["policy_revision"],
             created_at=datetime.fromisoformat(value["created_at"]),
+            proposal_cutoff=(
+                datetime.fromisoformat(value["proposal_cutoff"])
+                if value["proposal_cutoff"] is not None
+                else None
+            ),
             revision=value["revision"],
             risk_outcome=value["risk_outcome"],
+            risk_decision=risk_decision,
             order_id=value["order_id"],
+            dispatch_outcome_recorded=value["dispatch_outcome_recorded"],
+            dispatch_submitted=value["dispatch_submitted"],
+            dispatch_halt=value["dispatch_halt"],
+            dispatch_status=value["dispatch_status"],
         )
         # Reject malformed or non-canonical persisted data rather than repairing it.
         if _record_payload(record) != json.dumps(value, sort_keys=True, separators=(",", ":")):
@@ -150,6 +259,12 @@ class SQLitePortfolioRepository:
                         payload TEXT NOT NULL
                     )"""
                 )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS portfolio_execution_attribution (
+                        order_id TEXT PRIMARY KEY,
+                        payload TEXT NOT NULL
+                    )"""
+                )
 
     def decision(self, decision_id: str) -> PortfolioDecisionRecord | None:
         with closing(connect_sqlite(self.path)) as connection:
@@ -169,6 +284,24 @@ class SQLitePortfolioRepository:
             for decision_id, payload in rows
         )
 
+    def execution_attribution(self, order_id: str) -> PortfolioExecutionAttribution | None:
+        with closing(connect_sqlite(self.path)) as connection:
+            row = connection.execute(
+                "SELECT order_id, payload FROM portfolio_execution_attribution WHERE order_id = ?",
+                (order_id,),
+            ).fetchone()
+        return _from_execution_payload(row[1], expected_order_id=row[0]) if row else None
+
+    def execution_attributions(self) -> tuple[PortfolioExecutionAttribution, ...]:
+        with closing(connect_sqlite(self.path)) as connection:
+            rows = connection.execute(
+                "SELECT order_id, payload FROM portfolio_execution_attribution ORDER BY order_id"
+            ).fetchall()
+        return tuple(
+            _from_execution_payload(payload, expected_order_id=order_id)
+            for order_id, payload in rows
+        )
+
     def record_decision(self, record: PortfolioDecisionRecord) -> PortfolioDecisionRecord:
         if not isinstance(record, PortfolioDecisionRecord):
             raise TypeError("record must be PortfolioDecisionRecord")
@@ -183,12 +316,7 @@ class SQLitePortfolioRepository:
                     # Risk/execution facts may have been appended after the
                     # original decision; retrying the original append remains
                     # idempotent and must preserve those later facts.
-                    retry = replace(
-                        record,
-                        revision=stored.revision,
-                        risk_outcome=stored.risk_outcome,
-                        order_id=stored.order_id,
-                    )
+                    retry = _preserve_mutable_fields(record, stored)
                     if retry != stored:
                         raise ValueError("conflicting portfolio decision id")
                     return stored
@@ -218,16 +346,23 @@ class SQLitePortfolioRepository:
                 current = _from_payload(row[1], expected_decision_id=row[0])
                 if current.revision != expected_revision:
                     raise ValueError("stale portfolio decision revision")
-                if (
-                    replace(record, revision=current.revision, risk_outcome=current.risk_outcome,
-                            order_id=current.order_id)
-                    != current
-                ):
+                if record.dispatch_outcome_recorded and not current.dispatch_outcome_recorded:
+                    raise ValueError("dispatch outcomes require atomic execution attribution")
+                if _preserve_mutable_fields(record, current) != current:
                     raise ValueError("decision facts are immutable after persistence")
                 if current.risk_outcome is not None and record.risk_outcome != current.risk_outcome:
                     raise ValueError("risk outcome cannot be rewritten")
                 if current.order_id is not None and record.order_id != current.order_id:
                     raise ValueError("order linkage cannot be rewritten")
+                if current.risk_decision is not None and record.risk_decision != current.risk_decision:
+                    raise ValueError("risk decision cannot be rewritten")
+                if current.dispatch_outcome_recorded and (
+                    record.dispatch_outcome_recorded != current.dispatch_outcome_recorded
+                    or record.dispatch_submitted != current.dispatch_submitted
+                    or record.dispatch_halt != current.dispatch_halt
+                    or record.dispatch_status != current.dispatch_status
+                ):
+                    raise ValueError("dispatch outcome cannot be rewritten")
                 updated = replace(record, revision=current.revision + 1)
                 cursor = connection.execute(
                     "UPDATE portfolio_decision SET payload = ? WHERE decision_id = ? AND payload = ?",
@@ -236,3 +371,85 @@ class SQLitePortfolioRepository:
                 if cursor.rowcount != 1:
                     raise ValueError("stale portfolio decision revision")
                 return updated
+
+    def record_dispatch_outcome(
+        self,
+        record: PortfolioDecisionRecord,
+        execution_attribution: PortfolioExecutionAttribution | None,
+        *,
+        expected_revision: int,
+    ) -> PortfolioDecisionRecord:
+        if not record.dispatch_outcome_recorded:
+            raise ValueError("dispatch outcome must be recorded")
+        if (record.order_id is None) != (execution_attribution is None):
+            raise ValueError("order linkage and execution attribution must be recorded together")
+        if execution_attribution is not None and (
+            execution_attribution.order_id != record.order_id
+            or execution_attribution.portfolio_decision_id != record.decision.decision_id
+            or execution_attribution.symbol != record.decision.symbol
+            or record.risk_decision is None
+            or execution_attribution.quantity != record.risk_decision.approved_quantity
+            or record.decision.action is None
+            or execution_attribution.side is not record.decision.action.side
+            or execution_attribution.contributions
+            != execution_contributions_for_quantity(
+                record.decision, record.risk_decision.approved_quantity
+            )
+        ):
+            raise ValueError("execution attribution does not match its portfolio decision")
+        if type(expected_revision) is not int or expected_revision <= 0:
+            raise ValueError("expected_revision must be a positive integer")
+        with closing(connect_sqlite(self.path)) as connection:
+            with connection:
+                row = connection.execute(
+                    "SELECT decision_id, payload FROM portfolio_decision WHERE decision_id = ?",
+                    (record.decision.decision_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("portfolio decision does not exist")
+                current = _from_payload(row[1], expected_decision_id=row[0])
+                if current.revision != expected_revision:
+                    raise ValueError("stale portfolio decision revision")
+                if _preserve_mutable_fields(record, current) != current:
+                    raise ValueError("decision facts are immutable after persistence")
+                if current.risk_outcome is not None and record.risk_outcome != current.risk_outcome:
+                    raise ValueError("risk outcome cannot be rewritten")
+                if current.risk_decision is not None and record.risk_decision != current.risk_decision:
+                    raise ValueError("risk decision cannot be rewritten")
+                if current.dispatch_outcome_recorded:
+                    raise ValueError("dispatch outcome cannot be rewritten")
+                updated = replace(record, revision=current.revision + 1)
+                cursor = connection.execute(
+                    "UPDATE portfolio_decision SET payload = ? WHERE decision_id = ? AND payload = ?",
+                    (_record_payload(updated), record.decision.decision_id, row[1]),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("stale portfolio decision revision")
+                if execution_attribution is not None:
+                    try:
+                        connection.execute(
+                            "INSERT INTO portfolio_execution_attribution(order_id, payload) VALUES (?, ?)",
+                            (execution_attribution.order_id, _execution_payload(execution_attribution)),
+                        )
+                    except sqlite3.IntegrityError as exc:
+                        raise ValueError("order already has portfolio execution attribution") from exc
+                return updated
+
+
+def _preserve_mutable_fields(
+    incoming: PortfolioDecisionRecord,
+    stored: PortfolioDecisionRecord,
+) -> PortfolioDecisionRecord:
+    """Apply the store's mutable revision/outcome fields to an idempotent retry."""
+
+    return replace(
+        incoming,
+        revision=stored.revision,
+        risk_outcome=stored.risk_outcome,
+        risk_decision=stored.risk_decision,
+        order_id=stored.order_id,
+        dispatch_outcome_recorded=stored.dispatch_outcome_recorded,
+        dispatch_submitted=stored.dispatch_submitted,
+        dispatch_halt=stored.dispatch_halt,
+        dispatch_status=stored.dispatch_status,
+    )

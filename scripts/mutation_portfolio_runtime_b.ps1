@@ -14,7 +14,7 @@ $tests = Join-Path $projectRoot "tests\test_portfolio_repository.py"
 $mutations = @(
     @{ name='M1 attribution is omitted from durable payload'; file=$repo; find='for item in decision\.attribution'; repl='for item in ()'; select='round_trip_survives_repository_restart' },
     @{ name='M2 conflicting duplicate decision is accepted'; file=$repo; find='raise ValueError\("conflicting portfolio decision id"\)'; repl='return stored'; select='same_decision_payload_is_idempotent_and_conflict_is_refused' },
-    @{ name='M3 stale revision is accepted'; file=$repo; find='if current\.revision != expected_revision:'; repl='if False:'; select='decision_update_uses_compare_and_swap_revision' },
+    @{ name='M3 stale revision is accepted'; file=$repo; find='if current\.revision != expected_revision:'; repl='if False:'; select='decision_update_uses_compare_and_swap_revision'; scopeStart='    def update_decision('; scopeEnd='    def record_dispatch_outcome(' },
     @{ name='M4 corrupt state is returned as empty'; file=$repo; find='raise PortfolioStoreUnreadable\("stored portfolio decision is unreadable"\) from exc'; repl='return None'; select='corrupt_json_row_is_unreadable_not_an_empty_ledger' },
     @{ name='M5 signed attribution is converted to absolute quantity'; file=$repo; find='"signed_requested_quantity": item\.signed_requested_quantity'; repl='"signed_requested_quantity": abs(item.signed_requested_quantity)'; select='round_trip_survives_repository_restart' },
     @{ name='M6 zero-net decision reconstructs an action'; file=$repo; find='if action_data is not None'; repl='if action_data is not None or value["net_quantity"] == 0'; select='zero_net_decision_persists_without_action' },
@@ -31,7 +31,17 @@ $failures = @()
 foreach ($mutation in $mutations) {
     $original = Get-Text $mutation.file
     $regex = [regex]::new($mutation.find)
-    $matches = $regex.Matches($original)
+    $anchorText = $original
+    if ($mutation.ContainsKey('scopeStart')) {
+        $start = $original.IndexOf($mutation.scopeStart, [StringComparison]::Ordinal)
+        $end = $original.IndexOf($mutation.scopeEnd, [StringComparison]::Ordinal)
+        if ($start -lt 0 -or $end -le $start) {
+            $failures += "$($mutation.name): mutation scope was not found"
+            continue
+        }
+        $anchorText = $original.Substring($start, $end - $start)
+    }
+    $matches = $regex.Matches($anchorText)
     if ($matches.Count -ne 1) {
         $failures += "$($mutation.name): expected one anchor, found $($matches.Count)"
         continue

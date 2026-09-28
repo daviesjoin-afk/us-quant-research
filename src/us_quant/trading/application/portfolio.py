@@ -37,6 +37,7 @@ class CapitalAllocator:
         intents: Iterable[StrategyPortfolioIntent],
         snapshot: PortfolioSnapshot,
         policy: PortfolioCapitalPolicy,
+        decision_context_id: str | None = None,
     ) -> tuple[PortfolioDecision, ...]:
         proposals = tuple(intents)
         if not proposals:
@@ -60,7 +61,13 @@ class CapitalAllocator:
             blocker = self._portfolio_limit_blocker(ordered_groups, snapshot, policy)
 
         return tuple(
-            self._decision(symbol, items, snapshot, blocker)
+            self._decision(
+                symbol,
+                items,
+                snapshot,
+                blocker,
+                context_identity=decision_context_id,
+            )
             for symbol, items in ordered_groups.items()
         )
 
@@ -299,12 +306,15 @@ class CapitalAllocator:
         intents: tuple[StrategyPortfolioIntent, ...],
         snapshot: PortfolioSnapshot,
         blocker: PortfolioBlocker | None,
+        *,
+        context_identity: str | None = None,
     ) -> PortfolioDecision:
         ordered = tuple(sorted(intents, key=_intent_key))
         decision_id = stable_portfolio_decision_id(
             symbol=symbol,
             proposal_ids=tuple(item.proposal_id for item in ordered),
             observed_at=(snapshot.observed_at if isinstance(snapshot, PortfolioSnapshot) else None),
+            context_identity=context_identity,
         )
         attributions = tuple(
             PortfolioOrderAttribution(

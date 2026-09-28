@@ -266,6 +266,89 @@ def test_same_direction_intents_aggregate_to_one_deterministic_action():
     assert result[0].net_quantity == 15
 
 
+def test_mixed_case_same_symbol_intents_share_one_concentration_limit():
+    result = _decision(
+        (
+            _intent("strategy-a", "AAPL", PortfolioSide.BUY, 30, "upper-case"),
+            _intent("strategy-b", "aapl", PortfolioSide.BUY, 30, "lower-case"),
+        )
+    )
+
+    assert len(result) == 1
+    assert result[0].symbol == "AAPL"
+    assert result[0].blocker is PortfolioBlocker.SYMBOL_CONCENTRATION_EXCEEDED
+
+
+def test_whitespace_and_case_variants_aggregate_to_one_canonical_action():
+    result = _decision(
+        (
+            _intent("strategy-a", " AAPL ", PortfolioSide.BUY, 2, "padded"),
+            _intent("strategy-b", "AAPL", PortfolioSide.BUY, 3, "plain"),
+        )
+    )
+
+    assert len(result) == 1
+    assert result[0].symbol == "AAPL"
+    assert result[0].action is not None
+    assert result[0].action.symbol == "AAPL"
+    assert result[0].action.quantity == 5
+    assert {item.symbol for item in result[0].attribution} == {"AAPL"}
+
+
+def test_mixed_case_opposite_intents_net_to_one_canonical_action():
+    snapshot = _snapshot(
+        positions=(PortfolioPosition("aapl", 6, Decimal("60")),),
+        strategy_exposure=(
+            PortfolioStrategyExposure("strategy-b", "aapl", Decimal("60"), 6),
+        ),
+    )
+    result = _decision(
+        (
+            _intent("strategy-a", "AAPL", PortfolioSide.BUY, 10, "buy"),
+            _intent("strategy-b", "aapl", PortfolioSide.SELL, 6, "sell"),
+        ),
+        snapshot=snapshot,
+    )
+
+    assert len(result) == 1
+    assert result[0].symbol == "AAPL"
+    assert result[0].action is not None
+    assert result[0].action.symbol == "AAPL"
+    assert result[0].action.side is PortfolioSide.BUY
+    assert result[0].action.quantity == 4
+    assert {item.symbol for item in result[0].attribution} == {"AAPL"}
+
+
+def test_lowercase_snapshot_position_is_used_by_uppercase_intent():
+    snapshot = _snapshot(
+        positions=(PortfolioPosition("aapl", 40, Decimal("400")),),
+        strategy_exposure=(
+            PortfolioStrategyExposure("strategy-b", "aapl", Decimal("400"), 40),
+        ),
+    )
+    result = _decision(
+        (_intent("strategy-a", "AAPL", PortfolioSide.BUY, 11, "matches-position"),),
+        snapshot=snapshot,
+    )
+
+    assert snapshot.positions[0].symbol == "AAPL"
+    assert result[0].blocker is PortfolioBlocker.SYMBOL_CONCENTRATION_EXCEEDED
+
+
+def test_symbol_case_and_whitespace_do_not_change_decision_identity():
+    upper = _decision(
+        (_intent("strategy-a", "AAPL", PortfolioSide.BUY, 1, "stable-id"),)
+    )
+    lower = _decision(
+        (_intent("strategy-a", "aapl", PortfolioSide.BUY, 1, "stable-id"),)
+    )
+    padded = _decision(
+        (_intent("strategy-a", " AAPL ", PortfolioSide.BUY, 1, "stable-id"),)
+    )
+
+    assert upper == lower == padded
+
+
 def test_opposite_intents_net_and_keep_strategy_attribution():
     snapshot = _snapshot(
         positions=(PortfolioPosition("AAPL", 6, Decimal("60")),),

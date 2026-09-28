@@ -5312,6 +5312,8 @@ Governed Strategy C ─┘              │
 组合持仓数量或跨策略冲突结果。capital 必须由 policy 显式分配；零/空额度默认 fail closed。
 allocator 使用 Decimal 与确定性排序，对同标的同方向请求聚合、反向请求按股数净额归并，并保留
 proposal、strategy 与签名数量 attribution。完全抵消的净额可批准为零 action，不产生组合下单候选。
+所有 portfolio symbol 在 domain 构造时统一 `strip + upper`，确保 exposure、净额、snapshot lookup、
+attribution 与 decision identity 使用同一个 canonical symbol。
 不同 reference price、重复 proposal、未知/未分配策略及任一组合硬上限越界均 fail closed；不隐式缩量，
 同批次不按到达顺序挑选赢家。
 

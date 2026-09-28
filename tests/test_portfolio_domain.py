@@ -4,15 +4,20 @@ from decimal import Decimal
 import pytest
 
 from us_quant.trading.domain.portfolio import (
+    PortfolioAction,
     PortfolioCapitalPolicy,
+    PortfolioDecision,
     PortfolioError,
     PortfolioOpenOrder,
+    PortfolioOrderAttribution,
     PortfolioPosition,
+    PortfolioSide,
     PortfolioSnapshot,
     PortfolioStrategyAllocation,
     PortfolioStrategyExposure,
+    PortfolioSymbolExposure,
     StrategyPortfolioIntent,
-    PortfolioSide,
+    PortfolioVerdict,
 )
 
 
@@ -116,3 +121,44 @@ def test_snapshot_attribution_and_open_order_quantities_must_be_positive_integer
         PortfolioOpenOrder(
             "strategy-a", "AAPL", PortfolioSide.SELL, Decimal("10"), quantity
         )
+
+
+def test_every_symbol_carrying_portfolio_value_uses_canonical_symbol_identity():
+    position = PortfolioPosition(" aapl ", 1, Decimal("10"))
+    exposure = PortfolioSymbolExposure("aapl", Decimal("10"))
+    order = PortfolioOpenOrder(
+        "strategy-a", " aapl ", PortfolioSide.BUY, Decimal("10"), 1
+    )
+    strategy_exposure = PortfolioStrategyExposure(
+        "strategy-a", "aapl", Decimal("10"), 1
+    )
+    intent = StrategyPortfolioIntent(
+        "strategy-a", " aapl ", PortfolioSide.BUY, 1, Decimal("10"), "p-1"
+    )
+    attribution = PortfolioOrderAttribution("decision-1", "strategy-a", "p-1", "aapl", 1)
+    action = PortfolioAction(" aapl ", PortfolioSide.BUY, 1, Decimal("10"))
+    decision = PortfolioDecision(
+        "decision-1",
+        PortfolioVerdict.APPROVE,
+        "aapl",
+        ("strategy-a",),
+        1,
+        1,
+        None,
+        (attribution,),
+        action,
+    )
+
+    assert {
+        value.symbol
+        for value in (
+            position,
+            exposure,
+            order,
+            strategy_exposure,
+            intent,
+            attribution,
+            action,
+            decision,
+        )
+    } == {"AAPL"}

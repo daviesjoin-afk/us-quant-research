@@ -60,6 +60,13 @@ def _text(value: str, name: str) -> None:
         raise PortfolioError(f"{name} must be a nonblank string")
 
 
+def _symbol(value: str) -> str:
+    """Return the single canonical identity used for portfolio symbols."""
+
+    _text(value, "symbol")
+    return value.strip().upper()
+
+
 def _aware(value: datetime, name: str) -> None:
     if (
         not isinstance(value, datetime)
@@ -179,7 +186,7 @@ class PortfolioPosition:
     notional: Decimal
 
     def __post_init__(self) -> None:
-        _text(self.symbol, "symbol")
+        object.__setattr__(self, "symbol", _symbol(self.symbol))
         if type(self.quantity) is not int or self.quantity <= 0:
             raise PortfolioError("position quantity must be a positive integer")
         _decimal(self.notional, "position notional", allow_zero=False)
@@ -191,7 +198,7 @@ class PortfolioSymbolExposure:
     notional: Decimal
 
     def __post_init__(self) -> None:
-        _text(self.symbol, "symbol")
+        object.__setattr__(self, "symbol", _symbol(self.symbol))
         _decimal(self.notional, "symbol exposure")
 
 
@@ -207,7 +214,7 @@ class PortfolioOpenOrder:
 
     def __post_init__(self) -> None:
         _text(self.strategy_version_id, "strategy_version_id")
-        _text(self.symbol, "symbol")
+        object.__setattr__(self, "symbol", _symbol(self.symbol))
         if not isinstance(self.side, PortfolioSide):
             raise PortfolioError("open-order side must be PortfolioSide")
         _decimal(self.notional, "open-order notional")
@@ -224,7 +231,7 @@ class PortfolioStrategyExposure:
 
     def __post_init__(self) -> None:
         _text(self.strategy_version_id, "strategy_version_id")
-        _text(self.symbol, "symbol")
+        object.__setattr__(self, "symbol", _symbol(self.symbol))
         _decimal(self.notional, "strategy exposure")
         if type(self.quantity) is not int or self.quantity <= 0:
             raise PortfolioError("strategy exposure quantity must be a positive integer")
@@ -321,7 +328,7 @@ class StrategyPortfolioIntent:
 
     def __post_init__(self) -> None:
         _text(self.strategy_version_id, "strategy_version_id")
-        _text(self.symbol, "symbol")
+        object.__setattr__(self, "symbol", _symbol(self.symbol))
         _text(self.proposal_id, "proposal_id")
         if not isinstance(self.side, PortfolioSide):
             raise PortfolioError("side must be PortfolioSide")
@@ -346,6 +353,7 @@ class PortfolioOrderAttribution:
             "symbol",
         ):
             _text(getattr(self, name), name)
+        object.__setattr__(self, "symbol", _symbol(self.symbol))
         if type(self.signed_requested_quantity) is not int or self.signed_requested_quantity == 0:
             raise PortfolioError("attributed quantity must be a non-zero integer")
 
@@ -360,7 +368,7 @@ class PortfolioAction:
     reference_price: Decimal
 
     def __post_init__(self) -> None:
-        _text(self.symbol, "symbol")
+        object.__setattr__(self, "symbol", _symbol(self.symbol))
         if not isinstance(self.side, PortfolioSide):
             raise PortfolioError("side must be PortfolioSide")
         if type(self.quantity) is not int or self.quantity <= 0:
@@ -384,7 +392,7 @@ class PortfolioDecision:
 
     def __post_init__(self) -> None:
         _text(self.decision_id, "decision_id")
-        _text(self.symbol, "symbol")
+        object.__setattr__(self, "symbol", _symbol(self.symbol))
         if not isinstance(self.decision, PortfolioVerdict):
             raise PortfolioError("decision must be PortfolioVerdict")
         if not isinstance(self.strategy_version_ids, tuple) or any(
@@ -453,5 +461,5 @@ def stable_portfolio_decision_id(
     """Create a stable ID independent of input arrival order."""
 
     timestamp = observed_at.isoformat() if observed_at is not None else "unobserved"
-    material = "\0".join((symbol, timestamp, *sorted(proposal_ids)))
+    material = "\0".join((_symbol(symbol), timestamp, *sorted(proposal_ids)))
     return sha256(material.encode("utf-8")).hexdigest()

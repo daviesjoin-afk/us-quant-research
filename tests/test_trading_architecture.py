@@ -309,6 +309,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "paper_autonomy_supervisor.py",
         "paper_preparation.py",
         "portfolio.py",
+        "portfolio_ledger.py",
         "risk.py",
         "session.py",
         "strategy.py",
@@ -325,6 +326,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "paper_autonomy_action_repository.py",
         "paper_autonomy_repository.py",
         "paper_autonomy_supervisor.py",
+        "portfolio_repository.py",
         "strategy_repository.py",
     }
 
@@ -964,6 +966,7 @@ NON_MARKET_DATA_ADAPTER_MODULES = {
     "finnhub/__init__.py",
     "sqlite/__init__.py",
     "sqlite/order_repository.py",
+    "sqlite/portfolio_repository.py",
     "sqlite/strategy_repository.py",
 }
 

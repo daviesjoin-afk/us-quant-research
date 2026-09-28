@@ -215,3 +215,10 @@ class ExecutionFill:
     quantity: Decimal
     price: Decimal
     occurred_at: datetime
+    fee: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        if self.fee is not None and (
+            not self.fee.is_finite() or self.fee < ZERO
+        ):
+            raise ValueError("execution fee must be finite and non-negative")

@@ -116,6 +116,12 @@ CANONICAL_TYPES = {
     "OrderIntent": "orders.py",
     "OrderEvent": "orders.py",
     "ExecutionFill": "orders.py",
+    "PortfolioReconciliationBlocker": "portfolio_reconciliation.py",
+    "PortfolioOrderTruthRecord": "portfolio_reconciliation.py",
+    "PortfolioOrderTruth": "portfolio_reconciliation.py",
+    "PortfolioReconciledPosition": "portfolio_reconciliation.py",
+    "PortfolioStrategyAccounting": "portfolio_reconciliation.py",
+    "PortfolioReconciliationResult": "portfolio_reconciliation.py",
     "RiskDecision": "risk.py",
     "RiskEvaluationRequest": "risk.py",
     "RiskLimits": "risk.py",
@@ -311,6 +317,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "portfolio.py",
         "portfolio_ledger.py",
         "portfolio_runtime.py",
+        "portfolio_reconciliation.py",
         "risk.py",
         "session.py",
         "strategy.py",
@@ -329,6 +336,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "paper_autonomy_supervisor.py",
         "portfolio_repository.py",
         "portfolio_runtime.py",
+        "portfolio_order_truth.py",
         "strategy_repository.py",
     }
 

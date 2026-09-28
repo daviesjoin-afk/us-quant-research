@@ -6,8 +6,8 @@ still reads back correctly: the migration was a relocation behind a port, so no
 user may be asked to delete and rebuild their order history.
 
 The write path speaks the domain now -- ``OrderIntent`` / ``OrderEvent`` /
-``ExecutionFill`` -- while the table layout, the query order and the stored text
-formats stay byte-identical to the retired ``paper_order_journal``.  The store
+``ExecutionFill`` -- while preserving the retired journal layout and stored
+text formats. Optional execution fees are an additive nullable column. The store
 keeps the broker's own status text in its ``status`` column; the domain status is
 derived on read, once, through ``order_status_from_text``.
 """
@@ -45,8 +45,8 @@ from us_quant.trading.domain.orders import (
 )
 
 # The schema as written by the module before the split, copied verbatim from
-# git history. It must stay byte-identical to what the store creates today,
-# otherwise old databases stop opening.
+# git history. The migration preserves its columns; the current execution table
+# adds only a nullable fee column for Stage 5-D accounting evidence.
 LEGACY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS paper_order_intent(
     intent_id TEXT PRIMARY KEY,
@@ -606,7 +606,7 @@ def test_a_database_written_before_the_split_still_works() -> None:
 
 
 def test_legacy_schema_matches_what_the_journal_creates_today() -> None:
-    """Guards the test above: if the DDL drifted, it would prove nothing."""
+    """Guards legacy columns while allowing Stage 5-D's optional fee field."""
 
     with TemporaryDirectory() as directory:
         fresh = Path(directory) / "fresh.sqlite3"
@@ -633,7 +633,13 @@ def test_legacy_schema_matches_what_the_journal_creates_today() -> None:
 
     assert set(created) == set(legacy)
     for name, sql in legacy.items():
-        assert _normalise(created[name]) == _normalise(sql), name
+        expected = sql
+        if name == "paper_execution":
+            expected = expected.replace(
+                "recorded_at TEXT NOT NULL,\n    FOREIGN KEY",
+                "recorded_at TEXT NOT NULL,\n        fee TEXT,\n    FOREIGN KEY",
+            )
+        assert _normalise(created[name]) == _normalise(expected), name
 
 
 def test_sessions_rolls_up_each_session_with_its_own_totals() -> None:

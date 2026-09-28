@@ -123,7 +123,7 @@ def test_c7_paper_factory_constructs_real_paper_adapter_without_connecting(tmp_p
         (Environment.BACKTEST, False, ExecutionDeploymentBlocker.BACKTEST_HAS_NO_BROKER_CHANNEL),
         (Environment.BACKTEST, True, ExecutionDeploymentBlocker.BACKTEST_HAS_NO_BROKER_CHANNEL),
         (Environment.LIVE, False, ExecutionDeploymentBlocker.LIVE_FEATURE_DISABLED),
-        (Environment.LIVE, True, ExecutionDeploymentBlocker.LIVE_ADAPTER_UNAVAILABLE),
+        (Environment.LIVE, True, ExecutionDeploymentBlocker.LIVE_CANARY_GATES_REQUIRED),
     ],
 )
 def test_c8_c10_production_factory_fails_closed(
@@ -209,14 +209,14 @@ def test_c15_production_broker_api_calls_have_one_adapter_owner(method: str) -> 
     assert len(owners) == 2
 
 
-def test_c15b_live_adapter_is_not_constructed_by_production_code() -> None:
+def test_c15b_only_execution_composition_constructs_live_adapter() -> None:
     owners = [
         path.relative_to(SRC).as_posix()
         for path in _files(SRC)
         for node in ast.walk(_tree(path))
         if isinstance(node, ast.Call) and _call_name(node) == "IBKRLiveExecutionAdapter"
     ]
-    assert owners == []
+    assert owners == ["trading/composition/execution.py"]
 
 
 def test_c16_durable_record_precedes_submit() -> None:

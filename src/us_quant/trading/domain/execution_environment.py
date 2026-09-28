@@ -1,8 +1,4 @@
-"""Fail-closed decision for the production execution deployment.
-
-The feature flag is a deployment setting only. It never grants Live order
-authority: Stage 3 has no Live adapter or Live authorization boundary.
-"""
+"""Fail-closed deployment decision; feature flags never authorize Live orders."""
 
 from __future__ import annotations
 
@@ -21,6 +17,7 @@ class ExecutionDeploymentBlocker(StrEnum):
     BACKTEST_HAS_NO_BROKER_CHANNEL = "backtest_has_no_broker_channel"
     LIVE_FEATURE_DISABLED = "live_feature_disabled"
     LIVE_ADAPTER_UNAVAILABLE = "live_adapter_unavailable"
+    LIVE_CANARY_GATES_REQUIRED = "live_canary_gates_required"
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,8 +35,10 @@ def evaluate_execution_deployment(
 ) -> ExecutionDeploymentDecision:
     """Select whether this deployment may construct a broker channel.
 
-    PAPER always selects the existing Paper-only adapter. BACKTEST has no
-    broker channel. LIVE remains unavailable regardless of the feature flag.
+    PAPER selects the existing Paper-only adapter. BACKTEST has no broker
+    channel. LIVE returns a denial until composition supplies the complete
+    authorization, fresh-proof, and canary guard context; the flag alone never
+    authorizes it.
     """
 
     if not isinstance(environment, Environment):
@@ -71,8 +70,8 @@ def evaluate_execution_deployment(
     return ExecutionDeploymentDecision(
         environment=environment,
         broker_submission_allowed=False,
-        blocker=ExecutionDeploymentBlocker.LIVE_ADAPTER_UNAVAILABLE,
-        reason="Live execution is not implemented in Stage 3",
+        blocker=ExecutionDeploymentBlocker.LIVE_CANARY_GATES_REQUIRED,
+        reason="Live authorization, startup proof, and canary gates are required",
     )
 
 

@@ -69,6 +69,9 @@ _STRATEGY_DIR = _ORCH_DIR / "strategy"
 _EXECUTION_MODULE = (
     "us_quant.desktop_v2.orchestration.execution.orchestrator"
 )
+_LIVE_OPERATOR_MODULE = (
+    "us_quant.desktop_v2.orchestration.execution.live_operator"
+)
 _BACKTEST_MODULE = (
     "us_quant.desktop_v2.orchestration.research.backtest.orchestrator"
 )
@@ -98,6 +101,9 @@ _RETIRED_WINDOW_STATE = {
 #: single-owner map would be false.  That half is asserted separately, on the
 #: window's own ``self.execution_page`` receiver.
 _PAGE_API_OWNERS: dict[str, set[tuple[str, str]]] = {
+    "render_live_operator": {
+        (_LIVE_OPERATOR_MODULE, "LiveOperatorControlsOrchestrator")
+    },
     "render_candidates": {(_EXECUTION_MODULE, "ExecutionOrchestrator")},
     "render_context": {(_EXECUTION_MODULE, "ExecutionOrchestrator")},
     "render_preflight": {(_EXECUTION_MODULE, "ExecutionOrchestrator")},

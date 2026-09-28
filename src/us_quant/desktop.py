@@ -136,6 +136,12 @@ from us_quant.trading.composition.session_config import (
     resolve_paper_session_capital,
 )
 from us_quant.trading.application.risk import RiskApplication
+from us_quant.trading.application.live_operator_controls import (
+    LiveOperatorControlsApplication,
+)
+from us_quant.trading.adapters.sqlite.live_safety_repository import (
+    SQLiteLiveSafetyRepository,
+)
 from us_quant.trading.composition.execution import (
     build_execution_application,
     build_execution_candidate_factory,
@@ -189,6 +195,9 @@ from us_quant.desktop_v2.pages.execution import ExecutionPage
 from us_quant.desktop_v2.orchestration.execution import (
     ExecutionOrchestrator,
     ExecutionProviders,
+)
+from us_quant.desktop_v2.orchestration.execution.live_operator import (
+    LiveOperatorControlsOrchestrator,
 )
 from us_quant.desktop_v2.pages.market import MarketPage
 from us_quant.desktop_v2.pages.research.targeted import TargetedValidationPage
@@ -1238,13 +1247,25 @@ class MainWindow(QMainWindow):
         )
 
         # The execution page renders and reports intent.  Since G2-B every
-        # decision it reports -- the runtime strategy selection, the preflight,
+        # Paper decision it reports -- the runtime strategy selection, preflight,
         # the candidate preparation, the channel probe, the launch confirmation,
         # the control state and the whole session render -- is
-        # ``execution_orchestrator``'s, and that orchestrator is the page's only
-        # orchestration caller.  The window constructs the page and hands it the
-        # palette; that is the whole of its relationship with it.
+        # ``execution_orchestrator``'s. The Live panel is separately owned by
+        # ``live_operator_orchestrator`` and cannot access broker or startup
+        # providers. The window constructs the page and hands it the palette.
         self.execution_page = ExecutionPage(palette=self.theme)
+        self.live_operator_application = LiveOperatorControlsApplication(
+            SQLiteLiveSafetyRepository(
+                self.paths.runtime_root / "live_safety.sqlite3"
+            )
+        )
+        self.live_operator_orchestrator = LiveOperatorControlsOrchestrator(
+            page=self.execution_page,
+            application=self.live_operator_application,
+            environment=lambda: self.config.environment.value,
+            feature_enabled=lambda: self.config.live_trading_enabled,
+        )
+        self.live_operator_orchestrator.refresh()
         # Built here rather than beside the other capabilities because the page
         # it renders must exist first, and because this must exist before
         # ``strategy_governance_orchestrator.refresh`` below: a catalogue change
@@ -1475,6 +1496,19 @@ class MainWindow(QMainWindow):
         page.resume_reconciliation_requested.connect(
             self._confirm_paper_reconciliation_resume
         )
+        page.live_arm_requested.connect(
+            self.live_operator_orchestrator.request_arm
+        )
+        page.live_kill_requested.connect(
+            self.live_operator_orchestrator.request_kill
+        )
+        page.live_status_refresh_requested.connect(
+            self.live_operator_orchestrator.refresh
+        )
+        self.live_operator_orchestrator.warning_requested.connect(
+            self._show_runtime_warning
+        )
+        self.live_operator_orchestrator.log_requested.connect(self._log)
         # The route's published facts.  Consent is a dialog, the launch is Paper's
         # own command, the market commands pass the window's interlocks, and the
         # readiness fact becomes one market input.

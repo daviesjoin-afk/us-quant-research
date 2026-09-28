@@ -457,3 +457,22 @@ def test_a_second_probe_request_does_not_release_the_first(monkeypatch) -> None:
     finally:
         window.close()
         window.deleteLater()
+
+
+def test_live_operator_kill_button_persists_the_durable_kill_latch() -> None:
+    window = _window()
+    try:
+        panel = window.execution_page.live_operator_controls
+        assert not panel.arm_button.isEnabled()
+        assert "providers" in panel.arm_button.toolTip()
+
+        panel.kill_button.click()
+
+        record = window.live_operator_application.snapshot()
+        assert record.kill_latch.is_latched
+        assert record.kill_latch.reason == "Desktop Live operator emergency kill"
+        assert panel.fact_labels["kill_latch"].text() == "已触发"
+        assert "LIVE HALTED" in panel.status_label.text()
+    finally:
+        window.close()
+        window.deleteLater()

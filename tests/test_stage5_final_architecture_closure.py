@@ -185,9 +185,9 @@ def test_relative_imports_resolve_to_absolute_modules_for_layer_guards():
 
     assert "us_quant.trading.adapters.sqlite" in imports
     assert "us_quant.trading.runtime.dispatch" in imports
-    assert "us_quant.trading.adapters" in imports
     assert "us_quant.trading.application.execution" in imports
     assert "us_quant.trading.application.risk" in imports
+    assert "us_quant.trading.adapters" in imports
 
 
 def test_composition_guards_resolve_qualified_and_aliased_constructors():

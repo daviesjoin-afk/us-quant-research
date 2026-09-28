@@ -456,10 +456,17 @@ class PortfolioDecision:
 
 
 def stable_portfolio_decision_id(
-    *, symbol: str, proposal_ids: tuple[str, ...], observed_at: datetime | None
+    *,
+    symbol: str,
+    proposal_ids: tuple[str, ...],
+    observed_at: datetime | None,
+    context_identity: str | None = None,
 ) -> str:
     """Create a stable ID independent of input arrival order."""
 
     timestamp = observed_at.isoformat() if observed_at is not None else "unobserved"
-    material = "\0".join((_symbol(symbol), timestamp, *sorted(proposal_ids)))
+    parts = (_symbol(symbol), timestamp, *sorted(proposal_ids))
+    if context_identity is not None:
+        parts = (_symbol(symbol), timestamp, context_identity, *sorted(proposal_ids))
+    material = "\0".join(parts)
     return sha256(material.encode("utf-8")).hexdigest()

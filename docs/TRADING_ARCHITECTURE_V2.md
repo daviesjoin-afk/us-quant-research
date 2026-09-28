@@ -5339,6 +5339,8 @@ strategy promotion/parameter mutation，也没有 Kelly、risk parity 或 mean-v
 Stage 5-A PR #70 已通过 GitHub merge commit 合并。Stage 4 Final PR #69 的 baseline
 仍为 `b4d8112a180273947afd56b879d2fd155ad06d13`；Stage 5-A 实际 merge SHA 与
 Stage 5-B 起点均为 `0e7b5b7ade3705f9083a70fa935d58783777817b`。
+Stage 5-B PR #71 已通过 GitHub merge commit 合并，实际 baseline 与 Stage 5-C 起点为
+`e9deef1ec0e09f5ff51fbfd3abf658e2a1082f11`。
 
 Stage 5-B 在独立分支 `feat/portfolio-state-attribution-persistence` 建立
 `PortfolioStateRepositoryPort` 与 `SQLitePortfolioRepository`，持久化组合决策、逐策略 proposal
@@ -5347,3 +5349,18 @@ Stage 5-B 在独立分支 `feat/portfolio-state-attribution-persistence` 建立
 读入损坏 JSON、缺失归因、数量不一致、动作边不一致或非规范 symbol 时抛出
 `PortfolioStoreUnreadable`，不能把账本解释为空组合。组合 domain 和 port 不依赖 SQLite；账本没有
 账户凭据或原始 Live account identity 字段。Stage 5-B 不接 Risk、Execution、Desktop scheduler 或 broker。
+
+Stage 5-C 从 Stage 5-B 实际 merge SHA
+`e9deef1ec0e09f5ff51fbfd3abf658e2a1082f11` 开始，在
+`feat/multi-strategy-portfolio-runtime` 建立唯一 `PortfolioRuntime`。一次 cycle 明确记录
+cycle id、观察时间、proposal cutoff、snapshot identity 与 policy revision；策略 proposal 必须来自
+同一观察时间。只有运行时选中、处于已治理 Paper 状态、gate 已通过且 allocation enabled 的版本才会被调用。
+唯一 translator 将 proposal 转为 portfolio intent，HOLD 被过滤。Runtime 按 cycle context 生成稳定 decision
+identity，持久化 decision/归因后才把非零 APPROVE 交给 Risk path。Risk REJECT 只写审计，不提交订单；Risk
+APPROVE 先 durable 写入精确 `RiskDecision`，随后经注入的既有 `OrderDispatch` evaluate/submit seam。Dispatch
+完成后再 CAS 原子持久化 submitted/halt/status/order linkage，并把 order id、portfolio decision id 与完整
+strategy/proposal attribution 写入独立 execution-attribution ledger；两份记录在同一 SQLite transaction 提交。
+uncertain halt 在重启后仍恢复为 halt。风险结果已写入的
+重启恢复只返回已保存状态，绝不再次提交。无 order linkage 的已批准 BUY 会扣减下一 cycle 可用现金并占用
+组合 open-order reservation；无 linkage 的 SELL 会阻断下一 cycle，等待 reconciliation。Stage 5-C 扩展的
+snapshot identity / proposal cutoff 在 SQLite 中保留，Stage 5-B 旧行以显式 legacy marker 兼容读取。

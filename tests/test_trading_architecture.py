@@ -310,6 +310,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "paper_preparation.py",
         "portfolio.py",
         "portfolio_ledger.py",
+        "portfolio_runtime.py",
         "risk.py",
         "session.py",
         "strategy.py",
@@ -327,6 +328,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "paper_autonomy_repository.py",
         "paper_autonomy_supervisor.py",
         "portfolio_repository.py",
+        "portfolio_runtime.py",
         "strategy_repository.py",
     }
 
@@ -2721,6 +2723,7 @@ RUNTIME_SIGNALS = RUNTIME_DIR / "signals.py"
 RUNTIME_STRATEGY = RUNTIME_DIR / "strategy.py"
 RUNTIME_SESSION = RUNTIME_DIR / "session.py"
 RUNTIME_PORTFOLIO = RUNTIME_DIR / "portfolio.py"
+RUNTIME_PORTFOLIO_DISPATCH = RUNTIME_DIR / "portfolio_dispatch.py"
 RUNTIME_DISPATCH = RUNTIME_DIR / "dispatch.py"
 RUNTIME_TRADING = RUNTIME_DIR / "trading.py"
 RUNTIME_COMPOSITION = _TRADING / "composition" / "runtime.py"
@@ -2752,6 +2755,7 @@ RUNTIME_MODULES = (
     RUNTIME_STRATEGY,
     RUNTIME_SESSION,
     RUNTIME_PORTFOLIO,
+    RUNTIME_PORTFOLIO_DISPATCH,
     RUNTIME_DISPATCH,
     RUNTIME_TRADING,
     PAPER_CONTRACTS,

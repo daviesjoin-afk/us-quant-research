@@ -22,33 +22,75 @@ def _definitions(name: str):
     return tuple(found)
 
 
+def _resolved_import_base(path: Path, node: ast.ImportFrom):
+    if node.level == 0:
+        return node.module
+    module_parts = ["us_quant", *path.relative_to(SOURCE).with_suffix("").parts]
+    package_parts = module_parts[:-1]
+    parent_parts = package_parts[: len(package_parts) - (node.level - 1)]
+    imported_parts = node.module.split(".") if node.module else []
+    return ".".join([*parent_parts, *imported_parts])
+
+
 def _imported_modules(path: Path, *, source_text: str | None = None):
     tree = ast.parse(
         source_text if source_text is not None else path.read_text(encoding="utf-8")
     )
     modules = set()
-    module_parts = ["us_quant", *path.relative_to(SOURCE).with_suffix("").parts]
-    package_parts = module_parts[:-1]
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             modules.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            if node.level == 0:
-                if node.module:
-                    modules.add(node.module)
-                continue
-            parent_parts = package_parts[: len(package_parts) - (node.level - 1)]
-            imported_parts = node.module.split(".") if node.module else []
-            base_parts = [*parent_parts, *imported_parts]
-            if node.module:
-                modules.add(".".join(base_parts))
-            else:
+            base = _resolved_import_base(path, node)
+            if base:
+                modules.add(base)
                 modules.update(
-                    ".".join([*base_parts, alias.name])
+                    f"{base}.{alias.name}"
                     for alias in node.names
                     if alias.name != "*"
                 )
     return modules
+
+
+def _called_symbols(path: Path, scope: ast.AST, *, source_text: str | None = None):
+    tree = ast.parse(
+        source_text if source_text is not None else path.read_text(encoding="utf-8")
+    )
+    aliases = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                aliases[alias.asname or alias.name.split(".")[0]] = (
+                    alias.name if alias.asname else alias.name.split(".")[0]
+                )
+        elif isinstance(node, ast.ImportFrom):
+            base = _resolved_import_base(path, node)
+            if base:
+                for alias in node.names:
+                    if alias.name != "*":
+                        aliases[alias.asname or alias.name] = f"{base}.{alias.name}"
+
+    def dotted_name(node):
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            parent = dotted_name(node.value)
+            return f"{parent}.{node.attr}" if parent else None
+        return None
+
+    targets = set()
+    for node in ast.walk(scope):
+        if not isinstance(node, ast.Call):
+            continue
+        raw = dotted_name(node.func)
+        if not raw:
+            continue
+        parts = raw.split(".")
+        resolved = aliases.get(parts[0], parts[0])
+        target = ".".join([resolved, *parts[1:]])
+        targets.add(target)
+        targets.add(target.rsplit(".", 1)[-1])
+    return targets
 
 
 def test_stage5_and_shared_execution_authorities_have_one_owner():
@@ -92,10 +134,7 @@ def test_production_paper_delegates_to_one_portfolio_composition_root():
         node for node in ast.walk(desktop_tree)
         if isinstance(node, ast.FunctionDef) and node.name == "_build_paper_session"
     )
-    calls = {
-        node.func.id for node in ast.walk(build)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
+    calls = _called_symbols(desktop_path, build)
     assert "build_portfolio_paper_session" in calls
     assert not calls.intersection({
         "PortfolioPaperEngine", "PortfolioRuntime", "CapitalAllocator",
@@ -104,10 +143,7 @@ def test_production_paper_delegates_to_one_portfolio_composition_root():
 
     composition_path = SOURCE / "trading" / "composition" / "portfolio_paper.py"
     composition_tree = ast.parse(composition_path.read_text(encoding="utf-8"))
-    composition_calls = {
-        node.func.id for node in ast.walk(composition_tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
+    composition_calls = _called_symbols(composition_path, composition_tree)
     assert {
         "PortfolioPaperEngine", "build_portfolio_runtime", "OrderDispatch", "SessionBook"
     } <= composition_calls
@@ -142,12 +178,35 @@ def test_relative_imports_resolve_to_absolute_modules_for_layer_guards():
             "from ..adapters.sqlite import SQLiteOrderRepository\n"
             "from .dispatch import OrderDispatch\n"
             "from .. import adapters\n"
+            "from ..application import execution as execution_application\n"
+            "from us_quant.trading.application import risk\n"
         ),
     )
 
     assert "us_quant.trading.adapters.sqlite" in imports
     assert "us_quant.trading.runtime.dispatch" in imports
     assert "us_quant.trading.adapters" in imports
+    assert "us_quant.trading.application.execution" in imports
+    assert "us_quant.trading.application.risk" in imports
+
+
+def test_composition_guards_resolve_qualified_and_aliased_constructors():
+    desktop_path = SOURCE / "desktop.py"
+    source_text = """
+import us_quant.trading.runtime as runtime
+from us_quant.trading.runtime.trading import TradingRuntime as LegacyRuntime
+runtime.TradingRuntime()
+LegacyRuntime()
+"""
+    targets = _called_symbols(
+        desktop_path,
+        ast.parse(source_text),
+        source_text=source_text,
+    )
+
+    assert "TradingRuntime" in targets
+    assert "us_quant.trading.runtime.TradingRuntime" in targets
+    assert "us_quant.trading.runtime.trading.TradingRuntime" in targets
 
 
 def test_execution_page_stays_render_and_intent_only():

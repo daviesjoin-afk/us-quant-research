@@ -789,6 +789,7 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "orchestration/strategy/orchestrator.py",
         "orchestration/strategy/queries.py",
         "orchestration/execution/__init__.py",
+        "orchestration/execution/live_operator.py",
         "orchestration/execution/models.py",
         "orchestration/execution/orchestrator.py",
         "orchestration/autonomy/__init__.py",
@@ -809,6 +810,8 @@ def test_shell_and_navigation_are_the_only_desktop_v2_modules() -> None:
         "pages/strategy.py",
         "pages/execution/__init__.py",
         "pages/execution/controls.py",
+        "pages/execution/live_operator.py",
+        "pages/execution/live_operator_models.py",
         "pages/execution/models.py",
         "pages/execution/page.py",
         "pages/execution/presenter.py",
@@ -1495,6 +1498,7 @@ def test_only_composition_roots_wire_adapters_into_applications() -> None:
     assert wiring_modules == [
         "trading/composition/accounts.py",
         "trading/composition/execution.py",
+        "trading/composition/live_operator_controls.py",
         "trading/composition/market_data.py",
         "trading/composition/paper_autonomy.py",
         "trading/composition/paper_autonomy_supervisor.py",
@@ -3549,6 +3553,8 @@ def test_the_paper_order_channel_diagnostic_cannot_submit() -> None:
 EXECUTION_PAGE_DIR = _SRC / "desktop_v2" / "pages" / "execution"
 EXECUTION_PAGE = EXECUTION_PAGE_DIR / "page.py"
 EXECUTION_CONTROLS = EXECUTION_PAGE_DIR / "controls.py"
+EXECUTION_LIVE_OPERATOR = EXECUTION_PAGE_DIR / "live_operator.py"
+EXECUTION_LIVE_OPERATOR_MODELS = EXECUTION_PAGE_DIR / "live_operator_models.py"
 EXECUTION_MODELS = EXECUTION_PAGE_DIR / "models.py"
 EXECUTION_PRESENTER = EXECUTION_PAGE_DIR / "presenter.py"
 EXECUTION_PROJECTOR = EXECUTION_PAGE_DIR / "projector.py"
@@ -3563,6 +3569,8 @@ EXECUTION_PAGE_MODULES = (
     EXECUTION_ROWS,
     EXECUTION_TABLES,
     EXECUTION_CONTROLS,
+    EXECUTION_LIVE_OPERATOR,
+    EXECUTION_LIVE_OPERATOR_MODELS,
     EXECUTION_PAGE,
 )
 
@@ -3574,6 +3582,7 @@ EXECUTION_PAGE_MODULES = (
 EXECUTION_MODULE_LINE_LIMITS = {
     "__init__.py": 40,
     "models.py": 220,
+    "live_operator_models.py": 60,
     "presenter.py": 320,
     "projector.py": 240,
     "rows.py": 350,

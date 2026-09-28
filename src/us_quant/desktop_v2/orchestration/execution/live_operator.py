@@ -7,7 +7,9 @@ from typing import Callable
 
 from PySide6.QtCore import QObject, Signal
 
-from us_quant.desktop_v2.pages.execution.models import LiveOperatorControlView
+from us_quant.desktop_v2.pages.execution.live_operator_models import (
+    LiveOperatorControlView,
+)
 from us_quant.trading.application.live_operator_controls import (
     LiveOperatorControlsApplication,
 )

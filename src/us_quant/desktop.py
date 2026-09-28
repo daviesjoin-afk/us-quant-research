@@ -136,16 +136,13 @@ from us_quant.trading.composition.session_config import (
     resolve_paper_session_capital,
 )
 from us_quant.trading.application.risk import RiskApplication
-from us_quant.trading.application.live_operator_controls import (
-    LiveOperatorControlsApplication,
-)
-from us_quant.trading.adapters.sqlite.live_safety_repository import (
-    SQLiteLiveSafetyRepository,
-)
 from us_quant.trading.composition.execution import (
     build_execution_application,
     build_execution_candidate_factory,
     build_order_repository,
+)
+from us_quant.trading.composition.live_operator_controls import (
+    build_live_operator_controls_application,
 )
 from us_quant.trading.composition.risk import build_risk_application
 from us_quant.trading.composition.runtime import build_trading_runtime
@@ -1254,10 +1251,8 @@ class MainWindow(QMainWindow):
         # ``live_operator_orchestrator`` and cannot access broker or startup
         # providers. The window constructs the page and hands it the palette.
         self.execution_page = ExecutionPage(palette=self.theme)
-        self.live_operator_application = LiveOperatorControlsApplication(
-            SQLiteLiveSafetyRepository(
-                self.paths.runtime_root / "live_safety.sqlite3"
-            )
+        self.live_operator_application = build_live_operator_controls_application(
+            self.paths.runtime_root / "live_safety.sqlite3"
         )
         self.live_operator_orchestrator = LiveOperatorControlsOrchestrator(
             page=self.execution_page,

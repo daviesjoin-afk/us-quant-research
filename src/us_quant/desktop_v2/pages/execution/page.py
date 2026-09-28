@@ -43,6 +43,8 @@ from us_quant.desktop_v2.pages.execution.models import (
     ExecutionControlState,
     ExecutionDetailWorkspace,
     ExecutionRuntimeView,
+)
+from us_quant.desktop_v2.pages.execution.live_operator_models import (
     LiveOperatorControlView,
 )
 from us_quant.desktop_v2.pages.execution.tables import ExecutionDetailTabs

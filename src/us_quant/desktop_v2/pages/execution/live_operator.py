@@ -13,7 +13,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from us_quant.desktop_v2.pages.execution.models import LiveOperatorControlView
+from us_quant.desktop_v2.pages.execution.live_operator_models import (
+    LiveOperatorControlView,
+)
 
 
 _FACTS = (

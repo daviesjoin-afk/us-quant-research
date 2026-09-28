@@ -175,3 +175,53 @@ def test_stop_generates_one_owned_reduction_and_never_an_entry():
     assert proposals[0].action.value == "sell"
     assert proposals[0].desired_quantity == 10
     assert "stop requested" in proposals[0].reason
+
+
+def test_flat_then_reentry_resets_strategy_position_lifecycle_state():
+    version = _version("strategy-a-v1")
+    candidates = (AutoQuantCandidate("AAPL", "Apple", "Tech", 1, Decimal("1"), "test"),)
+    policy = PortfolioCapitalPolicy(
+        total_capital_limit=Decimal("1000"),
+        max_gross_exposure=Decimal("1000"),
+        max_net_exposure=Decimal("1000"),
+        max_single_position_notional=Decimal("500"),
+        max_symbol_concentration=Decimal("1"),
+        max_strategy_concentration=Decimal("1"),
+        max_positions=4,
+        max_open_orders=4,
+        allocations=(PortfolioStrategyAllocation(
+            version.version_id, Decimal("1"), Decimal("1000"), Decimal("1000"), True
+        ),),
+    )
+    workers = PortfolioStrategyWorkers(
+        strategies=(version,), candidates=candidates, policy=policy
+    )
+    initial = PortfolioSnapshot(
+        cash=Decimal("850"), equity=Decimal("1000"),
+        gross_exposure=Decimal("150"), net_exposure=Decimal("150"),
+        strategy_exposure=(PortfolioStrategyExposure(
+            version.version_id, "AAPL", Decimal("150"), 10,
+            average_cost=Decimal("10"),
+        ),),
+        observed_at=NOW,
+    )
+    first_view = workers._positions_for(version.version_id, initial, NOW)["AAPL"]
+    flat_at = NOW.replace(minute=NOW.minute + 1)
+    flat = replace(
+        initial, strategy_exposure=(), observed_at=flat_at,
+        cash=Decimal("1000"), gross_exposure=Decimal("0"), net_exposure=Decimal("0"),
+    )
+    workers._positions_for(version.version_id, flat, flat_at)
+    reentry_at = NOW.replace(minute=NOW.minute + 2)
+    reentry = replace(
+        initial, strategy_exposure=(replace(
+            initial.strategy_exposure[0], notional=Decimal("110")
+        ),), observed_at=reentry_at,
+    )
+
+    second_view = workers._positions_for(version.version_id, reentry, reentry_at)["AAPL"]
+
+    assert first_view.opened_at == NOW
+    assert first_view.high_water == Decimal("15")
+    assert second_view.opened_at == reentry_at
+    assert second_view.high_water == Decimal("11")

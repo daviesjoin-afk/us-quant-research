@@ -21,6 +21,7 @@ from us_quant.trading.domain.portfolio_reconciliation import (
     PortfolioReconciliationBlocker,
     PortfolioReconciliationResult,
     reconcile_portfolio_truth,
+    portfolio_order_truth_for_reconciliation,
 )
 from us_quant.trading.ports.broker_open_order_truth import BrokerOpenOrderTruthSource
 from us_quant.trading.ports.portfolio_order_truth import PortfolioOrderTruthSource
@@ -59,6 +60,12 @@ class BrokerPortfolioSnapshotSource:
         order_truth = self._order_truth.portfolio_order_truth()
         decisions = self._portfolio_repository.decisions()
         attributions = self._portfolio_repository.execution_attributions()
+        order_truth = portfolio_order_truth_for_reconciliation(
+            order_truth=order_truth,
+            broker_order_truth=open_truth,
+            decisions=decisions,
+            execution_attributions=attributions,
+        )
         result = reconcile_portfolio_truth(
             now=observed_at,
             broker=broker,
@@ -177,11 +184,14 @@ def _project_open_orders(*, broker_truth: BrokerOpenOrderTruth, durable_order_tr
         if decision is None:
             raise PortfolioSnapshotUnavailable("broker open order has no durable portfolio decision")
         contributions = execution_contributions_for_quantity(decision, remaining)
-        denominator = sum(abs(item.signed_quantity) for item in contributions)
         price = intent.limit_price
-        side = PortfolioSide.BUY if broker_order.side.value == "buy" else PortfolioSide.SELL
         for contribution in contributions:
-            notional = price * remaining * Decimal(abs(contribution.signed_quantity)) / Decimal(denominator)
+            side = (
+                PortfolioSide.BUY
+                if contribution.signed_quantity > 0
+                else PortfolioSide.SELL
+            )
+            notional = price * abs(contribution.signed_quantity)
             result.append(PortfolioOpenOrder(
                 strategy_version_id=contribution.strategy_version_id,
                 symbol=broker_order.symbol,

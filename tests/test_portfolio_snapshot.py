@@ -22,7 +22,9 @@ from us_quant.trading.domain.portfolio_reconciliation import (
     BrokerOpenOrderTruth,
     PortfolioOrderTruth,
     PortfolioReconciliationBlocker,
+    PortfolioOrderTruthRecord,
 )
+from us_quant.trading.domain.orders import OrderEvent, OrderIntent, OrderStatus
 from us_quant.trading.domain.portfolio import PortfolioOpenOrder, PortfolioSide
 
 ACCOUNT_ALIAS = "DU***01"
@@ -55,8 +57,11 @@ class _BrokerOrderTruth:
 
 
 class _OrderTruth:
+    def __init__(self, truth=PortfolioOrderTruth(())):
+        self.truth = truth
+
     def portfolio_order_truth(self):
-        return PortfolioOrderTruth(())
+        return self.truth
 
 
 class _PortfolioRepository:
@@ -67,7 +72,7 @@ class _PortfolioRepository:
         return ()
 
 
-def _source(account=None, *, open_orders=()):
+def _source(account=None, *, open_orders=(), order_truth=None):
     truth = BrokerOpenOrderTruth(
         account_alias=ACCOUNT_ALIAS,
         observed_at=NOW,
@@ -78,7 +83,7 @@ def _source(account=None, *, open_orders=()):
     source = BrokerPortfolioSnapshotSource(
         broker_portfolio=lambda: account or _broker(),
         broker_open_orders=provider,
-        order_truth=_OrderTruth(),
+        order_truth=_OrderTruth(order_truth or PortfolioOrderTruth(())),
         portfolio_repository=_PortfolioRepository(),
     )
     return source, provider
@@ -116,6 +121,39 @@ def test_unknown_broker_open_order_blocks_snapshot_and_exposure():
         source.snapshot(observed_at=NOW)
     assert raised.value.reconciliation is not None
     assert PortfolioReconciliationBlocker.UNEXPLAINED_ORDER in raised.value.reconciliation.blockers
+
+
+def test_completed_legacy_order_outside_portfolio_ledger_does_not_block_snapshot():
+    intent = OrderIntent.create(
+        session_id="legacy-session",
+        strategy_version_id="legacy-strategy",
+        signal_symbol="AAPL",
+        execution_symbol="AAPL",
+        side=Side.BUY,
+        quantity=1,
+        limit_price=Decimal("10"),
+        reason="legacy single-strategy order",
+    )
+    legacy = PortfolioOrderTruthRecord(
+        intent=intent,
+        account_alias=ACCOUNT_ALIAS,
+        broker_order_id=77,
+        events=(OrderEvent(
+            order_id=intent.order_id,
+            broker_order_id=77,
+            status=OrderStatus.FILLED,
+            filled=Decimal("1"),
+            remaining=Decimal("0"),
+            occurred_at=NOW,
+        ),),
+    )
+    source, _ = _source(order_truth=PortfolioOrderTruth((legacy,)))
+
+    snapshot = source.snapshot(observed_at=NOW)
+
+    assert snapshot.positions == ()
+    assert source.last_reconciliation is not None
+    assert source.last_reconciliation.can_open_exposure
 
 
 def test_unexplained_broker_position_blocks_snapshot_and_exposure():

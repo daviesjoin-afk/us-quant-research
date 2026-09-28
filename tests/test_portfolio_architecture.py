@@ -189,16 +189,25 @@ def test_production_paper_composes_one_portfolio_engine_and_no_single_strategy_f
         node.func.id for node in ast.walk(build_method)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
-    assert "PortfolioPaperEngine" in calls
-    assert "build_portfolio_runtime" in calls
-    assert "OrderDispatch" in calls
-    assert "SessionBook" in calls
-    assert "SessionState" in calls
+    assert "build_portfolio_paper_session" in calls
+    assert "PortfolioPaperEngine" not in calls
+    assert "build_portfolio_runtime" not in calls
+    assert "OrderDispatch" not in calls
+    assert "SessionBook" not in calls
+    assert "SessionState" not in calls
     assert "build_trading_runtime" not in calls
     assert "TradingRuntime" not in calls
     assert "TradingRuntime" not in {
         node.id for node in ast.walk(build_method) if isinstance(node, ast.Name)
     }
+    composition = ast.parse(
+        (SOURCE / "trading" / "composition" / "portfolio_paper.py").read_text(encoding="utf-8")
+    )
+    composition_calls = {
+        node.func.id for node in ast.walk(composition)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert {"PortfolioPaperEngine", "build_portfolio_runtime", "OrderDispatch", "SessionBook", "SessionState"} <= composition_calls
 
 
 def test_portfolio_paper_engine_has_one_class_and_requires_a_unique_runtime():

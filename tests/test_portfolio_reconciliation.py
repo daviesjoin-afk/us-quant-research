@@ -24,6 +24,7 @@ from us_quant.trading.adapters.sqlite.portfolio_repository import SQLitePortfoli
 from us_quant.trading.application.portfolio_reconciliation import (
     PortfolioReconciliationApplication,
 )
+from us_quant.trading.application.portfolio_snapshot import _project_open_orders
 from us_quant.trading.domain.account import (
     BrokerAccountPortfolio,
     BrokerAccountSnapshot,
@@ -57,6 +58,7 @@ from us_quant.trading.domain.portfolio_reconciliation import (
     PortfolioOrderTruthRecord,
     PortfolioReconciliationBlocker as Blocker,
     reconcile_portfolio_truth,
+    portfolio_order_truth_for_reconciliation,
 )
 from us_quant.trading.domain.risk import RiskDecision
 
@@ -573,6 +575,86 @@ def test_opposing_contributor_slippage_uses_signed_strategy_direction():
     )
     sell_slippage = {item.strategy_version_id: item.slippage for item in sell_result.strategy_accounting}
     assert sell_slippage == {"a": Decimal("6"), "b": Decimal("-4")}
+
+
+def test_completed_unowned_legacy_order_is_scoped_out_but_open_local_order_is_retained():
+    legacy_intent = OrderIntent.create(
+        session_id="legacy-session",
+        strategy_version_id="legacy-strategy",
+        signal_symbol="AAPL",
+        execution_symbol="AAPL",
+        side=Side.BUY,
+        quantity=1,
+        limit_price=Decimal("10"),
+        reason="legacy order",
+    )
+    terminal = PortfolioOrderTruthRecord(
+        intent=legacy_intent,
+        account_alias=ACCOUNT_ALIAS,
+        broker_order_id=19,
+        events=(OrderEvent(
+            order_id=legacy_intent.order_id,
+            broker_order_id=19,
+            status=OrderStatus.FILLED,
+            filled=Decimal("1"),
+            remaining=Decimal("0"),
+            occurred_at=NOW,
+        ),),
+    )
+    unresolved = replace(terminal, events=(replace(
+        terminal.events[0], status=OrderStatus.UNKNOWN
+    ),))
+    broker_truth = BrokerOpenOrderTruth(
+        account_alias=ACCOUNT_ALIAS,
+        observed_at=NOW,
+        snapshot_complete=True,
+        open_orders=(),
+    )
+
+    scoped = portfolio_order_truth_for_reconciliation(
+        order_truth=PortfolioOrderTruth((terminal, unresolved)),
+        broker_order_truth=broker_truth,
+        decisions=(),
+        execution_attributions=(),
+    )
+
+    assert scoped.orders == (unresolved,)
+
+
+def test_open_order_reservation_preserves_each_strategy_contribution_side():
+    record = decision_record(
+        "net-buy-open", (("a", "buy-a", 6), ("b", "sell-b", -4)),
+        order_id="net-buy-order",
+    )
+    local_order, attribution = linked_order(record, fills=())
+    broker_truth = BrokerOpenOrderTruth(
+        account_alias=ACCOUNT_ALIAS,
+        observed_at=NOW,
+        snapshot_complete=True,
+        open_orders=(BrokerOpenOrder(
+            broker_order_id=7,
+            account_alias=ACCOUNT_ALIAS,
+            symbol="AAPL",
+            side=Side.BUY,
+            quantity=Decimal("2"),
+            remaining_quantity=Decimal("2"),
+        ),),
+    )
+
+    orders = _project_open_orders(
+        broker_truth=broker_truth,
+        durable_order_truth=PortfolioOrderTruth((local_order,)),
+        decisions=(record,),
+        execution_attributions=(attribution,),
+    )
+
+    by_strategy = {item.strategy_version_id: item for item in orders}
+    assert by_strategy["a"].side is PortfolioSide.BUY
+    assert by_strategy["a"].quantity == 6
+    assert by_strategy["a"].notional == Decimal("60")
+    assert by_strategy["b"].side is PortfolioSide.SELL
+    assert by_strategy["b"].quantity == 4
+    assert by_strategy["b"].notional == Decimal("0")
 
 
 def test_unknown_order_and_fill_block():

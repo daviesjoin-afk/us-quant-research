@@ -108,6 +108,42 @@ class PortfolioReconciliationResult:
         return not self.blockers
 
 
+def portfolio_order_truth_for_reconciliation(
+    *,
+    order_truth: PortfolioOrderTruth,
+    broker_order_truth: BrokerOpenOrderTruth,
+    decisions: tuple[PortfolioDecisionRecord, ...],
+    execution_attributions: tuple[PortfolioExecutionAttribution, ...],
+) -> PortfolioOrderTruth:
+    """Exclude only completed legacy orders outside the portfolio ledger.
+
+    Current portfolio decisions and attributions retain their full local order
+    history. Broker-observed orders and any local order without terminal proof
+    also remain in scope, so missing or unresolved order truth still blocks.
+    """
+
+    owned_order_ids = {
+        item.order_id for item in execution_attributions
+    } | {
+        item.order_id for item in decisions if item.order_id is not None
+    }
+    broker_open_ids = {
+        item.broker_order_id for item in broker_order_truth.open_orders
+    }
+    scoped = []
+    for order in order_truth.orders:
+        if order.intent is None or order.intent.order_id in owned_order_ids:
+            scoped.append(order)
+            continue
+        if order.broker_order_id in broker_open_ids:
+            scoped.append(order)
+            continue
+        latest = _latest_event(order.events)
+        if latest is None or not latest.status.is_terminal:
+            scoped.append(order)
+    return PortfolioOrderTruth(tuple(scoped))
+
+
 @dataclass(slots=True)
 class _MutableAccounting:
     quantity: int = 0

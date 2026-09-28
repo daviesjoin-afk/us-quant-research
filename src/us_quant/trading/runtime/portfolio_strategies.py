@@ -137,6 +137,15 @@ class PortfolioStrategyWorkers:
 
     def _positions_for(self, strategy_version_id, snapshot, now):
         result = {}
+        active_keys = {
+            (item.strategy_version_id, item.symbol)
+            for item in snapshot.strategy_exposure
+            if item.quantity > 0
+        }
+        for key in tuple(self._opened_at):
+            if key not in active_keys:
+                self._opened_at.pop(key, None)
+                self._high_water.pop(key, None)
         quotes = self._ready_quotes.get(strategy_version_id, ({}, {}))[0]
         for item in snapshot.strategy_exposure:
             if item.strategy_version_id != strategy_version_id or item.quantity <= 0:

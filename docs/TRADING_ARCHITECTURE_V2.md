@@ -5449,3 +5449,67 @@ adapters、snapshot source、dispatch bridge 和唯一的 `PortfolioRuntime`。`
 Paper service、order repository、Risk authority 与 launch facts；不直接构造 portfolio adapter、
 `PortfolioRuntime`、`OrderDispatch` 或 `SessionBook`。`PortfolioOperationsOrchestrator` 负责计划保存与
 呈现顺序，execution page 的 portfolio panel 只渲染 view 并发出原始保存意图。
+
+#### 8.42 Stage 5 Final Architecture Closure
+
+Stage 5-E PR #75 已通过 merge commit 合并；实际 merge SHA 与 Stage 5-F base 均为
+`daf88b39af1ad0a26e72fc73343ef1ce17821059`。Stage 5-F 从独立分支
+`refactor/portfolio-runtime-final` 开始，只收口架构守卫、最终回归、mutation aggregate 和操作文档；
+它不增加策略、broker 行为、资金权限或 Live capability。Stage 5 Final PR 和 merge SHA 会在合并后
+记录于 Stage 5 最终报告，以免把尚未合并时的 tentative SHA 当成正式基线。
+
+正式合并链：Stage 5-A PR #70 `0e7b5b7ade3705f9083a70fa935d58783777817b`；Stage 5-B PR #71
+`e9deef1ec0e09f5ff51fbfd3abf658e2a1082f11`；Stage 5-C PR #72
+`c23a2cfcdbddde1a51aa3c4917dc2f010f09c00e`；Stage 5-D PR #73
+`6cbd1a4ddeddfc374526676b35fd5b425517e0f9`；Stage 5-D closure PR #74
+`254726b1056c47beeca1dea778bdd2f97c2bcf43`；Stage 5-E PR #75
+`daf88b39af1ad0a26e72fc73343ef1ce17821059`。Stage 3 Final 为 PR #62
+`61d0b1a13e9f2be49d3c2134fdc27f4cd09813a8`，Stage 4 Final 为 PR #69
+`b4d8112a180273947afd56b879d2fd155ad06d13`。
+
+Stage 5 的 authority 和 persistence owners：
+
+- `PortfolioPaperEngine`：`trading/runtime/portfolio_paper.py`，持有单一 Paper session 生命周期。
+- `PortfolioRuntime`：`trading/application/portfolio_runtime.py`，收集一次观察窗口的 proposal、调用单一 allocator 并编排 Risk path。
+- `CapitalAllocator`：`trading/application/portfolio.py`，唯一的组合资本分配和确定性净额 authority。
+- `PortfolioOperatingPlanApplication`：`trading/application/portfolio_operations.py`；计划以 revision CAS 持久化，SQLite portfolio repository 保存决策、审计与 execution attribution。
+- `PortfolioReconciliationApplication`：`trading/application/portfolio_reconciliation.py`；把 broker account/position/open-order truth 与 durable order、fill、portfolio decision 和 attribution 对账。
+- `trading/composition/portfolio_paper.py` 是 production Paper composition root，构造唯一 PortfolioRuntime、CapitalAllocator、物理 SessionBook、snapshot source 和 dispatch bridge。
+- 每个选中的 governed version 只运行一个 signal-only `StrategyRuntime` worker；worker 不拥有资本、Risk、Execution、OrderIntent 或 broker。
+
+组合持仓由 fresh broker position 与 durable strategy attribution 一起确定；每策略 allocation 约束组合可分配资本。
+symbol identity 在 portfolio domain canonicalize 为 strip + uppercase。同一 symbol 的买卖 proposal 先按策略归属聚合，
+再净额成至多一个物理订单；零净额只保存 PortfolioDecision 和 attribution audit，不调用 Risk 或 Execution。
+执行 attribution 使用统一的 partial-fill scaling helper，并由 reconciliation 按 durable fills 重放；broker 账户数量
+必须等于所有策略的归属数量总和。未知 broker open order、未知 position、缺失/过期事实、损坏 ledger 或 attribution
+mismatch 都阻断新 exposure。
+
+Paper 重启不自动恢复进程内的 signal history、trailing high-water 或 session arm。存在非零持仓或未结订单时需要
+operator recovery；zero-state 与 fresh clean reconciliation 后再开始新的 Paper session。Pause 阻止新 entry，stop/force-flat
+仍通过 strategy ownership 生成 reduction proposal，并经过 Portfolio → RiskApplication → OrderDispatch →
+ExecutionApplication → BrokerExecutionPort。Execution 继续保持 reserve → durable record → submit；uncertain submit
+进入 halt/reconcile 且 no retry，explicit refusal 无 fallback。
+
+Desktop execution page 只显示 plan、account/portfolio facts、pending orders、strategy accounting 和 reconciliation 状态，
+并发出保存/控制意图；page 不导入 application 或 broker adapter，也不从 widget 状态作交易决定。
+Stage 4 LiveAuthorization、startup proof、session arm、LiveCanaryExecutionGuard、kill latch 和 recovery barrier 均不变；
+Stage 5 Paper architecture 不会自动切换为 Live。Stage 4 operationally complete 仍为 NO（supervised Live canary 未运行）。
+本轮 Stage 5 supervised multi-strategy Paper canary 未运行；本机 doctor 显示 broker API read-only 且 Paper order submission disabled。
+
+```text
+Governed Strategy Versions
+  → signal-only StrategyRuntime workers (one shared observation/cutoff)
+  → TradeProposal batch
+  → PortfolioRuntime → CapitalAllocator → PortfolioDecision/netting/attribution
+  → RiskApplication → OrderDispatch → ExecutionApplication
+  → BrokerExecutionPort → IBKR Paper
+
+fresh IBKR account / positions / open orders
++ durable orders / fills / portfolio attribution
+  → PortfolioReconciliationApplication
+  → fresh PortfolioSnapshot / can_open_exposure gate
+  → PortfolioRuntime
+```
+
+操作前置条件、Paper 启动检查、netting/归属证据、stop、zero-state 和最终 reconciliation 步骤见
+`docs/STAGE_5_MULTI_STRATEGY_PAPER_RUNBOOK.md`。

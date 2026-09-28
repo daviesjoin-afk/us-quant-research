@@ -5216,3 +5216,57 @@ Live 连接状态。页面只渲染 view model 并发出 arm/kill/refresh intent
 session arm 按钮保持禁用；即使有人程序化触发 arm intent，orchestrator 也拒绝并说明缺少哪些事实。
 因此 Stage 4-F 不会把 Paper account/market facts 当作 Live proof，也不会让 Desktop 建立 Live broker channel。
 紧急 kill 控件仍可持久触发，阻止未来 Live exposure。
+
+### 8.37 Stage 4-G Final Architecture Closure
+
+Stage 4-G 从 Stage 4-F PR #68 的实际 merge SHA
+`3ead45e3db2e1796a4af6c2810cc077a55e6ec3c` 开始。分支为
+`refactor/live-canary-final`。本轮把跨阶段架构不变量、既有 Stage 4 行为测试和故障演练
+整理成最终证据矩阵，并增加聚合 mutation runner；它按顺序执行 Stage 4-A 至 4-F mutation、
+Stage 3 Final mutation 与历史 Final Architecture Closure mutation。每个子 harness 仍分别报告
+RED、survivor 或 harness error。
+
+最终闭环包含单一 Environment、RiskApplication、ExecutionApplication、OrderDispatch 与
+TradingRuntime；七方法 `BrokerExecutionPort` 不变；adapter 只由 execution composition 构造；
+共享链仍是 `reserve → durable record → submit`，不确定提交不重试，拒绝不 fallback。Live
+授权、session arm、账户匹配、startup proof、limits、kill、recovery、整股 LMT long-only 与风险降低
+出口由各 Stage 4 行为测试继续直接验证，Paper autonomy 与 BACKTEST 隔离测试也纳入最终本地回归。
+
+Stage 4-G 同时新增 [Stage 4 Live Canary Runbook](STAGE_4_CANARY_RUNBOOK.md)。它记录第一次真实
+canary 的人工步骤、停机条件、故障演练与审计字段；runbook 不是下单授权。本仓库当前 Desktop
+仍缺 Live broker/account/startup-proof providers，Live session arm 保持禁用。本轮没有连接真实
+Live broker，也没有执行真实 canary，因此 Stage 4 **operationally COMPLETE 尚未达到**；只有
+实现与完整验证均通过后才能声明 implementation COMPLETE。
+
+#### 8.37.1 Stage 4 final invariant evidence matrix
+
+| # | 必须保持的不变量 | 主要自动化证据 |
+|---:|---|---|
+| 1 | `Environment` 单例 | `test_live_ready_execution_architecture.py::test_environment_vocabulary_has_one_canonical_enum` |
+| 2–4 | `RiskApplication`、`ExecutionApplication`、`TradingRuntime` 单例 | `test_final_architecture_closure.py::test_fa19b_a_future_live_path_must_reuse_the_single_authority_stack`、`test_stage4_final_closure.py::test_stage4_has_exactly_one_shared_authority_stack_and_environment` |
+| 5 | `OrderDispatch` 是唯一 Risk→Execution seam | `test_live_ready_execution_architecture.py::test_order_dispatch_has_one_risk_to_execution_seam` |
+| 6 | 七方法 `BrokerExecutionPort` 不变 | `test_live_ready_execution_architecture.py::test_broker_execution_port_has_exact_provider_neutral_surface` |
+| 7–8 | Paper adapter 保持 Paper-only；Live adapter 只在 Live factory 内 | `test_live_ready_execution_architecture.py::test_current_ibkr_adapter_keeps_paper_boundary`、`test_only_execution_composition_constructs_the_live_adapter` |
+| 9–10 | adapter 只由 composition 构造；Desktop 不构造 adapter | `test_live_ready_execution_architecture.py::test_composition_is_the_only_production_adapter_construction_owner`、`test_desktop_only_uses_the_gated_factory_and_no_adapter` |
+| 11–12 | `placeOrder` / `cancelOrder` 仅由 adapter 调用 | `test_live_ready_execution_architecture.py::test_production_broker_submit_and_cancel_are_adapter_owned`；Stage 4 Final Closure guard |
+| 13 | `reserve → durable record → submit` | `test_live_ready_execution_closure.py::test_c16_durable_record_precedes_submit` |
+| 14 | uncertain submission 不重试 | `test_live_ready_execution_architecture.py::test_uncertain_submission_handler_does_not_retry`、`test_ibkr_live_execution_adapter.py::test_uncertain_submit_halts_adapter_and_never_retries` |
+| 15 | 跨环境拒绝不 fallback | `test_execution_environment.py::test_denied_deployment_never_constructs_paper_adapter`、`test_backtest_never_selects_live_even_with_authorization_context` |
+| 16–19 | session arm 不持久化；authorization 与 kill 持久化；restart unarmed | `test_live_safety.py::test_session_arm_is_not_a_persistable_field_and_restart_drops_it`、`test_repository_persists_no_raw_account_or_session_arm`、`test_kill_latch_survives_restart_and_only_blocks_exposure_increase` |
+| 20 | account fingerprint 精确匹配 | `test_live_startup.py::test_broker_truth_must_be_scoped_to_the_exactly_matched_managed_account`、`test_ibkr_live_execution_adapter.py::test_managed_account_must_be_one_exact_bound_live_account` |
+| 21 | startup proof 与 truth 必须新鲜 | `test_live_startup.py::test_any_missing_or_unsafe_startup_fact_blocks_proof`、`test_live_canary_execution.py::test_stale_or_mismatched_startup_proof_cannot_authorize_live_order` |
+| 22–23 | 零额度与无效 limits 拒绝 | `test_live_safety.py::test_zero_defaults_and_confirmation_are_fail_closed`、`test_live_startup.py::test_any_missing_or_unsafe_startup_fact_blocks_proof` |
+| 24–28 | short、fractional、非 LMT、未知策略/标的拒绝 | `test_ibkr_live_execution_adapter.py::test_unapproved_symbol_strategy_fractional_or_oversell_is_refused`、`test_reserve_only_allocates_id_and_submit_builds_one_live_lmt_order` |
+| 29 | kill 阻止新增敞口 | `test_live_canary_execution.py::test_kill_latch_blocks_new_exposure_even_if_an_old_arm_bit_survives` |
+| 30 | kill 后允许安全减仓 | `test_live_canary_execution.py::test_kill_allows_an_owned_share_risk_reducing_exit` |
+| 31 | uncertainty 强制 reconciliation | `test_live_canary_execution.py::test_uncertain_submission_persists_recovery_and_is_never_retried` |
+| 32 | restart/reconnect 强制 reconciliation | `test_live_recovery.py::test_recovery_barrier_persists_across_restart_and_invalidates_the_old_arm`、`test_execution_environment.py::test_live_composition_latches_fresh_reconciliation_on_process_start` |
+| 33 | Paper autonomy 不回归 | `tests/test_paper_autonomy*.py` 全套及 Stage 4-G 完整回归 |
+| 34 | BACKTEST 没有 broker channel | `test_execution_environment.py::test_backtest_never_selects_live_even_with_authorization_context` |
+| 35 | 没有 AI 执行路径 | `test_stage4_final_closure.py::test_stage4_execution_path_has_no_ai_or_broker_fallback_dependency` |
+| 36 | 治理版本不能被自动改写/进化 | `test_final_architecture_closure.py::test_fa26_a_governed_versions_parameters_cannot_be_edited_in_place`、`test_fa23_stopped_and_legacy_invalidated_are_terminal` |
+
+最终 mutation 命令为 `scripts/mutation_stage4_final.ps1`；它顺序运行 Stage 4-A…4-F、
+Stage 3 Final 与 FAC harness。每个子 harness 都必须 `0 survivor / 0 harness-error`。完整阶段回归
+还包括 sequential pytest、xdist pytest、FAC / Stage 4 architecture、Paper autonomy、Live safety、
+Doctor、Compile、Desktop offscreen 与 `git diff --check`；具体操作记录见 canary runbook。

@@ -141,7 +141,6 @@ FORBIDDEN_AGGREGATES = (
     "ResearchState",
     "ResearchServices",
     "DesktopContext",
-    "CapitalAllocator",
     "CapitalManager",
     "PortfolioCapital",
     "TradingCapital",
@@ -523,21 +522,25 @@ def test_the_capability_imports_no_forbidden_module() -> None:
 
 
 def test_no_cross_section_aggregate_is_declared() -> None:
-    """Spec 54: no ``ResearchOrchestrator`` and no premature capital owner.
+    """Spec 54: no research aggregate or research-owned capital authority.
 
-    ``CapitalAllocator`` in particular: the eventual allocator is built from
-    broker truth and portfolio risk, so a research scalar wearing that name
-    would invite it into live sizing.
+    Stage 5 owns ``CapitalAllocator`` in the portfolio application layer. A
+    duplicate declaration anywhere else, including research, remains forbidden.
     """
 
-    defined: set[str] = set()
+    defined: dict[str, set[pathlib.Path]] = {}
     for path in _python_files(_SRC):
         for node in ast.walk(_tree(path)):
             if isinstance(node, ast.ClassDef):
-                defined.add(node.name)
-    assert not (defined & set(FORBIDDEN_AGGREGATES)), (
-        defined & set(FORBIDDEN_AGGREGATES)
-    )
+                if node.name in FORBIDDEN_AGGREGATES or node.name == "CapitalAllocator":
+                    defined.setdefault(node.name, set()).add(path)
+    allowed_allocator = _SRC / "trading" / "application" / "portfolio.py"
+    violations = {
+        name: paths - ({allowed_allocator} if name == "CapitalAllocator" else set())
+        for name, paths in defined.items()
+        if paths - ({allowed_allocator} if name == "CapitalAllocator" else set())
+    }
+    assert not violations, violations
 
 
 @pytest.mark.parametrize("name", FORBIDDEN_ACCESSORS)

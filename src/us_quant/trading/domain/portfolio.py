@@ -13,8 +13,7 @@ from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
 
-
-ZERO = Decimal("0")
+from us_quant.trading.domain.common import ZERO
 
 
 class PortfolioError(ValueError):

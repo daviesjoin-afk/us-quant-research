@@ -33,7 +33,7 @@ margin-borrowing surface.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
@@ -119,6 +119,7 @@ class _ReconciliationRefreshAttempt:
     open_orders: dict[int, PaperBrokerOrder]
     completed_orders: dict[int, PaperBrokerOrder]
     executions: list[tuple[Any, Any]]
+    order_statuses: dict[int, tuple[str, Decimal, Decimal]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -604,6 +605,7 @@ class IBKRExecutionAdapter:
                 raise IBKRPaperOrderError("对账快照连接已失效")
         for contract, execution in attempt.executions:
             self._record_execution(contract, execution)
+        open_orders = self._open_orders_with_current_remaining(attempt)
         with self._state_lock:
             if (
                 self._refresh_attempt is not attempt
@@ -631,9 +633,6 @@ class IBKRExecutionAdapter:
             captured_at = self._broker_observed_at
             positions = tuple(
                 sorted(self._broker_positions.values(), key=lambda row: row.symbol)
-            )
-            open_orders = tuple(
-                sorted(attempt.open_orders.values(), key=lambda row: row.broker_order_id)
             )
             completed_orders = tuple(
                 sorted(
@@ -670,6 +669,45 @@ class IBKRExecutionAdapter:
             state_version=state_version,
             digest=digest,
         )
+
+    def _open_orders_with_current_remaining(
+        self, attempt: _ReconciliationRefreshAttempt
+    ) -> tuple[PaperBrokerOrder, ...]:
+        """Use broker status or durable executions from this refresh for remaining.
+
+        IBKR's openOrder callback has no remaining field. If its optional
+        orderStatus callback was absent, the completed reqExecutions refresh has
+        already been durably recorded above, so total quantity minus all known
+        broker fills remains a reproducible current observation.
+        """
+
+        with self._correlation_lock:
+            intents = dict(self._intent_by_order)
+        result = []
+        for order_id, order in attempt.open_orders.items():
+            status = attempt.order_statuses.get(order_id)
+            remaining = status[2] if status is not None else None
+            if remaining is None:
+                intent = intents.get(order_id)
+                if intent is not None:
+                    fills = self.repository.fills(intent.order_id)
+                    filled = sum(
+                        (
+                            fill.quantity
+                            for fill in fills
+                            if fill.broker_order_id == order_id
+                        ),
+                        Decimal("0"),
+                    )
+                    remaining = order.quantity - filled
+            result.append(
+                replace(
+                    order,
+                    status=status[0] if status is not None else order.status,
+                    remaining_quantity=remaining,
+                )
+            )
+        return tuple(sorted(result, key=lambda row: row.broker_order_id))
 
     def _is_current_connection(self, app: Any, epoch: int) -> bool:
         with self._state_lock:
@@ -821,6 +859,11 @@ class IBKRExecutionAdapter:
         market_cap_price: Any,
     ) -> None:
         del perm_id, parent_id, client_id, market_cap_price
+        attempt = self._refresh_attempt_for(app, epoch)
+        if attempt is not None:
+            attempt.order_statuses[int(order_id)] = (
+                str(status), Decimal(str(filled)), Decimal(str(remaining))
+            )
         self._record_order_status(
             orderId=order_id,
             status=status,
@@ -1801,6 +1844,11 @@ def _paper_broker_order(
         side=str(order.action).upper(),
         quantity=Decimal(str(order.totalQuantity)),
         status=str(order_state.status),
+        remaining_quantity=(
+            Decimal(str(order_state.remaining))
+            if getattr(order_state, "remaining", None) is not None
+            else None
+        ),
     )
 
 
@@ -1837,6 +1885,9 @@ def _reconciliation_snapshot_digest(
                 row.side,
                 str(row.quantity),
                 row.status,
+                str(row.remaining_quantity)
+                if row.remaining_quantity is not None
+                else None,
             )
             for row in open_orders
         ],

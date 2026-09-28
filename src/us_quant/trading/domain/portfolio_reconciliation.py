@@ -8,7 +8,13 @@ from decimal import Decimal
 from enum import StrEnum
 
 from us_quant.trading.domain.account import BrokerAccountPortfolio
-from us_quant.trading.domain.orders import ExecutionFill, OrderEvent, OrderIntent, OrderStatus
+from us_quant.trading.domain.orders import (
+    ExecutionFill,
+    OrderEvent,
+    OrderIntent,
+    OrderStatus,
+    Side,
+)
 from us_quant.trading.domain.portfolio_ledger import (
     PortfolioDecisionRecord,
     PortfolioExecutionAttribution,
@@ -40,6 +46,28 @@ class PortfolioOrderTruthRecord:
 @dataclass(frozen=True, slots=True)
 class PortfolioOrderTruth:
     orders: tuple[PortfolioOrderTruthRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerOpenOrder:
+    """Provider-neutral broker observation for one currently open order."""
+
+    broker_order_id: int
+    account_alias: str
+    symbol: str
+    side: Side
+    quantity: Decimal
+    remaining_quantity: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerOpenOrderTruth:
+    """A complete, timestamped observation of the broker's open-order set."""
+
+    account_alias: str
+    observed_at: datetime
+    snapshot_complete: bool
+    open_orders: tuple[BrokerOpenOrder, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +122,7 @@ def reconcile_portfolio_truth(
     *,
     now: datetime,
     broker: BrokerAccountPortfolio,
+    broker_order_truth: BrokerOpenOrderTruth,
     order_truth: PortfolioOrderTruth,
     decisions: tuple[PortfolioDecisionRecord, ...],
     execution_attributions: tuple[PortfolioExecutionAttribution, ...],
@@ -105,11 +134,16 @@ def reconcile_portfolio_truth(
         raise ValueError("reconciliation requires an aware time and broker portfolio")
     if not isinstance(order_truth, PortfolioOrderTruth):
         raise TypeError("order_truth must be PortfolioOrderTruth")
+    if not isinstance(broker_order_truth, BrokerOpenOrderTruth):
+        raise TypeError("broker_order_truth must be BrokerOpenOrderTruth")
     if max_snapshot_age <= timedelta(0):
         raise ValueError("max_snapshot_age must be positive")
 
     blockers: set[PortfolioReconciliationBlocker] = set()
     _check_freshness(now, broker, max_snapshot_age, blockers)
+    _check_open_order_freshness(
+        now, broker, broker_order_truth, max_snapshot_age, blockers
+    )
     decision_by_id = {item.decision.decision_id: item for item in decisions}
     if len(decision_by_id) != len(decisions):
         blockers.add(PortfolioReconciliationBlocker.MISSING_PORTFOLIO_DECISION)
@@ -147,6 +181,58 @@ def reconcile_portfolio_truth(
     for order_id in attribution_by_order:
         if order_id not in order_by_id:
             blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
+
+    broker_open_by_id: dict[int, BrokerOpenOrder] = {}
+    for broker_order in broker_order_truth.open_orders:
+        if (
+            not _valid_broker_open_order(broker_order)
+            or broker_order.broker_order_id in broker_open_by_id
+            or broker_order_truth.account_alias != broker.account.account_alias
+        ):
+            blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
+            continue
+        broker_open_by_id[broker_order.broker_order_id] = broker_order
+
+    local_open_by_broker_id: dict[
+        int, tuple[str, PortfolioOrderTruthRecord, OrderEvent | None]
+    ] = {}
+    for local_order_id, local_order in order_by_id.items():
+        local_event = _latest_event(local_order.events)
+        if local_event is None or not local_event.status.is_terminal:
+            if local_order.broker_order_id is None:
+                blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
+                continue
+            if local_order.broker_order_id in local_open_by_broker_id:
+                blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
+                continue
+            local_open_by_broker_id[local_order.broker_order_id] = (
+                local_order_id,
+                local_order,
+                local_event,
+            )
+    if broker_order_truth.snapshot_complete:
+        if set(broker_open_by_id) != set(local_open_by_broker_id):
+            blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
+        for broker_id in broker_open_by_id.keys() & local_open_by_broker_id.keys():
+            broker_order = broker_open_by_id[broker_id]
+            local_order_id, local_order, local_event = local_open_by_broker_id[
+                broker_id
+            ]
+            intent = local_order.intent
+            if (
+                intent is None
+                or local_order.account_alias != broker_order.account_alias
+                or local_order.broker_order_id != broker_id
+                or intent.execution_symbol != broker_order.symbol.strip().upper()
+                or intent.side is not broker_order.side
+                or Decimal(intent.quantity) != broker_order.quantity
+                or local_event is None
+                or local_event.broker_order_id != broker_id
+                or local_event.remaining != broker_order.remaining_quantity
+            ):
+                blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
+    else:
+        blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
     for record in decisions:
         if record.order_id is not None and record.order_id not in attribution_by_order:
             blockers.add(PortfolioReconciliationBlocker.PENDING_UNKNOWN_EXECUTION)
@@ -357,7 +443,34 @@ def reconcile_portfolio_truth(
 
 
 def _aware(value: datetime) -> bool:
-    return value.tzinfo is not None and value.utcoffset() is not None
+    return (
+        isinstance(value, datetime)
+        and value.tzinfo is not None
+        and value.utcoffset() is not None
+    )
+
+
+def _valid_broker_open_order(order: BrokerOpenOrder) -> bool:
+    if not isinstance(order, BrokerOpenOrder):
+        return False
+    remaining = order.remaining_quantity
+    return (
+        isinstance(order.broker_order_id, int)
+        and not isinstance(order.broker_order_id, bool)
+        and order.broker_order_id > 0
+        and isinstance(order.account_alias, str)
+        and bool(order.account_alias.strip())
+        and isinstance(order.symbol, str)
+        and bool(order.symbol.strip())
+        and isinstance(order.side, Side)
+        and isinstance(order.quantity, Decimal)
+        and order.quantity.is_finite()
+        and order.quantity > 0
+        and isinstance(remaining, Decimal)
+        and remaining.is_finite()
+        and remaining > 0
+        and remaining <= order.quantity
+    )
 
 
 def _check_freshness(
@@ -368,6 +481,23 @@ def _check_freshness(
 ) -> None:
     timestamps = (broker.account.observed_at, *(item.observed_at for item in broker.positions))
     if any(not _aware(value) or value > now or now - value > max_age for value in timestamps):
+        blockers.add(PortfolioReconciliationBlocker.STALE_SNAPSHOT)
+
+
+def _check_open_order_freshness(
+    now: datetime,
+    broker: BrokerAccountPortfolio,
+    truth: BrokerOpenOrderTruth,
+    max_age: timedelta,
+    blockers: set[PortfolioReconciliationBlocker],
+) -> None:
+    if (
+        not _aware(truth.observed_at)
+        or truth.observed_at > now
+        or now - truth.observed_at > max_age
+        or truth.account_alias != broker.account.account_alias
+        or not truth.snapshot_complete
+    ):
         blockers.add(PortfolioReconciliationBlocker.STALE_SNAPSHOT)
 
 
@@ -457,8 +587,12 @@ def _apply_fill(
         shares_by_strategy[strategy_id] = (
             shares_by_strategy.get(strategy_id, 0) + abs(signed_quantity)
         )
-        side_sign = 1 if fill.side.value == "buy" else -1
-        item.slippage += (fill.price - reference_price) * side_sign * abs(signed_quantity)
+        contribution_sign = 1 if signed_quantity > 0 else -1
+        item.slippage += (
+            (fill.price - reference_price)
+            * contribution_sign
+            * abs(signed_quantity)
+        )
 
     if fill.fee is None:
         for strategy_id in shares_by_strategy:

@@ -202,7 +202,12 @@ def test_portfolio_reconciliation_application_is_unique_and_reload_only():
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }
-    assert {"decisions", "execution_attributions", "portfolio_order_truth"} <= calls
+    assert {
+        "decisions",
+        "execution_attributions",
+        "portfolio_order_truth",
+        "broker_open_order_truth",
+    } <= calls
 
 
 def test_portfolio_risk_bridge_only_uses_existing_order_dispatch_seam():

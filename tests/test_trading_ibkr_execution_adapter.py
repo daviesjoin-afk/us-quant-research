@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from us_quant.extended_hours import PaperOrderRouting, USEquitySession
 from us_quant.ibkr import IBKRConnectionConfig
+from us_quant.paper_order_models import PaperBrokerOrder
 from us_quant.trading.adapters.ibkr.execution import (
     IBKRExecutionAdapter,
     IBKRPaperOrderError,
@@ -1300,6 +1301,38 @@ class IBKRPaperOrderTests(unittest.TestCase):
                 service._refresh_attempt.executions,
                 [("contract", "execution")],
             )
+
+    def test_open_order_remaining_uses_refresh_fills_without_optional_status(self) -> None:
+        with TemporaryDirectory() as directory:
+            service = self._service_with_handshake(directory)
+            service._intent_by_order[7] = SimpleNamespace(order_id="local-order")
+            service.repository = SimpleNamespace(
+                fills=lambda order_id: (
+                    SimpleNamespace(broker_order_id=7, quantity=Decimal("1")),
+                )
+            )
+            order = PaperBrokerOrder(7, "AAPL", "BUY", Decimal("5"), "Submitted")
+            attempt = SimpleNamespace(open_orders={7: order}, order_statuses={})
+
+            observed = service._open_orders_with_current_remaining(attempt)
+
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(observed[0].remaining_quantity, Decimal("4"))
+
+            attempt.order_statuses[7] = ("Submitted", Decimal("2"), Decimal("3"))
+            status_observed = service._open_orders_with_current_remaining(attempt)
+            self.assertEqual(status_observed[0].remaining_quantity, Decimal("3"))
+
+            unknown_attempt = SimpleNamespace(
+                open_orders={
+                    8: PaperBrokerOrder(
+                        8, "MSFT", "BUY", Decimal("2"), "Submitted"
+                    )
+                },
+                order_statuses={},
+            )
+            unknown = service._open_orders_with_current_remaining(unknown_attempt)
+            self.assertIsNone(unknown[0].remaining_quantity)
 
     def test_the_two_epoch_guards_are_both_required(self) -> None:
         """Client identity and epoch are separate conditions, not one."""

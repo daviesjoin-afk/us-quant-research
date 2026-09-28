@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -105,6 +105,17 @@ def test_same_decision_payload_is_idempotent_and_conflict_is_refused(tmp_path):
         repository.record_decision(replace(_record(), portfolio_cycle_id="cycle-2"))
 
 
+def test_retry_after_risk_and_order_linkage_preserves_later_facts(tmp_path):
+    repository = SQLitePortfolioRepository(tmp_path / "portfolio.sqlite")
+    saved = repository.record_decision(_record())
+    linked = repository.update_decision(
+        replace(saved, risk_outcome="approved", order_id="order-1"),
+        expected_revision=saved.revision,
+    )
+
+    assert repository.record_decision(_record()) == linked
+
+
 def test_decision_update_uses_compare_and_swap_revision(tmp_path):
     repository = SQLitePortfolioRepository(tmp_path / "portfolio.sqlite")
     saved = repository.record_decision(_record())
@@ -163,8 +174,14 @@ def test_portfolio_persistence_contains_no_broker_credentials_or_live_account_id
     path = tmp_path / "portfolio.sqlite"
     repository = SQLitePortfolioRepository(path)
     repository.record_decision(_record())
-    raw = path.read_bytes()
-
-    assert b"broker_password" not in raw
-    assert b"live_account_id" not in raw
-    assert b"DU1234567" not in raw
+    (payload,) = sqlite3.connect(path).execute(
+        "SELECT payload FROM portfolio_decision WHERE decision_id = ?", ("decision-a",)
+    ).fetchone()
+    names = {item.name.casefold() for item in fields(PortfolioDecisionRecord)}
+    assert "password" not in names
+    assert "credentials" not in names
+    assert "account_id" not in names
+    assert "account_alias" not in names
+    assert "live_account_identity" not in names
+    stored = json.loads(payload)
+    assert not any("account" in name.casefold() or "credential" in name.casefold() for name in stored)

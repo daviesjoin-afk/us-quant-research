@@ -170,7 +170,16 @@ class SQLitePortfolioRepository:
                 ).fetchone()
                 if row:
                     stored = _from_payload(row[0])
-                    if replace(record, revision=stored.revision) != stored:
+                    # Risk/execution facts may have been appended after the
+                    # original decision; retrying the original append remains
+                    # idempotent and must preserve those later facts.
+                    retry = replace(
+                        record,
+                        revision=stored.revision,
+                        risk_outcome=stored.risk_outcome,
+                        order_id=stored.order_id,
+                    )
+                    if retry != stored:
                         raise ValueError("conflicting portfolio decision id")
                     return stored
                 created = replace(record, revision=1)

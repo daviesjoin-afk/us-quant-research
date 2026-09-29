@@ -5532,6 +5532,13 @@ risk、execution、portfolio、order dispatch、broker adapter 与 desktop 页�
 不得出现任何 private-key primitive。sealing tool 拒绝把私钥放在 artifact store 内或 git working
 tree 内，也拒绝用 `VERIFY_ONLY` / `REVOKED` key 或与 trust store 公钥不匹配的私钥签名。
 
+私钥文件本身也有硬性约束：以 `O_CREAT | O_EXCL` 和 mode `0600` 创建（POSIX）。前者使覆盖既有私钥
+成为不可能——原地换钥会让该 key 签发的所有 seal 失效；后者避免 `Path.write_text()` 在常见 `0022`
+umask 下产生 `0644` 文件，即任何本地用户都能读取签名私钥并伪造会被 runtime 接受的 evidence。
+`generate-key` 在写任何文件**之前**先检查 trust store：若 `key_id` 已存在则拒绝执行，而不是静默
+替换，否则该 ID 的历史 seal 会全部失效，与 rotation 语义相反。trust store 与 seal 均以临时文件
+加 `os.replace` 原子写入，避免读取方看到半写文件（半写的 trust store 会让所有验证 fail closed）。
+
 Trust store 为 operator provision 的 JSON（仅公钥与 trust status），支持 `ACTIVE`、
 `VERIFY_ONLY`、`REVOKED`：`ACTIVE` 可验证新 evidence 且是唯一可签名状态；`VERIFY_ONLY` 让旧
 evidence 继续可验证、禁止新签名，使 key rotation 不会让旧 audit 记录消失；`REVOKED` 对该 key

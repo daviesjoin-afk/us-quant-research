@@ -22,8 +22,10 @@ import argparse
 from base64 import b64decode, b64encode
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import sys
+import tempfile
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -47,6 +49,87 @@ from us_quant.trading.domain.evidence_auth import (
 
 class EvidenceSealingError(RuntimeError):
     """The artifact cannot be sealed as requested."""
+
+
+#: Owner read/write only.  A signing key readable by another local user is a
+#: signing key they can use to mint trusted evidence.
+_PRIVATE_KEY_MODE = 0o600
+
+
+def _write_private_key(destination: Path, private_bytes: bytes) -> None:
+    """Create the key file owner-only, and never overwrite an existing one.
+
+    ``Path.write_text`` would create this under the process umask -- commonly
+    ``0644`` -- so any other local user could read the key and forge evidence
+    that the runtime would accept.  ``O_EXCL`` additionally makes a silent
+    overwrite impossible: replacing a key in place would invalidate every seal
+    that key ever signed.
+
+    The mode is a POSIX guarantee; on Windows the equivalent protection is the
+    directory ACL the operator provisions.
+    """
+
+    payload = (b64encode(private_bytes).decode("ascii") + "\n").encode("utf-8")
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise EvidenceSealingError(
+            f"private key directory cannot be created: {destination.parent}"
+        ) from error
+    try:
+        descriptor = os.open(
+            destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _PRIVATE_KEY_MODE
+        )
+    except FileExistsError as error:
+        raise EvidenceSealingError(
+            f"private key already exists and will not be overwritten: {destination}"
+        ) from error
+    except OSError as error:
+        raise EvidenceSealingError(
+            f"private key cannot be created: {destination}"
+        ) from error
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as error:
+        raise EvidenceSealingError(
+            f"private key cannot be written: {destination}"
+        ) from error
+
+
+def _write_json_atomically(destination: Path, payload: object) -> None:
+    """Replace a JSON file in one step, so a reader never sees a torn write.
+
+    The trust store is read on every verification, and a half-written file
+    would fail every verification closed until someone noticed.  A temporary
+    file plus ``os.replace`` keeps the visible file always complete.
+    """
+
+    content = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    temporary_path: Path | None = None
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_path = Path(temporary.name)
+        os.replace(temporary_path, destination)
+        temporary_path = None
+    except (OSError, UnicodeError) as error:
+        raise EvidenceSealingError(f"cannot write {destination}") from error
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def generate_signing_key() -> tuple[bytes, bytes]:
@@ -226,33 +309,23 @@ def seal_review_artifact(
     destination = (
         Path(seal_path) if seal_path is not None else default_seal_path(artifact_file)
     )
-    try:
-        destination.write_text(
-            json.dumps(seal_to_payload(seal), indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-    except (OSError, UnicodeError) as error:
-        raise EvidenceSealingError(f"seal cannot be written: {destination}") from error
+    _write_json_atomically(destination, seal_to_payload(seal))
     return seal, destination
 
 
 def write_signing_key(path: str | Path) -> bytes:
-    """Generate a key, write the private half, and return the public half.
+    """Generate a key, write the private half owner-only, return the public half.
 
     The git-tree check is applied here too: generating a fresh private key
-    straight into a checkout is the mistake this tool exists to prevent.
+    straight into a checkout is the mistake this tool exists to prevent.  An
+    existing destination is refused rather than replaced -- see
+    :func:`_write_private_key`.
     """
 
     destination = Path(path)
     assert_private_key_is_outside(destination)
     private_bytes, public_bytes = generate_signing_key()
-    try:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(
-            b64encode(private_bytes).decode("ascii") + "\n", encoding="utf-8"
-        )
-    except (OSError, UnicodeError) as error:
-        raise EvidenceSealingError(f"private key cannot be written: {destination}") from error
+    _write_private_key(destination, private_bytes)
     return public_bytes
 
 
@@ -291,6 +364,22 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "generate-key":
+            # Resolve the trust store *before* writing anything.  Silently
+            # replacing an existing key id would invalidate every seal that key
+            # ever signed, which is the opposite of what rotation is for -- and
+            # checking first avoids leaving an orphaned key file behind.
+            store_path = Path(args.trust_store) if args.trust_store else None
+            existing: tuple = ()
+            if store_path is not None and store_path.exists():
+                existing = read_trust_store(store_path)
+                if any(key.key_id == args.key_id for key in existing):
+                    raise EvidenceSealingError(
+                        f"trust store already lists key {args.key_id}; refusing to "
+                        "replace it, because every seal it signed would stop "
+                        "verifying. Use a new key id, and set the old key to "
+                        "VERIFY_ONLY to keep its history valid."
+                    )
+
             public_bytes = write_signing_key(args.private_key)
             entry = {
                 "key_id": args.key_id,
@@ -298,32 +387,32 @@ def main(argv: list[str] | None = None) -> int:
                 "public_key": b64encode(public_bytes).decode("ascii"),
                 "trust_status": EvidenceKeyTrustStatus.ACTIVE.value,
             }
-            if args.trust_store:
-                store_path = Path(args.trust_store)
-                existing: tuple = ()
-                if store_path.exists():
-                    existing = read_trust_store(store_path)
-                keys = tuple(key for key in existing if key.key_id != args.key_id)
-                merged = keys + (
-                    EvidenceVerificationKey(
-                        key_id=args.key_id,
-                        algorithm=ED25519_ALGORITHM,
-                        public_key=public_bytes,
-                        trust_status=EvidenceKeyTrustStatus.ACTIVE,
+            if store_path is not None:
+                _write_json_atomically(
+                    store_path,
+                    trust_store_to_payload(
+                        existing
+                        + (
+                            EvidenceVerificationKey(
+                                key_id=args.key_id,
+                                algorithm=ED25519_ALGORITHM,
+                                public_key=public_bytes,
+                                trust_status=EvidenceKeyTrustStatus.ACTIVE,
+                            ),
+                        )
                     ),
-                )
-                store_path.parent.mkdir(parents=True, exist_ok=True)
-                store_path.write_text(
-                    json.dumps(trust_store_to_payload(merged), indent=2, sort_keys=True)
-                    + "\n",
-                    encoding="utf-8",
                 )
             print(json.dumps(entry, sort_keys=True))
             return 0
 
         signed_at = None
         if args.signed_at:
-            signed_at = datetime.fromisoformat(args.signed_at)
+            try:
+                signed_at = datetime.fromisoformat(args.signed_at)
+            except ValueError as error:
+                raise EvidenceSealingError(
+                    f"--signed-at is not a valid ISO-8601 timestamp: {args.signed_at}"
+                ) from error
         seal_value, destination = seal_review_artifact(
             artifact_path=args.artifact,
             private_key_path=args.private_key,

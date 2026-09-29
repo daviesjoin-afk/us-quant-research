@@ -9,7 +9,9 @@ independently verifies.
 from base64 import b64decode
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
+import stat
 
 import pytest
 
@@ -127,6 +129,49 @@ def test_generated_keys_are_distinct(tmp_path):
     second = write_signing_key(tmp_path / "keys" / "b.key")
 
     assert first != second
+
+
+def test_private_key_is_created_owner_only_and_never_clobbered(tmp_path, monkeypatch):
+    """A signing key another local user can read is one they can forge with.
+
+    Asserted on the ``os.open`` call rather than on ``st_mode`` so the property
+    is checked on every platform: Windows does not report group/other bits.
+    """
+
+    recorded: dict = {}
+    real_open = os.open
+
+    def spy(path, flags, mode=0o777):
+        recorded["mode"] = mode
+        recorded["flags"] = flags
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", spy)
+    write_signing_key(tmp_path / "keys" / "research.key")
+
+    assert recorded["mode"] == 0o600
+    assert recorded["flags"] & os.O_EXCL
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes only")
+def test_private_key_mode_is_owner_only_on_disk(tmp_path):
+    path = tmp_path / "keys" / "research.key"
+    write_signing_key(path)
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_refuses_to_overwrite_an_existing_private_key(tmp_path):
+    """Replacing a key in place would invalidate every seal it ever signed."""
+
+    path = tmp_path / "keys" / "research.key"
+    write_signing_key(path)
+    original = path.read_bytes()
+
+    with pytest.raises(EvidenceSealingError):
+        write_signing_key(path)
+
+    assert path.read_bytes() == original
 
 
 # -- where a private key must never live ---------------------------------
@@ -304,6 +349,72 @@ def test_cli_generate_key_writes_the_key_and_a_usable_trust_store(tmp_path, caps
     assert keys[0].public_key == derived_public
 
 
+def test_cli_refuses_to_replace_an_existing_key_id(tmp_path):
+    """Re-registering a key id would silently invalidate all of its history."""
+
+    private_key = tmp_path / "keys" / "a.key"
+    trust_store = tmp_path / "keys" / "trust-store.json"
+    assert main(
+        [
+            "generate-key",
+            "--private-key", str(private_key),
+            "--key-id", KEY_ID,
+            "--trust-store", str(trust_store),
+        ]
+    ) == 0
+    before = trust_store.read_text(encoding="utf-8")
+
+    exit_code = main(
+        [
+            "generate-key",
+            "--private-key", str(tmp_path / "keys" / "b.key"),
+            "--key-id", KEY_ID,
+            "--trust-store", str(trust_store),
+        ]
+    )
+
+    assert exit_code == 2
+    assert trust_store.read_text(encoding="utf-8") == before
+    # The original key must still be the one the store trusts.
+    _, derived_public = load_private_key(private_key)
+    assert read_trust_store(trust_store)[0].public_key == derived_public
+
+
+def test_cli_generate_key_preserves_other_trust_store_entries(tmp_path):
+    trust_store = tmp_path / "keys" / "trust-store.json"
+    first_public = write_signing_key(tmp_path / "keys" / "a.key")
+    trust_store.parent.mkdir(parents=True, exist_ok=True)
+    trust_store.write_text(
+        json.dumps(
+            trust_store_to_payload(
+                (
+                    EvidenceVerificationKey(
+                        key_id="existing-key",
+                        algorithm=ED25519_ALGORITHM,
+                        public_key=first_public,
+                        trust_status=EvidenceKeyTrustStatus.VERIFY_ONLY,
+                    ),
+                )
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(
+        [
+            "generate-key",
+            "--private-key", str(tmp_path / "keys" / "b.key"),
+            "--key-id", "new-key",
+            "--trust-store", str(trust_store),
+        ]
+    ) == 0
+
+    keys = {key.key_id: key for key in read_trust_store(trust_store)}
+    assert set(keys) == {"existing-key", "new-key"}
+    assert keys["existing-key"].trust_status is EvidenceKeyTrustStatus.VERIFY_ONLY
+    assert keys["existing-key"].public_key == first_public
+
+
 def test_cli_seal_writes_a_detached_seal(tmp_path, capsys):
     ws = _workspace(tmp_path)
 
@@ -324,6 +435,46 @@ def test_cli_seal_writes_a_detached_seal(tmp_path, capsys):
     report = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert report["key_id"] == KEY_ID
     assert Path(report["seal_path"]).exists()
+
+
+def test_cli_reports_an_unparseable_signed_at_without_traceback(tmp_path, capsys):
+    ws = _workspace(tmp_path)
+
+    exit_code = main(
+        [
+            "seal",
+            "--artifact", str(ws["artifact"]),
+            "--private-key", str(ws["private_key"]),
+            "--trust-store", str(ws["trust_store"]),
+            "--key-id", KEY_ID,
+            "--universe-hash", "universe-1",
+            "--code-hash", "code-1",
+            "--signed-at", "yesterday",
+        ]
+    )
+
+    assert exit_code == 2
+    assert "error:" in capsys.readouterr().err
+
+
+def test_cli_reports_a_naive_signed_at_without_traceback(tmp_path, capsys):
+    ws = _workspace(tmp_path)
+
+    exit_code = main(
+        [
+            "seal",
+            "--artifact", str(ws["artifact"]),
+            "--private-key", str(ws["private_key"]),
+            "--trust-store", str(ws["trust_store"]),
+            "--key-id", KEY_ID,
+            "--universe-hash", "universe-1",
+            "--code-hash", "code-1",
+            "--signed-at", "2026-01-01T00:00:00",
+        ]
+    )
+
+    assert exit_code == 2
+    assert "error:" in capsys.readouterr().err
 
 
 def test_cli_reports_a_refusal_without_traceback(tmp_path, capsys):

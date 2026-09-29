@@ -304,6 +304,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "__init__.py",
         "account.py",
         "common.py",
+        "evidence_auth.py",
         "execution_environment.py",
         "live_canary.py",
         "live_recovery.py",
@@ -319,6 +320,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "portfolio_ledger.py",
         "portfolio_runtime.py",
         "portfolio_reconciliation.py",
+        "research_evidence.py",
         "risk.py",
         "session.py",
         "strategy.py",
@@ -330,6 +332,8 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "broker_account.py",
         "broker_execution.py",
         "broker_open_order_truth.py",
+        "evidence_authentication_repository.py",
+        "evidence_verification.py",
         "market_data.py",
         "live_canary_truth.py",
         "live_safety_repository.py",
@@ -341,6 +345,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "portfolio_operating_plan.py",
         "portfolio_runtime.py",
         "portfolio_order_truth.py",
+        "research_evidence_artifact.py",
         "strategy_repository.py",
         "strategy_gate_repository.py",
     }
@@ -995,6 +1000,9 @@ NON_MARKET_DATA_ADAPTER_MODULES = {
     "sqlite/strategy_repository.py",
     "research_evidence.py",
     "sqlite/strategy_gate_repository.py",
+    "evidence_signature.py",
+    "evidence_trust_store.py",
+    "sqlite/evidence_authentication_repository.py",
 }
 
 
@@ -1528,6 +1536,7 @@ def test_only_composition_roots_wire_adapters_into_applications() -> None:
             wiring_modules.append(path.relative_to(_SRC).as_posix())
     assert wiring_modules == [
         "trading/composition/accounts.py",
+        "trading/composition/evidence_authentication.py",
         "trading/composition/execution.py",
         "trading/composition/live_operator_controls.py",
         "trading/composition/market_data.py",

@@ -3,6 +3,10 @@
 This module records whether one symbol-specific TargetedReview artifact is
 bound to one immutable StrategyVersion. It does not change strategy lifecycle
 state and does not duplicate any statistical research thresholds.
+
+The evidence projection itself now lives in
+:mod:`us_quant.trading.domain.research_evidence`; it is re-exported here so the
+gate's existing consumers keep one import site.
 """
 
 from __future__ import annotations
@@ -13,8 +17,11 @@ from enum import StrEnum
 from hashlib import sha256
 import json
 
-
-ELIGIBLE_REVIEW_DECISION = "ELIGIBLE_FOR_INDEPENDENT_REVIEW"
+from us_quant.trading.domain.research_evidence import (
+    ELIGIBLE_REVIEW_DECISION,
+    StrategyEvidenceIdentity,
+    StrategyResearchEvidence,
+)
 
 
 class StrategyGateVerdict(StrEnum):
@@ -34,79 +41,6 @@ class StrategyGateBlocker(StrEnum):
     REVIEW_BLOCKING_FAILURES = "REVIEW_BLOCKING_FAILURES"
     DUPLICATE_EVIDENCE = "DUPLICATE_EVIDENCE"
     STALE_EVIDENCE = "STALE_EVIDENCE"
-
-
-@dataclass(frozen=True, slots=True)
-class StrategyEvidenceIdentity:
-    strategy_version_id: str
-    strategy_semver: str
-    parameter_hash: str
-    symbol: str
-    data_hash: str
-    provider: str
-
-    def __post_init__(self) -> None:
-        for name in (
-            "strategy_version_id", "strategy_semver", "parameter_hash",
-            "symbol", "data_hash", "provider",
-        ):
-            _require_text(getattr(self, name), name)
-
-
-@dataclass(frozen=True, slots=True)
-class StrategyResearchEvidence:
-    """A typed projection of a single symbol-specific research review."""
-
-    review_run_id: str
-    artifact_review_run_id: str
-    robustness_run_id: str
-    validation_run_id: str | None
-    overfit_run_id: str
-    data_quality_run_id: str | None
-    execution_stress_run_id: str | None
-    identity: StrategyEvidenceIdentity
-    evidence_origins: tuple[str, ...]
-    decision: str
-    eligible_for_independent_review: bool
-    blocking_failures: int
-    passed_gates: int
-    gate_count: int
-    generated_at: datetime
-
-    def __post_init__(self) -> None:
-        for name in ("review_run_id", "artifact_review_run_id", "robustness_run_id", "overfit_run_id"):
-            _require_text(getattr(self, name), name)
-        for name in ("validation_run_id", "data_quality_run_id", "execution_stress_run_id"):
-            value = getattr(self, name)
-            if value is not None:
-                _require_text(value, name)
-        if not isinstance(self.identity, StrategyEvidenceIdentity):
-            raise TypeError("identity must be StrategyEvidenceIdentity")
-        if not isinstance(self.evidence_origins, tuple):
-            raise TypeError("evidence_origins must be a tuple")
-        for origin in self.evidence_origins:
-            _require_text(origin, "evidence origin")
-        _require_text(self.decision, "decision")
-        if type(self.eligible_for_independent_review) is not bool:
-            raise TypeError("eligible_for_independent_review must be bool")
-        _require_count(self.blocking_failures, "blocking_failures")
-        _require_count(self.passed_gates, "passed_gates")
-        _require_count(self.gate_count, "gate_count")
-        if self.passed_gates > self.gate_count:
-            raise ValueError("passed_gates cannot exceed gate_count")
-        _require_aware(self.generated_at, "generated_at")
-
-    @property
-    def component_run_ids(self) -> tuple[str, ...]:
-        return tuple(
-            value for value in (
-                self.robustness_run_id,
-                self.validation_run_id,
-                self.overfit_run_id,
-                self.data_quality_run_id,
-                self.execution_stress_run_id,
-            ) if value is not None
-        )
 
 
 @dataclass(frozen=True, slots=True)

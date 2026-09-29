@@ -5502,6 +5502,65 @@ Stage 6-C 才引入 governed promotion/demotion controller。authenticated resea
 artifact 外部信任根，之后 `StrategyGateEvaluation` 才能成为 lifecycle authority；**Stage 6-C 不得在该
 认证边界闭环前开始**。Stage 6-A 的本地 artifact 校验不替代此认证前置条件。
 
+#### 8.44 Stage 6-B1 Authenticated Research Evidence Provenance
+
+Stage 6-B1 从 Stage 6-A 的实际 merge SHA `9689366e336fd202968efb5effb885549ad2c0e0` 开始，
+关闭 Stage 6-A 明确延期的安全边界：本地 JSON artifact 内部字段即使全部自洽，也不能证明它没有被
+整体协同篡改。B1 引入 artifact **之外**的独立信任根。
+
+信任关系为：`TargetedReview` artifact + detached seal + external verification trust root
+→ `AuthenticatedStrategyResearchEvidence`。seal 与 artifact 分离存放（约定
+`<run_id>.seal.json`），签的是 artifact **canonical payload digest**，因此 `passed`、`observed`、
+`generated_at`、`parameter_hash`、`symbol`、`data_hash` 等任一语义字段变化都会使 digest 改变、
+签名失效。Stage 6-A 的严格 parser 会拒绝 aggregate 不一致的篡改，但**自洽的**整体重写仍能通过
+Stage 6-A 校验；只有 detached seal 能识别它，回归测试与 mutation M03 固定了该边界。
+
+加密方案为 Ed25519，依赖 `cryptography>=48,<50`（显式锁定并记录用途），不自制 crypto。
+`signed material` 为唯一 canonical 序列化：UTF-8、`sort_keys=True`、
+`separators=(",", ":")`、`ensure_ascii=False`，且 `signature` 不参与自身签名。签名与验签双方调用
+同一个 `canonical_signed_material()`，其字段集合由单一 `_seal_common_fields()` 定义，避免两侧
+对"签了什么"产生分歧。
+
+`universe_hash` 与 `code_hash` 由 seal **断言**并签名，再由 verifier 绑定到 governed
+`StrategyVersion`（不匹配则 `UNIVERSE_HASH_MISMATCH` / `CODE_HASH_MISMATCH`）。这是 B1 能正式
+绑定这两项的唯一途径：TargetedReview artifact 本身不携带它们。
+
+私钥 ownership：trading runtime **只能 VERIFY，绝不能 SIGN**。签名实现位于
+`us_quant.research_evidence_sealing`（research side，非 trading 包），architecture guard 保证
+risk、execution、portfolio、order dispatch、broker adapter 与 desktop 页面都无法 import 它，
+且 `cryptography` 只允许出现在该签名模块与 `adapters/evidence_signature.py` 两处；trading 包内
+不得出现任何 private-key primitive。sealing tool 拒绝把私钥放在 artifact store 内或 git working
+tree 内，也拒绝用 `VERIFY_ONLY` / `REVOKED` key 或与 trust store 公钥不匹配的私钥签名。
+
+Trust store 为 operator provision 的 JSON（仅公钥与 trust status），支持 `ACTIVE`、
+`VERIFY_ONLY`、`REVOKED`：`ACTIVE` 可验证新 evidence 且是唯一可签名状态；`VERIFY_ONLY` 让旧
+evidence 继续可验证、禁止新签名，使 key rotation 不会让旧 audit 记录消失；`REVOKED` 对该 key
+签发的所有 evidence **FAIL CLOSED**。trust store 每次验证重新读取，因此撤销无需重启进程即生效。
+
+Authentication blockers 覆盖 `AUTHENTICATION_MISSING`、`TRUST_ROOT_UNAVAILABLE`、
+`SIGNATURE_MALFORMED`、`SIGNATURE_INVALID`、`ARTIFACT_DIGEST_MISMATCH`、`UNKNOWN_KEY`、
+`KEY_REVOKED`、`UNSUPPORTED_ALGORITHM`、`STRATEGY_IDENTITY_MISMATCH`、`PARAMETER_HASH_MISMATCH`、
+`CODE_HASH_MISMATCH`、`UNIVERSE_HASH_MISMATCH`、`REVIEW_RUN_MISMATCH`、`DATA_HASH_MISMATCH`、
+`SIGNED_AT_INVALID`。任何 unknown/error 一律 fail closed，没有把未知当作 PASS 的路径；
+naive `signed_at` 是 policy 层 FAIL（带 blocker），不是构造期崩溃。
+
+持久化使用独立表 `strategy_evidence_authentication`，不修改冻结的 `strategy_version` /
+`strategy_deployment` schema，也不复用 gate 表。authentication ID 由身份、artifact digest、
+key、algorithm、signature digest、verdict、blockers 与 policy/authenticator 版本决定，**不含**
+验证时钟，因此同一 evidence 重复验证幂等；revocation 改变 verdict 时产生**新**记录，旧 PASS
+记录保留用于 audit。相同 ID 配不同 immutable payload 视为 conflict；corrupt row（payload hash、
+indexed column、blockers JSON、verdict）读取时 FAIL CLOSED。
+
+Stage 6-B1 不改变 lifecycle：不修改 `StrategyStatus`、不执行 transition、不修改 `gate_passed`、
+不修改 `PortfolioOperatingPlan`、不启动 Paper、不提交订单。它只回答"这份 research evidence 是否
+由受信任身份认证"。`AuthenticatedStrategyResearchEvidence` 只能由 authenticator 用私有 token
+铸造，因此"只有 authenticated evidence 才能进入 lifecycle authority"是结构性质而非约定。
+
+架构上，application 层不得直接 import artifact adapter：B1 为此新增
+`ports/research_evidence_artifact.py`（`ResearchEvidenceArtifactSourcePort`），由
+`adapters/research_evidence.py` 实现，仅 composition 负责装配。这既满足 FA1–FA5 的内向依赖规则，
+也避免装配方把认证决策重定向到别的 loader。
+
 Stage 5 implementation COMPLETE = YES，Stage 5 Final Architecture Guard CLEAN = YES。
 Stage 5 supervised multi-strategy Paper canary = NOT RUN；Stage 4 operationally COMPLETE = NO，
 因为 supervised Live canary 尚未运行。

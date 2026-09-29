@@ -10,6 +10,11 @@ requires-python = ">=3.12"
 dependencies = [
   "tzdata>=2025.2",
   "websockets>=15,<17",
+  # Ed25519 verification of detached research-evidence seals (Stage 6-B1).
+  # The trading runtime verifies only; signing lives in research tooling.
+  # Pinned deliberately: hand-rolling signature verification to avoid a
+  # dependency would be exactly the self-made crypto this boundary must not use.
+  "cryptography>=48,<50",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +35,9 @@ test = [
 [project.scripts]
 us-quant = "us_quant.cli:main"
 us-quant-desktop = "us_quant.desktop:main"
+# Research-side sealing surface.  Deliberately a separate entry point: the
+# trading runtime must never be able to invoke signing.
+us-quant-evidence-sealing = "us_quant.research_evidence_sealing:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

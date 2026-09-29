@@ -234,6 +234,36 @@ def test_payload_run_id_mismatch_fails_closed(tmp_path):
         load_targeted_review_artifact(path)
 
 
+def test_exact_artifact_payload_is_not_mixed_with_duplicate_run_id_file(tmp_path):
+    requested, artifact = _loaded_artifact(
+        tmp_path, _review(), generated_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+    )
+    duplicate = tmp_path / "copy.json"
+    duplicate_payload = json.loads(requested.read_text(encoding="utf-8"))
+    duplicate_payload.update(
+        {
+            "strategy_version_id": "other-version",
+            "base_parameter_hash": "other-parameter",
+            "decision": "BLOCKED",
+            "eligible_for_independent_review": False,
+        }
+    )
+    duplicate.write_text(json.dumps(duplicate_payload), encoding="utf-8")
+    duplicate.touch()
+
+    loaded = load_targeted_review_artifact(requested)
+    projected = project_targeted_review(loaded)
+
+    assert loaded.source_path == requested.resolve()
+    assert loaded.result.run_id == "review-1"
+    assert loaded.result.strategy_version_id == "version-1"
+    assert loaded.result.base_parameter_hash == "parameter-1"
+    assert loaded.result.decision == "ELIGIBLE_FOR_INDEPENDENT_REVIEW"
+    assert loaded.generated_at == datetime(2025, 1, 1, tzinfo=timezone.utc)
+    assert projected.identity.strategy_version_id == "version-1"
+    assert projected.eligible_for_independent_review
+
+
 @pytest.mark.parametrize(
     ("evidence", "blocker"),
     [

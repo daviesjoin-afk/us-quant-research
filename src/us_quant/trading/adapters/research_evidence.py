@@ -7,7 +7,10 @@ from datetime import datetime
 import json
 from pathlib import Path
 
-from us_quant.targeted_review import TargetedReviewResult, load_targeted_reviews
+from us_quant.targeted_review import (
+    TargetedReviewResult,
+    targeted_review_from_payload,
+)
 
 from us_quant.trading.domain.strategy_gate import (
     StrategyEvidenceIdentity,
@@ -95,11 +98,9 @@ def load_targeted_review_artifact(path: str | Path) -> LoadedTargetedReviewArtif
         generated_at = datetime.fromisoformat(generated_at_text)
         if generated_at.tzinfo is None or generated_at.utcoffset() is None:
             raise ValueError("artifact generated_at must be timezone-aware")
-        artifact_count = sum(1 for item in artifact_path.parent.glob("*.json") if item.is_file())
-        results = load_targeted_reviews(artifact_path.parent, limit=max(artifact_count, 1))
-        result = next((item for item in results if item.run_id == artifact_run_id), None)
-        if result is None:
-            raise ValueError("artifact payload cannot be loaded as TargetedReviewResult")
+        result = targeted_review_from_payload(row)
+        if result.run_id != artifact_run_id:
+            raise ValueError("parsed TargetedReview run_id does not match its file")
         return LoadedTargetedReviewArtifact(
             result,
             artifact_run_id,

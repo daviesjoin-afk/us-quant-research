@@ -5479,8 +5479,9 @@ Stage 6 Git base 为 `acb5d23663f00644ff8391e948d961792225ccb9`；Stage 5 implem
 与 evidence origin。现有研究 artifact 尚不能独立证明 `code_hash` 或 `universe_hash`，这两项仍是
 后续 provenance gap。Stage 6-A evaluator/policy 版本分别为 `strategy-gate-v1` 与
 `independent-review-v1`；未配置最大 evidence age 时不臆造过期阈值。研究证据只能从持久化
-TargetedReview JSON artifact 加载：loader 校验文件名 run ID、payload run ID 和 timezone-aware
-`generated_at`，projection 不接受调用方单独提交这些 provenance 字段。evaluation ID 表示语义状态，
+TargetedReview JSON artifact 加载：loader 只解析指定文件的同一 payload，并校验文件名 run ID、
+payload run ID 和 timezone-aware `generated_at`；目录中重复的 run ID 不会混入该证据。
+projection 不接受调用方单独提交这些 provenance 字段。evaluation ID 表示语义状态，
 由策略/证据 identity、policy/evaluator 版本、verdict 与 canonical blockers 决定；相同状态的重试
 沿用同一 ID，repository 对重试时间戳差异仍幂等并保留首次记录时间。freshness 导致 blocker/verdict
 改变时产生不同 ID，过期 FAIL 可独立保存。缺失或不可读证据的 FAIL 允许 `review_run_id = NULL`；

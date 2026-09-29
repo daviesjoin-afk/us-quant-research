@@ -25,7 +25,8 @@ $mutations = @(
     @{ name='M07 evaluator mutates lifecycle state'; file=$evaluator; find='if not isinstance\(policy, StrategyGatePolicy\):'; repl="object.__setattr__(version, `"gate_passed`", not version.gate_passed)`n        if not isinstance(policy, StrategyGatePolicy):"; tests=@($testsEvaluator); select='test_evaluation_does_not_change_strategy_lifecycle_fields' },
     @{ name='M08 conflicting immutable duplicate accepted'; file=$repository; find='raise StrategyGateRepositoryConflict\(\s*"evaluation id already has a different immutable payload"\s*\)'; repl='return'; tests=@($testsRepository); select='test_roundtrip_restart_idempotency_conflict_and_latest_order' },
     @{ name='M09 payload corruption becomes accepted'; file=$repository; find='if sha256\(payload_json\.encode\("utf-8"\)\)\.hexdigest\(\) != payload_hash:'; repl='if False:'; tests=@($testsRepository); select='test_corrupt_indexed_rows_fail_closed and payload_hash' },
-    @{ name='M10 TargetedReview eligibility bypassed'; file=$projection; find='eligible_for_independent_review=result\.eligible_for_independent_review,'; repl='eligible_for_independent_review=True,'; tests=@($testsEvaluator); select='test_targeted_review_ineligible_flag_is_preserved_by_projection' }
+    @{ name='M10 TargetedReview eligibility bypassed'; file=$projection; find='eligible_for_independent_review=result\.eligible_for_independent_review,'; repl='eligible_for_independent_review=True,'; tests=@($testsEvaluator); select='test_targeted_review_ineligible_flag_is_preserved_by_projection' },
+    @{ name='M11 freshness transition reuses evaluation id'; file=(Join-Path $projectRoot "src\us_quant\trading\domain\strategy_gate.py"); find='"evaluated_at": evaluated_at\.astimezone\(timezone\.utc\)\.isoformat\(\),'; repl='"evaluated_at": None,'; tests=@($testsEvaluator); select='test_time_dependent_evaluations_have_distinct_stable_ids' }
 )
 
 function Get-Text([string]$path) { [System.IO.File]::ReadAllText($path) }

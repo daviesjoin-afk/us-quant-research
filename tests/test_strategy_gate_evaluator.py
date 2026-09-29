@@ -143,8 +143,34 @@ def test_evaluation_does_not_change_strategy_lifecycle_fields():
         assert (version.status, version.mode, version.gate_passed) == before
 
 
-def test_stable_evaluation_id_ignores_evaluation_clock():
+def test_time_dependent_evaluations_have_distinct_stable_ids():
     evaluator = StrategyGateEvaluator()
     first = evaluator.evaluate(version=_version(), evidence=_evidence(), policy=StrategyGatePolicy(), evaluated_at=NOW)
     second = evaluator.evaluate(version=_version(), evidence=_evidence(), policy=StrategyGatePolicy(), evaluated_at=datetime(2026, 1, 2, tzinfo=timezone.utc))
-    assert first.evaluation_id == second.evaluation_id
+    assert first.evaluation_id != second.evaluation_id
+    repeated = evaluator.evaluate(version=_version(), evidence=_evidence(), policy=StrategyGatePolicy(), evaluated_at=NOW)
+    assert first.evaluation_id == repeated.evaluation_id
+
+
+def test_expiration_transition_is_a_distinct_persistable_failure(tmp_path):
+    from us_quant.trading.adapters.sqlite.strategy_gate_repository import SQLiteStrategyGateRepository
+
+    evaluator = StrategyGateEvaluator()
+    policy = StrategyGatePolicy(maximum_evidence_age=timedelta(days=1))
+    version = _version()
+    evidence = _evidence()
+    before_expiration = evaluator.evaluate(
+        version=version, evidence=evidence, policy=policy, evaluated_at=NOW,
+    )
+    after_expiration = evaluator.evaluate(
+        version=version, evidence=evidence, policy=policy,
+        evaluated_at=NOW + timedelta(days=2),
+    )
+    repository = SQLiteStrategyGateRepository(tmp_path / "gate.sqlite3")
+    repository.record(before_expiration)
+    repository.record(after_expiration)
+    latest = repository.latest_for_version(version.version_id)
+    assert before_expiration.evaluation_id != after_expiration.evaluation_id
+    assert after_expiration.verdict is StrategyGateVerdict.FAIL
+    assert StrategyGateBlocker.STALE_EVIDENCE in after_expiration.blockers
+    assert latest == after_expiration

@@ -5479,6 +5479,7 @@ Stage 6 Git base 为 `acb5d23663f00644ff8391e948d961792225ccb9`；Stage 5 implem
 与 evidence origin。现有研究 artifact 尚不能独立证明 `code_hash` 或 `universe_hash`，这两项仍是
 后续 provenance gap。Stage 6-A evaluator/policy 版本分别为 `strategy-gate-v1` 与
 `independent-review-v1`；未配置最大 evidence age 时不臆造过期阈值。
+evaluation ID 同时绑定 UTC evaluation timestamp，使证据由新鲜转为过期时能保存为独立的 FAIL 记录。
 
 Stage 5 implementation COMPLETE = YES，Stage 5 Final Architecture Guard CLEAN = YES。
 Stage 5 supervised multi-strategy Paper canary = NOT RUN；Stage 4 operationally COMPLETE = NO，

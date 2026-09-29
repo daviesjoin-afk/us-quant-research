@@ -63,6 +63,7 @@ class StrategyGateEvaluator:
             symbol=identity.symbol if identity else None,
             policy_version=policy.policy_version,
             evaluator_version=policy.evaluator_version,
+            evaluated_at=evaluated_at,
         )
         return StrategyGateEvaluation(
             evaluation_id=evaluation_id,

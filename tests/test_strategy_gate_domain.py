@@ -71,6 +71,7 @@ def test_stable_id_is_deterministic_and_uses_required_identities():
         strategy_version_id="v1", review_run_id="r1", parameter_hash="p1",
         data_hash="d1", policy_version="independent-review-v1",
         evaluator_version="strategy-gate-v1", symbol="AAPL",
+        evaluated_at=NOW,
     )
     assert stable_strategy_gate_evaluation_id(**arguments) == stable_strategy_gate_evaluation_id(**arguments)
     for key in (
@@ -79,6 +80,8 @@ def test_stable_id_is_deterministic_and_uses_required_identities():
     ):
         changed = {**arguments, key: f"different-{key}"}
         assert stable_strategy_gate_evaluation_id(**arguments) != stable_strategy_gate_evaluation_id(**changed)
+    changed_time = {**arguments, "evaluated_at": NOW + timedelta(seconds=1)}
+    assert stable_strategy_gate_evaluation_id(**arguments) != stable_strategy_gate_evaluation_id(**changed_time)
 
 
 def test_blocker_order_is_canonical_for_different_input_orderings():

@@ -8,7 +8,7 @@ state and does not duplicate any statistical research thresholds.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from hashlib import sha256
 import json
@@ -179,9 +179,12 @@ def stable_strategy_gate_evaluation_id(
     data_hash: str | None,
     policy_version: str,
     evaluator_version: str,
+    evaluated_at: datetime,
     symbol: str | None = None,
 ) -> str:
-    """Return a deterministic business identity for one version/evidence/policy."""
+    """Return a deterministic identity for one time-specific evaluation."""
+
+    _require_aware(evaluated_at, "evaluated_at")
 
     material = {
         "strategy_version_id": strategy_version_id,
@@ -191,6 +194,7 @@ def stable_strategy_gate_evaluation_id(
         "symbol": symbol,
         "policy_version": policy_version,
         "evaluator_version": evaluator_version,
+        "evaluated_at": evaluated_at.astimezone(timezone.utc).isoformat(),
     }
     digest = sha256(_canonical_json(material).encode("utf-8")).hexdigest()
     return f"sge-{digest}"

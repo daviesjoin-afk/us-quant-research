@@ -7,7 +7,8 @@ import pytest
 
 from us_quant.targeted_review import (
     DependenceDiagnostic, EvidenceGate, TargetedReviewResult,
-    TARGETED_REVIEW_REQUIRED_GATE_CODES, save_targeted_review,
+    TARGETED_REVIEW_GATE_DEFINITIONS, TARGETED_REVIEW_REQUIRED_GATE_CODES,
+    save_targeted_review,
 )
 from us_quant.trading.adapters.research_evidence import (
     StrategyEvidenceProjectionError, load_targeted_review_artifact,
@@ -56,8 +57,8 @@ def _evidence(**changes):
 
 def _review(**changes):
     gates = tuple(
-        EvidenceGate(code, code, True, "yes", "yes", "evidence")
-        for code in TARGETED_REVIEW_REQUIRED_GATE_CODES
+        EvidenceGate(code, name, True, "yes", required, evidence)
+        for code, name, required, evidence in TARGETED_REVIEW_GATE_DEFINITIONS
     )
     values = dict(
         run_id="review-1", robustness_run_id="robust-1", validation_run_id="validation-1",
@@ -99,11 +100,11 @@ def test_targeted_review_ineligible_flag_is_preserved_by_projection(tmp_path):
             gates=(
                 EvidenceGate(
                     TARGETED_REVIEW_REQUIRED_GATE_CODES[0],
-                    TARGETED_REVIEW_REQUIRED_GATE_CODES[0],
+                    TARGETED_REVIEW_GATE_DEFINITIONS[0][1],
                     False,
                     "no",
-                    "yes",
-                    "evidence",
+                    TARGETED_REVIEW_GATE_DEFINITIONS[0][2],
+                    TARGETED_REVIEW_GATE_DEFINITIONS[0][3],
                 ),
                 *_review().gates[1:],
             ),
@@ -396,6 +397,19 @@ def test_artifact_requires_complete_unique_gate_code_set(tmp_path, corruption):
         payload["passed_gates"] -= 1
     else:
         payload["gates"][-1]["code"] = payload["gates"][0]["code"]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(StrategyEvidenceProjectionError):
+        load_targeted_review_artifact(path)
+
+
+def test_artifact_gate_code_is_bound_to_canonical_definition(tmp_path):
+    path, _ = _loaded_artifact(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["gates"][0]["code"], payload["gates"][1]["code"] = (
+        payload["gates"][1]["code"],
+        payload["gates"][0]["code"],
+    )
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(StrategyEvidenceProjectionError):

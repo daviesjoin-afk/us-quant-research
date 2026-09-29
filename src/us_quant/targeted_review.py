@@ -26,29 +26,32 @@ MINIMUM_OOS_SESSIONS = 10
 MAXIMUM_PBO = Decimal("0.50")
 MINIMUM_DSR_PROBABILITY = Decimal("0.95")
 MINIMUM_HAC_POSITIVE_PROBABILITY = Decimal("0.95")
-TARGETED_REVIEW_REQUIRED_GATE_CODES = (
-    "identity",
-    "captured_origin",
-    "complete_sessions",
-    "quality_identity",
-    "high_quality_sessions",
-    "minimum_completeness",
-    "source_age",
-    "walk_forward_folds",
-    "test_isolation",
-    "validation_gates",
-    "oos_return",
-    "oos_excess",
-    "pbo",
-    "dsr",
-    "dependence",
-    "effective_oos",
-    "hac_positive",
-    "execution_constraints",
-    "oos_execution",
-    "stress_identity",
-    "cost_stress",
-    "top_book_capacity",
+TARGETED_REVIEW_GATE_DEFINITIONS = (
+    ("identity", "证据身份一致", "Run、标的、版本、参数、数据哈希与行情源完全一致", "稳健性、时间隔离和过拟合结果交叉核验"),
+    ("captured_origin", "真实流采集来源", "仅 captured_stream", "分钟证据来源字段，不凭行情源名称猜测"),
+    ("complete_sessions", "完整独立会话", f"≥ {MINIMUM_COMPLETE_SESSIONS}", "纽约 10:00–15:45、≥300 行且连续预热"),
+    ("quality_identity", "数据质量报告身份", "与稳健性 Run、标的、版本、数据哈希和行情源一致", "原始分钟质量报告交叉核验"),
+    ("high_quality_sessions", "高质量完整会话", f"≥ {MINIMUM_COMPLETE_SESSIONS}", "完整率、连续缺口、报价合法性和行情年龄联合门"),
+    ("minimum_completeness", "最差会话完整率", "≥ 98%", "纽约 10:00–15:45 共 346 个预期分钟"),
+    ("source_age", "行情年龄 P95", "≤ 5 秒", "原始流快照记录的 bid/ask 最旧分量年龄"),
+    ("walk_forward_folds", "时间隔离折数", "≥ 2", "锚定训练/验证/未触碰测试折"),
+    ("test_isolation", "测试集未参与选择", "全部折为否", "test_used_for_selection"),
+    ("validation_gates", "验证门全部通过", "全部通过且至少 2 折", "验证策略收益同时为正且高于等风险基准"),
+    ("oos_return", "未触碰测试收益", "> 0%", "只汇总各折未参与选择的测试会话"),
+    ("oos_excess", "未触碰测试超额", "> 0%", "相对同风险、整股、同成本日内基准"),
+    ("pbo", "回测过拟合概率", "< 50%", "10 分区 CSCV 固定候选集"),
+    ("dsr", "多重检验修正", "≥ 95%", "DSR；不可估计按未通过处理"),
+    ("dependence", "序列相关性可估计", "非零方差且可估计", "未触碰测试会话收益 lag-1 自相关"),
+    ("effective_oos", "相关性折算样本量", f"≥ {MINIMUM_OOS_SESSIONS}", "AR(1) 近似；正相关会降低有效样本量"),
+    ("hac_positive", "HAC均值为正置信度", "≥ 95%", "Newey-West/Bartlett 长期方差下的均值为正概率"),
+    ("execution_constraints", "整股与成本建模", "整股=true，佣金>0，滑点>0", "不可变策略版本参数"),
+    ("oos_execution", "样本外实际成交证据", "每折至少 1 次完整往返", "未触碰测试会话成交汇总"),
+    ("stress_identity", "执行压力报告身份", "与稳健性 Run、标的、版本、参数、数据哈希和行情源一致", "执行成本压力结果交叉核验"),
+    ("cost_stress", "高成本压力收益", "> 0%", "至少 10bps 滑点并使用双倍佣金"),
+    ("top_book_capacity", "最优价一档参与率 P95", "≤ 10%", "整股订单量 / 当时对应买卖一档数量"),
+)
+TARGETED_REVIEW_REQUIRED_GATE_CODES = tuple(
+    definition[0] for definition in TARGETED_REVIEW_GATE_DEFINITIONS
 )
 
 
@@ -638,6 +641,16 @@ def _targeted_review_gates_from_payload(
         TARGETED_REVIEW_REQUIRED_GATE_CODES
     ):
         raise ValueError("TargetedReview gate codes are incomplete or duplicated")
+    definitions_by_code = {
+        code: (name, required, evidence)
+        for code, name, required, evidence in TARGETED_REVIEW_GATE_DEFINITIONS
+    }
+    if any(
+        (gate.name, gate.required, gate.evidence)
+        != definitions_by_code[gate.code]
+        for gate in gates
+    ):
+        raise ValueError("TargetedReview gate code does not match its definition")
     return tuple(gates)
 
 

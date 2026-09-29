@@ -15,6 +15,7 @@ from us_quant.targeted_execution_stress import (
     TargetedExecutionStressResult,
 )
 from us_quant.targeted_review import (
+    TARGETED_REVIEW_GATE_DEFINITIONS,
     load_targeted_reviews,
     run_targeted_review,
     save_targeted_review,
@@ -142,6 +143,13 @@ class TargetedReviewTests(unittest.TestCase):
             execution_stress=execution_stress,
         )
         self.assertTrue(review.eligible_for_independent_review)
+        self.assertEqual(
+            tuple(
+                (gate.code, gate.name, gate.required, gate.evidence)
+                for gate in review.gates
+            ),
+            TARGETED_REVIEW_GATE_DEFINITIONS,
+        )
         self.assertEqual(review.blocking_failures, 0)
         self.assertEqual(
             review.decision, "ELIGIBLE_FOR_INDEPENDENT_REVIEW"

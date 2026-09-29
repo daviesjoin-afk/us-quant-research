@@ -322,6 +322,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "risk.py",
         "session.py",
         "strategy.py",
+        "strategy_gate.py",
         "strategy_parameters.py",
     }
     assert {path.name for path in _python_files(PORTS_DIR)} == {
@@ -341,6 +342,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "portfolio_runtime.py",
         "portfolio_order_truth.py",
         "strategy_repository.py",
+        "strategy_gate_repository.py",
     }
 
 
@@ -962,6 +964,8 @@ MARKET_DATA_ADAPTERS = _TRADING / "adapters"
 #: autonomy store, the Stage 4-A Live safety repository, and -- since Execution
 #: v2 -- the execution chain (the IBKR order adapter, its gateway bridge, the
 #: SQLite order store and the two shared helpers the execution adapters use).
+#: The research-evidence projection and its independent SQLite repository also
+#: live here, but do not implement the market-data stream surface.
 #: Listed by relative path so a new module in any of those packages cannot slip
 #: through the market-data surface guard by sharing a filename.
 NON_MARKET_DATA_ADAPTER_MODULES = {
@@ -989,6 +993,8 @@ NON_MARKET_DATA_ADAPTER_MODULES = {
     "sqlite/order_repository.py",
     "sqlite/portfolio_repository.py",
     "sqlite/strategy_repository.py",
+    "research_evidence.py",
+    "sqlite/strategy_gate_repository.py",
 }
 
 
@@ -1530,6 +1536,7 @@ def test_only_composition_roots_wire_adapters_into_applications() -> None:
         "trading/composition/portfolio_operations.py",
         "trading/composition/portfolio_paper.py",
         "trading/composition/strategies.py",
+        "trading/composition/strategy_gate.py",
     ], wiring_modules
 
 

@@ -26,6 +26,33 @@ MINIMUM_OOS_SESSIONS = 10
 MAXIMUM_PBO = Decimal("0.50")
 MINIMUM_DSR_PROBABILITY = Decimal("0.95")
 MINIMUM_HAC_POSITIVE_PROBABILITY = Decimal("0.95")
+TARGETED_REVIEW_GATE_DEFINITIONS = (
+    ("identity", "证据身份一致", "Run、标的、版本、参数、数据哈希与行情源完全一致", "稳健性、时间隔离和过拟合结果交叉核验"),
+    ("captured_origin", "真实流采集来源", "仅 captured_stream", "分钟证据来源字段，不凭行情源名称猜测"),
+    ("complete_sessions", "完整独立会话", f"≥ {MINIMUM_COMPLETE_SESSIONS}", "纽约 10:00–15:45、≥300 行且连续预热"),
+    ("quality_identity", "数据质量报告身份", "与稳健性 Run、标的、版本、数据哈希和行情源一致", "原始分钟质量报告交叉核验"),
+    ("high_quality_sessions", "高质量完整会话", f"≥ {MINIMUM_COMPLETE_SESSIONS}", "完整率、连续缺口、报价合法性和行情年龄联合门"),
+    ("minimum_completeness", "最差会话完整率", "≥ 98%", "纽约 10:00–15:45 共 346 个预期分钟"),
+    ("source_age", "行情年龄 P95", "≤ 5 秒", "原始流快照记录的 bid/ask 最旧分量年龄"),
+    ("walk_forward_folds", "时间隔离折数", "≥ 2", "锚定训练/验证/未触碰测试折"),
+    ("test_isolation", "测试集未参与选择", "全部折为否", "test_used_for_selection"),
+    ("validation_gates", "验证门全部通过", "全部通过且至少 2 折", "验证策略收益同时为正且高于等风险基准"),
+    ("oos_return", "未触碰测试收益", "> 0%", "只汇总各折未参与选择的测试会话"),
+    ("oos_excess", "未触碰测试超额", "> 0%", "相对同风险、整股、同成本日内基准"),
+    ("pbo", "回测过拟合概率", "< 50%", "10 分区 CSCV 固定候选集"),
+    ("dsr", "多重检验修正", "≥ 95%", "DSR；不可估计按未通过处理"),
+    ("dependence", "序列相关性可估计", "非零方差且可估计", "未触碰测试会话收益 lag-1 自相关"),
+    ("effective_oos", "相关性折算样本量", f"≥ {MINIMUM_OOS_SESSIONS}", "AR(1) 近似；正相关会降低有效样本量"),
+    ("hac_positive", "HAC均值为正置信度", "≥ 95%", "Newey-West/Bartlett 长期方差下的均值为正概率"),
+    ("execution_constraints", "整股与成本建模", "整股=true，佣金>0，滑点>0", "不可变策略版本参数"),
+    ("oos_execution", "样本外实际成交证据", "每折至少 1 次完整往返", "未触碰测试会话成交汇总"),
+    ("stress_identity", "执行压力报告身份", "与稳健性 Run、标的、版本、参数、数据哈希和行情源一致", "执行成本压力结果交叉核验"),
+    ("cost_stress", "高成本压力收益", "> 0%", "至少 10bps 滑点并使用双倍佣金"),
+    ("top_book_capacity", "最优价一档参与率 P95", "≤ 10%", "整股订单量 / 当时对应买卖一档数量"),
+)
+TARGETED_REVIEW_REQUIRED_GATE_CODES = tuple(
+    definition[0] for definition in TARGETED_REVIEW_GATE_DEFINITIONS
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,90 +518,7 @@ def load_targeted_reviews(
     results: list[TargetedReviewResult] = []
     for path in paths:
         try:
-            row = json.loads(path.read_text(encoding="utf-8"))
-            dependence = row["dependence"]
-            results.append(
-                TargetedReviewResult(
-                    run_id=str(row["run_id"]),
-                    robustness_run_id=str(row["robustness_run_id"]),
-                    validation_run_id=(
-                        str(row["validation_run_id"])
-                        if row.get("validation_run_id") is not None
-                        else None
-                    ),
-                    overfit_run_id=str(row["overfit_run_id"]),
-                    data_quality_run_id=(
-                        str(row["data_quality_run_id"])
-                        if row.get("data_quality_run_id") is not None
-                        else None
-                    ),
-                    execution_stress_run_id=(
-                        str(row["execution_stress_run_id"])
-                        if row.get("execution_stress_run_id")
-                        is not None
-                        else None
-                    ),
-                    symbol=str(row["symbol"]),
-                    strategy_version_id=str(row["strategy_version_id"]),
-                    strategy_semver=str(row["strategy_semver"]),
-                    base_parameter_hash=str(row["base_parameter_hash"]),
-                    data_hash=str(row["data_hash"]),
-                    provider=str(row["provider"]),
-                    evidence_origins=tuple(
-                        row.get("evidence_origins", ())
-                    ),
-                    dependence=DependenceDiagnostic(
-                        oos_session_count=int(
-                            dependence["oos_session_count"]
-                        ),
-                        lag1_autocorrelation=_optional_decimal(
-                            dependence.get("lag1_autocorrelation")
-                        ),
-                        effective_sample_size_ar1=_optional_decimal(
-                            dependence.get(
-                                "effective_sample_size_ar1"
-                            )
-                        ),
-                        newey_west_lags=int(
-                            dependence["newey_west_lags"]
-                        ),
-                        hac_mean_return=_optional_decimal(
-                            dependence.get("hac_mean_return")
-                        ),
-                        hac_standard_error=_optional_decimal(
-                            dependence.get("hac_standard_error")
-                        ),
-                        probability_mean_positive=_optional_decimal(
-                            dependence.get(
-                                "probability_mean_positive"
-                            )
-                        ),
-                        status=str(dependence["status"]),
-                    ),
-                    gates=tuple(
-                        EvidenceGate(
-                            code=str(gate["code"]),
-                            name=str(gate["name"]),
-                            passed=bool(gate["passed"]),
-                            observed=str(gate["observed"]),
-                            required=str(gate["required"]),
-                            evidence=str(gate["evidence"]),
-                            severity=str(
-                                gate.get("severity", "blocking")
-                            ),
-                        )
-                        for gate in row["gates"]
-                    ),
-                    passed_gates=int(row["passed_gates"]),
-                    blocking_failures=int(row["blocking_failures"]),
-                    warnings=tuple(row.get("warnings", ())),
-                    decision=str(row["decision"]),
-                    eligible_for_independent_review=bool(
-                        row["eligible_for_independent_review"]
-                    ),
-                    status=str(row["status"]),
-                )
-            )
+            results.append(load_targeted_review(path))
         except (
             OSError,
             KeyError,
@@ -584,6 +528,182 @@ def load_targeted_reviews(
         ):
             continue
     return tuple(results)
+
+
+def load_targeted_review(path: str | Path) -> TargetedReviewResult:
+    """Parse one exact persisted TargetedReview JSON artifact."""
+
+    row = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(row, dict):
+        raise ValueError("TargetedReview payload must be an object")
+    return targeted_review_from_payload(row)
+
+
+def targeted_review_from_payload(row: dict[str, Any]) -> TargetedReviewResult:
+    """Build one result from the exact JSON object already read by a caller."""
+
+    if not isinstance(row, dict):
+        raise ValueError("TargetedReview payload must be an object")
+    dependence = row["dependence"]
+    gates = _targeted_review_gates_from_payload(row)
+    (
+        passed_gates,
+        blocking_failures,
+        decision,
+        eligible_for_independent_review,
+    ) = _validated_targeted_review_summary(row, gates)
+    return TargetedReviewResult(
+        run_id=str(row["run_id"]),
+        robustness_run_id=str(row["robustness_run_id"]),
+        validation_run_id=(
+            str(row["validation_run_id"])
+            if row.get("validation_run_id") is not None
+            else None
+        ),
+        overfit_run_id=str(row["overfit_run_id"]),
+        data_quality_run_id=(
+            str(row["data_quality_run_id"])
+            if row.get("data_quality_run_id") is not None
+            else None
+        ),
+        execution_stress_run_id=(
+            str(row["execution_stress_run_id"])
+            if row.get("execution_stress_run_id") is not None
+            else None
+        ),
+        symbol=str(row["symbol"]),
+        strategy_version_id=str(row["strategy_version_id"]),
+        strategy_semver=str(row["strategy_semver"]),
+        base_parameter_hash=str(row["base_parameter_hash"]),
+        data_hash=str(row["data_hash"]),
+        provider=str(row["provider"]),
+        evidence_origins=tuple(row.get("evidence_origins", ())),
+        dependence=DependenceDiagnostic(
+            oos_session_count=int(dependence["oos_session_count"]),
+            lag1_autocorrelation=_optional_decimal(
+                dependence.get("lag1_autocorrelation")
+            ),
+            effective_sample_size_ar1=_optional_decimal(
+                dependence.get("effective_sample_size_ar1")
+            ),
+            newey_west_lags=int(dependence["newey_west_lags"]),
+            hac_mean_return=_optional_decimal(dependence.get("hac_mean_return")),
+            hac_standard_error=_optional_decimal(
+                dependence.get("hac_standard_error")
+            ),
+            probability_mean_positive=_optional_decimal(
+                dependence.get("probability_mean_positive")
+            ),
+            status=str(dependence["status"]),
+        ),
+        gates=gates,
+        passed_gates=passed_gates,
+        blocking_failures=blocking_failures,
+        warnings=tuple(row.get("warnings", ())),
+        decision=decision,
+        eligible_for_independent_review=eligible_for_independent_review,
+        status=str(row["status"]),
+    )
+
+
+def _targeted_review_gates_from_payload(
+    row: dict[str, Any],
+) -> tuple[EvidenceGate, ...]:
+    raw_gates = row.get("gates")
+    if not isinstance(raw_gates, list):
+        raise ValueError("TargetedReview gates must be a list")
+    gates: list[EvidenceGate] = []
+    for raw_gate in raw_gates:
+        if not isinstance(raw_gate, dict):
+            raise ValueError("TargetedReview gate must be an object")
+        text_fields = ("code", "name", "observed", "required", "evidence")
+        for field in text_fields:
+            value = raw_gate.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"TargetedReview gate {field} must be non-empty text")
+        if type(raw_gate.get("passed")) is not bool:
+            raise ValueError("TargetedReview gate passed must be a boolean")
+        if raw_gate.get("severity") != "blocking":
+            raise ValueError("TargetedReview gate severity is not supported")
+        gates.append(
+            EvidenceGate(
+                code=raw_gate["code"],
+                name=raw_gate["name"],
+                passed=raw_gate["passed"],
+                observed=raw_gate["observed"],
+                required=raw_gate["required"],
+                evidence=raw_gate["evidence"],
+                severity="blocking",
+            )
+        )
+    gate_codes = tuple(gate.code for gate in gates)
+    if len(gate_codes) != len(set(gate_codes)) or set(gate_codes) != set(
+        TARGETED_REVIEW_REQUIRED_GATE_CODES
+    ):
+        raise ValueError("TargetedReview gate codes are incomplete or duplicated")
+    definitions_by_code = {
+        code: (name, required, evidence)
+        for code, name, required, evidence in TARGETED_REVIEW_GATE_DEFINITIONS
+    }
+    if any(
+        (gate.name, gate.required, gate.evidence)
+        != definitions_by_code[gate.code]
+        for gate in gates
+    ):
+        raise ValueError("TargetedReview gate code does not match its definition")
+    return tuple(gates)
+
+
+def _validated_targeted_review_summary(
+    row: dict[str, Any], gates: tuple[EvidenceGate, ...],
+) -> tuple[int, int, str, bool]:
+    derived_passed_gates = sum(gate.passed for gate in gates)
+    derived_blocking_failures = sum(
+        not gate.passed and gate.severity == "blocking" for gate in gates
+    )
+    derived_eligible = derived_blocking_failures == 0
+    derived_decision = (
+        "ELIGIBLE_FOR_INDEPENDENT_REVIEW" if derived_eligible else "BLOCKED"
+    )
+
+    claimed_passed_gates = row.get("passed_gates")
+    claimed_blocking_failures = row.get("blocking_failures")
+    if type(claimed_passed_gates) is not int or claimed_passed_gates < 0:
+        raise ValueError("TargetedReview passed_gates must be a non-negative integer")
+    if (
+        type(claimed_blocking_failures) is not int
+        or claimed_blocking_failures < 0
+    ):
+        raise ValueError(
+            "TargetedReview blocking_failures must be a non-negative integer"
+        )
+    claimed_eligible = row.get("eligible_for_independent_review")
+    if type(claimed_eligible) is not bool:
+        raise ValueError(
+            "TargetedReview eligibility must be a boolean"
+        )
+    claimed_decision = row.get("decision")
+    if not isinstance(claimed_decision, str):
+        raise ValueError("TargetedReview decision must be text")
+
+    if claimed_passed_gates != derived_passed_gates:
+        raise ValueError("TargetedReview passed_gates does not match its gates")
+    if claimed_blocking_failures != derived_blocking_failures:
+        raise ValueError(
+            "TargetedReview blocking_failures does not match its gates"
+        )
+    if claimed_eligible is not derived_eligible:
+        raise ValueError(
+            "TargetedReview eligibility does not match its gates"
+        )
+    if claimed_decision != derived_decision:
+        raise ValueError("TargetedReview decision does not match its gates")
+    return (
+        derived_passed_gates,
+        derived_blocking_failures,
+        derived_decision,
+        derived_eligible,
+    )
 
 
 def _selected_oos_returns(

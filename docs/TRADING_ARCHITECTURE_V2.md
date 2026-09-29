@@ -5461,6 +5461,47 @@ Repair PR #77 只修改 architecture closure test 与 mutation harness，未改�
 实际 merge SHA 为 `ce09319020bf4ac5f8d3e1e098a849dbea287c43`。该 SHA 是冻结的
 `STAGE_5_FINAL_BASELINE`，也是 Stage 6 的 implementation base。
 
+#### 8.43 Stage 6-A Independent Strategy Evidence Gate Foundation
+
+Stage 6 Git base 为 `acb5d23663f00644ff8391e948d961792225ccb9`；Stage 5 implementation baseline
+为 `ce09319020bf4ac5f8d3e1e098a849dbea287c43`。Stage 6-A 以不可变的
+`StrategyResearchEvidence` 投影绑定单个 `StrategyVersion` 与一个 symbol-specific
+`TargetedReviewResult`，由 `StrategyGateEvaluator` 产生确定性的治理证据，并写入独立的
+`strategy_gate_evaluation` 表。该表不改变冻结的 strategy version/deployment schema。
+
+`TargetedReview` 仍是所有研究统计门槛的唯一 authority；`StrategyGateEvaluator` 只负责接受或拒绝
+证据身份、完整性、来源与上游 independent-review eligibility，不重新计算统计门槛。Stage 6-A
+不执行 lifecycle transition，也不修改 `status`、`mode` 或 legacy `gate_passed`；
+`StrategyGateEvaluation` 目前不是 runtime lifecycle authority，生产 runtime 不读取它。
+单个 symbol 的 PASS 不代表整个策略已覆盖或可进入 Paper；coverage 定义留给 Stage 6-B。
+
+当前 TargetedReview 可证明 `version_id`、`semver`、`parameter_hash`、`data_hash`、provider
+与 evidence origin。现有研究 artifact 尚不能独立证明 `code_hash` 或 `universe_hash`，这两项仍是
+后续 provenance gap。Stage 6-A evaluator/policy 版本分别为 `strategy-gate-v1` 与
+`independent-review-v1`；未配置最大 evidence age 时不臆造过期阈值。研究证据只能从持久化
+TargetedReview JSON artifact 加载：loader 只解析指定文件的同一 payload，并校验文件名 run ID、
+payload run ID 和 timezone-aware `generated_at`；目录中重复的 run ID 不会混入该证据。
+projection 不接受调用方单独提交这些 provenance 字段。evaluation ID 表示语义状态，
+由策略/证据 identity、policy/evaluator 版本、verdict 与 canonical blockers 决定；相同状态的重试
+沿用同一 ID，repository 对重试时间戳差异仍幂等并保留首次记录时间。freshness 导致 blocker/verdict
+改变时产生不同 ID，过期 FAIL 可独立保存。缺失或不可读证据的 FAIL 允许 `review_run_id = NULL`；
+PASS 必须带有效 review run ID。
+
+Stage 6-A 的保证边界是：exact-path provenance、filename/payload identity、timezone-aware artifact time、
+完整且唯一的 canonical gate code 集合、code 与 canonical gate definition 一致、gate detail 与
+aggregate 完全一致、确定性的 semantic evaluation、durable fail-closed persistence、跨版本 evidence
+reuse 防护，以及不修改 strategy lifecycle。
+
+Stage 6-A 只产生经过结构与来源校验的 persisted research evidence；它**不提供**针对有能力协同修改本地
+artifact 的攻击者的 cryptographic authenticity。artifact 内部一致性不能证明 artifact 未被整体篡改。
+因此 `StrategyGateEvaluation` 当前不得成为 lifecycle、Paper eligibility 或 broker execution authority；
+Stage 6-A 也不因此授予任何交易权限。
+
+后续阶段顺序调整为：Stage 6-B 同时定义 evidence coverage 与 authenticated research-evidence provenance；
+Stage 6-C 才引入 governed promotion/demotion controller。authenticated research evidence 必须先形成独立的
+artifact 外部信任根，之后 `StrategyGateEvaluation` 才能成为 lifecycle authority；**Stage 6-C 不得在该
+认证边界闭环前开始**。Stage 6-A 的本地 artifact 校验不替代此认证前置条件。
+
 Stage 5 implementation COMPLETE = YES，Stage 5 Final Architecture Guard CLEAN = YES。
 Stage 5 supervised multi-strategy Paper canary = NOT RUN；Stage 4 operationally COMPLETE = NO，
 因为 supervised Live canary 尚未运行。

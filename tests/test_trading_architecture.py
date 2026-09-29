@@ -326,6 +326,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "strategy.py",
         "strategy_coverage.py",
         "strategy_gate.py",
+        "strategy_lifecycle.py",
         "strategy_parameters.py",
     }
     assert {path.name for path in _python_files(PORTS_DIR)} == {

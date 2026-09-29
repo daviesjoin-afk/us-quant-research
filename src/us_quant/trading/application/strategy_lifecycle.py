@@ -1,0 +1,392 @@
+"""The one authority that decides *why* a strategy version may change state.
+
+``StrategyApplication`` owns the state machine, the repository write and the
+audit row; this controller owns the justification.  Splitting them is the point
+of Stage 6-C: before it, the justification was a ``gate_passed`` boolean stored
+on the version, which meant the field that described a decision also was the
+decision.
+
+The controller evaluates the whole chain for one exact action:
+
+``authenticated evidence PASS`` + ``gate PASS`` + ``coverage PASS``, each bound
+to the current version identity, against policy revisions and an evidence age
+bound, with signing-key revocation re-checked *now* rather than whenever the
+seal happened to be verified.
+
+For a promotion a full PASS is required.  For a pause the opposite is required:
+the pause is authorised *because* a named governance fact became invalid, and a
+pause with nothing wrong is refused.  Both directions are fail-closed, so the
+controller cannot promote on hope or suspend on a whim.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+from us_quant.trading.domain import strategy_lifecycle as _strategy_lifecycle
+from us_quant.trading.domain.evidence_auth import (
+    AuthenticatedStrategyResearchEvidence,
+    EvidenceAuthenticationVerdict,
+    EvidenceKeyTrustStatus,
+)
+from us_quant.trading.domain.strategy import StrategyVersion
+from us_quant.trading.domain.strategy_coverage import (
+    StrategyCoverageEvaluation,
+    StrategyCoverageVerdict,
+)
+from us_quant.trading.domain.strategy_gate import (
+    StrategyGateEvaluation,
+    StrategyGateVerdict,
+)
+from us_quant.trading.domain.strategy_lifecycle import (
+    ACTION_SOURCE_STATUS,
+    ACTION_TARGET_STATUS,
+    LIFECYCLE_CONTROLLER_VERSION,
+    SUPPORTED_LIFECYCLE_POLICY_VERSIONS,
+    StrategyLifecycleAction,
+    StrategyLifecycleAuthorization,
+    StrategyLifecycleBlocker,
+    StrategyLifecycleDecision,
+    StrategyLifecycleDecisionState,
+    StrategyLifecyclePolicy,
+    stable_lifecycle_decision_id,
+)
+from us_quant.trading.ports.evidence_verification import EvidenceTrustRootUnavailable
+
+
+@dataclass(frozen=True, slots=True)
+class StrategyLifecycleDecisionResult:
+    """One decision, plus the authorization it grants if it was allowed.
+
+    The authorization is present only for an authorised decision, so a caller
+    cannot accidentally treat a refusal as permission by ignoring the state.
+    """
+
+    decision: StrategyLifecycleDecision
+    authorization: StrategyLifecycleAuthorization | None
+
+    @property
+    def authorised(self) -> bool:
+        return self.authorization is not None
+
+
+class StrategyLifecycleController:
+    """Decide whether one evidence-driven lifecycle mutation is justified."""
+
+    def __init__(self, *, key_source) -> None:
+        if key_source is None:
+            raise TypeError("key_source is required")
+        self._key_source = key_source
+
+    def decide(
+        self,
+        *,
+        version: StrategyVersion,
+        action: StrategyLifecycleAction,
+        policy: StrategyLifecyclePolicy | None,
+        authenticated: AuthenticatedStrategyResearchEvidence | None,
+        gate: StrategyGateEvaluation | None,
+        coverage: StrategyCoverageEvaluation | None,
+        decided_at: datetime,
+    ) -> StrategyLifecycleDecisionResult:
+        if not isinstance(version, StrategyVersion):
+            raise TypeError("version must be StrategyVersion")
+        if not isinstance(action, StrategyLifecycleAction):
+            raise TypeError("action must be StrategyLifecycleAction")
+        if not isinstance(decided_at, datetime):
+            raise TypeError("decided_at must be a datetime")
+        if decided_at.tzinfo is None or decided_at.utcoffset() is None:
+            raise ValueError("decided_at must be timezone-aware")
+
+        # Without a policy there is no authority to mutate anything.  This is
+        # the fail-closed default, not an oversight.
+        if not isinstance(policy, StrategyLifecyclePolicy):
+            return self._blocked(
+                version=version,
+                action=action,
+                policy=None,
+                blockers={StrategyLifecycleBlocker.POLICY_MISSING},
+                authenticated=authenticated,
+                gate=gate,
+                coverage=coverage,
+                decided_at=decided_at,
+            )
+
+        structural: set[StrategyLifecycleBlocker] = set()
+        if policy.policy_version not in SUPPORTED_LIFECYCLE_POLICY_VERSIONS:
+            structural.add(StrategyLifecycleBlocker.POLICY_VERSION_UNSUPPORTED)
+        if not policy.permits(action):
+            structural.add(StrategyLifecycleBlocker.ACTION_NOT_PERMITTED)
+        if version.status is not ACTION_SOURCE_STATUS[action]:
+            structural.add(StrategyLifecycleBlocker.CURRENT_STATUS_NOT_ELIGIBLE)
+
+        failures = self._chain_failures(
+            version=version,
+            policy=policy,
+            authenticated=authenticated,
+            gate=gate,
+            coverage=coverage,
+            decided_at=decided_at,
+        )
+
+        if action is StrategyLifecycleAction.PAUSE:
+            # A pause is authorised *because* something became invalid, so it
+            # needs a trigger.  Nothing wrong means nothing to pause for.
+            if structural:
+                blockers, triggers = structural, set()
+            elif failures:
+                blockers, triggers = set(), failures
+            else:
+                blockers = {StrategyLifecycleBlocker.PAUSE_NOT_JUSTIFIED}
+                triggers = set()
+        else:
+            blockers, triggers = structural | failures, set()
+
+        if blockers:
+            return self._blocked(
+                version=version,
+                action=action,
+                policy=policy,
+                blockers=blockers,
+                authenticated=authenticated,
+                gate=gate,
+                coverage=coverage,
+                decided_at=decided_at,
+            )
+        return self._authorise(
+            version=version,
+            action=action,
+            policy=policy,
+            triggers=triggers,
+            authenticated=authenticated,
+            gate=gate,
+            coverage=coverage,
+            decided_at=decided_at,
+        )
+
+    # -- the evidence chain ----------------------------------------------
+
+    def _chain_failures(
+        self,
+        *,
+        version: StrategyVersion,
+        policy: StrategyLifecyclePolicy,
+        authenticated: AuthenticatedStrategyResearchEvidence | None,
+        gate: StrategyGateEvaluation | None,
+        coverage: StrategyCoverageEvaluation | None,
+        decided_at: datetime,
+    ) -> set[StrategyLifecycleBlocker]:
+        failures: set[StrategyLifecycleBlocker] = set()
+
+        if authenticated is None:
+            failures.add(StrategyLifecycleBlocker.AUTHENTICATION_MISSING)
+        else:
+            if (
+                authenticated.authentication.verdict
+                is not EvidenceAuthenticationVerdict.PASS
+            ):
+                failures.add(StrategyLifecycleBlocker.AUTHENTICATION_NOT_PASSED)
+            if authenticated.strategy_version_id != version.version_id:
+                failures.add(StrategyLifecycleBlocker.VERSION_IDENTITY_MISMATCH)
+            if authenticated.strategy_semver != version.semver:
+                failures.add(StrategyLifecycleBlocker.STRATEGY_SEMVER_MISMATCH)
+            if authenticated.parameter_hash != version.parameter_hash:
+                failures.add(StrategyLifecycleBlocker.PARAMETER_HASH_MISMATCH)
+            if authenticated.universe_hash != version.universe_hash:
+                failures.add(StrategyLifecycleBlocker.UNIVERSE_HASH_MISMATCH)
+            if authenticated.code_hash != version.code_hash:
+                failures.add(StrategyLifecycleBlocker.CODE_HASH_MISMATCH)
+            # Revocation is re-checked at decision time: a key revoked after the
+            # seal was verified must stop authorising new mutations.
+            try:
+                key = self._key_source.verification_key(authenticated.key_id)
+            except EvidenceTrustRootUnavailable:
+                failures.add(StrategyLifecycleBlocker.TRUST_ROOT_UNAVAILABLE)
+            else:
+                if key is None:
+                    failures.add(StrategyLifecycleBlocker.UNKNOWN_SIGNING_KEY)
+                elif key.trust_status is EvidenceKeyTrustStatus.REVOKED:
+                    failures.add(StrategyLifecycleBlocker.REVOKED_SIGNING_KEY)
+            if policy.maximum_evidence_age is not None:
+                generated_at = authenticated.evidence.generated_at.astimezone(timezone.utc)
+                moment = decided_at.astimezone(timezone.utc)
+                if moment - generated_at > policy.maximum_evidence_age:
+                    failures.add(StrategyLifecycleBlocker.STALE_EVIDENCE)
+
+        if gate is None:
+            failures.add(StrategyLifecycleBlocker.GATE_MISSING)
+        else:
+            if gate.strategy_version_id != version.version_id:
+                failures.add(StrategyLifecycleBlocker.VERSION_IDENTITY_MISMATCH)
+            if gate.verdict is not StrategyGateVerdict.PASS:
+                failures.add(StrategyLifecycleBlocker.GATE_NOT_PASSED)
+            if gate.policy_version != policy.required_gate_policy_version:
+                failures.add(StrategyLifecycleBlocker.POLICY_REVISION_MISMATCH)
+
+        if coverage is None:
+            failures.add(StrategyLifecycleBlocker.COVERAGE_MISSING)
+        else:
+            if coverage.strategy_version_id != version.version_id:
+                failures.add(StrategyLifecycleBlocker.VERSION_IDENTITY_MISMATCH)
+            if coverage.verdict is not StrategyCoverageVerdict.PASS:
+                failures.add(StrategyLifecycleBlocker.COVERAGE_NOT_PASSED)
+            if coverage.policy_version != policy.required_coverage_policy_version:
+                failures.add(StrategyLifecycleBlocker.POLICY_REVISION_MISMATCH)
+            if coverage.strategy_semver != version.semver:
+                failures.add(StrategyLifecycleBlocker.STRATEGY_SEMVER_MISMATCH)
+            if coverage.parameter_hash != version.parameter_hash:
+                failures.add(StrategyLifecycleBlocker.PARAMETER_HASH_MISMATCH)
+            if coverage.universe_hash != version.universe_hash:
+                failures.add(StrategyLifecycleBlocker.UNIVERSE_HASH_MISMATCH)
+            if coverage.code_hash != version.code_hash:
+                failures.add(StrategyLifecycleBlocker.CODE_HASH_MISMATCH)
+
+        return failures
+
+    # -- construction ----------------------------------------------------
+
+    def _blocked(
+        self,
+        *,
+        version: StrategyVersion,
+        action: StrategyLifecycleAction,
+        policy: StrategyLifecyclePolicy | None,
+        blockers: set[StrategyLifecycleBlocker],
+        authenticated,
+        gate,
+        coverage,
+        decided_at: datetime,
+    ) -> StrategyLifecycleDecisionResult:
+        resolved = set(blockers)
+        if not resolved:
+            # Only reachable if a future branch forgets to name a reason; a
+            # refusal must always be explicable.
+            resolved.add(StrategyLifecycleBlocker.POLICY_MISSING)
+        decision = self._build(
+            version=version,
+            action=action,
+            policy=policy,
+            state=StrategyLifecycleDecisionState.BLOCKED,
+            blockers=resolved,
+            triggers=(),
+            authenticated=authenticated,
+            gate=gate,
+            coverage=coverage,
+            decided_at=decided_at,
+            applied_at=None,
+        )
+        return StrategyLifecycleDecisionResult(decision=decision, authorization=None)
+
+    def _authorise(
+        self,
+        *,
+        version: StrategyVersion,
+        action: StrategyLifecycleAction,
+        policy: StrategyLifecyclePolicy,
+        triggers: set[StrategyLifecycleBlocker],
+        authenticated,
+        gate,
+        coverage,
+        decided_at: datetime,
+    ) -> StrategyLifecycleDecisionResult:
+        decision = self._build(
+            version=version,
+            action=action,
+            policy=policy,
+            state=StrategyLifecycleDecisionState.PREPARED,
+            blockers=(),
+            triggers=tuple(sorted(triggers, key=lambda item: item.value)),
+            authenticated=authenticated,
+            gate=gate,
+            coverage=coverage,
+            decided_at=decided_at,
+            applied_at=None,
+        )
+        authorization = StrategyLifecycleAuthorization(
+            version.version_id,
+            action,
+            ACTION_TARGET_STATUS[action],
+            decision.decision_id,
+            decided_at,
+            _controller_token=_strategy_lifecycle._CONTROLLER_TOKEN,
+        )
+        return StrategyLifecycleDecisionResult(
+            decision=decision, authorization=authorization
+        )
+
+    @staticmethod
+    def _build(
+        *,
+        version: StrategyVersion,
+        action: StrategyLifecycleAction,
+        policy: StrategyLifecyclePolicy | None,
+        state: StrategyLifecycleDecisionState,
+        blockers,
+        triggers,
+        authenticated,
+        gate,
+        coverage,
+        decided_at: datetime,
+        applied_at: datetime | None,
+    ) -> StrategyLifecycleDecision:
+        policy_id = policy.policy_id if policy is not None else None
+        policy_revision = policy.revision if policy is not None else None
+        policy_version = policy.policy_version if policy is not None else None
+        authentication_id = (
+            authenticated.authentication.authentication_id
+            if authenticated is not None
+            else None
+        )
+        gate_evaluation_id = gate.evaluation_id if gate is not None else None
+        coverage_evaluation_id = coverage.evaluation_id if coverage is not None else None
+        coverage_policy_id = coverage.policy_id if coverage is not None else None
+        coverage_policy_revision = (
+            coverage.policy_revision if coverage is not None else None
+        )
+        blockers_tuple = tuple(sorted(set(blockers), key=lambda item: item.value))
+        triggers_tuple = tuple(sorted(set(triggers), key=lambda item: item.value))
+        return StrategyLifecycleDecision(
+            decision_id=stable_lifecycle_decision_id(
+                strategy_version_id=version.version_id,
+                action=action,
+                source_status=ACTION_SOURCE_STATUS[action],
+                target_status=ACTION_TARGET_STATUS[action],
+                policy_id=policy_id,
+                policy_revision=policy_revision,
+                authentication_id=authentication_id,
+                gate_evaluation_id=gate_evaluation_id,
+                coverage_evaluation_id=coverage_evaluation_id,
+                blockers=blockers_tuple,
+                triggers=triggers_tuple,
+                controller_version=LIFECYCLE_CONTROLLER_VERSION,
+            ),
+            strategy_version_id=version.version_id,
+            strategy_semver=version.semver,
+            parameter_hash=version.parameter_hash,
+            universe_hash=version.universe_hash,
+            code_hash=version.code_hash,
+            action=action,
+            source_status=ACTION_SOURCE_STATUS[action],
+            target_status=ACTION_TARGET_STATUS[action],
+            state=state,
+            blockers=blockers_tuple,
+            triggers=triggers_tuple,
+            policy_id=policy_id,
+            policy_revision=policy_revision,
+            policy_version=policy_version,
+            authentication_id=authentication_id,
+            gate_evaluation_id=gate_evaluation_id,
+            coverage_evaluation_id=coverage_evaluation_id,
+            coverage_policy_id=coverage_policy_id,
+            coverage_policy_revision=coverage_policy_revision,
+            controller_version=LIFECYCLE_CONTROLLER_VERSION,
+            authorized_at=decided_at,
+            applied_at=applied_at,
+        )
+
+
+__all__ = [
+    "StrategyLifecycleController",
+    "StrategyLifecycleDecisionResult",
+]

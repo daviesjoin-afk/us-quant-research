@@ -5461,6 +5461,25 @@ Repair PR #77 只修改 architecture closure test 与 mutation harness，未改�
 实际 merge SHA 为 `ce09319020bf4ac5f8d3e1e098a849dbea287c43`。该 SHA 是冻结的
 `STAGE_5_FINAL_BASELINE`，也是 Stage 6 的 implementation base。
 
+#### 8.43 Stage 6-A Independent Strategy Evidence Gate Foundation
+
+Stage 6 Git base 为 `acb5d23663f00644ff8391e948d961792225ccb9`；Stage 5 implementation baseline
+为 `ce09319020bf4ac5f8d3e1e098a849dbea287c43`。Stage 6-A 以不可变的
+`StrategyResearchEvidence` 投影绑定单个 `StrategyVersion` 与一个 symbol-specific
+`TargetedReviewResult`，由 `StrategyGateEvaluator` 产生确定性的治理证据，并写入独立的
+`strategy_gate_evaluation` 表。该表不改变冻结的 strategy version/deployment schema。
+
+`TargetedReview` 仍是所有研究统计门槛的唯一 authority；`StrategyGateEvaluator` 只负责接受或拒绝
+证据身份、完整性、来源与上游 independent-review eligibility，不重新计算统计门槛。Stage 6-A
+不执行 lifecycle transition，也不修改 `status`、`mode` 或 legacy `gate_passed`；
+`StrategyGateEvaluation` 目前不是 runtime lifecycle authority，生产 runtime 不读取它。
+单个 symbol 的 PASS 不代表整个策略已覆盖或可进入 Paper；coverage 定义留给 Stage 6-B。
+
+当前 TargetedReview 可证明 `version_id`、`semver`、`parameter_hash`、`data_hash`、provider
+与 evidence origin。现有研究 artifact 尚不能独立证明 `code_hash` 或 `universe_hash`，这两项仍是
+后续 provenance gap。Stage 6-A evaluator/policy 版本分别为 `strategy-gate-v1` 与
+`independent-review-v1`；未配置最大 evidence age 时不臆造过期阈值。
+
 Stage 5 implementation COMPLETE = YES，Stage 5 Final Architecture Guard CLEAN = YES。
 Stage 5 supervised multi-strategy Paper canary = NOT RUN；Stage 4 operationally COMPLETE = NO，
 因为 supervised Live canary 尚未运行。

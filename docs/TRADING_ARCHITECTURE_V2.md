@@ -5455,15 +5455,24 @@ Paper service、order repository、Risk authority 与 launch facts；不直接�
 Stage 5-E PR #75 已通过 merge commit 合并；实际 merge SHA 与 Stage 5-F base 均为
 `daf88b39af1ad0a26e72fc73343ef1ce17821059`。Stage 5-F 从独立分支
 `refactor/portfolio-runtime-final` 开始，只收口架构守卫、最终回归、mutation aggregate 和操作文档；
-它不增加策略、broker 行为、资金权限或 Live capability。Stage 5 Final PR 和 merge SHA 会在合并后
-记录于 Stage 5 最终报告，以免把尚未合并时的 tentative SHA 当成正式基线。
+它不增加策略、broker 行为、资金权限或 Live capability。Stage 5-F PR #76 已通过 merge commit
+合并，实际 merge SHA 为 `acd54378004491a9fba7ee7ba6573b22355865b5`。Stage 5 Final Closure Guard
+Repair PR #77 只修改 architecture closure test 与 mutation harness，未改变 production behavior；
+实际 merge SHA 为 `ce09319020bf4ac5f8d3e1e098a849dbea287c43`。该 SHA 是冻结的
+`STAGE_5_FINAL_BASELINE`，也是 Stage 6 的 implementation base。
+
+Stage 5 implementation COMPLETE = YES，Stage 5 Final Architecture Guard CLEAN = YES。
+Stage 5 supervised multi-strategy Paper canary = NOT RUN；Stage 4 operationally COMPLETE = NO，
+因为 supervised Live canary 尚未运行。
 
 正式合并链：Stage 5-A PR #70 `0e7b5b7ade3705f9083a70fa935d58783777817b`；Stage 5-B PR #71
 `e9deef1ec0e09f5ff51fbfd3abf658e2a1082f11`；Stage 5-C PR #72
 `c23a2cfcdbddde1a51aa3c4917dc2f010f09c00e`；Stage 5-D PR #73
 `6cbd1a4ddeddfc374526676b35fd5b425517e0f9`；Stage 5-D closure PR #74
 `254726b1056c47beeca1dea778bdd2f97c2bcf43`；Stage 5-E PR #75
-`daf88b39af1ad0a26e72fc73343ef1ce17821059`。Stage 3 Final 为 PR #62
+`daf88b39af1ad0a26e72fc73343ef1ce17821059`；Stage 5-F PR #76
+`acd54378004491a9fba7ee7ba6573b22355865b5`；Stage 5 Final Closure Guard Repair PR #77
+`ce09319020bf4ac5f8d3e1e098a849dbea287c43`。Stage 3 Final 为 PR #62
 `61d0b1a13e9f2be49d3c2134fdc27f4cd09813a8`，Stage 4 Final 为 PR #69
 `b4d8112a180273947afd56b879d2fd155ad06d13`。
 

@@ -324,6 +324,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "risk.py",
         "session.py",
         "strategy.py",
+        "strategy_coverage.py",
         "strategy_gate.py",
         "strategy_parameters.py",
     }
@@ -346,6 +347,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "portfolio_runtime.py",
         "portfolio_order_truth.py",
         "research_evidence_artifact.py",
+        "strategy_coverage_repository.py",
         "strategy_repository.py",
         "strategy_gate_repository.py",
     }
@@ -1003,6 +1005,7 @@ NON_MARKET_DATA_ADAPTER_MODULES = {
     "evidence_signature.py",
     "evidence_trust_store.py",
     "sqlite/evidence_authentication_repository.py",
+    "sqlite/strategy_coverage_repository.py",
 }
 
 
@@ -1545,6 +1548,7 @@ def test_only_composition_roots_wire_adapters_into_applications() -> None:
         "trading/composition/portfolio_operations.py",
         "trading/composition/portfolio_paper.py",
         "trading/composition/strategies.py",
+        "trading/composition/strategy_coverage.py",
         "trading/composition/strategy_gate.py",
     ], wiring_modules
 

@@ -9,6 +9,17 @@ EVALUATOR = SRC / "trading" / "application" / "strategy_gate.py"
 ADAPTER = SRC / "trading" / "adapters" / "research_evidence.py"
 COMPOSITION = SRC / "trading" / "composition" / "strategy_gate.py"
 
+# Stage 6-B2 coverage is the *sanctioned* consumer of gate evaluations: its
+# whole job is to compose "authenticated evidence PASS" with "gate PASS".  It is
+# therefore allowlisted below, by name and with a reason, rather than by
+# loosening the guard.  The guard's teeth are unchanged: it still fails if a
+# runtime, broker-adapter or desktop module starts reaching for the gate.
+COVERAGE_DOMAIN = SRC / "trading" / "domain" / "strategy_coverage.py"
+COVERAGE_APPLICATION = SRC / "trading" / "application" / "strategy_coverage.py"
+SANCTIONED_GATE_CONSUMERS = frozenset(
+    {EVALUATOR, COVERAGE_DOMAIN, COVERAGE_APPLICATION}
+)
+
 
 def _text(path):
     return path.read_text(encoding="utf-8")
@@ -71,6 +82,14 @@ def test_a12_to_a16_targeted_review_owns_statistical_thresholds():
 
 
 def test_a17_and_a18_stage4_and_stage5_production_paths_are_unchanged():
+    """Runtime, broker adapters and the desktop must not reach the gate.
+
+    The application layer is scanned too, minus the modules whose job *is* to
+    consume gate evidence -- the gate evaluator itself and, since Stage 6-B2,
+    coverage.  A new application module that mentions the gate without being
+    allowlisted still turns this red, which is the property worth keeping.
+    """
+
     protected_roots = (
         SRC / "trading" / "application",
         SRC / "trading" / "adapters" / "ibkr",
@@ -83,9 +102,19 @@ def test_a17_and_a18_stage4_and_stage5_production_paths_are_unchanged():
     references = [
         str(path.relative_to(SRC))
         for path in protected_files
-        if path.exists() and path != EVALUATOR and "strategy_gate" in _text(path).lower()
+        if path.exists()
+        and path not in SANCTIONED_GATE_CONSUMERS
+        and "strategy_gate" in _text(path).lower()
     ]
     assert references == []
+
+
+def test_a18b_sanctioned_gate_consumers_are_exactly_the_gate_and_coverage():
+    """The allowlist above must not quietly grow."""
+
+    assert SANCTIONED_GATE_CONSUMERS == {
+        EVALUATOR, COVERAGE_DOMAIN, COVERAGE_APPLICATION,
+    }
 
 
 def test_a19_and_a20_no_ai_or_optimizer_imports():
@@ -94,11 +123,19 @@ def test_a19_and_a20_no_ai_or_optimizer_imports():
 
 
 def test_a21_gate_is_not_wired_into_runtime_or_lifecycle():
+    """Only the gate's own modules and coverage may name its evaluation type.
+
+    Coverage is included because composing gate PASSes is precisely its
+    authority; runtime, lifecycle, storage and desktop are still excluded, so a
+    gate evaluation still cannot become a lifecycle input by accident.
+    """
+
     changed_refs = []
     allowed = {
         DOMAIN, EVALUATOR, ADAPTER, COMPOSITION,
         SRC / "trading" / "ports" / "strategy_gate_repository.py",
         SRC / "trading" / "adapters" / "sqlite" / "strategy_gate_repository.py",
+        COVERAGE_DOMAIN, COVERAGE_APPLICATION,
     }
     for path in SRC.rglob("*.py"):
         if path in allowed:

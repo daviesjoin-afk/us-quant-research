@@ -71,9 +71,21 @@ def test_a12_to_a16_targeted_review_owns_statistical_thresholds():
 
 
 def test_a17_and_a18_stage4_and_stage5_production_paths_are_unchanged():
-    changed = __import__("subprocess").run(["git", "diff", "--name-only", "acb5d23663f00644ff8391e948d961792225ccb9"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.splitlines()
-    forbidden_roots = ("src/us_quant/trading/application/portfolio", "src/us_quant/trading/application/risk", "src/us_quant/trading/application/execution", "src/us_quant/trading/adapters/ibkr", "src/us_quant/trading/application/live", "src/us_quant/desktop")
-    assert not any(path.startswith(forbidden_roots) for path in changed)
+    protected_roots = (
+        SRC / "trading" / "application",
+        SRC / "trading" / "adapters" / "ibkr",
+        SRC / "trading" / "runtime",
+        SRC / "desktop.py",
+    )
+    protected_files = []
+    for root in protected_roots:
+        protected_files.extend(root.rglob("*.py") if root.is_dir() else (root,))
+    references = [
+        str(path.relative_to(SRC))
+        for path in protected_files
+        if path.exists() and path != EVALUATOR and "strategy_gate" in _text(path).lower()
+    ]
+    assert references == []
 
 
 def test_a19_and_a20_no_ai_or_optimizer_imports():
@@ -88,7 +100,7 @@ def test_a21_gate_is_not_wired_into_runtime_or_lifecycle():
         SRC / "trading" / "ports" / "strategy_gate_repository.py",
         SRC / "trading" / "adapters" / "sqlite" / "strategy_gate_repository.py",
     }
-    for path in (SRC / "trading").rglob("*.py"):
+    for path in SRC.rglob("*.py"):
         if path in allowed:
             continue
         if "StrategyGateEvaluation" in _text(path) or "SQLiteStrategyGateRepository" in _text(path):

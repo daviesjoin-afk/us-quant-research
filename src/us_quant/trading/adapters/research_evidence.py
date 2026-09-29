@@ -19,7 +19,7 @@ from us_quant.trading.domain.strategy_gate import (
 
 
 class StrategyEvidenceProjectionError(ValueError):
-    """The research artifact cannot be represented as trusted gate evidence."""
+    """The research artifact cannot be represented as validated gate evidence."""
 
 
 _LOADER_TOKEN = object()

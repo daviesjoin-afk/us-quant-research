@@ -6,15 +6,21 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Mapping
 
 from us_quant.targeted_review import (
     TargetedReviewResult,
     targeted_review_from_payload,
 )
 
-from us_quant.trading.domain.strategy_gate import (
+from us_quant.trading.domain.research_evidence import (
+    LoadedResearchEvidence,
     StrategyEvidenceIdentity,
     StrategyResearchEvidence,
+)
+from us_quant.trading.ports.research_evidence_artifact import (
+    ResearchEvidenceArtifactUnavailable,
 )
 
 
@@ -27,12 +33,19 @@ _LOADER_TOKEN = object()
 
 @dataclass(frozen=True, slots=True, init=False)
 class LoadedTargetedReviewArtifact:
-    """A TargetedReview result paired with metadata read from its stored file."""
+    """A TargetedReview result paired with metadata read from its stored file.
+
+    ``payload`` is the exact parsed object the result was projected from.  It
+    is retained so that a detached seal can be checked against the canonical
+    digest of *this* read, rather than re-reading the file and reopening a
+    window in which the two reads could disagree.
+    """
 
     result: TargetedReviewResult
     artifact_run_id: str
     generated_at: datetime
     source_path: Path
+    payload: Mapping[str, Any]
 
     def __init__(
         self,
@@ -40,6 +53,7 @@ class LoadedTargetedReviewArtifact:
         artifact_run_id: str,
         generated_at: datetime,
         source_path: Path,
+        payload: Mapping[str, Any],
         *,
         _loader_token: object,
     ) -> None:
@@ -49,10 +63,13 @@ class LoadedTargetedReviewArtifact:
             raise ValueError("TargetedReview artifact identity does not match its file")
         if generated_at.tzinfo is None or generated_at.utcoffset() is None:
             raise ValueError("TargetedReview generated_at must be timezone-aware")
+        if not isinstance(payload, Mapping):
+            raise TypeError("TargetedReview artifact payload must be a mapping")
         object.__setattr__(self, "result", result)
         object.__setattr__(self, "artifact_run_id", artifact_run_id)
         object.__setattr__(self, "generated_at", generated_at)
         object.__setattr__(self, "source_path", source_path)
+        object.__setattr__(self, "payload", MappingProxyType(dict(payload)))
 
 
 def load_targeted_review_artifact(path: str | Path) -> LoadedTargetedReviewArtifact:
@@ -99,6 +116,7 @@ def load_targeted_review_artifact(path: str | Path) -> LoadedTargetedReviewArtif
             artifact_run_id,
             generated_at,
             artifact_path,
+            row,
             _loader_token=_LOADER_TOKEN,
         )
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as error:
@@ -146,9 +164,30 @@ def project_targeted_review(
         ) from error
 
 
+class TargetedReviewArtifactSource:
+    """Serve review artifacts through the port the application layer depends on.
+
+    This is the adapter half of :class:`ResearchEvidenceArtifactSourcePort`.  It
+    exists so that the authentication application never imports this module:
+    the composition decides which loader is used, and the application only sees
+    a validated payload plus its projection.
+    """
+
+    def load(self, artifact_path: str | Path) -> LoadedResearchEvidence:
+        try:
+            artifact = load_targeted_review_artifact(artifact_path)
+            evidence = project_targeted_review(artifact)
+        except StrategyEvidenceProjectionError as error:
+            raise ResearchEvidenceArtifactUnavailable(
+                "TargetedReview artifact is missing, malformed, or inconsistent"
+            ) from error
+        return LoadedResearchEvidence(payload=artifact.payload, evidence=evidence)
+
+
 __all__ = [
     "LoadedTargetedReviewArtifact",
     "StrategyEvidenceProjectionError",
+    "TargetedReviewArtifactSource",
     "load_targeted_review_artifact",
     "project_targeted_review",
 ]

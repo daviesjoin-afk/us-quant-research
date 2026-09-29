@@ -26,6 +26,30 @@ MINIMUM_OOS_SESSIONS = 10
 MAXIMUM_PBO = Decimal("0.50")
 MINIMUM_DSR_PROBABILITY = Decimal("0.95")
 MINIMUM_HAC_POSITIVE_PROBABILITY = Decimal("0.95")
+TARGETED_REVIEW_REQUIRED_GATE_CODES = (
+    "identity",
+    "captured_origin",
+    "complete_sessions",
+    "quality_identity",
+    "high_quality_sessions",
+    "minimum_completeness",
+    "source_age",
+    "walk_forward_folds",
+    "test_isolation",
+    "validation_gates",
+    "oos_return",
+    "oos_excess",
+    "pbo",
+    "dsr",
+    "dependence",
+    "effective_oos",
+    "hac_positive",
+    "execution_constraints",
+    "oos_execution",
+    "stress_identity",
+    "cost_stress",
+    "top_book_capacity",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -609,6 +633,11 @@ def _targeted_review_gates_from_payload(
                 severity="blocking",
             )
         )
+    gate_codes = tuple(gate.code for gate in gates)
+    if len(gate_codes) != len(set(gate_codes)) or set(gate_codes) != set(
+        TARGETED_REVIEW_REQUIRED_GATE_CODES
+    ):
+        raise ValueError("TargetedReview gate codes are incomplete or duplicated")
     return tuple(gates)
 
 

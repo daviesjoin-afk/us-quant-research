@@ -6,7 +6,8 @@ import json
 import pytest
 
 from us_quant.targeted_review import (
-    DependenceDiagnostic, EvidenceGate, TargetedReviewResult, save_targeted_review,
+    DependenceDiagnostic, EvidenceGate, TargetedReviewResult,
+    TARGETED_REVIEW_REQUIRED_GATE_CODES, save_targeted_review,
 )
 from us_quant.trading.adapters.research_evidence import (
     StrategyEvidenceProjectionError, load_targeted_review_artifact,
@@ -54,6 +55,10 @@ def _evidence(**changes):
 
 
 def _review(**changes):
+    gates = tuple(
+        EvidenceGate(code, code, True, "yes", "yes", "evidence")
+        for code in TARGETED_REVIEW_REQUIRED_GATE_CODES
+    )
     values = dict(
         run_id="review-1", robustness_run_id="robust-1", validation_run_id="validation-1",
         overfit_run_id="overfit-1", data_quality_run_id="quality-1",
@@ -61,8 +66,8 @@ def _review(**changes):
         strategy_semver="1.0.0", base_parameter_hash="parameter-1", data_hash="data-1",
         provider="provider-1", evidence_origins=("captured_stream",),
         dependence=DependenceDiagnostic(12, None, None, 0, None, None, None, "pass"),
-        gates=(EvidenceGate("g1", "gate", True, "yes", "yes", "evidence"),),
-        passed_gates=1, blocking_failures=0, warnings=(),
+        gates=gates,
+        passed_gates=len(gates), blocking_failures=0, warnings=(),
         decision="ELIGIBLE_FOR_INDEPENDENT_REVIEW", eligible_for_independent_review=True,
         status="PASS",
     )
@@ -84,15 +89,25 @@ def test_valid_evidence_passes_and_projection_uses_persisted_artifact_fields(tmp
     result = StrategyGateEvaluator().evaluate(version=_version(), evidence=projected, policy=StrategyGatePolicy(), evaluated_at=NOW)
     assert result.verdict is StrategyGateVerdict.PASS
     assert result.review_run_id == "review-1"
-    assert result.review_gate_count == 1
+    assert result.review_gate_count == len(TARGETED_REVIEW_REQUIRED_GATE_CODES)
 
 
 def test_targeted_review_ineligible_flag_is_preserved_by_projection(tmp_path):
     _, artifact = _loaded_artifact(
         tmp_path,
         _review(
-            gates=(EvidenceGate("g1", "gate", False, "no", "yes", "evidence"),),
-            passed_gates=0,
+            gates=(
+                EvidenceGate(
+                    TARGETED_REVIEW_REQUIRED_GATE_CODES[0],
+                    TARGETED_REVIEW_REQUIRED_GATE_CODES[0],
+                    False,
+                    "no",
+                    "yes",
+                    "evidence",
+                ),
+                *_review().gates[1:],
+            ),
+            passed_gates=len(TARGETED_REVIEW_REQUIRED_GATE_CODES) - 1,
             blocking_failures=1,
             eligible_for_independent_review=False,
             decision="BLOCKED",
@@ -286,7 +301,7 @@ def test_exact_artifact_payload_is_not_mixed_with_duplicate_run_id_file(tmp_path
             lambda payload: (
                 payload["gates"][0].update(passed=False),
                 payload.update(
-                    passed_gates=0,
+                    passed_gates=len(TARGETED_REVIEW_REQUIRED_GATE_CODES) - 1,
                     eligible_for_independent_review=False,
                     decision="BLOCKED",
                 ),
@@ -301,7 +316,7 @@ def test_exact_artifact_payload_is_not_mixed_with_duplicate_run_id_file(tmp_path
             lambda payload: (
                 payload["gates"][0].update(passed=False),
                 payload.update(
-                    passed_gates=0,
+                    passed_gates=len(TARGETED_REVIEW_REQUIRED_GATE_CODES) - 1,
                     blocking_failures=1,
                     eligible_for_independent_review=True,
                     decision="BLOCKED",
@@ -317,7 +332,7 @@ def test_exact_artifact_payload_is_not_mixed_with_duplicate_run_id_file(tmp_path
             lambda payload: (
                 payload["gates"][0].update(passed=False),
                 payload.update(
-                    passed_gates=0,
+                    passed_gates=len(TARGETED_REVIEW_REQUIRED_GATE_CODES) - 1,
                     blocking_failures=1,
                     eligible_for_independent_review=False,
                     decision="ELIGIBLE_FOR_INDEPENDENT_REVIEW",
@@ -370,6 +385,21 @@ def test_ordinary_targeted_review_loader_uses_strict_gate_parser(tmp_path):
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     assert load_targeted_reviews(tmp_path) == ()
+
+
+@pytest.mark.parametrize("corruption", ["missing", "duplicate"])
+def test_artifact_requires_complete_unique_gate_code_set(tmp_path, corruption):
+    path, _ = _loaded_artifact(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if corruption == "missing":
+        payload["gates"].pop()
+        payload["passed_gates"] -= 1
+    else:
+        payload["gates"][-1]["code"] = payload["gates"][0]["code"]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(StrategyEvidenceProjectionError):
+        load_targeted_review_artifact(path)
 
 
 @pytest.mark.parametrize(

@@ -34,6 +34,7 @@ from us_quant.trading.domain.evidence_auth import (
     EVIDENCE_SEAL_SCHEMA_VERSION,
     EvidenceKeyTrustStatus,
     EvidenceTrustStoreMalformed,
+    EvidenceVerificationKey,
     ResearchEvidenceSeal,
     canonical_artifact_payload_digest,
     canonical_signed_material,
@@ -303,8 +304,6 @@ def main(argv: list[str] | None = None) -> int:
                 if store_path.exists():
                     existing = read_trust_store(store_path)
                 keys = tuple(key for key in existing if key.key_id != args.key_id)
-                from us_quant.trading.domain.evidence_auth import EvidenceVerificationKey
-
                 merged = keys + (
                     EvidenceVerificationKey(
                         key_id=args.key_id,

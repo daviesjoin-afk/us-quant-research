@@ -28,11 +28,11 @@ from us_quant.trading.ports.strategy_gate_repository import (
 )
 
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS strategy_gate_evaluation (
+_CREATE_TABLE = """
+CREATE TABLE strategy_gate_evaluation (
     evaluation_id TEXT PRIMARY KEY,
     strategy_version_id TEXT NOT NULL,
-    review_run_id TEXT NOT NULL,
+    review_run_id TEXT,
     parameter_hash TEXT,
     data_hash TEXT,
     provider TEXT,
@@ -48,7 +48,9 @@ CREATE TABLE IF NOT EXISTS strategy_gate_evaluation (
     evaluated_at TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     payload_hash TEXT NOT NULL
-);
+)
+"""
+_CREATE_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_strategy_gate_version_time
 ON strategy_gate_evaluation(strategy_version_id, evaluated_at, evaluation_id);
 """
@@ -80,10 +82,6 @@ class SQLiteStrategyGateRepository:
     def record(self, evaluation: StrategyGateEvaluation) -> None:
         if not isinstance(evaluation, StrategyGateEvaluation):
             raise TypeError("evaluation must be StrategyGateEvaluation")
-        if not evaluation.review_run_id:
-            raise StrategyGateRepositoryError(
-                "cannot persist an evaluation without a review run id"
-            )
         payload = _evaluation_payload(evaluation)
         payload_json = _canonical_json(payload)
         payload_hash = sha256(payload_json.encode("utf-8")).hexdigest()
@@ -99,7 +97,7 @@ class SQLiteStrategyGateRepository:
                     if existing is not None:
                         stored = _row_to_evaluation(existing)
                         stored_payload = _canonical_json(_evaluation_payload(stored))
-                        if stored_payload == payload_json:
+                        if _semantic_payload(stored_payload) == _semantic_payload(payload_json):
                             return
                         raise StrategyGateRepositoryConflict(
                             "evaluation id already has a different immutable payload"
@@ -161,9 +159,45 @@ class SQLiteStrategyGateRepository:
     def _initialize(self) -> None:
         try:
             with closing(self._connect()) as connection:
-                with connection:
-                    connection.executescript(_SCHEMA)
+                connection.execute("BEGIN IMMEDIATE")
+                exists = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'strategy_gate_evaluation'"
+                ).fetchone() is not None
+                if not exists:
+                    connection.execute(_CREATE_TABLE)
+                else:
+                    columns = connection.execute(
+                        "PRAGMA table_info(strategy_gate_evaluation)"
+                    ).fetchall()
+                    review_run_column = next(
+                        (row for row in columns if row[1] == "review_run_id"), None
+                    )
+                    if review_run_column is None:
+                        raise StrategyGateRepositoryError(
+                            "strategy gate table is missing review_run_id"
+                        )
+                    if bool(review_run_column[3]):
+                        connection.execute(
+                            "DROP INDEX IF EXISTS idx_strategy_gate_version_time"
+                        )
+                        connection.execute(
+                            "ALTER TABLE strategy_gate_evaluation "
+                            "RENAME TO strategy_gate_evaluation_legacy"
+                        )
+                        connection.execute(_CREATE_TABLE)
+                        connection.execute(
+                            f"INSERT INTO strategy_gate_evaluation ({_COLUMNS}) "
+                            f"SELECT {_COLUMNS} FROM strategy_gate_evaluation_legacy"
+                        )
+                        connection.execute("DROP TABLE strategy_gate_evaluation_legacy")
+                connection.execute(_CREATE_INDEX)
+                connection.commit()
         except sqlite3.Error as error:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
             raise StrategyGateRepositoryError(
                 f"cannot initialize strategy gate store: {error}"
             ) from error
@@ -238,7 +272,7 @@ def _row_to_evaluation(row: tuple[Any, ...]) -> StrategyGateEvaluation:
     indexed_evaluated_at = evaluated_at
     _require_text(evaluation_id, "evaluation_id")
     _require_text(strategy_version_id, "strategy_version_id")
-    _require_text(review_run_id, "review_run_id")
+    _require_optional_text(review_run_id, "review_run_id")
     _require_text(evaluator_version, "evaluator_version")
     _require_text(policy_version, "policy_version")
     _require_text(payload_json, "payload_json")
@@ -278,7 +312,7 @@ def _row_to_evaluation(row: tuple[Any, ...]) -> StrategyGateEvaluation:
         evaluation = StrategyGateEvaluation(
             evaluation_id=_payload_text(parsed, "evaluation_id"),
             strategy_version_id=_payload_text(parsed, "strategy_version_id"),
-            review_run_id=_payload_text(parsed, "review_run_id"),
+            review_run_id=_payload_optional_text(parsed, "review_run_id"),
             parameter_hash=_payload_optional_text(parsed, "parameter_hash"),
             data_hash=_payload_optional_text(parsed, "data_hash"),
             provider=_payload_optional_text(parsed, "provider"),
@@ -349,9 +383,21 @@ def _canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def _semantic_payload(payload_json: str) -> str:
+    """Ignore the first-recorded timestamp when comparing an ID retry."""
+    payload = json.loads(payload_json)
+    payload.pop("evaluated_at", None)
+    return _canonical_json(payload)
+
+
 def _require_text(value: object, name: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise StrategyGateRepositoryError(f"{name} must be nonblank text")
+
+
+def _require_optional_text(value: object, name: str) -> None:
+    if value is not None and (not isinstance(value, str) or not value.strip()):
+        raise StrategyGateRepositoryError(f"{name} must be null or nonblank text")
 
 
 __all__ = ["SQLiteStrategyGateRepository"]

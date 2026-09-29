@@ -71,7 +71,7 @@ def test_stable_id_is_deterministic_and_uses_required_identities():
         strategy_version_id="v1", review_run_id="r1", parameter_hash="p1",
         data_hash="d1", policy_version="independent-review-v1",
         evaluator_version="strategy-gate-v1", symbol="AAPL",
-        evaluated_at=NOW,
+        verdict=StrategyGateVerdict.PASS, blockers=(),
     )
     assert stable_strategy_gate_evaluation_id(**arguments) == stable_strategy_gate_evaluation_id(**arguments)
     for key in (
@@ -80,8 +80,33 @@ def test_stable_id_is_deterministic_and_uses_required_identities():
     ):
         changed = {**arguments, key: f"different-{key}"}
         assert stable_strategy_gate_evaluation_id(**arguments) != stable_strategy_gate_evaluation_id(**changed)
-    changed_time = {**arguments, "evaluated_at": NOW + timedelta(seconds=1)}
-    assert stable_strategy_gate_evaluation_id(**arguments) != stable_strategy_gate_evaluation_id(**changed_time)
+    changed_state = {
+        **arguments,
+        "verdict": StrategyGateVerdict.FAIL,
+        "blockers": (StrategyGateBlocker.STALE_EVIDENCE,),
+    }
+    assert stable_strategy_gate_evaluation_id(**arguments) != stable_strategy_gate_evaluation_id(**changed_state)
+    first_failure = {
+        **arguments, "verdict": StrategyGateVerdict.FAIL,
+        "blockers": (StrategyGateBlocker.EVIDENCE_NOT_ELIGIBLE,),
+    }
+    additional_freshness_blocker = {
+        **arguments, "verdict": StrategyGateVerdict.FAIL,
+        "blockers": (
+            StrategyGateBlocker.EVIDENCE_NOT_ELIGIBLE,
+            StrategyGateBlocker.STALE_EVIDENCE,
+        ),
+    }
+    assert stable_strategy_gate_evaluation_id(**first_failure) != stable_strategy_gate_evaluation_id(**additional_freshness_blocker)
+
+
+def test_pass_requires_review_identity_and_missing_evidence_failure_allows_none():
+    with pytest.raises(ValueError, match="PASS requires a review run id"):
+        replace(_evaluation(), review_run_id=None)
+    missing = replace(
+        _evaluation((StrategyGateBlocker.EVIDENCE_MISSING,)), review_run_id=None,
+    )
+    assert missing.review_run_id is None
 
 
 def test_blocker_order_is_canonical_for_different_input_orderings():

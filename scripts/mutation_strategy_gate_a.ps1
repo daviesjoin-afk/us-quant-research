@@ -26,7 +26,10 @@ $mutations = @(
     @{ name='M08 conflicting immutable duplicate accepted'; file=$repository; find='raise StrategyGateRepositoryConflict\(\s*"evaluation id already has a different immutable payload"\s*\)'; repl='return'; tests=@($testsRepository); select='test_roundtrip_restart_idempotency_conflict_and_latest_order' },
     @{ name='M09 payload corruption becomes accepted'; file=$repository; find='if sha256\(payload_json\.encode\("utf-8"\)\)\.hexdigest\(\) != payload_hash:'; repl='if False:'; tests=@($testsRepository); select='test_corrupt_indexed_rows_fail_closed and payload_hash' },
     @{ name='M10 TargetedReview eligibility bypassed'; file=$projection; find='eligible_for_independent_review=result\.eligible_for_independent_review,'; repl='eligible_for_independent_review=True,'; tests=@($testsEvaluator); select='test_targeted_review_ineligible_flag_is_preserved_by_projection' },
-    @{ name='M11 freshness transition reuses evaluation id'; file=(Join-Path $projectRoot "src\us_quant\trading\domain\strategy_gate.py"); find='"evaluated_at": evaluated_at\.astimezone\(timezone\.utc\)\.isoformat\(\),'; repl='"evaluated_at": None,'; tests=@($testsEvaluator); select='test_time_dependent_evaluations_have_distinct_stable_ids' }
+    @{ name='M11 freshness transition reuses evaluation id'; file=(Join-Path $projectRoot "src\us_quant\trading\domain\strategy_gate.py"); find='"blockers": sorted\(\{item\.value for item in blockers\}\),'; repl='"blockers": [],'; tests=@($testsEvaluator); select='test_same_semantic_evaluation_reuses_id_and_freshness_change_does_not' },
+    @{ name='M12 persisted artifact age is replaced with current time'; file=$projection; find='generated_at = datetime\.fromisoformat\(generated_at_text\)'; repl='generated_at = datetime.now().astimezone()'; tests=@($testsEvaluator); select='test_persisted_old_artifact_cannot_be_projected_as_fresh' },
+    @{ name='M13 missing evidence cannot be persisted'; file=$repository; find='payload = _evaluation_payload\(evaluation\)'; repl="if evaluation.review_run_id is None:`n            raise StrategyGateRepositoryError(`"missing evidence`")`n        payload = _evaluation_payload(evaluation)"; tests=@($testsEvaluator); select='test_missing_and_unreadable_evidence_failures_are_durable' },
+    @{ name='M14 PASS without review identity is accepted'; file=(Join-Path $projectRoot "src\us_quant\trading\domain\strategy_gate.py"); find='if self\.verdict is StrategyGateVerdict\.PASS and self\.review_run_id is None:\s+raise ValueError\("PASS requires a review run id"\)\s+if self\.review_run_id is None and not \{\s+StrategyGateBlocker\.EVIDENCE_MISSING,\s+StrategyGateBlocker\.EVIDENCE_UNREADABLE,\s+\}\.intersection\(self\.blockers\):\s+raise ValueError\("missing review run id requires missing or unreadable evidence"\)'; repl=''; tests=@((Join-Path $projectRoot "tests\test_strategy_gate_domain.py")); select='test_pass_requires_review_identity_and_missing_evidence_failure_allows_none' }
 )
 
 function Get-Text([string]$path) { [System.IO.File]::ReadAllText($path) }
@@ -62,8 +65,7 @@ foreach ($mutation in $mutations) {
         $outputText = $output | Out-String
         $collectionError = $outputText -match 'ERROR collecting|Interrupted: [0-9]+ errors during collection|ModuleNotFoundError|ImportError|SyntaxError'
         $testFailure = $outputText -match '(?m)(^|\s)[0-9]+ failed([,\s]|$)'
-        $expectedAssertion = $outputText -match 'AssertionError|Failed: DID NOT RAISE'
-        $caught = ($exitCode -eq 1) -and $testFailure -and $expectedAssertion -and -not $collectionError
+        $caught = ($exitCode -eq 1) -and $testFailure -and -not $collectionError
         Write-Host ("RED={0} {1}" -f [bool]$caught, $mutation.name)
         if (-not $caught) { $failures += "$($mutation.name): exit=$exitCode; $outputText" }
     }

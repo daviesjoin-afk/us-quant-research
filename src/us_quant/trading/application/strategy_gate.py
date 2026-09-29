@@ -60,10 +60,16 @@ class StrategyGateEvaluator:
             review_run_id=review_run_id,
             parameter_hash=identity.parameter_hash if identity else version.parameter_hash,
             data_hash=identity.data_hash if identity else None,
-            symbol=identity.symbol if identity else None,
             policy_version=policy.policy_version,
             evaluator_version=policy.evaluator_version,
-            evaluated_at=evaluated_at,
+            verdict=verdict,
+            blockers=blockers_tuple,
+            provider=identity.provider if identity else None,
+            review_decision=evidence.decision if evidence else None,
+            review_blocking_failures=evidence.blocking_failures if evidence else None,
+            review_passed_gates=evidence.passed_gates if evidence else None,
+            review_gate_count=evidence.gate_count if evidence else None,
+            symbol=identity.symbol if identity else None,
         )
         return StrategyGateEvaluation(
             evaluation_id=evaluation_id,

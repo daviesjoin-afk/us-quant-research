@@ -8,7 +8,7 @@ state and does not duplicate any statistical research thresholds.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
 import json
@@ -161,6 +161,13 @@ class StrategyGateEvaluation:
         object.__setattr__(self, "blockers", canonical)
         if (self.verdict is StrategyGateVerdict.PASS) != (not self.blockers):
             raise ValueError("PASS requires no blockers and FAIL requires blockers")
+        if self.verdict is StrategyGateVerdict.PASS and self.review_run_id is None:
+            raise ValueError("PASS requires a review run id")
+        if self.review_run_id is None and not {
+            StrategyGateBlocker.EVIDENCE_MISSING,
+            StrategyGateBlocker.EVIDENCE_UNREADABLE,
+        }.intersection(self.blockers):
+            raise ValueError("missing review run id requires missing or unreadable evidence")
         for name in ("review_blocking_failures", "review_passed_gates", "review_gate_count"):
             value = getattr(self, name)
             if value is not None:
@@ -179,12 +186,16 @@ def stable_strategy_gate_evaluation_id(
     data_hash: str | None,
     policy_version: str,
     evaluator_version: str,
-    evaluated_at: datetime,
+    verdict: StrategyGateVerdict,
+    blockers: tuple[StrategyGateBlocker, ...],
     symbol: str | None = None,
+    provider: str | None = None,
+    review_decision: str | None = None,
+    review_blocking_failures: int | None = None,
+    review_passed_gates: int | None = None,
+    review_gate_count: int | None = None,
 ) -> str:
-    """Return a deterministic identity for one time-specific evaluation."""
-
-    _require_aware(evaluated_at, "evaluated_at")
+    """Return a deterministic identity for one semantic evaluation state."""
 
     material = {
         "strategy_version_id": strategy_version_id,
@@ -192,9 +203,15 @@ def stable_strategy_gate_evaluation_id(
         "parameter_hash": parameter_hash,
         "data_hash": data_hash,
         "symbol": symbol,
+        "provider": provider,
         "policy_version": policy_version,
         "evaluator_version": evaluator_version,
-        "evaluated_at": evaluated_at.astimezone(timezone.utc).isoformat(),
+        "verdict": verdict.value,
+        "blockers": sorted({item.value for item in blockers}),
+        "review_decision": review_decision,
+        "review_blocking_failures": review_blocking_failures,
+        "review_passed_gates": review_passed_gates,
+        "review_gate_count": review_gate_count,
     }
     digest = sha256(_canonical_json(material).encode("utf-8")).hexdigest()
     return f"sge-{digest}"

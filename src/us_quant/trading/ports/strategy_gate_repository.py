@@ -23,7 +23,7 @@ class StrategyGateRepositoryPort(Protocol):
     """Store evaluation facts; make no lifecycle or eligibility decisions."""
 
     def record(self, evaluation: StrategyGateEvaluation) -> None:
-        """Persist once; identical retries are idempotent, conflicts are refused."""
+        """Persist once per semantic ID; timestamp-only retries keep the first row."""
 
     def get(self, evaluation_id: str) -> StrategyGateEvaluation:
         """Read one evaluation, raising a typed error for missing/corrupt data."""

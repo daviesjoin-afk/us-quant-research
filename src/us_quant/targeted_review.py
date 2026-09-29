@@ -518,6 +518,13 @@ def targeted_review_from_payload(row: dict[str, Any]) -> TargetedReviewResult:
     if not isinstance(row, dict):
         raise ValueError("TargetedReview payload must be an object")
     dependence = row["dependence"]
+    gates = _targeted_review_gates_from_payload(row)
+    (
+        passed_gates,
+        blocking_failures,
+        decision,
+        eligible_for_independent_review,
+    ) = _validated_targeted_review_summary(row, gates)
     return TargetedReviewResult(
         run_id=str(row["run_id"]),
         robustness_run_id=str(row["robustness_run_id"]),
@@ -562,26 +569,98 @@ def targeted_review_from_payload(row: dict[str, Any]) -> TargetedReviewResult:
             ),
             status=str(dependence["status"]),
         ),
-        gates=tuple(
-            EvidenceGate(
-                code=str(gate["code"]),
-                name=str(gate["name"]),
-                passed=bool(gate["passed"]),
-                observed=str(gate["observed"]),
-                required=str(gate["required"]),
-                evidence=str(gate["evidence"]),
-                severity=str(gate.get("severity", "blocking")),
-            )
-            for gate in row["gates"]
-        ),
-        passed_gates=int(row["passed_gates"]),
-        blocking_failures=int(row["blocking_failures"]),
+        gates=gates,
+        passed_gates=passed_gates,
+        blocking_failures=blocking_failures,
         warnings=tuple(row.get("warnings", ())),
-        decision=str(row["decision"]),
-        eligible_for_independent_review=bool(
-            row["eligible_for_independent_review"]
-        ),
+        decision=decision,
+        eligible_for_independent_review=eligible_for_independent_review,
         status=str(row["status"]),
+    )
+
+
+def _targeted_review_gates_from_payload(
+    row: dict[str, Any],
+) -> tuple[EvidenceGate, ...]:
+    raw_gates = row.get("gates")
+    if not isinstance(raw_gates, list):
+        raise ValueError("TargetedReview gates must be a list")
+    gates: list[EvidenceGate] = []
+    for raw_gate in raw_gates:
+        if not isinstance(raw_gate, dict):
+            raise ValueError("TargetedReview gate must be an object")
+        text_fields = ("code", "name", "observed", "required", "evidence")
+        for field in text_fields:
+            value = raw_gate.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"TargetedReview gate {field} must be non-empty text")
+        if type(raw_gate.get("passed")) is not bool:
+            raise ValueError("TargetedReview gate passed must be a boolean")
+        if raw_gate.get("severity") != "blocking":
+            raise ValueError("TargetedReview gate severity is not supported")
+        gates.append(
+            EvidenceGate(
+                code=raw_gate["code"],
+                name=raw_gate["name"],
+                passed=raw_gate["passed"],
+                observed=raw_gate["observed"],
+                required=raw_gate["required"],
+                evidence=raw_gate["evidence"],
+                severity="blocking",
+            )
+        )
+    return tuple(gates)
+
+
+def _validated_targeted_review_summary(
+    row: dict[str, Any], gates: tuple[EvidenceGate, ...],
+) -> tuple[int, int, str, bool]:
+    derived_passed_gates = sum(gate.passed for gate in gates)
+    derived_blocking_failures = sum(
+        not gate.passed and gate.severity == "blocking" for gate in gates
+    )
+    derived_eligible = derived_blocking_failures == 0
+    derived_decision = (
+        "ELIGIBLE_FOR_INDEPENDENT_REVIEW" if derived_eligible else "BLOCKED"
+    )
+
+    claimed_passed_gates = row.get("passed_gates")
+    claimed_blocking_failures = row.get("blocking_failures")
+    if type(claimed_passed_gates) is not int or claimed_passed_gates < 0:
+        raise ValueError("TargetedReview passed_gates must be a non-negative integer")
+    if (
+        type(claimed_blocking_failures) is not int
+        or claimed_blocking_failures < 0
+    ):
+        raise ValueError(
+            "TargetedReview blocking_failures must be a non-negative integer"
+        )
+    claimed_eligible = row.get("eligible_for_independent_review")
+    if type(claimed_eligible) is not bool:
+        raise ValueError(
+            "TargetedReview eligibility must be a boolean"
+        )
+    claimed_decision = row.get("decision")
+    if not isinstance(claimed_decision, str):
+        raise ValueError("TargetedReview decision must be text")
+
+    if claimed_passed_gates != derived_passed_gates:
+        raise ValueError("TargetedReview passed_gates does not match its gates")
+    if claimed_blocking_failures != derived_blocking_failures:
+        raise ValueError(
+            "TargetedReview blocking_failures does not match its gates"
+        )
+    if claimed_eligible is not derived_eligible:
+        raise ValueError(
+            "TargetedReview eligibility does not match its gates"
+        )
+    if claimed_decision != derived_decision:
+        raise ValueError("TargetedReview decision does not match its gates")
+    return (
+        derived_passed_gates,
+        derived_blocking_failures,
+        derived_decision,
+        derived_eligible,
     )
 
 

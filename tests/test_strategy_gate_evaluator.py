@@ -89,7 +89,14 @@ def test_valid_evidence_passes_and_projection_uses_persisted_artifact_fields(tmp
 
 def test_targeted_review_ineligible_flag_is_preserved_by_projection(tmp_path):
     _, artifact = _loaded_artifact(
-        tmp_path, _review(eligible_for_independent_review=False, decision="BLOCKED"),
+        tmp_path,
+        _review(
+            gates=(EvidenceGate("g1", "gate", False, "no", "yes", "evidence"),),
+            passed_gates=0,
+            blocking_failures=1,
+            eligible_for_independent_review=False,
+            decision="BLOCKED",
+        ),
     )
     projected = project_targeted_review(
         artifact,
@@ -262,6 +269,107 @@ def test_exact_artifact_payload_is_not_mixed_with_duplicate_run_id_file(tmp_path
     assert loaded.generated_at == datetime(2025, 1, 1, tzinfo=timezone.utc)
     assert projected.identity.strategy_version_id == "version-1"
     assert projected.eligible_for_independent_review
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        pytest.param(
+            lambda payload: payload["gates"][0].update(passed=False),
+            id="failed-gate-claimed-eligible",
+        ),
+        pytest.param(
+            lambda payload: payload.update(passed_gates=0),
+            id="passed-gate-count-mismatch",
+        ),
+        pytest.param(
+            lambda payload: (
+                payload["gates"][0].update(passed=False),
+                payload.update(
+                    passed_gates=0,
+                    eligible_for_independent_review=False,
+                    decision="BLOCKED",
+                ),
+            ),
+            id="blocking-failure-count-mismatch",
+        ),
+        pytest.param(
+            lambda payload: payload.update(eligible_for_independent_review=False),
+            id="zero-failures-claimed-ineligible",
+        ),
+        pytest.param(
+            lambda payload: (
+                payload["gates"][0].update(passed=False),
+                payload.update(
+                    passed_gates=0,
+                    blocking_failures=1,
+                    eligible_for_independent_review=True,
+                    decision="BLOCKED",
+                ),
+            ),
+            id="failures-claimed-eligible",
+        ),
+        pytest.param(
+            lambda payload: payload.update(decision="BLOCKED"),
+            id="eligible-with-blocked-decision",
+        ),
+        pytest.param(
+            lambda payload: (
+                payload["gates"][0].update(passed=False),
+                payload.update(
+                    passed_gates=0,
+                    blocking_failures=1,
+                    eligible_for_independent_review=False,
+                    decision="ELIGIBLE_FOR_INDEPENDENT_REVIEW",
+                ),
+            ),
+            id="blocked-with-eligible-decision",
+        ),
+        pytest.param(
+            lambda payload: payload["gates"][0].update(passed="false"),
+            id="string-false-is-not-a-boolean",
+        ),
+        pytest.param(
+            lambda payload: payload["gates"][0].update(severity="advisory"),
+            id="unsupported-severity",
+        ),
+        pytest.param(
+            lambda payload: payload["gates"][0].pop("severity"),
+            id="missing-severity",
+        ),
+        pytest.param(
+            lambda payload: payload["gates"][0].update(name="  "),
+            id="empty-gate-field",
+        ),
+        pytest.param(
+            lambda payload: payload.update(passed_gates=True),
+            id="boolean-is-not-an-integer-count",
+        ),
+        pytest.param(
+            lambda payload: payload.update(eligible_for_independent_review=1),
+            id="integer-is-not-an-eligibility-boolean",
+        ),
+    ],
+)
+def test_artifact_gate_summary_mismatches_fail_closed(tmp_path, tamper):
+    path, _ = _loaded_artifact(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    tamper(payload)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(StrategyEvidenceProjectionError):
+        load_targeted_review_artifact(path)
+
+
+def test_ordinary_targeted_review_loader_uses_strict_gate_parser(tmp_path):
+    from us_quant.targeted_review import load_targeted_reviews
+
+    path, _ = _loaded_artifact(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["gates"][0]["passed"] = "false"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert load_targeted_reviews(tmp_path) == ()
 
 
 @pytest.mark.parametrize(

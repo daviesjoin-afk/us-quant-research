@@ -80,13 +80,6 @@ def load_targeted_review_artifact(path: str | Path) -> LoadedTargetedReviewArtif
             not isinstance(item, str) or not item.strip() for item in origins
         ):
             raise ValueError("artifact evidence_origins is invalid")
-        if type(row.get("eligible_for_independent_review")) is not bool:
-            raise ValueError("artifact eligibility flag is invalid")
-        for key in ("blocking_failures", "passed_gates"):
-            if type(row.get(key)) is not int or row[key] < 0:
-                raise ValueError(f"artifact {key} is invalid")
-        if not isinstance(row.get("gates"), list):
-            raise ValueError("artifact gates are invalid")
         artifact_run_id = row.get("run_id")
         if not isinstance(artifact_run_id, str) or not artifact_run_id.strip():
             raise ValueError("artifact run_id is missing")

@@ -5568,6 +5568,59 @@ Stage 6-B1 不改变 lifecycle：不修改 `StrategyStatus`、不执行 transiti
 `adapters/research_evidence.py` 实现，仅 composition 负责装配。这既满足 FA1–FA5 的内向依赖规则，
 也避免装配方把认证决策重定向到别的 loader。
 
+#### 8.45 Stage 6-B2 Strategy Evidence Coverage Policy
+
+Stage 6-B2 从 Stage 6-B1 的实际 merge SHA `894b4863717d3d45f938f45c44baed22ce82086c` 开始。
+它解决 Stage 6-A/B1 都未覆盖的问题：两者只能证明**单个 symbol 的单个 review** 可被信任，无法证明
+**整个策略 universe 已被覆盖**。因此 coverage 是独立 authority，而不是 gate 或 authentication 的
+推论。一个 symbol 的 PASS **永远不能**代表整个策略 PASS。
+
+Coverage 只**组合**两份既有事实：authenticated evidence PASS 与 `StrategyGateEvaluation` PASS。
+它不重新计算 PBO、DSR、walk-forward、HAC 或 data-quality 阈值——这些继续只属于 `TargetedReview`。
+architecture guard `C02`/`C03` 按名称扫描保证 coverage surface 不出现任何统计门槛名，`C04` 保证它
+不 import gate evaluator（只消费 `StrategyGateEvaluation`），`C05` 保证它不重新认证。
+
+阈值必须显式、版本化地存放在 policy 中，而不是写死在代码里。`StrategyCoveragePolicy` 携带
+`policy_id`、`revision`、`policy_version`、`required_symbols`、`required_universe_hash`、
+`required_code_hash`、`min_distinct_review_runs`、`min_distinct_data_hashes`、
+`maximum_evidence_age`、`created_at`。**所有字段都是必填**（不存在带默认值的字段，也不存在任何
+`StrategyCoveragePolicy` 实例常量），因此不存在"忘记配置即授权一切"的 policy；空 symbol 列表与 0
+最小值都被拒绝。没有 policy 时 `POLICY_MISSING`，fail closed。`C18` 进一步断言 evaluator 中
+**没有任何数值字面量**：授权的数字只能来自 policy。
+
+Coverage 判定要求：version_id / semver / parameter_hash / code_hash / universe_hash 全部精确匹配；
+auth PASS；gate PASS 且该 gate evaluation 确实针对这份 evidence 与这个 version；policy 的
+required universe/code hash 与 version 一致；required symbol 全部覆盖；distinct review run 与
+distinct data hash 达到 policy 最小值；无过期 evidence；无 revoked authentication；无重复 evidence
+identity。所有 blocker 显式记录，`PASS` 当且仅当 blocker 集合为空。out-of-scope symbol 的 evidence
+既不构成失败也不计入 credit。evidence 身份先绑定 version、再校验 gate，因此身份类 blocker 反映的
+是 evidence 自身的问题，而不是被 gate 检查掩盖。
+
+Revocation 在 **coverage 时重新检查**，而不只在签名验证时检查：seal 验证通过后 key 才被撤销的
+evidence 不得继续支撑 coverage claim（`REVOKED_AUTHENTICATION`）。`VERIFY_ONLY` key 仍可支撑已签发
+evidence。trust root 每次求值重新读取，因此撤销无需重启。
+
+持久化使用两张独立表：`strategy_coverage_policy` 与 `strategy_coverage_evaluation`。前者只能通过
+**CAS append** 写入——`expected_current_revision` 为 `None` 表示"尚无任何 revision"，否则必须等于
+store 中最新 revision，且新 policy 的 revision 必须恰好加一。stale writer 会失败而不是改写过去
+claim 所依据的授权；旧 revision 永不删除。CAS 覆盖了主键覆盖不到的情形：store 中 revision 出现空洞
+时，持有过期 expected 的 writer 无法追加下一个 revision，从而不会记录一条从未存在过的 lineage。
+evaluation 记录**精确的 policy revision、精确的 authentication IDs 与精确的 gate evaluation IDs**，
+因此"当时为什么认为该 version 已覆盖"事后可完整回答。evaluation 身份不含求值时钟，重复求值幂等；
+evidence 集或 verdict 改变则产生新记录，旧记录保留。corrupt row（payload hash、indexed column、
+items JSON、verdict）读取时 FAIL CLOSED；冻结的 `strategy_version` / `strategy_deployment` schema
+与 gate/auth 表均不被触碰。
+
+Stage 6-B2 仍不改 lifecycle：PASS 不 transition，FAIL 也不 pause。`C10`/`C11`/`C12` 断言 coverage
+surface 不调用 `transition` / `clone_version`，不出现 `gate_passed`、`StrategyStatus`、
+`PortfolioOperatingPlan`，也不 import strategy repository。`C09` 断言 runtime、broker adapter 与
+desktop 都不 import coverage。
+
+Stage 6-A 的 `test_a17_and_a18` 与 `test_a21` 因 coverage 成为 gate evaluation 的**合法消费者**而
+扩展了白名单：新增 `COVERAGE_DOMAIN`/`COVERAGE_APPLICATION`，并新增 `test_a18b` 断言该白名单不会
+悄悄增长。runtime / lifecycle / storage / desktop 仍被排除，因此 gate evaluation 依然无法意外成为
+lifecycle 输入。
+
 Stage 5 implementation COMPLETE = YES，Stage 5 Final Architecture Guard CLEAN = YES。
 Stage 5 supervised multi-strategy Paper canary = NOT RUN；Stage 4 operationally COMPLETE = NO，
 因为 supervised Live canary 尚未运行。

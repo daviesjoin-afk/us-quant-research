@@ -21,12 +21,17 @@ $application = Join-Path $projectRoot "src\us_quant\trading\application\strategy
 $strategies = Join-Path $projectRoot "src\us_quant\trading\application\strategies.py"
 $repository = Join-Path $projectRoot "src\us_quant\trading\adapters\sqlite\strategy_lifecycle_repository.py"
 $runtimeConfig = Join-Path $projectRoot "src\us_quant\trading\runtime\config.py"
+$launchGate = Join-Path $projectRoot "src\us_quant\trading\application\paper_authorization.py"
+$planBoundary = Join-Path $projectRoot "src\us_quant\trading\application\portfolio_operations.py"
+$appPaths = Join-Path $projectRoot "src\us_quant\paths.py"
 
 $tEvaluator = Join-Path $projectRoot "tests\test_strategy_lifecycle_evaluator.py"
 $tService = Join-Path $projectRoot "tests\test_strategy_lifecycle_service.py"
 $tRepository = Join-Path $projectRoot "tests\test_strategy_lifecycle_repository.py"
 $tArchitecture = Join-Path $projectRoot "tests\test_strategy_lifecycle_architecture.py"
 $tStrategies = Join-Path $projectRoot "tests\test_trading_strategy_application.py"
+$tLaunchGate = Join-Path $projectRoot "tests\test_paper_authorization.py"
+$tPortfolioOps = Join-Path $projectRoot "tests\test_portfolio_operations.py"
 
 $mutations = @(
     # -- authorization is the only bridge ---------------------------------
@@ -72,7 +77,18 @@ $mutations = @(
     # -- architecture -------------------------------------------------------
     @{ name='M31 application imports the lifecycle adapter'; file=$application; find='from us_quant\.trading\.domain\.evidence_auth import \('; repl="from us_quant.trading.adapters.sqlite.strategy_lifecycle_repository import SQLiteStrategyLifecycleRepository  # noqa: F401`nfrom us_quant.trading.domain.evidence_auth import ("; tests=@($tArchitecture); select='test_l08_application_reaches_only_domain_and_ports' },
     @{ name='M32 lifecycle names a statistical threshold'; file=$application; find='class StrategyLifecycleController:'; repl="_STATISTICS_OWNER = `"MAXIMUM_PBO`"`n`n`nclass StrategyLifecycleController:"; tests=@($tArchitecture); select='test_l07_the_lifecycle_surface_never_recomputes_statistics' },
-    @{ name='M33 a runtime module mints an authorization'; file=$runtimeConfig; find='from __future__ import annotations'; repl="from __future__ import annotations`nfrom us_quant.trading.domain.strategy_lifecycle import StrategyLifecycleAuthorization  # noqa: F401`n`n`ndef _forge():`n    return StrategyLifecycleAuthorization(None, None, None, None, None, _controller_token=object())"; tests=@($tArchitecture); select='test_l11_no_protected_layer_mints_an_authorization' }
+    @{ name='M33 a runtime module mints an authorization'; file=$runtimeConfig; find='from __future__ import annotations'; repl="from __future__ import annotations`nfrom us_quant.trading.domain.strategy_lifecycle import StrategyLifecycleAuthorization  # noqa: F401`n`n`ndef _forge():`n    return StrategyLifecycleAuthorization(None, None, None, None, None, _controller_token=object())"; tests=@($tArchitecture); select='test_l11_no_protected_layer_mints_an_authorization' },
+
+    # -- the Paper launch gate ---------------------------------------------
+    @{ name='M34 the plan boundary stops asking the launch gate'; file=$planBoundary; find='if \(\s*\n\s*self\._paper_authorization is None\s*\n\s*or not self\._paper_authorization\(version_id\)\s*\n\s*\):'; repl='if False:'; tests=@($tPortfolioOps); select='test_paper_shadow_alone_is_not_permission or test_a_plan_builder_without_an_authorizer_fails_closed' },
+    @{ name='M35 a revoked key still authorises a launch'; file=$launchGate; find='if key is None or key\.trust_status is EvidenceKeyTrustStatus\.REVOKED:'; repl='if key is None:'; tests=@($tLaunchGate); select='test_a_revoked_key_refuses' },
+    @{ name='M36 a failed authentication still authorises a launch'; file=$launchGate; find='if authentication\.verdict is not EvidenceAuthenticationVerdict\.PASS:'; repl='if False:'; tests=@($tLaunchGate); select='test_a_failed_authentication_refuses' },
+    @{ name='M37 a failed coverage still authorises a launch'; file=$launchGate; find='return coverage\.verdict is StrategyCoverageVerdict\.PASS'; repl='return True'; tests=@($tLaunchGate); select='test_a_failed_coverage_refuses' },
+    @{ name='M38 a decision that never applied authorises a launch'; file=$launchGate; find='decision\.state is StrategyLifecycleDecisionState\.APPLIED'; repl='True'; tests=@($tLaunchGate); select='test_a_prepared_decision_is_not_authority or test_a_superseded_decision_is_not_authority' },
+    @{ name='M39 a pause counts as an entry decision'; file=$launchGate; find='StrategyLifecycleAction\.PROMOTE_TO_PAPER_SHADOW,\s*\n\s*StrategyLifecycleAction\.RESUME_PAPER_SHADOW,'; repl="StrategyLifecycleAction.PROMOTE_TO_PAPER_SHADOW,`n        StrategyLifecycleAction.RESUME_PAPER_SHADOW,`n        StrategyLifecycleAction.PAUSE,"; tests=@($tLaunchGate); select='test_a_pause_alone_never_authorises_a_launch or test_pause_is_not_an_entry_action' },
+    @{ name='M40 an unreadable authentication store raises instead of refusing'; file=$launchGate; find='except EvidenceAuthenticationRepositoryError:'; repl='except ZeroDivisionError:'; tests=@($tLaunchGate); select='test_an_unreadable_store_refuses_rather_than_raising' },
+    @{ name='M41 the plan boundary reads the legacy flag again'; file=$planBoundary; find='if version\.status is not StrategyStatus\.PAPER_SHADOW or version\.mode is not StrategyMode\.PAPER_SHADOW:'; repl="if version.status is not StrategyStatus.PAPER_SHADOW or version.mode is not StrategyMode.PAPER_SHADOW or not version.gate_passed:"; tests=@($tArchitecture); select='test_l20_the_plan_boundary_no_longer_reads_the_legacy_flag' },
+    @{ name='M42 the trust root moves inside the runtime store'; file=$appPaths; find='return self\.state_root / "trust"'; repl='return self.runtime_root / "trust"'; tests=@($tArchitecture); select='test_l25_the_trust_root_stays_outside_the_runtime_store' }
 )
 
 function Get-Text([string]$path) { [System.IO.File]::ReadAllText($path) }

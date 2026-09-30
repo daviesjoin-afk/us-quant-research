@@ -168,8 +168,13 @@ class PortfolioOperatingPlanApplication:
         """Return display-only options and editable values for the Desktop page."""
 
         versions = self._strategies.list_versions()
+        # The label reports what the launch gate would actually decide.  It used
+        # to read the retired ``gate_passed`` flag, which nothing writes any
+        # more -- so every evidence-authorised promotion would have been
+        # displayed as blocked.
+        authorises = self._paper_authorization or (lambda _version_id: False)
         options = tuple(
-            f"{item.version_id} / {item.status.value} / {item.mode.value} / gate={'PASS' if item.gate_passed else 'BLOCKED'} / worker={'READY' if item.strategy_id == 'intraday-auto-rotation' else 'UNAVAILABLE'}"
+            f"{item.version_id} / {item.status.value} / {item.mode.value} / paper={'AUTHORISED' if authorises(item.version_id) else 'NOT_AUTHORISED'} / worker={'READY' if item.strategy_id == 'intraday-auto-rotation' else 'UNAVAILABLE'}"
             for item in sorted(versions, key=lambda value: value.version_id)
         )
         plan = self._repository.load()

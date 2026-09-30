@@ -294,3 +294,130 @@ def test_l18_lifecycle_paths_do_not_import_the_signing_tool():
             "research_evidence_sealing" in target
             for target in _import_targets(path)
         ), path
+
+
+# -- the Paper launch gate ------------------------------------------------
+
+LAUNCH_GATE = SRC / "trading" / "application" / "paper_authorization.py"
+PLAN_BOUNDARY = SRC / "trading" / "application" / "portfolio_operations.py"
+PLAN_COMPOSITION = SRC / "trading" / "composition" / "portfolio_operations.py"
+PATHS = SRC / "paths.py"
+
+GOVERNED_LAYERS = (
+    SRC / "trading" / "runtime",
+    SRC / "trading" / "adapters" / "ibkr",
+    SRC / "trading" / "application" / "portfolio_runtime.py",
+    SRC / "desktop_v2",
+)
+
+
+def test_l19_the_launch_gate_lives_at_the_plan_boundary_only():
+    """Instruction 25: not in the runtime, not in risk, not in execution."""
+
+    assert 'self._paper_authorization(' in _text(PLAN_BOUNDARY)
+
+    offenders = []
+    for root in GOVERNED_LAYERS:
+        files = root.rglob("*.py") if root.is_dir() else (root,)
+        for path in files:
+            if not path.exists() or "__pycache__" in path.parts:
+                continue
+            if "paper_authorization" in _text(path):
+                offenders.append(str(path.relative_to(SRC)))
+
+    assert offenders == []
+
+
+def test_l20_the_plan_boundary_no_longer_reads_the_legacy_flag():
+    tree = ast.parse(_text(PLAN_BOUNDARY))
+    boundary = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        and node.name == "PortfolioOperatingPlanApplication"
+    )
+    validate = next(
+        node
+        for node in ast.walk(boundary)
+        if isinstance(node, ast.FunctionDef) and node.name == "_validate"
+    )
+
+    reads = {
+        node.attr for node in ast.walk(validate) if isinstance(node, ast.Attribute)
+    }
+
+    assert "gate_passed" not in reads
+
+
+def test_l21_the_plan_boundary_fails_closed_without_a_gate():
+    text = _text(PLAN_BOUNDARY)
+
+    assert "self._paper_authorization is None" in text
+    assert "or not self._paper_authorization(" in text
+
+
+def test_l22_the_authorizer_returns_rather_than_raising():
+    """A launch gate that can throw is one a caller wraps in a broad except.
+
+    Scoped to ``authorises``: the constructor *should* raise on a missing
+    dependency, since that is a wiring fault rather than a launch decision.
+    """
+
+    tree = ast.parse(_text(LAUNCH_GATE))
+    authorizer = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "PaperLaunchAuthorizer"
+    )
+    authorises = next(
+        node
+        for node in ast.walk(authorizer)
+        if isinstance(node, ast.FunctionDef) and node.name == "authorises"
+    )
+
+    raises = [node for node in ast.walk(authorises) if isinstance(node, ast.Raise)]
+    returns = [node for node in ast.walk(authorises) if isinstance(node, ast.Return)]
+
+    assert raises == []
+    assert len(returns) >= 8
+
+
+def test_l23_pause_is_never_an_entry_action():
+    from us_quant.trading.application.paper_authorization import PAPER_ENTRY_ACTIONS
+    from us_quant.trading.domain.strategy_lifecycle import StrategyLifecycleAction
+
+    assert PAPER_ENTRY_ACTIONS == {
+        StrategyLifecycleAction.PROMOTE_TO_PAPER_SHADOW,
+        StrategyLifecycleAction.RESUME_PAPER_SHADOW,
+    }
+    assert StrategyLifecycleAction.PAUSE not in PAPER_ENTRY_ACTIONS
+
+
+def test_l24_composition_is_the_only_place_that_names_the_authorizer():
+    for path in (PLAN_BOUNDARY, LAUNCH_GATE):
+        assert not any(
+            "adapters" in target for target in _import_targets(path)
+        ), path
+
+    assert any(
+        "paper_authorization" in target for target in _import_targets(PLAN_COMPOSITION)
+    )
+
+
+def test_l25_the_trust_root_stays_outside_the_runtime_store():
+    """B1 requires verification trust material outside the artifact store."""
+
+    tree = ast.parse(_text(PATHS))
+    trust = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "trust_root"
+    )
+
+    reads = {
+        node.attr for node in ast.walk(trust) if isinstance(node, ast.Attribute)
+    }
+
+    assert "state_root" in reads
+    assert "runtime_root" not in reads
+

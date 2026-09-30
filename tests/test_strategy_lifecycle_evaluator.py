@@ -483,6 +483,32 @@ def test_version_identity_mismatch_blocks_promotion(tmp_path):
     assert Blocker.VERSION_IDENTITY_MISMATCH in result.decision.blockers
 
 
+def test_a_cross_wired_chain_is_refused(tmp_path):
+    """Evidence from one version with a gate and coverage from another.
+
+    The gate and coverage here have both been re-pointed at the version under
+    test, so only the authenticated-evidence binding can catch the mismatch.
+    Without it the chain would look complete and the promotion would proceed.
+    """
+
+    from dataclasses import replace
+
+    chain = _Chain(tmp_path).build()
+    other = _version(
+        identity=StrategyIdentity("family-1", "version-2", PARAMETER_HASH)
+    )
+
+    result = _decide(
+        chain,
+        version=other,
+        gate=replace(chain.gate, strategy_version_id="version-2"),
+        coverage=replace(chain.coverage, strategy_version_id="version-2"),
+    )
+
+    assert result.authorised is False
+    assert Blocker.VERSION_IDENTITY_MISMATCH in result.decision.blockers
+
+
 def test_parameter_hash_mismatch_blocks_promotion(tmp_path):
     chain = _Chain(tmp_path).build()
     other = _version(
@@ -491,6 +517,26 @@ def test_parameter_hash_mismatch_blocks_promotion(tmp_path):
 
     result = _decide(chain, version=other)
 
+    assert Blocker.PARAMETER_HASH_MISMATCH in result.decision.blockers
+
+
+def test_a_parameter_hash_cross_wire_is_refused(tmp_path):
+    """Only the evidence binding can catch this: coverage is re-pointed too."""
+
+    from dataclasses import replace
+
+    chain = _Chain(tmp_path).build()
+    other = _version(
+        identity=StrategyIdentity("family-1", VERSION_ID, "parameter-2")
+    )
+
+    result = _decide(
+        chain,
+        version=other,
+        coverage=replace(chain.coverage, parameter_hash="parameter-2"),
+    )
+
+    assert result.authorised is False
     assert Blocker.PARAMETER_HASH_MISMATCH in result.decision.blockers
 
 

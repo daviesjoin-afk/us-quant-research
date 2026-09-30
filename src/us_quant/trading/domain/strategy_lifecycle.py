@@ -243,8 +243,13 @@ class StrategyLifecycleDecision:
             if value is not None and (type(value) is not int or value < 1):
                 raise ValueError(f"{name} must be a positive integer or None")
         # A decision that is allowed to proceed must name every reason it was
-        # allowed to proceed; a refused one must name why.
-        if self.authorised != (not self.blockers):
+        # allowed to proceed; a refused one must name why.  SUPERSEDED is the
+        # exception: the decision *was* authorised, it simply became moot
+        # because the world moved on, so there is no governance failure to name.
+        if self.state is StrategyLifecycleDecisionState.SUPERSEDED:
+            if self.blockers:
+                raise ValueError("a superseded decision must not carry blockers")
+        elif self.authorised != (not self.blockers):
             raise ValueError("a decision is authorised exactly when it has no blockers")
         # A PAUSE is authorised *because* something became invalid, so it must
         # record that trigger.  A promotion is authorised because nothing is

@@ -278,9 +278,21 @@ def test_page_source_has_no_trading_authority_imports():
         assert forbidden not in text
 
 
+def _authorised(version_id: str) -> bool:
+    """A stub Paper launch authorizer.
+
+    These tests are about plan mechanics, so the launch gate only has to admit.
+    The real authority is ``PaperLaunchAuthorizer``, covered by
+    ``tests/test_paper_authorization.py``.
+    """
+
+    return True
+
+
 def test_plan_missing_refuses_and_save_round_trips_with_audit(tmp_path):
     repository = SQLitePortfolioOperatingPlanRepository(tmp_path / "plan.sqlite")
     application = PortfolioOperatingPlanApplication(
+        paper_authorization=_authorised,
         repository=repository,
         strategies=_GovernedStrategies((_governed_version("strategy-a"),)),
     )
@@ -306,6 +318,7 @@ def test_plan_stale_cas_and_active_session_edits_are_refused(tmp_path):
     repository = SQLitePortfolioOperatingPlanRepository(tmp_path / "plan.sqlite")
     active = False
     application = PortfolioOperatingPlanApplication(
+        paper_authorization=_authorised,
         repository=repository,
         strategies=_GovernedStrategies((_governed_version("strategy-a"),)),
         active_session=lambda: active,
@@ -330,10 +343,10 @@ def test_plan_stale_cas_and_active_session_edits_are_refused(tmp_path):
 @pytest.mark.parametrize("version", [
     _governed_version("strategy-a", status=StrategyStatus.RESEARCH),
     _governed_version("strategy-a", mode=StrategyMode.RESEARCH),
-    _governed_version("strategy-a", gate_passed=False),
 ])
 def test_rejects_non_governed_selection(tmp_path, version):
     application = PortfolioOperatingPlanApplication(
+        paper_authorization=_authorised,
         repository=SQLitePortfolioOperatingPlanRepository(tmp_path / "plan.sqlite"),
         strategies=_GovernedStrategies((version,)),
     )
@@ -344,8 +357,50 @@ def test_rejects_non_governed_selection(tmp_path, version):
         )
 
 
+def test_paper_shadow_alone_is_not_permission(tmp_path):
+    """The launch gate's whole job, and the case ``gate_passed`` used to stand in for.
+
+    A version can be ``PAPER_SHADOW`` with ``gate_passed=False`` -- that is
+    exactly what an evidence-authorised promotion now produces -- so the launch
+    has to be refused or admitted on the strength of the lifecycle record, never
+    on the status alone.
+    """
+
+    application = PortfolioOperatingPlanApplication(
+        paper_authorization=lambda version_id: False,
+        repository=SQLitePortfolioOperatingPlanRepository(tmp_path / "plan.sqlite"),
+        strategies=_GovernedStrategies(
+            (_governed_version("strategy-a", gate_passed=False),)
+        ),
+    )
+    with pytest.raises(
+        PortfolioPlanRefused, match="no current Paper lifecycle authorization"
+    ):
+        application.save(
+            selected_version_ids=("strategy-a",), policy=_configured_policy(),
+            expected_revision=0, operator_reason="must refuse",
+        )
+
+
+def test_a_plan_builder_without_an_authorizer_fails_closed(tmp_path):
+    """No way to check means no launch, not an assumed one."""
+
+    application = PortfolioOperatingPlanApplication(
+        repository=SQLitePortfolioOperatingPlanRepository(tmp_path / "plan.sqlite"),
+        strategies=_GovernedStrategies((_governed_version("strategy-a"),)),
+    )
+    with pytest.raises(
+        PortfolioPlanRefused, match="no current Paper lifecycle authorization"
+    ):
+        application.save(
+            selected_version_ids=("strategy-a",), policy=_configured_policy(),
+            expected_revision=0, operator_reason="must refuse",
+        )
+
+
 def test_unknown_selected_strategy_refuses_portfolio_plan(tmp_path):
     application = PortfolioOperatingPlanApplication(
+        paper_authorization=_authorised,
         repository=SQLitePortfolioOperatingPlanRepository(tmp_path / "plan.sqlite"),
         strategies=_GovernedStrategies((_governed_version("known"),)),
     )
@@ -360,6 +415,7 @@ def test_unknown_selected_strategy_refuses_portfolio_plan(tmp_path):
 
 def test_selected_but_unallocated_strategy_refuses_portfolio_plan(tmp_path):
     application = PortfolioOperatingPlanApplication(
+        paper_authorization=_authorised,
         repository=SQLitePortfolioOperatingPlanRepository(tmp_path / "plan.sqlite"),
         strategies=_GovernedStrategies((_governed_version("selected"),)),
     )
@@ -374,6 +430,7 @@ def test_selected_but_unallocated_strategy_refuses_portfolio_plan(tmp_path):
 
 def test_plan_audit_rejects_secrets_and_raw_paper_account_id(tmp_path):
     application = PortfolioOperatingPlanApplication(
+        paper_authorization=_authorised,
         repository=SQLitePortfolioOperatingPlanRepository(tmp_path / "plan.sqlite"),
         strategies=_GovernedStrategies((_governed_version("strategy-a"),)),
     )
@@ -428,6 +485,7 @@ def test_portfolio_launch_has_no_primary_strategy_and_uses_plan_capital():
 
 def test_editor_form_is_parsed_by_application_and_saved_with_revision(tmp_path):
     application = PortfolioOperatingPlanApplication(
+        paper_authorization=_authorised,
         repository=SQLitePortfolioOperatingPlanRepository(tmp_path / "plan.sqlite"),
         strategies=_GovernedStrategies((_governed_version("strategy-a"),)),
     )

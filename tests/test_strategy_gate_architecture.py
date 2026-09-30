@@ -16,8 +16,19 @@ COMPOSITION = SRC / "trading" / "composition" / "strategy_gate.py"
 # runtime, broker-adapter or desktop module starts reaching for the gate.
 COVERAGE_DOMAIN = SRC / "trading" / "domain" / "strategy_coverage.py"
 COVERAGE_APPLICATION = SRC / "trading" / "application" / "strategy_coverage.py"
+# Stage 6-C lifecycle is the third sanctioned consumer, and the most deliberate
+# one: it is the authority that turns gate and coverage PASSes into a justified
+# state change, so it must be able to read them.
+LIFECYCLE_DOMAIN = SRC / "trading" / "domain" / "strategy_lifecycle.py"
+LIFECYCLE_APPLICATION = SRC / "trading" / "application" / "strategy_lifecycle.py"
 SANCTIONED_GATE_CONSUMERS = frozenset(
-    {EVALUATOR, COVERAGE_DOMAIN, COVERAGE_APPLICATION}
+    {
+        EVALUATOR,
+        COVERAGE_DOMAIN,
+        COVERAGE_APPLICATION,
+        LIFECYCLE_DOMAIN,
+        LIFECYCLE_APPLICATION,
+    }
 )
 
 
@@ -109,11 +120,12 @@ def test_a17_and_a18_stage4_and_stage5_production_paths_are_unchanged():
     assert references == []
 
 
-def test_a18b_sanctioned_gate_consumers_are_exactly_the_gate_and_coverage():
+def test_a18b_sanctioned_gate_consumers_are_exactly_the_gate_and_its_governance_consumers():
     """The allowlist above must not quietly grow."""
 
     assert SANCTIONED_GATE_CONSUMERS == {
         EVALUATOR, COVERAGE_DOMAIN, COVERAGE_APPLICATION,
+        LIFECYCLE_DOMAIN, LIFECYCLE_APPLICATION,
     }
 
 
@@ -136,6 +148,7 @@ def test_a21_gate_is_not_wired_into_runtime_or_lifecycle():
         SRC / "trading" / "ports" / "strategy_gate_repository.py",
         SRC / "trading" / "adapters" / "sqlite" / "strategy_gate_repository.py",
         COVERAGE_DOMAIN, COVERAGE_APPLICATION,
+        LIFECYCLE_DOMAIN, LIFECYCLE_APPLICATION,
     }
     for path in SRC.rglob("*.py"):
         if path in allowed:

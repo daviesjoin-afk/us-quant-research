@@ -468,6 +468,8 @@ class MainWindow(QMainWindow):
         self.portfolio_runtime_registry = PortfolioRuntimeRegistry()
         self.portfolio_operating_plan_application = build_portfolio_operating_plan_application(
             database_path=self.paths.runtime_root / "portfolio_operating_plan.sqlite3",
+            governance_database_path=self.paths.runtime_root / "strategy_governance.sqlite3",
+            trust_store_path=self.paths.strategy_evidence_trust_store_path,
             strategies=self.strategies,
             active_session=lambda: (
                 self.paper_orchestrator.runtime_active

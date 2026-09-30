@@ -126,10 +126,17 @@ class PortfolioOperatingPlanApplication:
         repository: PortfolioOperatingPlanRepositoryPort,
         strategies: StrategyApplication,
         active_session: Callable[[], bool] | None = None,
+        paper_authorization: Callable[[str], bool] | None = None,
     ) -> None:
         self._repository = repository
         self._strategies = strategies
         self._active_session = active_session or (lambda: False)
+        # Fail closed: a plan builder with no way to check whether a promotion is
+        # still authorised refuses every selection rather than assuming it is.
+        # This is the launch boundary, so it is the one place the check belongs
+        # -- instruction 25 keeps it out of the runtime, risk and execution
+        # layers, which trust an already-composed plan.
+        self._paper_authorization = paper_authorization
 
     def load(self) -> PortfolioOperatingPlan:
         plan = self._repository.load()
@@ -161,8 +168,13 @@ class PortfolioOperatingPlanApplication:
         """Return display-only options and editable values for the Desktop page."""
 
         versions = self._strategies.list_versions()
+        # The label reports what the launch gate would actually decide.  It used
+        # to read the retired ``gate_passed`` flag, which nothing writes any
+        # more -- so every evidence-authorised promotion would have been
+        # displayed as blocked.
+        authorises = self._paper_authorization or (lambda _version_id: False)
         options = tuple(
-            f"{item.version_id} / {item.status.value} / {item.mode.value} / gate={'PASS' if item.gate_passed else 'BLOCKED'} / worker={'READY' if item.strategy_id == 'intraday-auto-rotation' else 'UNAVAILABLE'}"
+            f"{item.version_id} / {item.status.value} / {item.mode.value} / paper={'AUTHORISED' if authorises(item.version_id) else 'NOT_AUTHORISED'} / worker={'READY' if item.strategy_id == 'intraday-auto-rotation' else 'UNAVAILABLE'}"
             for item in sorted(versions, key=lambda value: value.version_id)
         )
         plan = self._repository.load()
@@ -310,8 +322,22 @@ class PortfolioOperatingPlanApplication:
             version = versions.get(version_id)
             if version is None:
                 raise PortfolioPlanRefused(f"selected strategy version does not exist: {version_id}")
-            if version.status is not StrategyStatus.PAPER_SHADOW or version.mode is not StrategyMode.PAPER_SHADOW or not version.gate_passed:
+            if version.status is not StrategyStatus.PAPER_SHADOW or version.mode is not StrategyMode.PAPER_SHADOW:
                 raise PortfolioPlanRefused(f"selected strategy version is not governed for Paper: {version_id}")
+            # The legacy ``gate_passed`` column is not consulted.  Nothing writes
+            # it any more, so requiring it would refuse every evidence-authorised
+            # promotion -- which is exactly the gap this check replaces.  What
+            # matters is whether the decision that entered Paper is still valid
+            # *now*: a question about the lifecycle record and the evidence
+            # behind it, not about a stored boolean.
+            if (
+                self._paper_authorization is None
+                or not self._paper_authorization(version_id)
+            ):
+                raise PortfolioPlanRefused(
+                    f"selected strategy version has no current Paper lifecycle "
+                    f"authorization: {version_id}"
+                )
             if version.strategy_id != "intraday-auto-rotation":
                 raise PortfolioPlanRefused(
                     f"no production Paper signal worker is registered for strategy family: {version.strategy_id}"

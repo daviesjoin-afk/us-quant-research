@@ -112,13 +112,20 @@ class PortfolioRuntime:
             if unknown_selected:
                 raise PortfolioRuntimeError("runtime selection contains an unknown version")
 
+            # Eligibility here is status, mode and allocation only.  Governance
+            # -- whether a promotion was *justified* -- was decided and recorded
+            # at the Paper launch boundary before this runtime was composed, and
+            # it deliberately does not live here: a runtime that re-checked the
+            # evidence chain would be a second lifecycle authority, and the
+            # stage-5 ownership rule is that a composed runtime trusts its
+            # frozen plan.  The legacy ``gate_passed`` column is not consulted;
+            # nothing writes it any more.
             eligible = tuple(
                 version
                 for version in versions
                 if version.version_id in selected_version_ids
                 and version.status is StrategyStatus.PAPER_SHADOW
                 and version.mode is StrategyMode.PAPER_SHADOW
-                and version.gate_passed
                 and (allocation := policy.allocation_for(version.version_id)) is not None
                 and allocation.enabled
                 and allocation.capital_weight > 0

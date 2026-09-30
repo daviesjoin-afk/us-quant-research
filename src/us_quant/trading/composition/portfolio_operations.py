@@ -1,13 +1,32 @@
-"""Composition for the durable portfolio operating plan."""
+"""Composition for the durable portfolio operating plan.
+
+Also the place where the Paper launch gate is given teeth: the plan validator
+needs to know whether the lifecycle decision that put a version into Paper is
+still valid *now*, so this module is the only one that names both the plan
+application and the governance stores the answer comes from.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Callable
 
+from us_quant.trading.adapters.evidence_trust_store import (
+    FileEvidenceVerificationKeySource,
+)
+from us_quant.trading.adapters.sqlite.evidence_authentication_repository import (
+    SQLiteEvidenceAuthenticationRepository,
+)
 from us_quant.trading.adapters.sqlite.portfolio_operating_plan_repository import (
     SQLitePortfolioOperatingPlanRepository,
 )
+from us_quant.trading.adapters.sqlite.strategy_coverage_repository import (
+    SQLiteStrategyCoverageRepository,
+)
+from us_quant.trading.adapters.sqlite.strategy_lifecycle_repository import (
+    SQLiteStrategyLifecycleRepository,
+)
+from us_quant.trading.application.paper_authorization import PaperLaunchAuthorizer
 from us_quant.trading.application.portfolio_operations import (
     PortfolioOperatingPlanApplication,
 )
@@ -16,15 +35,31 @@ from us_quant.trading.application.portfolio_operations import (
 def build_portfolio_operating_plan_application(
     *,
     database_path: str | Path,
+    governance_database_path: str | Path,
+    trust_store_path: str | Path,
     strategies,
     active_session: Callable[[], bool],
 ) -> PortfolioOperatingPlanApplication:
-    """Wire the plan service to its durable store at the application boundary."""
+    """Wire the plan service to its store and to its Paper launch gate.
 
+    ``governance_database_path`` holds the lifecycle, authentication and
+    coverage records; ``trust_store_path`` holds the public keys, and is a
+    separate file precisely so it can live outside the runtime store.
+    """
+
+    authorizer = PaperLaunchAuthorizer(
+        decisions=SQLiteStrategyLifecycleRepository(governance_database_path),
+        authentications=SQLiteEvidenceAuthenticationRepository(
+            governance_database_path
+        ),
+        coverages=SQLiteStrategyCoverageRepository(governance_database_path),
+        key_source=FileEvidenceVerificationKeySource(trust_store_path),
+    )
     return PortfolioOperatingPlanApplication(
         repository=SQLitePortfolioOperatingPlanRepository(database_path),
         strategies=strategies,
         active_session=active_session,
+        paper_authorization=authorizer.authorises,
     )
 
 

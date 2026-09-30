@@ -19,6 +19,7 @@ than a ``StrategyVersion``, that stub could not satisfy the port.
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 import json
 import pathlib
@@ -37,12 +38,18 @@ from us_quant.trading.application.strategies import (
 from us_quant.trading.application.strategy_defaults import (
     DEFAULT_STRATEGY_SEEDS,
 )
+from us_quant.trading.domain import strategy_lifecycle as _lifecycle
 from us_quant.trading.domain.strategy import (
     StrategyMode,
     StrategyStatus,
     StrategyVersion,
     canonical_parameters_json,
     parameter_hash_for,
+)
+from us_quant.trading.domain.strategy_lifecycle import (
+    ACTION_TARGET_STATUS,
+    StrategyLifecycleAction,
+    StrategyLifecycleAuthorization,
 )
 from us_quant.trading.domain.strategy_parameters import (
     StrategyParameterError,
@@ -522,23 +529,80 @@ def test_cloning_validates_the_new_parameters(seeded, application) -> None:
 # -- transition -----------------------------------------------------------
 
 
+def _authorization(
+    version_id: str,
+    action: StrategyLifecycleAction,
+    *,
+    decision_id: str = "sld-test",
+) -> StrategyLifecycleAuthorization:
+    """Mint an authorization the way only the lifecycle controller may.
+
+    The private token is imported deliberately.  This is the single bridge from
+    "the evidence justified it" to "the state machine may move", so a test that
+    asserted promotion without it would be asserting a bypass.
+    """
+
+    return StrategyLifecycleAuthorization(
+        version_id,
+        action,
+        ACTION_TARGET_STATUS[action],
+        decision_id,
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        _controller_token=_lifecycle._CONTROLLER_TOKEN,
+    )
+
+
 @pytest.mark.parametrize(
     "start,target",
     [
         (StrategyStatus.RESEARCH, StrategyStatus.STOPPED),
-        (StrategyStatus.PAPER_SHADOW, StrategyStatus.PAUSED),
         (StrategyStatus.PAPER_SHADOW, StrategyStatus.STOPPED),
         (StrategyStatus.PAUSED, StrategyStatus.STOPPED),
     ],
 )
-def test_the_legal_transitions_are_allowed(
+def test_legal_terminal_transitions_need_no_evidence(
     application, start, target
 ) -> None:
+    """Reaching STOPPED stays an explicit governance act, not an evidence call."""
+
     version = _register(application, status=start)
     moved = application.transition(
         version.version_id, target, reason="test"
     )
     assert moved.status is target
+
+
+@pytest.mark.parametrize(
+    "start,action",
+    [
+        (StrategyStatus.RESEARCH, StrategyLifecycleAction.PROMOTE_TO_PAPER_SHADOW),
+        (StrategyStatus.PAPER_SHADOW, StrategyLifecycleAction.PAUSE),
+        (StrategyStatus.PAUSED, StrategyLifecycleAction.RESUME_PAPER_SHADOW),
+    ],
+)
+def test_paper_targets_require_a_lifecycle_authorization(
+    application, start, action
+) -> None:
+    """Either direction across the Paper boundary is evidence-driven."""
+
+    version = _register(application, status=start)
+    target = ACTION_TARGET_STATUS[action]
+
+    with pytest.raises(StrategyApplicationError, match="lifecycle authorization"):
+        application.transition(version.version_id, target, reason="try")
+
+    moved = application.transition(
+        version.version_id,
+        target,
+        reason="governed",
+        authorization=_authorization(version.version_id, action),
+    )
+    assert moved.status is target
+    assert moved.mode is StrategyMode.PAPER_SHADOW
+    # Promotion does not write the legacy flag, which is exactly why the launch
+    # path had to stop reading it: an evidence-authorised PAPER_SHADOW version
+    # now carries gate_passed=False.
+    assert moved.gate_passed is False
 
 
 @pytest.mark.parametrize(
@@ -555,10 +619,10 @@ def test_illegal_transitions_are_refused(application, start, target) -> None:
         application.transition(version.version_id, target, reason="test")
 
 
-def test_entering_paper_shadow_requires_the_gate(application) -> None:
+def test_entering_paper_shadow_requires_the_controller(application) -> None:
     version = _register(application, gate_reason="cost stress failed")
     with pytest.raises(
-        StrategyApplicationError, match="research gate blocked"
+        StrategyApplicationError, match="requires lifecycle authorization"
     ):
         application.transition(
             version.version_id, StrategyStatus.PAPER_SHADOW, reason="try"
@@ -569,15 +633,57 @@ def test_entering_paper_shadow_requires_the_gate(application) -> None:
     )
 
 
-def test_a_gate_passed_version_may_enter_paper_shadow(
+def test_a_gate_passed_version_cannot_promote_itself(
     application, repository
 ) -> None:
+    """The Stage 6-C invariant: the legacy flag is not promotion authority.
+
+    Before this stage a stored ``gate_passed=True`` was sufficient to reach
+    ``PAPER_SHADOW``.  It is now a read-only compatibility column, so a version
+    carrying it still cannot promote without a lifecycle authorization.
+    """
+
     gated = _gated(application, repository)
-    moved = application.transition(
-        gated.version_id, StrategyStatus.PAPER_SHADOW, reason="reviewed"
+    assert gated.gate_passed is True
+
+    with pytest.raises(
+        StrategyApplicationError, match="requires lifecycle authorization"
+    ):
+        application.transition(
+            gated.version_id, StrategyStatus.PAPER_SHADOW, reason="legacy"
+        )
+
+    assert (
+        application.get_version(gated.version_id).status is StrategyStatus.RESEARCH
     )
-    assert moved.status is StrategyStatus.PAPER_SHADOW
-    assert moved.mode is StrategyMode.PAPER_SHADOW
+
+
+def test_an_authorization_for_another_version_or_target_is_refused(
+    application,
+) -> None:
+    """An authorization names one exact transition and cannot be reused."""
+
+    version = _register(application)
+    other = _register(application, semver="9.9.9-research")
+
+    with pytest.raises(StrategyApplicationError, match="different version"):
+        application.transition(
+            version.version_id,
+            StrategyStatus.PAPER_SHADOW,
+            reason="x",
+            authorization=_authorization(
+                other.version_id, StrategyLifecycleAction.PROMOTE_TO_PAPER_SHADOW
+            ),
+        )
+
+    pause = _authorization(version.version_id, StrategyLifecycleAction.PAUSE)
+    with pytest.raises(StrategyApplicationError, match="different target"):
+        application.transition(
+            version.version_id,
+            StrategyStatus.PAPER_SHADOW,
+            reason="x",
+            authorization=pause,
+        )
 
 
 def test_stopped_is_terminal(application) -> None:
@@ -600,28 +706,62 @@ def test_legacy_invalidated_is_terminal(application) -> None:
             )
 
 
-def test_pausing_switches_the_mode_to_paper_shadow(
-    application, repository
-) -> None:
-    gated = _gated(application, repository)
+def test_pausing_switches_the_mode_to_paper_shadow(application) -> None:
+    version = _register(application)
     application.transition(
-        gated.version_id, StrategyStatus.PAPER_SHADOW, reason="reviewed"
+        version.version_id,
+        StrategyStatus.PAPER_SHADOW,
+        reason="reviewed",
+        authorization=_authorization(
+            version.version_id, StrategyLifecycleAction.PROMOTE_TO_PAPER_SHADOW
+        ),
     )
     paused = application.transition(
-        gated.version_id, StrategyStatus.PAUSED, reason="hold"
+        version.version_id,
+        StrategyStatus.PAUSED,
+        reason="hold",
+        authorization=_authorization(
+            version.version_id, StrategyLifecycleAction.PAUSE
+        ),
     )
     assert paused.mode is StrategyMode.PAPER_SHADOW
 
 
-def test_stopping_keeps_the_current_mode(application, repository) -> None:
-    gated = _gated(application, repository)
+def test_stopping_keeps_the_current_mode(application) -> None:
+    version = _register(application)
     application.transition(
-        gated.version_id, StrategyStatus.PAPER_SHADOW, reason="reviewed"
+        version.version_id,
+        StrategyStatus.PAPER_SHADOW,
+        reason="reviewed",
+        authorization=_authorization(
+            version.version_id, StrategyLifecycleAction.PROMOTE_TO_PAPER_SHADOW
+        ),
     )
     stopped = application.transition(
-        gated.version_id, StrategyStatus.STOPPED, reason="kill"
+        version.version_id, StrategyStatus.STOPPED, reason="kill"
     )
     assert stopped.mode is StrategyMode.PAPER_SHADOW
+
+
+def test_the_audit_row_names_the_lifecycle_decision(
+    application, repository
+) -> None:
+    """The transition audit must point back at the decision that justified it."""
+
+    version = _register(application)
+    application.transition(
+        version.version_id,
+        StrategyStatus.PAPER_SHADOW,
+        reason="governed",
+        authorization=_authorization(
+            version.version_id,
+            StrategyLifecycleAction.PROMOTE_TO_PAPER_SHADOW,
+            decision_id="sld-abc",
+        ),
+    )
+
+    details = [event.detail for event in repository.audits if event.event == "transition"]
+    assert details[-1] == "research->paper_shadow: governed [sld-abc]"
 
 
 def test_a_transition_updates_the_timestamp_and_audits(

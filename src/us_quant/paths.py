@@ -64,6 +64,25 @@ class ApplicationPaths:
     def config_path(self) -> Path:
         return self.resource_root / "configs" / "paper.toml"
 
+    @property
+    def trust_root(self) -> Path:
+        """Where the operator provisions verification trust material.
+
+        Deliberately a sibling of ``runtime_root`` rather than a child of it.
+        Stage 6-B1 requires the research-evidence trust root to live outside the
+        runtime artifact store, outside the database and outside the repository;
+        a verification key sitting next to the artifacts it verifies would not
+        be an independent trust root at all.
+        """
+
+        return self.state_root / "trust"
+
+    @property
+    def strategy_evidence_trust_store_path(self) -> Path:
+        """The public-key trust store the runtime reads to verify seals."""
+
+        return self.trust_root / "strategy_evidence_trust_store.json"
+
     def ensure_state_directories(self) -> None:
         for path in (
             self.state_root,
@@ -72,6 +91,10 @@ class ApplicationPaths:
             self.exports_root,
             self.user_data_root,
             self.research_results_root,
+            # The directory only.  An empty trust-store *file* would read as a
+            # configured root that trusts nothing, which is a worse failure than
+            # an absent one: absent is reported as TRUST_ROOT_UNAVAILABLE.
+            self.trust_root,
         ):
             path.mkdir(parents=True, exist_ok=True)
 

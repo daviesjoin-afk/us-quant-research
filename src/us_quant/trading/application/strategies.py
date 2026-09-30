@@ -47,6 +47,9 @@ from us_quant.trading.domain.strategy import (
 from us_quant.trading.domain.strategy_parameters import (
     validate_strategy_parameters,
 )
+from us_quant.trading.domain.strategy_lifecycle import (
+    StrategyLifecycleAuthorization,
+)
 from us_quant.trading.ports.strategy_repository import (
     StrategyAuditEvent,
     StrategyRepositoryNotFound,
@@ -58,6 +61,15 @@ from us_quant.trading.ports.strategy_repository import (
 EMBEDDED_SYMBOL_KEYS = frozenset({"signal_symbol", "execution_symbol"})
 
 DEFAULT_GATE_REASON = "尚未通过研究晋级门"
+
+#: Targets that enter or leave Paper shadow.  Reaching either is an
+#: evidence-driven decision, so ``transition`` demands a lifecycle
+#: authorization for them rather than consulting the legacy ``gate_passed``
+#: column.  ``STOPPED`` is deliberately absent: reaching a terminal state stays
+#: an explicit governance act.
+AUTHORIZATION_REQUIRED_TARGETS = frozenset(
+    {StrategyStatus.PAPER_SHADOW, StrategyStatus.PAUSED}
+)
 
 
 class StrategyApplicationError(RuntimeError):
@@ -206,8 +218,21 @@ class StrategyApplication:
         target_status: StrategyStatus | str,
         *,
         reason: str,
+        authorization: StrategyLifecycleAuthorization | None = None,
     ) -> StrategyVersion:
-        """Move a version through the governance state machine."""
+        """Move a version through the governance state machine.
+
+        This method still owns the legal-state-machine write, the repository
+        mutation and the audit row -- and it no longer owns the *decision*.
+        Entering or leaving Paper shadow requires a
+        :class:`StrategyLifecycleAuthorization` naming this exact version and
+        target, which only ``StrategyLifecycleController`` can mint.
+
+        The legacy ``gate_passed`` column is deliberately not consulted.  It
+        survives as a read-only compatibility field: it described a decision
+        made years ago by a registry that no longer exists, and a stored
+        boolean can never answer who decided or on what evidence.
+        """
 
         current = self.get_version(version_id)
         target = _coerce_status(target_status)
@@ -215,13 +240,22 @@ class StrategyApplication:
             raise StrategyApplicationError(
                 f"{current.status} cannot transition to {target}"
             )
-        if (
-            target is StrategyStatus.PAPER_SHADOW
-            and not current.gate_passed
-        ):
-            raise StrategyApplicationError(
-                f"research gate blocked: {current.gate_reason}"
-            )
+        if target in AUTHORIZATION_REQUIRED_TARGETS:
+            if not isinstance(authorization, StrategyLifecycleAuthorization):
+                raise StrategyApplicationError(
+                    f"{current.status} -> {target} requires lifecycle authorization"
+                )
+            if authorization.version_id != version_id:
+                raise StrategyApplicationError(
+                    "lifecycle authorization is for a different version"
+                )
+            if authorization.target_status is not target:
+                raise StrategyApplicationError(
+                    "lifecycle authorization is for a different target"
+                )
+            decision_note = f" [{authorization.decision_id}]"
+        else:
+            decision_note = ""
         mode = (
             StrategyMode.PAPER_SHADOW
             if target
@@ -238,7 +272,7 @@ class StrategyApplication:
                 strategy_id=current.strategy_id,
                 version_id=version_id,
                 event="transition",
-                detail=f"{current.status}->{target}: {reason}",
+                detail=f"{current.status}->{target}: {reason}{decision_note}",
                 occurred_at=now,
             ),
         )

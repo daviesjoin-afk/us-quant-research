@@ -386,7 +386,111 @@ class StrategyLifecycleController:
         )
 
 
+class StrategyLifecycleService:
+    """Drive one lifecycle mutation durably, and reconcile it after a crash.
+
+    The protocol is deliberately three steps rather than one, because a
+    transition and its audit record must not be able to disagree:
+
+    1. evaluate and persist the decision (``PREPARED``, or ``BLOCKED``);
+    2. perform the state-machine transition, which now *requires* the
+       authorization this service just received;
+    3. mark the decision ``APPLIED``.
+
+    An interruption between 2 and 3 leaves a ``PREPARED`` row whose target
+    already matches the live status -- :meth:`reconcile` finishes it.  An
+    interruption before 2 leaves the status untouched, so the same call can be
+    safely retried.  Nothing replays a transition that already happened, because
+    the decision id is derived from the semantic inputs and the state machine
+    refuses a transition that is no longer legal.
+    """
+
+    def __init__(self, *, controller, decisions, strategies) -> None:
+        if controller is None or decisions is None or strategies is None:
+            raise TypeError("controller, decisions and strategies are required")
+        self._controller = controller
+        self._decisions = decisions
+        self._strategies = strategies
+
+    def apply(
+        self,
+        *,
+        version: StrategyVersion,
+        action: StrategyLifecycleAction,
+        policy: StrategyLifecyclePolicy | None,
+        authenticated: AuthenticatedStrategyResearchEvidence | None,
+        gate: StrategyGateEvaluation | None,
+        coverage: StrategyCoverageEvaluation | None,
+        applied_at: datetime,
+    ) -> StrategyLifecycleDecisionResult:
+        outcome = self._controller.decide(
+            version=version,
+            action=action,
+            policy=policy,
+            authenticated=authenticated,
+            gate=gate,
+            coverage=coverage,
+            decided_at=applied_at,
+        )
+        # A refusal is recorded too: "we looked and declined" is exactly the
+        # audit fact a later reviewer needs.
+        self._decisions.record_decision(outcome.decision)
+        if outcome.authorization is None:
+            return outcome
+
+        self._strategies.transition(
+            version.version_id,
+            outcome.decision.target_status,
+            reason=(
+                f"lifecycle {action.value} "
+                f"[{outcome.decision.decision_id}]"
+            ),
+            authorization=outcome.authorization,
+        )
+        applied = self._decisions.mark_applied(
+            outcome.decision.decision_id, applied_at=applied_at
+        )
+        return StrategyLifecycleDecisionResult(
+            decision=applied, authorization=outcome.authorization
+        )
+
+    def reconcile(
+        self, *, version_id: str, now: datetime
+    ) -> tuple[StrategyLifecycleDecision, ...]:
+        """Resolve every ``PREPARED`` decision against the live status.
+
+        - target already reached -> the transition did happen: mark ``APPLIED``;
+        - source unchanged -> nothing happened yet: leave it ``PREPARED`` so a
+          retry can still apply it;
+        - anything else -> the world moved on: mark ``SUPERSEDED`` so it can
+          never be replayed.
+        """
+
+        if not isinstance(now, datetime):
+            raise TypeError("now must be a datetime")
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+
+        resolved: list[StrategyLifecycleDecision] = []
+        for decision in self._decisions.prepared_decisions(version_id):
+            current = self._strategies.get_version(version_id).status
+            if current is decision.target_status:
+                resolved.append(
+                    self._decisions.mark_applied(
+                        decision.decision_id, applied_at=now
+                    )
+                )
+            elif current is decision.source_status:
+                resolved.append(decision)
+            else:
+                resolved.append(
+                    self._decisions.mark_superseded(decision.decision_id)
+                )
+        return tuple(resolved)
+
+
 __all__ = [
     "StrategyLifecycleController",
     "StrategyLifecycleDecisionResult",
+    "StrategyLifecycleService",
 ]

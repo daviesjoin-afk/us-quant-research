@@ -126,10 +126,17 @@ class PortfolioOperatingPlanApplication:
         repository: PortfolioOperatingPlanRepositoryPort,
         strategies: StrategyApplication,
         active_session: Callable[[], bool] | None = None,
+        paper_authorization: Callable[[str], bool] | None = None,
     ) -> None:
         self._repository = repository
         self._strategies = strategies
         self._active_session = active_session or (lambda: False)
+        # Fail closed: a plan builder with no way to check whether a promotion is
+        # still authorised refuses every selection rather than assuming it is.
+        # This is the launch boundary, so it is the one place the check belongs
+        # -- instruction 25 keeps it out of the runtime, risk and execution
+        # layers, which trust an already-composed plan.
+        self._paper_authorization = paper_authorization
 
     def load(self) -> PortfolioOperatingPlan:
         plan = self._repository.load()
@@ -312,15 +319,20 @@ class PortfolioOperatingPlanApplication:
                 raise PortfolioPlanRefused(f"selected strategy version does not exist: {version_id}")
             if version.status is not StrategyStatus.PAPER_SHADOW or version.mode is not StrategyMode.PAPER_SHADOW:
                 raise PortfolioPlanRefused(f"selected strategy version is not governed for Paper: {version_id}")
-            # TODO(6-C): this is the launch boundary where instruction 25 wants the
-            # lifecycle authorization checked.  The check is not wired yet, so the
-            # legacy flag is still consulted here -- which means an
-            # evidence-authorised promotion (gate_passed stays False) is currently
-            # refused.  See ``PaperLaunchAuthorizer`` for the intended replacement;
-            # wiring it also requires updating the desktop paper-wiring fixtures,
-            # which build plans for versions that have no lifecycle decision.
-            if not version.gate_passed:
-                raise PortfolioPlanRefused(f"selected strategy version is not governed for Paper: {version_id}")
+            # The legacy ``gate_passed`` column is not consulted.  Nothing writes
+            # it any more, so requiring it would refuse every evidence-authorised
+            # promotion -- which is exactly the gap this check replaces.  What
+            # matters is whether the decision that entered Paper is still valid
+            # *now*: a question about the lifecycle record and the evidence
+            # behind it, not about a stored boolean.
+            if (
+                self._paper_authorization is None
+                or not self._paper_authorization(version_id)
+            ):
+                raise PortfolioPlanRefused(
+                    f"selected strategy version has no current Paper lifecycle "
+                    f"authorization: {version_id}"
+                )
             if version.strategy_id != "intraday-auto-rotation":
                 raise PortfolioPlanRefused(
                     f"no production Paper signal worker is registered for strategy family: {version.strategy_id}"

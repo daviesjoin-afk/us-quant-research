@@ -273,6 +273,16 @@ def window(monkeypatch, tmp_path):
     window.portfolio_operating_plan_application._strategies = type(
         "GovernedTestCatalogue", (), {"list_versions": lambda _self: (governed_test_version,)}
     )()
+    # Same seam, for the launch gate.  The real authorizer reads the governance
+    # stores, which are empty in a fresh state root, so a launch would be
+    # refused here for want of a lifecycle decision.  These tests are about the
+    # Paper *workflow*, so the gate is opened explicitly rather than by
+    # fabricating a sealed evidence chain; ``test_paper_authorization.py``
+    # covers the gate itself, and ``test_portfolio_operations.py`` covers its
+    # fail-closed behaviour at the plan boundary.
+    window.portfolio_operating_plan_application._paper_authorization = (
+        lambda _version_id: True
+    )
     window.paper_orchestrator._portfolio_strategies_provider = lambda _ids: (governed_test_version,)
     version_id = window._test_strategy.version_id
     window.portfolio_operating_plan_application.save(

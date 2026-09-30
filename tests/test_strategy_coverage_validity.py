@@ -30,6 +30,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from us_quant.trading.application.strategy_coverage_validity import (
     StrategyCoverageCurrentValidator,
     StrategyCoverageValidityBlocker,
+    StrategyCoverageValidityResult,
     StrategyCoverageValidityVerdict,
 )
 from us_quant.trading.domain.evidence_auth import (
@@ -49,6 +50,9 @@ from us_quant.trading.domain.strategy_gate import (
     StrategyGateBlocker,
     StrategyGateEvaluation,
     StrategyGateVerdict,
+)
+from us_quant.trading.ports.evidence_authentication_repository import (
+    EvidenceAuthenticationRepositoryError,
 )
 from us_quant.trading.ports.evidence_verification import (
     EvidenceTrustRootUnavailable,
@@ -290,6 +294,7 @@ class _Fixture:
         )
 
     def validate(self, coverage=None, **kwargs):
+        kwargs.setdefault("required_gate_policy_version", "gate-policy-1")
         return self.validator.validate(
             coverage if coverage is not None else _coverage(self.items),
             now=kwargs.pop("now", _NOW),
@@ -401,14 +406,14 @@ def test_a_claim_naming_no_members_cannot_even_be_built() -> None:
         evaluated_at=_NOW - timedelta(minutes=30),
     )
     fixture = _Fixture(())
-    result = fixture.validator.validate(empty, now=_NOW)
+    result = fixture.validator.validate(empty, now=_NOW, required_gate_policy_version='gate-policy-1')
     assert result.verdict is StrategyCoverageValidityVerdict.INVALID
     assert StrategyCoverageValidityBlocker.COVERAGE_NOT_PASSED in result.blockers
 
 
 def test_a_missing_claim_is_invalid() -> None:
     fixture = _two_members()
-    result = fixture.validator.validate(None, now=_NOW)
+    result = fixture.validator.validate(None, now=_NOW, required_gate_policy_version='gate-policy-1')
     assert result.verdict is StrategyCoverageValidityVerdict.INVALID
 
 
@@ -430,6 +435,7 @@ def test_a_naive_now_is_refused() -> None:
         fixture.validator.validate(
             _coverage(fixture.items),
             now=datetime(2026, 9, 28, 15, 0),
+            required_gate_policy_version='gate-policy-1',
         )
 
 
@@ -532,14 +538,49 @@ def test_a_gate_that_no_longer_passes_invalidates_the_claim() -> None:
 
 
 def test_an_unreadable_authentication_store_invalidates_the_claim() -> None:
+    """A port failure is a refusal; a programming bug is not swallowed."""
+
     fixture = _two_members()
 
     def explode(_authentication_id: str):
-        raise RuntimeError("the store is corrupt")
+        raise EvidenceAuthenticationRepositoryError("the store is corrupt")
 
     fixture.authentications.get = explode
     result = fixture.validate()
-    assert result.verdict is StrategyCoverageValidityVerdict.INVALID
+    assert (
+        StrategyCoverageValidityBlocker.AUTHENTICATION_RECORD_MISSING
+        in result.blockers
+    )
+
+
+def test_a_programming_error_is_not_disguised_as_a_missing_record() -> None:
+    """The reason the handlers catch the port's errors and not ``Exception``.
+
+    A bare ``except Exception`` also swallows an ``AttributeError`` from a typo,
+    reports it as a missing record, and leaves a green suite over a real defect.
+    The failure has to reach the test rather than be turned into a safe-looking
+    refusal.
+    """
+
+    fixture = _two_members()
+
+    def broken(_authentication_id: str):
+        raise AttributeError("a typo, not a storage failure")
+
+    fixture.authentications.get = broken
+    with pytest.raises(AttributeError):
+        fixture.validate()
+
+
+def test_a_gate_programming_error_is_not_disguised_either() -> None:
+    fixture = _two_members()
+
+    def broken(_evaluation_id: str):
+        raise TypeError("a typo, not a storage failure")
+
+    fixture.gates.get = broken
+    with pytest.raises(TypeError):
+        fixture.validate()
 
 
 # =====================================================================
@@ -712,24 +753,27 @@ def test_a_gate_from_another_policy_revision_invalidates_the_claim() -> None:
         gate_policy_version="gate-policy-OLD",
     )
     fixture = _Fixture((member,))
-    result = fixture.validate(
-        required_gate_policy_version="gate-policy-1"
-    )
+    result = fixture.validate(required_gate_policy_version="gate-policy-1")
     assert StrategyCoverageValidityBlocker.GATE_POLICY_MISMATCH in result.blockers
 
 
-def test_the_gate_policy_version_is_optional() -> None:
-    """The lifecycle controller supplies it; the launch boundary may not need to."""
+def test_the_required_gate_policy_version_is_mandatory() -> None:
+    """Required, not optional, so a caller cannot skip the check by omission.
 
-    member = _pair(
-        symbol="AAA",
-        suffix="a",
-        key_id=_KEY_A,
-        review_run_id=_RUN_A,
-        gate_policy_version="gate-policy-OLD",
-    )
-    fixture = _Fixture((member,))
-    assert fixture.validate().valid is True
+    An optional argument with a default is how the previous model let one
+    representative gate stand in for the claim; the same shape here would let a
+    future launch path forget the policy and silently pass every gate.
+    """
+
+    fixture = _two_members()
+    with pytest.raises(TypeError):
+        fixture.validator.validate(_coverage(fixture.items), now=_NOW)
+    with pytest.raises(ValueError):
+        fixture.validate(required_gate_policy_version="")
+    with pytest.raises(ValueError):
+        fixture.validate(required_gate_policy_version="   ")
+    with pytest.raises(ValueError):
+        fixture.validate(required_gate_policy_version=None)
 
 
 # =====================================================================
@@ -808,6 +852,21 @@ def test_blockers_are_sorted_and_deduplicated() -> None:
     values = [row.value for row in first.blockers]
     assert values == sorted(values)
     assert len(values) == len(set(values))
+
+
+def test_a_result_cannot_contradict_itself() -> None:
+    """The verdict and its reasons are locked together at construction."""
+
+    with pytest.raises(ValueError):
+        StrategyCoverageValidityResult(
+            verdict=StrategyCoverageValidityVerdict.VALID,
+            blockers=(StrategyCoverageValidityBlocker.REVOKED_SIGNING_KEY,),
+        )
+    with pytest.raises(ValueError):
+        StrategyCoverageValidityResult(
+            verdict=StrategyCoverageValidityVerdict.INVALID,
+            blockers=(),
+        )
 
 
 def test_the_result_is_immutable() -> None:

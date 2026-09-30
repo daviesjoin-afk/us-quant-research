@@ -11,12 +11,22 @@ and forbids it from living inside ``PortfolioRuntime``, ``RiskApplication`` or
 ``ExecutionApplication``: those keep Stage 5 ownership of a runtime that has
 already been composed.
 
-Three things must hold, and any one of them failing refuses the launch:
+The chain is fixed, and every step reads a *specific* record rather than a
+"latest" one:
 
-1. a lifecycle decision that entered Paper for this version reached ``APPLIED``;
-2. the signing key behind its evidence is still trusted -- a key revoked after
-   the launch decision must stop the launch, not just the next promotion;
-3. the coverage evaluation it relied on still passes.
+1. the newest ``APPLIED`` decision that entered Paper for this version;
+2. that decision's own ``policy_id`` / ``policy_revision`` -- the policy that
+   justified the promotion, not whatever policy is active now;
+3. the exact coverage evaluation the decision named;
+4. the coverage claim's identity against the version being launched;
+5. the shared ``StrategyCoverageCurrentValidator`` over every member of that
+   claim.
+
+Step 5 is shared rather than re-implemented, and that is the repair.  An earlier
+version of this class re-checked *one* representative authentication and its
+signing key, then read ``coverage.verdict is PASS``.  A claim formed from several
+members could therefore have one member's key revoked and still authorise a
+launch, because the one key it looked at was still fine.
 
 Every failure path returns ``False`` rather than raising.  A launch gate that
 can throw is a launch gate a caller will wrap in a broad ``except``.
@@ -24,19 +34,12 @@ can throw is a launch gate a caller will wrap in a broad ``except``.
 
 from __future__ import annotations
 
-from us_quant.trading.domain.evidence_auth import (
-    EvidenceAuthenticationVerdict,
-    EvidenceKeyTrustStatus,
-)
-from us_quant.trading.domain.strategy_coverage import StrategyCoverageVerdict
+from datetime import datetime, timezone
+
 from us_quant.trading.domain.strategy_lifecycle import (
     StrategyLifecycleAction,
     StrategyLifecycleDecisionState,
 )
-from us_quant.trading.ports.evidence_authentication_repository import (
-    EvidenceAuthenticationRepositoryError,
-)
-from us_quant.trading.ports.evidence_verification import EvidenceTrustRootUnavailable
 from us_quant.trading.ports.strategy_coverage_repository import (
     StrategyCoverageRepositoryError,
 )
@@ -55,50 +58,77 @@ PAPER_ENTRY_ACTIONS = frozenset(
 )
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 class PaperLaunchAuthorizer:
     """Decide whether one version may be launched into Paper right now."""
 
     def __init__(
-        self, *, decisions, authentications, coverages, key_source
+        self,
+        *,
+        decisions,
+        coverages,
+        lifecycle_policies,
+        coverage_validity,
+        clock=None,
     ) -> None:
-        if decisions is None or authentications is None or coverages is None:
-            raise TypeError("decisions, authentications and coverages are required")
-        if key_source is None:
-            raise TypeError("key_source is required")
+        if decisions is None or coverages is None:
+            raise TypeError("decisions and coverages are required")
+        if lifecycle_policies is None:
+            raise TypeError("lifecycle_policies is required")
+        if coverage_validity is None:
+            raise TypeError("coverage_validity is required")
         self._decisions = decisions
-        self._authentications = authentications
         self._coverages = coverages
-        self._key_source = key_source
+        self._lifecycle_policies = lifecycle_policies
+        self._coverage_validity = coverage_validity
+        self._clock = clock or _utc_now
 
     def authorises(self, version_id: str) -> bool:
         decision = self._entering_decision(version_id)
         if decision is None:
             return False
-        # A decision that named no evidence cannot have been justified.
-        if decision.authentication_id is None or decision.coverage_evaluation_id is None:
+        # A decision that named no claim cannot have been justified.  There is no
+        # representative-id check beside it any more: the claim is the evidence.
+        if decision.coverage_evaluation_id is None:
+            return False
+
+        # The policy the decision was made under, by exact revision.  Substituting
+        # whatever is active now would apply today's gate policy and today's age
+        # bound to a promotion that was justified under different ones.
+        if decision.policy_id is None or decision.policy_revision is None:
+            return False
+        try:
+            policy = self._lifecycle_policies.get_policy(
+                decision.policy_id, decision.policy_revision
+            )
+        except StrategyLifecycleRepositoryError:
+            return False
+        if policy is None:
             return False
 
         try:
-            authentication = self._authentications.get(decision.authentication_id)
-        except EvidenceAuthenticationRepositoryError:
-            return False
-        if authentication.verdict is not EvidenceAuthenticationVerdict.PASS:
-            return False
-
-        # Revocation is re-checked here, not merely where the seal was verified:
-        # a key revoked after the launch decision must stop the launch.
-        try:
-            key = self._key_source.verification_key(authentication.key_id)
-        except EvidenceTrustRootUnavailable:
-            return False
-        if key is None or key.trust_status is EvidenceKeyTrustStatus.REVOKED:
-            return False
-
-        try:
-            coverage = self._coverages.get_evaluation(decision.coverage_evaluation_id)
+            coverage = self._coverages.get_evaluation(
+                decision.coverage_evaluation_id
+            )
         except StrategyCoverageRepositoryError:
             return False
-        return coverage.verdict is StrategyCoverageVerdict.PASS
+        if coverage is None:
+            return False
+        # The claim has to be about the version being launched, or a decision that
+        # referenced another strategy's passing claim would authorise this one.
+        if coverage.strategy_version_id != version_id:
+            return False
+
+        validity = self._coverage_validity.validate(
+            coverage,
+            now=self._clock(),
+            required_gate_policy_version=policy.required_gate_policy_version,
+            maximum_evidence_age=policy.maximum_evidence_age,
+        )
+        return validity.valid
 
     def _entering_decision(self, version_id: str):
         try:

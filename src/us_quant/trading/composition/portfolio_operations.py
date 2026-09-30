@@ -23,8 +23,14 @@ from us_quant.trading.adapters.sqlite.portfolio_operating_plan_repository import
 from us_quant.trading.adapters.sqlite.strategy_coverage_repository import (
     SQLiteStrategyCoverageRepository,
 )
+from us_quant.trading.adapters.sqlite.strategy_gate_repository import (
+    SQLiteStrategyGateRepository,
+)
 from us_quant.trading.adapters.sqlite.strategy_lifecycle_repository import (
     SQLiteStrategyLifecycleRepository,
+)
+from us_quant.trading.application.strategy_coverage_validity import (
+    StrategyCoverageCurrentValidator,
 )
 from us_quant.trading.application.paper_authorization import PaperLaunchAuthorizer
 from us_quant.trading.application.portfolio_operations import (
@@ -47,13 +53,24 @@ def build_portfolio_operating_plan_application(
     separate file precisely so it can live outside the runtime store.
     """
 
-    authorizer = PaperLaunchAuthorizer(
-        decisions=SQLiteStrategyLifecycleRepository(governance_database_path),
+    lifecycle_repository = SQLiteStrategyLifecycleRepository(
+        governance_database_path
+    )
+    # One validator, built once, shared with the lifecycle controller: two
+    # instances over the same stores would be two answers to one question, and
+    # the launch boundary is exactly where the two must agree.
+    coverage_validity = StrategyCoverageCurrentValidator(
         authentications=SQLiteEvidenceAuthenticationRepository(
             governance_database_path
         ),
-        coverages=SQLiteStrategyCoverageRepository(governance_database_path),
+        gates=SQLiteStrategyGateRepository(governance_database_path),
         key_source=FileEvidenceVerificationKeySource(trust_store_path),
+    )
+    authorizer = PaperLaunchAuthorizer(
+        decisions=lifecycle_repository,
+        coverages=SQLiteStrategyCoverageRepository(governance_database_path),
+        lifecycle_policies=lifecycle_repository,
+        coverage_validity=coverage_validity,
     )
     return PortfolioOperatingPlanApplication(
         repository=SQLitePortfolioOperatingPlanRepository(database_path),

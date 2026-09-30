@@ -51,8 +51,14 @@ from us_quant.trading.domain.strategy_coverage import (
     StrategyCoverageVerdict,
 )
 from us_quant.trading.domain.strategy_gate import StrategyGateVerdict
+from us_quant.trading.ports.evidence_authentication_repository import (
+    EvidenceAuthenticationRepositoryError,
+)
 from us_quant.trading.ports.evidence_verification import (
     EvidenceTrustRootUnavailable,
+)
+from us_quant.trading.ports.strategy_gate_repository import (
+    StrategyGateRepositoryError,
 )
 
 
@@ -103,6 +109,20 @@ class StrategyCoverageValidityResult:
     verdict: StrategyCoverageValidityVerdict
     blockers: tuple[StrategyCoverageValidityBlocker, ...]
 
+    def __post_init__(self) -> None:
+        # The verdict and its reasons have to agree.  Without this a caller could
+        # hold a result that says VALID while carrying a blocker, and the verdict
+        # is the first thing anybody reads.
+        if self.verdict is StrategyCoverageValidityVerdict.VALID:
+            if self.blockers:
+                raise ValueError(
+                    "a VALID coverage validity result cannot carry blockers"
+                )
+        elif not self.blockers:
+            raise ValueError(
+                "an INVALID coverage validity result must name at least one blocker"
+            )
+
     @property
     def valid(self) -> bool:
         return self.verdict is StrategyCoverageValidityVerdict.VALID
@@ -139,7 +159,7 @@ class StrategyCoverageCurrentValidator:
         coverage: StrategyCoverageEvaluation | None,
         *,
         now: datetime,
-        required_gate_policy_version: str | None = None,
+        required_gate_policy_version: str,
         maximum_evidence_age: timedelta | None = None,
     ) -> StrategyCoverageValidityResult:
         """Whether every member of ``coverage`` is still current.
@@ -151,6 +171,17 @@ class StrategyCoverageCurrentValidator:
 
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("now must be timezone-aware")
+        # Required, not optional.  The policy revision is what says which gate
+        # policy the claim was formed under, and an optional argument would let a
+        # future caller skip the check by omission -- the one shape of fail-open
+        # this repair exists to remove.
+        if (
+            not isinstance(required_gate_policy_version, str)
+            or not required_gate_policy_version.strip()
+        ):
+            raise ValueError(
+                "required_gate_policy_version must be a non-blank string"
+            )
         if coverage is None:
             return _invalid(
                 {StrategyCoverageValidityBlocker.COVERAGE_NOT_PASSED}
@@ -191,7 +222,7 @@ class StrategyCoverageCurrentValidator:
         *,
         coverage: StrategyCoverageEvaluation,
         now: datetime,
-        required_gate_policy_version: str | None,
+        required_gate_policy_version: str,
         maximum_evidence_age: timedelta | None,
     ) -> set[StrategyCoverageValidityBlocker]:
         blockers: set[StrategyCoverageValidityBlocker] = set()
@@ -216,7 +247,11 @@ class StrategyCoverageCurrentValidator:
         blockers: set[StrategyCoverageValidityBlocker] = set()
         try:
             record = self._authentications.get(item.authentication_id)
-        except Exception:  # noqa: BLE001 - an unreadable store is a refusal
+        except EvidenceAuthenticationRepositoryError:
+            # Only the port's own failures.  A bare ``except Exception`` would also
+            # swallow an AttributeError from a programming bug and report it as a
+            # missing record -- safe, but diagnosed as the wrong problem, which is
+            # how a real defect survives a green suite.
             return {StrategyCoverageValidityBlocker.AUTHENTICATION_RECORD_MISSING}
         if record is None:
             return {StrategyCoverageValidityBlocker.AUTHENTICATION_RECORD_MISSING}
@@ -247,8 +282,6 @@ class StrategyCoverageCurrentValidator:
             key = self._key_source.verification_key(key_id)
         except EvidenceTrustRootUnavailable:
             return {StrategyCoverageValidityBlocker.TRUST_ROOT_UNAVAILABLE}
-        except Exception:  # noqa: BLE001 - an unreadable trust root is a refusal
-            return {StrategyCoverageValidityBlocker.TRUST_ROOT_UNAVAILABLE}
         if key is None:
             return {StrategyCoverageValidityBlocker.UNKNOWN_SIGNING_KEY}
         if key.trust_status is EvidenceKeyTrustStatus.REVOKED:
@@ -260,12 +293,12 @@ class StrategyCoverageCurrentValidator:
         item: StrategyCoverageItem,
         *,
         coverage: StrategyCoverageEvaluation,
-        required_gate_policy_version: str | None,
+        required_gate_policy_version: str,
     ) -> set[StrategyCoverageValidityBlocker]:
         blockers: set[StrategyCoverageValidityBlocker] = set()
         try:
             gate = self._gates.get(item.gate_evaluation_id)
-        except Exception:  # noqa: BLE001 - an unreadable store is a refusal
+        except StrategyGateRepositoryError:
             return {StrategyCoverageValidityBlocker.GATE_RECORD_MISSING}
         if gate is None:
             return {StrategyCoverageValidityBlocker.GATE_RECORD_MISSING}
@@ -283,10 +316,7 @@ class StrategyCoverageCurrentValidator:
         ):
             blockers.add(StrategyCoverageValidityBlocker.MEMBER_IDENTITY_MISMATCH)
 
-        if (
-            required_gate_policy_version is not None
-            and gate.policy_version != required_gate_policy_version
-        ):
+        if gate.policy_version != required_gate_policy_version:
             blockers.add(StrategyCoverageValidityBlocker.GATE_POLICY_MISMATCH)
         return blockers
 

@@ -22,22 +22,13 @@ controller cannot promote on hope or suspend on a whim.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 
 from us_quant.trading.domain import strategy_lifecycle as _strategy_lifecycle
-from us_quant.trading.domain.evidence_auth import (
-    AuthenticatedStrategyResearchEvidence,
-    EvidenceAuthenticationVerdict,
-    EvidenceKeyTrustStatus,
-)
 from us_quant.trading.domain.strategy import StrategyVersion
 from us_quant.trading.domain.strategy_coverage import (
     StrategyCoverageEvaluation,
     StrategyCoverageVerdict,
-)
-from us_quant.trading.domain.strategy_gate import (
-    StrategyGateEvaluation,
-    StrategyGateVerdict,
 )
 from us_quant.trading.domain.strategy_lifecycle import (
     ACTION_SOURCE_STATUS,
@@ -52,7 +43,6 @@ from us_quant.trading.domain.strategy_lifecycle import (
     StrategyLifecyclePolicy,
     stable_lifecycle_decision_id,
 )
-from us_quant.trading.ports.evidence_verification import EvidenceTrustRootUnavailable
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,12 +62,20 @@ class StrategyLifecycleDecisionResult:
 
 
 class StrategyLifecycleController:
-    """Decide whether one evidence-driven lifecycle mutation is justified."""
+    """Decide whether one evidence-driven lifecycle mutation is justified.
 
-    def __init__(self, *, key_source) -> None:
-        if key_source is None:
-            raise TypeError("key_source is required")
-        self._key_source = key_source
+    The evidence authority is the coverage claim and its current validity, not a
+    pair of representative records.  A coverage evaluation names its complete
+    member set, so it is the whole of what has to still hold; the controller
+    therefore takes no ``authenticated`` / ``gate`` argument at all.  Accepting
+    one of each would re-introduce the model where a single passing member could
+    stand in for the claim.
+    """
+
+    def __init__(self, *, coverage_validity) -> None:
+        if coverage_validity is None:
+            raise TypeError("coverage_validity is required")
+        self._coverage_validity = coverage_validity
 
     def decide(
         self,
@@ -85,8 +83,6 @@ class StrategyLifecycleController:
         version: StrategyVersion,
         action: StrategyLifecycleAction,
         policy: StrategyLifecyclePolicy | None,
-        authenticated: AuthenticatedStrategyResearchEvidence | None,
-        gate: StrategyGateEvaluation | None,
         coverage: StrategyCoverageEvaluation | None,
         decided_at: datetime,
     ) -> StrategyLifecycleDecisionResult:
@@ -107,8 +103,6 @@ class StrategyLifecycleController:
                 action=action,
                 policy=None,
                 blockers={StrategyLifecycleBlocker.POLICY_MISSING},
-                authenticated=authenticated,
-                gate=gate,
                 coverage=coverage,
                 decided_at=decided_at,
             )
@@ -124,8 +118,6 @@ class StrategyLifecycleController:
         failures = self._chain_failures(
             version=version,
             policy=policy,
-            authenticated=authenticated,
-            gate=gate,
             coverage=coverage,
             decided_at=decided_at,
         )
@@ -149,8 +141,6 @@ class StrategyLifecycleController:
                 action=action,
                 policy=policy,
                 blockers=blockers,
-                authenticated=authenticated,
-                gate=gate,
                 coverage=coverage,
                 decided_at=decided_at,
             )
@@ -159,8 +149,6 @@ class StrategyLifecycleController:
             action=action,
             policy=policy,
             triggers=triggers,
-            authenticated=authenticated,
-            gate=gate,
             coverage=coverage,
             decided_at=decided_at,
         )
@@ -172,76 +160,54 @@ class StrategyLifecycleController:
         *,
         version: StrategyVersion,
         policy: StrategyLifecyclePolicy,
-        authenticated: AuthenticatedStrategyResearchEvidence | None,
-        gate: StrategyGateEvaluation | None,
         coverage: StrategyCoverageEvaluation | None,
         decided_at: datetime,
     ) -> set[StrategyLifecycleBlocker]:
+        """Whether the evidence chain still justifies a mutation, right now.
+
+        Two halves, and the split is the repair.  The coverage claim is checked
+        for *structural* agreement with the version and the policy -- identity,
+        semver, hashes, policy revision -- and its whole member set is then handed
+        to the shared current-validity validator, which re-checks every member's
+        authentication, gate, key trust and freshness.
+
+        What is gone: the representative ``authenticated`` and ``gate`` arguments.
+        They let one passing member stand in for a claim that named several, so a
+        key revoked on a member nobody passed went unnoticed.  The claim is the
+        authority now, and ``coverage.items`` is the evidence set.
+        """
+
         failures: set[StrategyLifecycleBlocker] = set()
-
-        if authenticated is None:
-            failures.add(StrategyLifecycleBlocker.AUTHENTICATION_MISSING)
-        else:
-            if (
-                authenticated.authentication.verdict
-                is not EvidenceAuthenticationVerdict.PASS
-            ):
-                failures.add(StrategyLifecycleBlocker.AUTHENTICATION_NOT_PASSED)
-            if authenticated.strategy_version_id != version.version_id:
-                failures.add(StrategyLifecycleBlocker.VERSION_IDENTITY_MISMATCH)
-            if authenticated.strategy_semver != version.semver:
-                failures.add(StrategyLifecycleBlocker.STRATEGY_SEMVER_MISMATCH)
-            if authenticated.parameter_hash != version.parameter_hash:
-                failures.add(StrategyLifecycleBlocker.PARAMETER_HASH_MISMATCH)
-            if authenticated.universe_hash != version.universe_hash:
-                failures.add(StrategyLifecycleBlocker.UNIVERSE_HASH_MISMATCH)
-            if authenticated.code_hash != version.code_hash:
-                failures.add(StrategyLifecycleBlocker.CODE_HASH_MISMATCH)
-            # Revocation is re-checked at decision time: a key revoked after the
-            # seal was verified must stop authorising new mutations.
-            try:
-                key = self._key_source.verification_key(authenticated.key_id)
-            except EvidenceTrustRootUnavailable:
-                failures.add(StrategyLifecycleBlocker.TRUST_ROOT_UNAVAILABLE)
-            else:
-                if key is None:
-                    failures.add(StrategyLifecycleBlocker.UNKNOWN_SIGNING_KEY)
-                elif key.trust_status is EvidenceKeyTrustStatus.REVOKED:
-                    failures.add(StrategyLifecycleBlocker.REVOKED_SIGNING_KEY)
-            if policy.maximum_evidence_age is not None:
-                generated_at = authenticated.evidence.generated_at.astimezone(timezone.utc)
-                moment = decided_at.astimezone(timezone.utc)
-                if moment - generated_at > policy.maximum_evidence_age:
-                    failures.add(StrategyLifecycleBlocker.STALE_EVIDENCE)
-
-        if gate is None:
-            failures.add(StrategyLifecycleBlocker.GATE_MISSING)
-        else:
-            if gate.strategy_version_id != version.version_id:
-                failures.add(StrategyLifecycleBlocker.VERSION_IDENTITY_MISMATCH)
-            if gate.verdict is not StrategyGateVerdict.PASS:
-                failures.add(StrategyLifecycleBlocker.GATE_NOT_PASSED)
-            if gate.policy_version != policy.required_gate_policy_version:
-                failures.add(StrategyLifecycleBlocker.POLICY_REVISION_MISMATCH)
 
         if coverage is None:
             failures.add(StrategyLifecycleBlocker.COVERAGE_MISSING)
-        else:
-            if coverage.strategy_version_id != version.version_id:
-                failures.add(StrategyLifecycleBlocker.VERSION_IDENTITY_MISMATCH)
-            if coverage.verdict is not StrategyCoverageVerdict.PASS:
-                failures.add(StrategyLifecycleBlocker.COVERAGE_NOT_PASSED)
-            if coverage.policy_version != policy.required_coverage_policy_version:
-                failures.add(StrategyLifecycleBlocker.POLICY_REVISION_MISMATCH)
-            if coverage.strategy_semver != version.semver:
-                failures.add(StrategyLifecycleBlocker.STRATEGY_SEMVER_MISMATCH)
-            if coverage.parameter_hash != version.parameter_hash:
-                failures.add(StrategyLifecycleBlocker.PARAMETER_HASH_MISMATCH)
-            if coverage.universe_hash != version.universe_hash:
-                failures.add(StrategyLifecycleBlocker.UNIVERSE_HASH_MISMATCH)
-            if coverage.code_hash != version.code_hash:
-                failures.add(StrategyLifecycleBlocker.CODE_HASH_MISMATCH)
+            return failures
 
+        if coverage.strategy_version_id != version.version_id:
+            failures.add(StrategyLifecycleBlocker.VERSION_IDENTITY_MISMATCH)
+        if coverage.verdict is not StrategyCoverageVerdict.PASS:
+            failures.add(StrategyLifecycleBlocker.COVERAGE_NOT_PASSED)
+        if coverage.policy_version != policy.required_coverage_policy_version:
+            failures.add(StrategyLifecycleBlocker.POLICY_REVISION_MISMATCH)
+        if coverage.strategy_semver != version.semver:
+            failures.add(StrategyLifecycleBlocker.STRATEGY_SEMVER_MISMATCH)
+        if coverage.parameter_hash != version.parameter_hash:
+            failures.add(StrategyLifecycleBlocker.PARAMETER_HASH_MISMATCH)
+        if coverage.universe_hash != version.universe_hash:
+            failures.add(StrategyLifecycleBlocker.UNIVERSE_HASH_MISMATCH)
+        if coverage.code_hash != version.code_hash:
+            failures.add(StrategyLifecycleBlocker.CODE_HASH_MISMATCH)
+
+        validity = self._coverage_validity.validate(
+            coverage,
+            now=decided_at,
+            required_gate_policy_version=policy.required_gate_policy_version,
+            maximum_evidence_age=policy.maximum_evidence_age,
+        )
+        if not validity.valid:
+            failures.add(
+                StrategyLifecycleBlocker.EVIDENCE_CHAIN_NOT_CURRENT
+            )
         return failures
 
     # -- construction ----------------------------------------------------
@@ -253,8 +219,6 @@ class StrategyLifecycleController:
         action: StrategyLifecycleAction,
         policy: StrategyLifecyclePolicy | None,
         blockers: set[StrategyLifecycleBlocker],
-        authenticated,
-        gate,
         coverage,
         decided_at: datetime,
     ) -> StrategyLifecycleDecisionResult:
@@ -270,8 +234,6 @@ class StrategyLifecycleController:
             state=StrategyLifecycleDecisionState.BLOCKED,
             blockers=resolved,
             triggers=(),
-            authenticated=authenticated,
-            gate=gate,
             coverage=coverage,
             decided_at=decided_at,
             applied_at=None,
@@ -285,8 +247,6 @@ class StrategyLifecycleController:
         action: StrategyLifecycleAction,
         policy: StrategyLifecyclePolicy,
         triggers: set[StrategyLifecycleBlocker],
-        authenticated,
-        gate,
         coverage,
         decided_at: datetime,
     ) -> StrategyLifecycleDecisionResult:
@@ -297,8 +257,6 @@ class StrategyLifecycleController:
             state=StrategyLifecycleDecisionState.PREPARED,
             blockers=(),
             triggers=tuple(sorted(triggers, key=lambda item: item.value)),
-            authenticated=authenticated,
-            gate=gate,
             coverage=coverage,
             decided_at=decided_at,
             applied_at=None,
@@ -324,8 +282,6 @@ class StrategyLifecycleController:
         state: StrategyLifecycleDecisionState,
         blockers,
         triggers,
-        authenticated,
-        gate,
         coverage,
         decided_at: datetime,
         applied_at: datetime | None,
@@ -333,12 +289,12 @@ class StrategyLifecycleController:
         policy_id = policy.policy_id if policy is not None else None
         policy_revision = policy.revision if policy is not None else None
         policy_version = policy.policy_version if policy is not None else None
-        authentication_id = (
-            authenticated.authentication.authentication_id
-            if authenticated is not None
-            else None
-        )
-        gate_evaluation_id = gate.evaluation_id if gate is not None else None
+        # The representative ids are written as NULL from here on.  The columns
+        # stay for the databases that already hold them, but nothing new fills
+        # them and nothing reads them: the evidence identity is
+        # ``coverage_evaluation_id``, which names the complete member set.
+        authentication_id = None
+        gate_evaluation_id = None
         coverage_evaluation_id = coverage.evaluation_id if coverage is not None else None
         coverage_policy_id = coverage.policy_id if coverage is not None else None
         coverage_policy_revision = (
@@ -354,8 +310,6 @@ class StrategyLifecycleController:
                 target_status=ACTION_TARGET_STATUS[action],
                 policy_id=policy_id,
                 policy_revision=policy_revision,
-                authentication_id=authentication_id,
-                gate_evaluation_id=gate_evaluation_id,
                 coverage_evaluation_id=coverage_evaluation_id,
                 blockers=blockers_tuple,
                 triggers=triggers_tuple,
@@ -418,8 +372,6 @@ class StrategyLifecycleService:
         version: StrategyVersion,
         action: StrategyLifecycleAction,
         policy: StrategyLifecyclePolicy | None,
-        authenticated: AuthenticatedStrategyResearchEvidence | None,
-        gate: StrategyGateEvaluation | None,
         coverage: StrategyCoverageEvaluation | None,
         applied_at: datetime,
     ) -> StrategyLifecycleDecisionResult:
@@ -427,8 +379,6 @@ class StrategyLifecycleService:
             version=version,
             action=action,
             policy=policy,
-            authenticated=authenticated,
-            gate=gate,
             coverage=coverage,
             decided_at=applied_at,
         )

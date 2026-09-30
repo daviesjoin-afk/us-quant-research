@@ -171,7 +171,28 @@ def test_l08_application_reaches_only_domain_and_ports():
 
     assert not any("trading.adapters" in target for target in targets)
     assert not any(target == "sqlite3" for target in targets)
-    assert any("trading.ports" in target for target in targets)
+    # The controller no longer names a port itself.  It used to import the trust
+    # root's failure type because it re-checked one representative key inline;
+    # now it holds a shared coverage-validity validator, which owns the port
+    # reads.  So the assertion is that no *adapter* or storage is reachable --
+    # the positive half moved to test_l08b.
+    assert not any("trading.ports" in target and "adapters" in target for target in targets)
+
+
+def test_l08b_the_controller_reaches_evidence_only_through_the_shared_validator():
+    """The dependency direction this repair establishes, asserted directly.
+
+    The lifecycle controller must not hold a key source, an authentication
+    repository or a gate repository of its own: current validity is one service,
+    and a controller that could read a single key inline is a controller that can
+    drift back to the representative model.
+    """
+
+    source = APPLICATION.read_text(encoding="utf-8")
+    assert "key_source" not in source
+    assert "verification_key" not in source
+    assert "coverage_validity" in source
+    assert "self._coverage_validity.validate(" in source
 
 
 def test_l09_domain_stays_free_of_frameworks_and_storage():

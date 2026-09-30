@@ -10,6 +10,7 @@ without evidence pointing the right way.
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,15 @@ from us_quant.trading.adapters.evidence_signature import (
 )
 from us_quant.trading.adapters.evidence_trust_store import (
     FileEvidenceVerificationKeySource,
+)
+from us_quant.trading.adapters.sqlite.evidence_authentication_repository import (
+    SQLiteEvidenceAuthenticationRepository,
+)
+from us_quant.trading.adapters.sqlite.strategy_gate_repository import (
+    SQLiteStrategyGateRepository,
+)
+from us_quant.trading.application.strategy_coverage_validity import (
+    StrategyCoverageCurrentValidator,
 )
 from us_quant.trading.adapters.research_evidence import TargetedReviewArtifactSource
 from us_quant.trading.application.evidence_authentication import (
@@ -155,6 +165,15 @@ class _Chain:
         self.coverage_evaluator = StrategyCoverageEvaluator(
             key_source=FileEvidenceVerificationKeySource(self.trust_store)
         )
+        # The current-validity validator reads the *records*, by exact id, so the
+        # chain has to store them.  Real SQLite stores rather than stubs: what is
+        # being tested is that the records the coverage claim names can still be
+        # found and still say what they said, and a stub would only prove the stub
+        # agrees with itself.
+        self.authentication_store = SQLiteEvidenceAuthenticationRepository(
+            tmp_path / "authentications.sqlite3"
+        )
+        self.gate_store = SQLiteStrategyGateRepository(tmp_path / "gates.sqlite3")
         self._authenticated = None
         self._gate = None
         self._coverage = None
@@ -204,6 +223,10 @@ class _Chain:
             version=version, evidence=loaded.evidence,
             policy=StrategyGatePolicy(), evaluated_at=NOW,
         )
+        # Recorded before the coverage claim is formed, so the claim names records
+        # that actually exist -- which is the precondition the validator re-checks.
+        self.authentication_store.record(self._authenticated.authentication)
+        self.gate_store.record(self._gate)
         self._coverage = self.coverage_evaluator.evaluate(
             version=version,
             policy=coverage_policy if coverage_policy is not None else _coverage_policy(),
@@ -215,6 +238,56 @@ class _Chain:
             evaluated_at=NOW,
         )
         return self
+
+    def remove_authentication_record(self):
+        """Delete the member record the claim names, as a store loss would."""
+
+        connection = sqlite3.connect(self.authentication_store.path)
+        try:
+            connection.execute("DELETE FROM strategy_evidence_authentication")
+            connection.commit()
+        finally:
+            connection.close()
+
+    def corrupt_gate_verdict(self, verdict):
+        """Change the stored gate row in place.
+
+        Written through SQL rather than re-recorded: ``record`` refuses an id
+        whose payload changed, which is the store's own immutability guard and a
+        property worth keeping.  A store that *has* been tampered with is exactly
+        what the validator has to notice.
+        """
+
+        connection = sqlite3.connect(self.gate_store.path)
+        try:
+            connection.execute(
+                "UPDATE strategy_gate_evaluation SET verdict = ? "
+                "WHERE evaluation_id = ?",
+                (verdict.value, self._gate.evaluation_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def corrupt_gate_version(self, version_id):
+        connection = sqlite3.connect(self.gate_store.path)
+        try:
+            connection.execute(
+                "UPDATE strategy_gate_evaluation SET strategy_version_id = ? "
+                "WHERE evaluation_id = ?",
+                (version_id, self._gate.evaluation_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def remove_gate_record(self):
+        connection = sqlite3.connect(self.gate_store.path)
+        try:
+            connection.execute("DELETE FROM strategy_gate_evaluation")
+            connection.commit()
+        finally:
+            connection.close()
 
     @property
     def authenticated(self):
@@ -242,8 +315,19 @@ def _coverage_policy(**changes):
 
 
 def _controller(chain):
+    """The controller over the shared current-validity validator.
+
+    The controller no longer takes a key source: it holds no representative
+    record and therefore no way to read one key inline.  Current validity is one
+    service, and the controller reaches evidence only through it.
+    """
+
     return StrategyLifecycleController(
-        key_source=FileEvidenceVerificationKeySource(chain.trust_store)
+        coverage_validity=StrategyCoverageCurrentValidator(
+            authentications=chain.authentication_store,
+            gates=chain.gate_store,
+            key_source=FileEvidenceVerificationKeySource(chain.trust_store),
+        )
     )
 
 
@@ -253,16 +337,19 @@ _UNSET = object()
 
 
 def _decide(chain, *, action=StrategyLifecycleAction.PROMOTE_TO_PAPER_SHADOW,
-            version=None, policy=_UNSET, authenticated=_UNSET, gate=_UNSET,
-            coverage=_UNSET, decided_at=NOW):
+            version=None, policy=_UNSET, coverage=_UNSET, decided_at=NOW):
+    """One decision over the whole chain.
+
+    There is no ``authenticated`` or ``gate`` argument, and that absence is the
+    repair: the evidence authority is the coverage claim, which names its complete
+    member set.  A caller that could pass one representative member could pass one
+    that is still valid while another has been revoked.
+    """
+
     return _controller(chain).decide(
         version=version if version is not None else _version(),
         action=action,
         policy=_policy() if policy is _UNSET else policy,
-        authenticated=(
-            chain.authenticated if authenticated is _UNSET else authenticated
-        ),
-        gate=chain.gate if gate is _UNSET else gate,
         coverage=chain.coverage if coverage is _UNSET else coverage,
         decided_at=decided_at,
     )
@@ -281,8 +368,11 @@ def test_a_full_chain_authorises_promotion(tmp_path):
     assert result.decision.blockers == ()
     assert result.decision.triggers == ()
     assert result.decision.policy_identity == ("lifecycle-policy-1", 1)
-    assert result.decision.authentication_id is not None
-    assert result.decision.gate_evaluation_id is not None
+    # The evidence identity is the coverage claim alone.  The representative
+    # columns are written NULL from here on: they identified one member of a set
+    # the claim already names in full.
+    assert result.decision.authentication_id is None
+    assert result.decision.gate_evaluation_id is None
     assert result.decision.coverage_evaluation_id is not None
     assert result.authorization.target_status is StrategyStatus.PAPER_SHADOW
 
@@ -347,36 +437,53 @@ def test_the_current_status_must_match_the_action(tmp_path):
 # -- the evidence chain --------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "omitted, expected",
-    [
-        ("authenticated", Blocker.AUTHENTICATION_MISSING),
-        ("gate", Blocker.GATE_MISSING),
-        ("coverage", Blocker.COVERAGE_MISSING),
-    ],
-)
-def test_a_missing_link_blocks_promotion(tmp_path, omitted, expected):
+def test_a_missing_claim_blocks_promotion(tmp_path):
+    """The claim is the evidence link now, so it is the one that can be absent.
+
+    There is no "authenticated missing" or "gate missing" case any more: a caller
+    cannot pass a representative member at all, and a claim whose member records
+    have gone missing is caught by the current-validity check instead.
+    """
+
     chain = _Chain(tmp_path).build()
 
-    result = _decide(chain, **{omitted: None})
+    result = _decide(chain, coverage=None)
 
     assert result.authorised is False
-    assert expected in result.decision.blockers
+    assert Blocker.COVERAGE_MISSING in result.decision.blockers
+
+
+def test_a_claim_whose_authentication_record_vanished_blocks(tmp_path):
+    """The member-record case, at the store the validator reads."""
+
+    chain = _Chain(tmp_path).build()
+    chain.remove_authentication_record()
+
+    result = _decide(chain)
+
+    assert result.authorised is False
+    assert Blocker.EVIDENCE_CHAIN_NOT_CURRENT in result.decision.blockers
+
+
+def test_a_claim_whose_gate_record_vanished_blocks(tmp_path):
+    chain = _Chain(tmp_path).build()
+    chain.remove_gate_record()
+
+    result = _decide(chain)
+
+    assert result.authorised is False
+    assert Blocker.EVIDENCE_CHAIN_NOT_CURRENT in result.decision.blockers
 
 
 def test_a_failed_gate_blocks_promotion(tmp_path):
-    from dataclasses import replace
+    """The stored gate row itself says FAIL, which is what the validator reads."""
 
     chain = _Chain(tmp_path).build()
-    failed = replace(
-        chain.gate,
-        verdict=StrategyGateVerdict.FAIL,
-        blockers=(StrategyGateBlocker.STALE_EVIDENCE,),
-    )
+    chain.corrupt_gate_verdict(StrategyGateVerdict.FAIL)
 
-    result = _decide(chain, gate=failed)
+    result = _decide(chain)
 
-    assert Blocker.GATE_NOT_PASSED in result.decision.blockers
+    assert Blocker.EVIDENCE_CHAIN_NOT_CURRENT in result.decision.blockers
 
 
 def test_a_failed_coverage_blocks_promotion(tmp_path):
@@ -396,24 +503,30 @@ def test_a_failed_coverage_blocks_promotion(tmp_path):
 
 
 def test_a_gate_for_another_version_blocks_promotion(tmp_path):
-    from dataclasses import replace
+    """The stored gate no longer describes the item that named it."""
 
     chain = _Chain(tmp_path).build()
-    elsewhere = replace(chain.gate, strategy_version_id="version-2")
+    chain.corrupt_gate_version("version-2")
 
-    result = _decide(chain, gate=elsewhere)
+    result = _decide(chain)
 
-    assert Blocker.VERSION_IDENTITY_MISMATCH in result.decision.blockers
+    assert Blocker.EVIDENCE_CHAIN_NOT_CURRENT in result.decision.blockers
 
 
 def test_gate_policy_revision_mismatch_blocks(tmp_path):
+    """The lifecycle policy's required gate revision reaches the validator.
+
+    This is the path the launch boundary will use too: the policy revision is read
+    from the decision's own policy, never from an "active" one.
+    """
+
     chain = _Chain(tmp_path).build()
 
     result = _decide(
         chain, policy=_policy(required_gate_policy_version="independent-review-v9")
     )
 
-    assert Blocker.POLICY_REVISION_MISMATCH in result.decision.blockers
+    assert Blocker.EVIDENCE_CHAIN_NOT_CURRENT in result.decision.blockers
 
 
 def test_coverage_policy_revision_mismatch_blocks(tmp_path):
@@ -427,13 +540,15 @@ def test_coverage_policy_revision_mismatch_blocks(tmp_path):
     assert Blocker.POLICY_REVISION_MISMATCH in result.decision.blockers
 
 
-def test_a_revoked_key_blocks_promotion(tmp_path):
+def test_a_revoked_member_key_blocks_promotion(tmp_path):
+    """A key revoked after the claim was formed stops authorising mutations."""
+
     chain = _Chain(tmp_path).build()
     chain.set_trust_status(EvidenceKeyTrustStatus.REVOKED)
 
     result = _decide(chain)
 
-    assert Blocker.REVOKED_SIGNING_KEY in result.decision.blockers
+    assert Blocker.EVIDENCE_CHAIN_NOT_CURRENT in result.decision.blockers
 
 
 def test_an_unknown_key_blocks_promotion(tmp_path):
@@ -455,15 +570,17 @@ def test_an_unknown_key_blocks_promotion(tmp_path):
 
     result = _decide(chain)
 
-    assert Blocker.UNKNOWN_SIGNING_KEY in result.decision.blockers
+    assert Blocker.EVIDENCE_CHAIN_NOT_CURRENT in result.decision.blockers
 
 
-def test_stale_evidence_blocks_promotion(tmp_path):
+def test_stale_member_evidence_blocks_promotion(tmp_path):
+    """Freshness is judged per member, from the claim's own items."""
+
     chain = _Chain(tmp_path).build(generated_at=NOW - timedelta(days=90))
 
     result = _decide(chain)
 
-    assert Blocker.STALE_EVIDENCE in result.decision.blockers
+    assert Blocker.EVIDENCE_CHAIN_NOT_CURRENT in result.decision.blockers
 
 
 def test_evidence_within_the_age_bound_is_accepted(tmp_path):
@@ -501,12 +618,15 @@ def test_a_cross_wired_chain_is_refused(tmp_path):
     result = _decide(
         chain,
         version=other,
-        gate=replace(chain.gate, strategy_version_id="version-2"),
         coverage=replace(chain.coverage, strategy_version_id="version-2"),
     )
 
     assert result.authorised is False
-    assert Blocker.VERSION_IDENTITY_MISMATCH in result.decision.blockers
+    # The claim agrees with the version it is presented against, so the
+    # structural half passes -- and the *stored member records* are what catch it:
+    # they still name the original version, which is the cross-wire this case is
+    # about.
+    assert Blocker.EVIDENCE_CHAIN_NOT_CURRENT in result.decision.blockers
 
 
 def test_parameter_hash_mismatch_blocks_promotion(tmp_path):
@@ -537,7 +657,9 @@ def test_a_parameter_hash_cross_wire_is_refused(tmp_path):
     )
 
     assert result.authorised is False
-    assert Blocker.PARAMETER_HASH_MISMATCH in result.decision.blockers
+    # The claim now agrees with the version's parameters, so only the *stored*
+    # member records can catch that they were signed for other parameters.
+    assert Blocker.EVIDENCE_CHAIN_NOT_CURRENT in result.decision.blockers
 
 
 # -- pause semantics -----------------------------------------------------
@@ -566,7 +688,7 @@ def test_a_pause_is_authorised_by_a_named_governance_failure(tmp_path):
 
     assert result.authorised is True
     assert result.decision.blockers == ()
-    assert result.decision.triggers == (Blocker.REVOKED_SIGNING_KEY,)
+    assert result.decision.triggers == (Blocker.EVIDENCE_CHAIN_NOT_CURRENT,)
     assert result.authorization.target_status is StrategyStatus.PAUSED
 
 
@@ -625,7 +747,6 @@ def test_a_changed_action_produces_a_new_decision_identity(tmp_path):
     promote = _decide(chain, version=version)
     pause = _decide(
         chain, action=StrategyLifecycleAction.PAUSE, version=version,
-        authenticated=chain.authenticated,
     )
 
     assert promote.decision.decision_id != pause.decision.decision_id

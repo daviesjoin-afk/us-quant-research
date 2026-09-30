@@ -46,15 +46,16 @@ def parse_clone_parameters(parameters_json: str) -> dict[str, Any]:
 def strategy_account_notice(version: StrategyVersion) -> str:
     """The account-page notice for the version the operator is viewing.
 
-    Semantics are exactly the three the window used to branch on, unchanged:
+    Describes the version's *status* and nothing more.  It used to branch on
+    ``gate_passed`` and quote ``gate_reason``, which made this a place where a
+    legacy boolean decided what the operator was told about their own
+    authorisation.  That flag no longer decides anything: Paper lifecycle
+    authorisation comes from the coverage chain and the lifecycle controller, and
+    a notice that inferred it from a retired field would be stating an authority
+    the system does not have.
 
-    1. an intraday-targeted-t *research* version is exploratory shadow use:
-       real-time simulated evidence may be collected, it is not a promotion,
-       and no broker order can ever be sent;
-    2. a gate-passed paper-shadow version has cleared the evidence gate but
-       still needs a fresh Paper account and real-time quotes;
-    3. everything else is a hard evidence-gate block, and the gate's reason
-       is shown.
+    So the notice says what status the version is in, and -- where it matters --
+    that a Paper session still has to pass the current authorisation check.
     """
 
     if (
@@ -66,15 +67,23 @@ def strategy_account_notice(version: StrategyVersion) -> str:
             f"{version.semver}。可收集实时模拟证据；"
             "不代表晋级，不会发送券商订单。"
         )
-    if version.gate_passed and version.status is StrategyStatus.PAPER_SHADOW:
+    if version.status is StrategyStatus.PAPER_SHADOW:
         return (
-            f"策略证据门：通过；已绑定 {version.strategy_id} "
-            f"{version.semver}。仍需新鲜 Paper 账户与实时行情。"
+            f"当前版本状态为 Paper Shadow：{version.strategy_id} "
+            f"{version.semver}。新的 Paper session 仍必须通过当前"
+            "生命周期授权检查。"
+        )
+    if version.status is StrategyStatus.PAUSED:
+        return (
+            f"当前版本已暂停：{version.strategy_id} {version.semver}。"
+        )
+    if version.status is StrategyStatus.STOPPED:
+        return (
+            f"当前版本已停止：{version.strategy_id} {version.semver}。"
         )
     return (
-        "策略证据门：硬阻断。"
-        f"{version.strategy_id} {version.semver}："
-        f"{version.gate_reason}"
+        f"研究状态：{version.strategy_id} {version.semver}。"
+        "尚未进入受治理的 Paper 生命周期。"
     )
 
 

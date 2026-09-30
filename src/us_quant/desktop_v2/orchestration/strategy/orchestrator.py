@@ -55,6 +55,7 @@ from us_quant.trading.application.strategies import (
     StrategyApplicationError,
     StrategyNotFoundError,
 )
+from us_quant.trading.domain.strategy import StrategyStatus
 
 #: The reason stamped on every governance transition this route performs.
 #: Carried over verbatim from the retired window handler.
@@ -167,31 +168,32 @@ class StrategyGovernanceOrchestrator(QObject):
             "状态回到研究，需重新验证"
         )
 
-    def transition(
-        self,
-        version_id: str,
-        target_status: str,
-    ) -> None:
-        """Execute a lifecycle change the page asked for.
+    def stop(self, version_id: str) -> None:
+        """Stop one version: the one governance action the operator still owns.
 
-        The promotion gate belongs to the application: a blocked transition
-        is a warning plus a log line, never a runtime event (nothing changed
-        on the runtime's behalf) and never a faked status.  A successful one
-        repaints, logs, and publishes exactly one ``STATUS_CHANGE``.
+        Deliberately not a generic ``transition(version_id, target_status)``.
+        Promotion into Paper Shadow and pausing are evidence-driven lifecycle
+        decisions, made by the coverage chain and ``StrategyLifecycleController``
+        -- a page that could name an arbitrary target would be a second lifecycle
+        authority reached through a button.  ``STOPPED`` stays here because it is
+        explicit operator governance rather than an evidence decision.
+
+        The application remains the authority: a refused stop is a warning plus a
+        log line, never a runtime event and never a faked status.
         """
 
         try:
             changed = self._application.transition(
                 version_id,
-                target_status,
+                StrategyStatus.STOPPED.value,
                 reason=GOVERNANCE_TRANSITION_REASON,
             )
         except StrategyApplicationError as error:
             self.warning_requested.emit(
-                "晋级门阻断",
+                "停止被阻断",
                 f"{error}\n\n自动下单仍保持关闭。",
             )
-            self.log_requested.emit(f"策略状态变更被阻断：{error}")
+            self.log_requested.emit(f"策略停止被阻断：{error}")
             return
         self.refresh()
         self.log_requested.emit(

@@ -1241,8 +1241,8 @@ class MainWindow(QMainWindow):
         self.strategy_page.clone_requested.connect(
             self.strategy_governance_orchestrator.clone
         )
-        self.strategy_page.transition_requested.connect(
-            self.strategy_governance_orchestrator.transition
+        self.strategy_page.stop_requested.connect(
+            self.strategy_governance_orchestrator.stop
         )
         # Four published facts, four window bridges -- composition only:
         # the catalogue fan-out, the finished account notice (the account

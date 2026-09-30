@@ -599,6 +599,10 @@ def test_paper_targets_require_a_lifecycle_authorization(
     )
     assert moved.status is target
     assert moved.mode is StrategyMode.PAPER_SHADOW
+    # Promotion does not write the legacy flag, which is exactly why the launch
+    # path had to stop reading it: an evidence-authorised PAPER_SHADOW version
+    # now carries gate_passed=False.
+    assert moved.gate_passed is False
 
 
 @pytest.mark.parametrize(

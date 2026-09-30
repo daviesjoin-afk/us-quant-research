@@ -910,3 +910,50 @@ def test_the_validator_writes_nothing() -> None:
         for name in ("_authentications", "_gates", "_key_source")
     }
     assert before == after
+
+
+# =====================================================================
+# The validator's own boundaries
+# =====================================================================
+
+
+def test_the_validator_reaches_no_adapter_and_no_authority() -> None:
+    """It reads three ports and writes nothing -- asserted as imports.
+
+    A validator that could name a SQLite adapter, a lifecycle authority or a
+    broker would be a place where a re-check turns into a decision, which is the
+    second authority this whole repair exists to avoid.
+    """
+
+    import ast
+    import pathlib
+
+    source = pathlib.Path(
+        "src/us_quant/trading/application/strategy_coverage_validity.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+
+    for forbidden in (
+        "sqlite3",
+        "us_quant.trading.adapters",
+        "us_quant.trading.composition",
+        "us_quant.trading.application.strategy_lifecycle",
+        "us_quant.trading.application.paper_authorization",
+        "us_quant.trading.application.strategy_coverage",
+        "us_quant.trading.runtime",
+        "us_quant.desktop",
+        "us_quant.desktop_v2",
+        "PySide6",
+        "ibapi",
+    ):
+        assert not any(
+            name == forbidden or name.startswith(forbidden + ".")
+            for name in imported
+        ), forbidden

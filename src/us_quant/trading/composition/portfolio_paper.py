@@ -82,7 +82,6 @@ def build_portfolio_paper_session(
             or version.parameter_hash != frozen.parameter_hash
             or version.status.value != frozen.status
             or version.mode.value != frozen.mode
-            or version.gate_passed != frozen.gate_passed
         ):
             raise RuntimeError("selected Paper strategy facts changed before runtime composition")
 

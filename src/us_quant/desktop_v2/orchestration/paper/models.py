@@ -303,7 +303,6 @@ class PaperStrategyLaunchFact:
     parameters: Mapping[str, Any]
     status: str
     mode: str
-    gate_passed: bool
 
 
 @dataclass(frozen=True, slots=True)

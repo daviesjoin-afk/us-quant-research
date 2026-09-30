@@ -546,15 +546,9 @@ def test_the_orchestrator_owns_no_evidence_lifecycle() -> None:
 #: the debt cannot be quietly forgotten and cannot grow.
 _LEGACY_GATE_READERS_PENDING_RETIREMENT = frozenset(
     {
-        "desktop_v2/orchestration/execution/queries.py",
-        "desktop_v2/orchestration/paper/models.py",
-        "desktop_v2/orchestration/paper/queries.py",
-        "desktop_v2/orchestration/shadow/queries.py",
         "export_service.py",
-        "targeted_preflight.py",
         "trading/application/strategies.py",
         "trading/application/strategy_defaults.py",
-        "trading/composition/portfolio_paper.py",
     }
 )
 

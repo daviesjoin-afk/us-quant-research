@@ -120,16 +120,15 @@ def evaluate_target_preflight(
     )
 
     strategy_bound = strategy is not None
-    strategy_eligible = (
-        strategy is not None
-        and (
-            strategy.status is StrategyStatus.RESEARCH
-            or (
-                strategy.status is StrategyStatus.PAPER_SHADOW
-                and strategy.gate_passed
-            )
-        )
-    )
+    # The legacy ``gate_passed`` flag is not consulted: after Stage 6-C an
+    # evidence-driven promotion deliberately leaves it False, so requiring it here
+    # rejected exactly the versions the new architecture had authorised.  Whether
+    # a version is authorised is the lifecycle authority's answer, asked at the
+    # Paper launch boundary.
+    strategy_eligible = strategy is not None and strategy.status in {
+        StrategyStatus.RESEARCH,
+        StrategyStatus.PAPER_SHADOW,
+    }
 
     position_budget: Decimal | None = None
     quantity: int | None = None

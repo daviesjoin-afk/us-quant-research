@@ -310,7 +310,16 @@ class PortfolioOperatingPlanApplication:
             version = versions.get(version_id)
             if version is None:
                 raise PortfolioPlanRefused(f"selected strategy version does not exist: {version_id}")
-            if version.status is not StrategyStatus.PAPER_SHADOW or version.mode is not StrategyMode.PAPER_SHADOW or not version.gate_passed:
+            if version.status is not StrategyStatus.PAPER_SHADOW or version.mode is not StrategyMode.PAPER_SHADOW:
+                raise PortfolioPlanRefused(f"selected strategy version is not governed for Paper: {version_id}")
+            # TODO(6-C): this is the launch boundary where instruction 25 wants the
+            # lifecycle authorization checked.  The check is not wired yet, so the
+            # legacy flag is still consulted here -- which means an
+            # evidence-authorised promotion (gate_passed stays False) is currently
+            # refused.  See ``PaperLaunchAuthorizer`` for the intended replacement;
+            # wiring it also requires updating the desktop paper-wiring fixtures,
+            # which build plans for versions that have no lifecycle decision.
+            if not version.gate_passed:
                 raise PortfolioPlanRefused(f"selected strategy version is not governed for Paper: {version_id}")
             if version.strategy_id != "intraday-auto-rotation":
                 raise PortfolioPlanRefused(

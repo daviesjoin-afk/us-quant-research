@@ -5682,3 +5682,72 @@ fresh IBKR account / positions / open orders
 
 操作前置条件、Paper 启动检查、netting/归属证据、stop、zero-state 和最终 reconciliation 步骤见
 `docs/STAGE_5_MULTI_STRATEGY_PAPER_RUNBOOK.md`。
+
+#### 8.46 Stage 6-C Lifecycle Authority Consolidation
+
+Stage 6-C 消除 promotion 的**双重 authority**。此前 `StrategyApplication.transition()` 除结构转移
+表外还直接读取持久化的 `gate_passed` boolean；一个 boolean 无法回答"是谁、依据什么证据决定的"。
+现在 lifecycle 变更的 authority 唯一属于 `StrategyLifecycleController`
+（`trading/application/strategy_lifecycle.py`）。
+
+`transition()` 仍然拥有合法状态机的写入、repository mutation 与 audit row，但不再拥有决策：
+进入或离开 Paper 必须携带一个 `StrategyLifecycleAuthorization`，它精确命名**该 version 与该 target**，
+且只能由 controller 通过私有 token 签发。`gate_passed` 在 transition 路径中不再被读取（`l04` 以 AST
+断言 `transition` 方法内不存在 `gate_passed` / `gate_reason` attribute 读取），仅作为只读兼容列保留。
+`test_a_gate_passed_version_cannot_promote_itself` 直接钉住该不变量：携带 `gate_passed=True` 的 version
+仍不能进入 `PAPER_SHADOW`。
+
+`AUTHORIZATION_REQUIRED_TARGETS` 恰为 `{PAPER_SHADOW, PAUSED}`。`STOPPED` 被**刻意排除**：终止状态
+是显式治理动作，永远不是 evaluator 的自主决策；`l05`/`l06` 断言 STOPPED 既不是授权目标也不是
+lifecycle action。
+
+Controller 要求完整证据链——authenticated evidence PASS + gate PASS + coverage PASS——并绑定当前
+version identity（version id、semver、parameter hash、universe hash、code hash）、gate/coverage policy
+revision、以及 evidence age 上限。撤销（revocation）在**决策时**重新读取 trust root，而不是在 seal
+验证时读一次。promotion 需要完整 PASS；pause 需要**相反**的东西：一个被命名的治理失败。
+没有任何失败时 `PAUSE_NOT_JUSTIFIED` 拒绝暂停一个健康运行中的 strategy，因此 evaluator
+既不能凭希望 promotion，也不能随意 suspend。
+
+Crash-safe 协议由 `StrategyLifecycleService` 实现：evaluate → 持久化 `PREPARED` → transition →
+标记 `APPLIED`。decision 在状态机移动**之前**已经 durable。`reconcile()` 将遗留的 `PREPARED` 对照实时
+status 解析：已到 target → `APPLIED`；source 未变 → 保留待安全重试；其它 → `SUPERSEDED`
+（决策本身无错，只是已失去意义）。`test_reconcile_never_repeats_a_transition` 断言它永不重放转移。
+
+`SUPERSEDED` 在 domain 中有独立不变量：它没有 blocker，但不是 "authorised"——原有共享不变量
+（authorised ⟺ blockers 为空）会错误地拒绝它，因此 supersession 单独成规则。
+
+Policy store 使用 CAS append（`expected_current_revision`），并覆盖主键覆盖不到的历史空洞情形。
+decision identity 不含时钟，重复决策幂等。
+
+**Paper 启动门（指令 25）**：governance 检查位于 Paper launch / operating-plan 边界，即
+`PortfolioOperatingPlanApplication._validate()`。它不再要求 `gate_passed`，而是要求"当前存在 Paper
+lifecycle authorization"，通过新增的 `paper_authorization` seam 注入；该 seam 缺失时 **FAIL CLOSED**。
+
+`PaperLaunchAuthorizer`（`trading/application/paper_authorization.py`）回答"当初把该 version 放进 Paper
+的决策**现在**是否仍然有效"：要求一个 `APPLIED` 的 entry decision（`PROMOTE_TO_PAPER_SHADOW` /
+`RESUME_PAPER_SHADOW`；`PAUSE` 是把 version 取出 Paper 的动作，因此永不能把 version 放进去），
+重新对照 trust root 校验签名 key，并重新读取它依赖的 coverage evaluation。所有失败路径
+**返回 False 而不抛异常**——会抛异常的门会被调用方包在一个宽泛的 `except` 里；`l22` 以 AST 断言
+`authorises` 内不存在任何 `raise`（构造函数仍可 raise，因为那是 wiring 故障而非启动决策）。
+
+`PortfolioRuntime` **不再**检查 `gate_passed`；`l19` 断言 runtime、broker adapter、desktop 三个层级
+都不出现 `paper_authorization`。runtime 一旦组成即保持 Stage 5 ownership，信任其 frozen plan；
+在 runtime 内重新检查证据链会造出第二个 lifecycle authority。
+
+trust root 位于 `state_root/trust`，是 `runtime_root` 的**同级**而非子目录（`l25` 以 AST 断言
+`trust_root` property 不读取 `runtime_root`）：Stage 6-B1 要求验证 trust material 位于 runtime artifact
+store 之外，与被验证的 artifact 放在一起的验证 key 根本不是独立 trust root。
+
+过程中发现并修复的真实缺陷：
+
+- **Paper 路径被关闭**：promotion 不再写 `gate_passed`，因此经证据授权的 promotion 携带
+  `gate_passed=False`；而旧的启动检查要求该 flag，导致**每一个合法 promotion 都被拒绝**。
+  这正是指令 25 存在的原因，也是启动门改造不是可选项的原因。
+- **plan editor 显示过期标签**：`editor_state()` 仍渲染 `gate=PASS/BLOCKED`，会让 operator 看到
+  已被授权的 promotion 显示为 blocked；现改为报告启动门**实际会做的判断**。
+
+验证：6111 passed（1 个 POSIX-only skip，0 失败）；Stage 6-C mutation 42/42 RED、0 survivor；
+B1 51/51、B2 44/44 回归仍全 RED；compileall、doctor、offscreen desktop 启动与 `diff --check` 全部干净。
+
+已知未完成：尚无一个 promotion 之后真正构建 plan 的端到端集成测试。该路径的缺失正是上述
+"Paper 路径被关闭"缺陷当初未被测试发现的直接原因，因此该测试应作为后续补强项。

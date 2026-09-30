@@ -420,4 +420,3 @@ def test_l25_the_trust_root_stays_outside_the_runtime_store():
 
     assert "state_root" in reads
     assert "runtime_root" not in reads
-

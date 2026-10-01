@@ -785,25 +785,52 @@ def test_the_chain_blocker_is_added_unconditionally():
     seen cannot produce an empty failure set.  Asserted on the AST rather than by
     behaviour, because the property is about ordering inside one function.
 
-    This is the guard that fails if the unconditional ``add`` is removed -- L31
-    stays green in that case, which is why the two are separate.
+    Three things are pinned, and all three are needed for the property to hold:
+
+    * the branch is taken when the claim is **invalid** -- inverting it to
+      ``if validity.valid:`` is a fail-open that leaves the ordering below
+      untouched, so ordering alone is not enough;
+    * the umbrella ``add`` is present and unconditional;
+    * it precedes the union that consults the translation table.
+
+    L31 stays green when any of these break, which is why the two guards are
+    separate.  The polarity case in particular is caught by the behavioural
+    suites as well, but a guard should not be blind to the half of its own
+    property it does not look at.
     """
 
     tree = ast.parse(_text(APPLICATION))
     chain = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "_chain_failures"
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_chain_failures"
+        ),
+        None,
     )
-    body = [node for node in chain.body if isinstance(node, ast.If)]
-    guarded = next(
+    assert chain is not None, "_chain_failures is missing"
+
+    candidates = [
         node
-        for node in body
-        if "validity.valid" in ast.unparse(node.test)
+        for node in chain.body
+        if isinstance(node, ast.If) and "validity.valid" in ast.unparse(node.test)
+    ]
+    assert candidates, (
+        "no branch in _chain_failures tests `validity.valid`; the chain validity "
+        "result is not consulted"
+    )
+    guarded = candidates[0]
+
+    # Polarity first: the branch must run when the claim is NOT valid.
+    test_text = ast.unparse(guarded.test)
+    assert "not validity.valid" in test_text, (
+        f"the chain-validity branch is not guarded by `not validity.valid` "
+        f"(found `{test_text}`); inverting it authorises exactly the claims the "
+        f"validator refused"
     )
 
-    # The umbrella must be an unconditional add inside that branch, and it must
-    # come before the union that consults the translation table.
+    # Then ordering: the umbrella must be an unconditional add inside that branch,
+    # and it must come before the union that consults the translation table.
     statements = [ast.unparse(node) for node in guarded.body]
     umbrella = [
         index
@@ -816,8 +843,11 @@ def test_the_chain_blocker_is_added_unconditionally():
         if "_CHAIN_BLOCKER_BY_VALIDITY" in text
     ]
 
-    assert umbrella, "the umbrella blocker is not added unconditionally"
-    assert union, "the translation table is not consulted"
+    assert umbrella, (
+        "the umbrella blocker is not added unconditionally inside the "
+        "chain-validity branch"
+    )
+    assert union, "the translation table is not consulted inside that branch"
     assert umbrella[0] < union[0], (
         "the umbrella must be added before the mapped union, so an unmapped "
         "reason cannot leave the failure set empty"

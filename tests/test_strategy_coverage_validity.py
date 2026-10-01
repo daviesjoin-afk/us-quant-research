@@ -851,7 +851,43 @@ def test_the_age_bound_cannot_be_dropped_by_omission() -> None:
             now=_NOW,
             required_gate_policy_version="gate-policy-1",
         )
-    # And a wrong type is a caller bug, not an unbounded policy.
+
+
+def test_a_wrong_typed_age_bound_is_refused_rather_than_read_as_unbounded() -> None:
+    """The type check is what stops a wrong value from disabling the bound.
+
+    This case is deliberately built so that the *comparison* cannot catch the
+    error.  ``timedelta > int`` raises ``TypeError`` on its own, so asserting
+    that ``30`` and ``"30d"`` are refused would pass even with the explicit
+    ``isinstance`` check deleted -- the test would be pinning Python's operator
+    behaviour, not this validator's guard.
+
+    ``_NeverStale`` is duck-typed so its comparisons simply answer "not too old".
+    Without the ``isinstance`` check a 999-day-old member would therefore be
+    reported VALID, which is a fail-open: the policy's age bound silently stops
+    applying.  The refusal has to come from the check, and this asserts that.
+    """
+
+    class _NeverStale:
+        def __gt__(self, _other):
+            return False
+
+        def __lt__(self, _other):
+            return False
+
+    stale = _pair(
+        symbol="AAA",
+        suffix="a",
+        key_id=_KEY_A,
+        review_run_id=_RUN_A,
+        generated_at=_NOW - timedelta(days=999),
+    )
+    fixture = _Fixture((stale,))
+
+    with pytest.raises(TypeError):
+        fixture.validate(maximum_evidence_age=_NeverStale())
+
+    # The plain wrong types, kept as the obvious half.
     with pytest.raises(TypeError):
         fixture.validate(maximum_evidence_age=30)
     with pytest.raises(TypeError):

@@ -42,10 +42,15 @@ a store raising something its own port type does not name -- each one previously
 escaped as ``ValueError`` or ``AttributeError`` and reached the desktop as an
 unhandled error.  Enumerating them would mean re-auditing this method every time
 a collaborator changed; wrapping it does not.
+
+Because the caller renders both a refusal and a failure identically, the wrapper
+logs before refusing.  A genuine programming error must not be indistinguishable
+from a policy decision, or nobody would ever investigate it.
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from us_quant.trading.domain.strategy_lifecycle import (
@@ -68,6 +73,8 @@ PAPER_ENTRY_ACTIONS = frozenset(
         StrategyLifecycleAction.RESUME_PAPER_SHADOW,
     }
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _utc_now() -> datetime:
@@ -115,10 +122,19 @@ class PaperLaunchAuthorizer:
             # not timezone-aware and a bug in a collaborator are all "we cannot
             # establish that this may launch", which fails closed.
             #
-            # This does not disguise a programming error as a *missing record* --
-            # the distinction the validator draws internally -- because it reports
-            # nothing about why.  It reports only that authority was not
-            # established.
+            # Logged, because the refusal is otherwise indistinguishable from a
+            # legitimate one: the caller renders both as ``paper=NOT_AUTHORISED``,
+            # so without this a programming error would look like a policy
+            # decision and nobody would ever investigate it.  The logging itself
+            # cannot break the contract -- a handler that raises would defeat the
+            # whole point of this wrapper.
+            try:
+                _LOGGER.exception(
+                    "Paper launch authorisation failed for %s; refusing",
+                    version_id,
+                )
+            except Exception:
+                pass
             return False
 
     def _authorises(self, version_id: str) -> bool:

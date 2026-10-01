@@ -514,6 +514,67 @@ def test_l22_the_authorizer_returns_rather_than_raising():
     assert build(authentications=_WrongType()).authorises(version_id) is False
 
 
+def test_l32_a_swallowed_failure_is_logged_not_silent():
+    """A programming error must not look like a policy decision.
+
+    The wrapper refuses on any exception, and the caller renders a refusal and a
+    failure identically (``paper=NOT_AUTHORISED``).  Without a log the two are
+    indistinguishable, so a genuine bug would never be investigated -- and the
+    fix would have traded a traceback for silence.
+
+    The logging must also not be able to break the contract it protects: a
+    handler that raises cannot be allowed to turn a refusal into an exception.
+    """
+
+    import logging
+    from datetime import datetime, timezone
+
+    from us_quant.trading.application.paper_authorization import PaperLaunchAuthorizer
+
+    class _Exploding:
+        def decisions_for_version(self, _version_id):
+            raise RuntimeError("a collaborator misbehaved")
+
+    class _Unused:
+        pass
+
+    authorizer = PaperLaunchAuthorizer(
+        decisions=_Exploding(), coverages=_Unused(),
+        lifecycle_policies=_Unused(), coverage_validity=_Unused(),
+        clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    logger = logging.getLogger(
+        "us_quant.trading.application.paper_authorization"
+    )
+    handler = _Capture(level=logging.ERROR)
+    logger.addHandler(handler)
+    try:
+        assert authorizer.authorises("version-1") is False
+    finally:
+        logger.removeHandler(handler)
+
+    assert records, "the swallowed failure was not logged"
+
+    # A handler that raises must not defeat the wrapper.
+    class _Hostile(logging.Handler):
+        def emit(self, record):
+            raise RuntimeError("the logging handler is broken")
+
+    hostile = _Hostile(level=logging.ERROR)
+    logger.addHandler(hostile)
+    try:
+        assert authorizer.authorises("version-1") is False
+    finally:
+        logger.removeHandler(hostile)
+
+
 def test_l23_pause_is_never_an_entry_action():
     from us_quant.trading.application.paper_authorization import PAPER_ENTRY_ACTIONS
     from us_quant.trading.domain.strategy_lifecycle import StrategyLifecycleAction
@@ -664,13 +725,21 @@ def test_l31_the_chain_blocker_mapping_cannot_drift_silently():
     """Every validator blocker is either mapped or explicitly exempt.
 
     The lifecycle decision records the umbrella ``EVIDENCE_CHAIN_NOT_CURRENT``
-    *and* the specific reason, so an operator knows which repair is needed.  The
-    umbrella is added unconditionally, so a missing mapping cannot fail open --
-    but it would silently degrade the diagnosis, which is the regression this
-    guard exists to catch.
+    *and* the specific reason, so an operator knows which repair is needed.  This
+    guard pins the *classification*: a new validator blocker has to be either
+    mapped or declared unmapped, so the two lists cannot drift apart and silently
+    degrade the diagnosis.
 
-    A new validator blocker therefore has to be classified here: either it maps to
-    a lifecycle blocker, or it is listed as deliberately unmapped with a reason.
+    It does **not** pin the safety property, and the docstring says so rather than
+    implying otherwise.  The refusal comes from the umbrella blocker being added
+    unconditionally, which is asserted where that ordering lives --
+    ``test_the_chain_blocker_is_added_unconditionally`` in this module.  Removing
+    the umbrella leaves this guard green, so a reader must not treat it as the
+    thing that prevents a fail-open.
+
+    The ``deliberately_unmapped`` set is a decision, not a proof: a developer can
+    add a reason to it.  That is acceptable only because the umbrella refuses
+    regardless -- what the set can do is lose a diagnosis, never an authorisation.
     """
 
     from us_quant.trading.application.strategy_coverage_validity import (
@@ -706,3 +775,50 @@ def test_l31_the_chain_blocker_mapping_cannot_drift_silently():
 
     for reason, target in _CHAIN_BLOCKER_BY_VALIDITY.items():
         assert isinstance(target, StrategyLifecycleBlocker), reason
+
+
+def test_the_chain_blocker_is_added_unconditionally():
+    """The safety property F3 rests on: an untranslatable reason still refuses.
+
+    ``_chain_failures`` adds ``EVIDENCE_CHAIN_NOT_CURRENT`` *before* the mapped
+    union and regardless of it, so a validator blocker this codebase has never
+    seen cannot produce an empty failure set.  Asserted on the AST rather than by
+    behaviour, because the property is about ordering inside one function.
+
+    This is the guard that fails if the unconditional ``add`` is removed -- L31
+    stays green in that case, which is why the two are separate.
+    """
+
+    tree = ast.parse(_text(APPLICATION))
+    chain = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_chain_failures"
+    )
+    body = [node for node in chain.body if isinstance(node, ast.If)]
+    guarded = next(
+        node
+        for node in body
+        if "validity.valid" in ast.unparse(node.test)
+    )
+
+    # The umbrella must be an unconditional add inside that branch, and it must
+    # come before the union that consults the translation table.
+    statements = [ast.unparse(node) for node in guarded.body]
+    umbrella = [
+        index
+        for index, text in enumerate(statements)
+        if "failures.add(StrategyLifecycleBlocker.EVIDENCE_CHAIN_NOT_CURRENT)" in text
+    ]
+    union = [
+        index
+        for index, text in enumerate(statements)
+        if "_CHAIN_BLOCKER_BY_VALIDITY" in text
+    ]
+
+    assert umbrella, "the umbrella blocker is not added unconditionally"
+    assert union, "the translation table is not consulted"
+    assert umbrella[0] < union[0], (
+        "the umbrella must be added before the mapped union, so an unmapped "
+        "reason cannot leave the failure set empty"
+    )

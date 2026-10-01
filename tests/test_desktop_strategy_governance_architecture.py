@@ -534,23 +534,29 @@ def test_the_orchestrator_owns_no_evidence_lifecycle() -> None:
     assert "def stop(" in source
 
 
-#: Production modules that still read the retired gate fields, by relative path.
+#: Production modules that still *decide* anything from the retired gate fields.
 #:
-#: The end state this round is aiming at is the empty set: nothing decides or
-#: displays anything from ``gate_passed`` / ``gate_reason``, and they survive
-#: only in the frozen domain value and the SQLite adapter that round-trips them.
+#: The end state is the empty set, and it is reached: nothing in the product
+#: branches on ``gate_passed`` or ``gate_reason`` any more.  They survive only as
+#: the frozen domain value, the SQLite adapter that round-trips them, and two
+#: non-decision surfaces -- the ``strategies.csv`` export columns and the
+#: ``StrategySeed`` / ``StrategyVersion`` field declarations.
 #:
-#: The list is a *ratchet* rather than an allowlist of convenience.  It is
-#: asserted for exact equality, so a new reader anywhere fails immediately, and
-#: retiring one of these files forces the list to shrink in the same commit --
-#: the debt cannot be quietly forgotten and cannot grow.
-_LEGACY_GATE_READERS_PENDING_RETIREMENT = frozenset(
-    {
-        "export_service.py",
-        "trading/application/strategies.py",
-        "trading/application/strategy_defaults.py",
-    }
-)
+#: "Decide" is the operative word, and it is why this guard reads contexts rather
+#: than identifiers.  An earlier version of this ratchet counted every mention of
+#: either name, which reported three modules as outstanding debt when none of them
+#: made a decision: a value packed into a dict and written to a CSV is *carried*,
+#: and a dataclass field declaration is not a read at all.  A ratchet that cannot
+#: reach zero because it is measuring the wrong thing is not a stricter guard, it
+#: is a guard somebody eventually widens.  So the measurement was corrected
+#: instead -- and the predicate was validated against the commit *before* this
+#: repair, where it reports all eleven of the original defects, including the two
+#: that read the flag inside a boolean expression assigned to a variable rather
+#: than inside an ``if`` test.
+#:
+#: The list is asserted for exact equality, so a new decision read anywhere fails
+#: immediately and the debt cannot grow.
+_LEGACY_GATE_READERS_PENDING_RETIREMENT = frozenset()
 
 #: Where the fields are *allowed* to remain: the frozen schema and its value.
 _LEGACY_GATE_STORAGE = frozenset(
@@ -560,31 +566,80 @@ _LEGACY_GATE_STORAGE = frozenset(
     }
 )
 
+#: Contexts that mean the value is being branched on.
+_GATE_DECISION_CONTEXTS = (
+    ast.BoolOp,
+    ast.Compare,
+    ast.UnaryOp,
+    ast.If,
+    ast.While,
+    ast.IfExp,
+    ast.Assert,
+    ast.comprehension,
+)
 
-def test_the_legacy_gate_fields_are_read_by_no_new_module() -> None:
-    """A ratchet on the retired fields: the debt cannot grow, only shrink.
+#: Contexts that mean the value is only being carried -- a payload, not a
+#: decision.  Reaching one of these first stops the outward walk.
+_GATE_CONVEYOR_CONTEXTS = (ast.Dict, ast.List, ast.Tuple, ast.Set)
+
+
+def _decides_from_a_legacy_gate_field(path: pathlib.Path) -> list[tuple[int, str]]:
+    """Attribute reads of the retired fields that feed a branch or a condition.
+
+    Attribute reads only: ``register(gate_passed=...)``'s parameter and the
+    ``StrategySeed`` field declaration are not reads of a stored version's
+    retired column.
+
+    The walk goes outward from the field and stops at the first context that
+    settles the question.  A container literal wins over a decision context,
+    which is what keeps a CSV row from counting as a branch -- and a ``BoolOp``
+    counts as a decision, which is what keeps ``eligible = (... or
+    version.gate_passed)`` counted even though no ``if`` is involved.
+    """
+
+    tree = _tree(path)
+    parents: dict[int, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute) or node.attr not in (
+            "gate_passed",
+            "gate_reason",
+        ):
+            continue
+        cursor: ast.AST = node
+        while id(cursor) in parents:
+            cursor = parents[id(cursor)]
+            if isinstance(cursor, _GATE_CONVEYOR_CONTEXTS):
+                break
+            if isinstance(cursor, _GATE_DECISION_CONTEXTS):
+                found.append((node.lineno, ast.unparse(node)))
+                break
+    return found
+
+
+def test_the_legacy_gate_fields_decide_nothing() -> None:
+    """A ratchet on the retired fields: the debt can only shrink, and is now zero.
 
     ``gate_passed`` and ``gate_reason`` stay in the domain value and the SQLite
     adapter because the schema is frozen and existing databases must keep
-    round-tripping.  Everything else is expected to stop reading them; this pins
-    exactly which modules have not got there yet, so a *new* reader fails today
-    and retiring one of the listed files fails until the list is shortened.
+    round-tripping.  Nothing else may *decide* from them; this pins that exactly,
+    so a new decision read fails immediately.
     """
 
-    readers: set[str] = set()
-    for path in _SRC.rglob("*.py"):
-        if "__pycache__" in path.parts:
-            continue
+    offenders: dict[str, list[tuple[int, str]]] = {}
+    for path in _python_files(_SRC):
         relative = path.relative_to(_SRC).as_posix()
         if relative in _LEGACY_GATE_STORAGE:
             continue
-        names = _identifier_names(path)
-        if "gate_passed" in names or "gate_reason" in names:
-            readers.add(relative)
+        reads = _decides_from_a_legacy_gate_field(path)
+        if reads:
+            offenders[relative] = reads
 
-    assert readers == set(_LEGACY_GATE_READERS_PENDING_RETIREMENT), sorted(
-        readers ^ set(_LEGACY_GATE_READERS_PENDING_RETIREMENT)
-    )
+    assert set(offenders) == set(_LEGACY_GATE_READERS_PENDING_RETIREMENT), offenders
 
 
 def test_the_frozen_storage_still_carries_the_fields() -> None:

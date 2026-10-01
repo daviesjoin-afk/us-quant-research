@@ -23,6 +23,9 @@ from us_quant.trading.adapters.sqlite.strategy_gate_repository import (
 from us_quant.trading.adapters.sqlite.strategy_lifecycle_repository import (
     SQLiteStrategyLifecycleRepository,
 )
+from us_quant.trading.adapters.sqlite.strategy_paper_performance_repository import (
+    SQLiteStrategyPaperPerformanceRepository,
+)
 from us_quant.trading.application.strategies import StrategyApplication
 from us_quant.trading.application.strategy_coverage_validity import (
     StrategyCoverageCurrentValidator,
@@ -68,7 +71,10 @@ def build_strategy_lifecycle_components(
     return StrategyLifecycleComponents(
         controller=controller,
         service=StrategyLifecycleService(
-            controller=controller, decisions=repository, strategies=strategies
+            controller=controller, decisions=repository, strategies=strategies,
+            paper_performance_repository=SQLiteStrategyPaperPerformanceRepository(
+                database_path
+            ),
         ),
         repository=repository,
         key_source=key_source,

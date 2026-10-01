@@ -296,6 +296,7 @@ def evaluate_strategy_paper_performance_policy(
 class StrategyPaperPerformanceEvaluation:
     evaluation_id: str
     strategy_version_id: str
+    requested_policy_id: str
     policy_id: str | None
     policy_revision: int | None
     policy_version: str | None
@@ -319,7 +320,7 @@ class StrategyPaperPerformanceEvaluation:
         require_aware(self.window_end)
         if self.window_start >= self.window_end or self.window_end > self.evaluated_at:
             raise ValueError('invalid observation window')
-        for name in ('strategy_version_id', 'evaluator_version'):
+        for name in ('strategy_version_id', 'requested_policy_id', 'evaluator_version'):
             if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
                 raise ValueError(f'{name} must be nonblank')
         policy_identity = (self.policy_id, self.policy_revision, self.policy_version)
@@ -328,6 +329,8 @@ class StrategyPaperPerformanceEvaluation:
                     or type(self.policy_revision) is not int or self.policy_revision < 1
                     or not isinstance(self.policy_version, str) or not self.policy_version.strip()):
                 raise ValueError('incomplete policy identity')
+            if self.requested_policy_id != self.policy_id:
+                raise ValueError('requested policy identity mismatch')
         if self.reconciliation_observed_at is not None:
             require_aware(self.reconciliation_observed_at)
         if any(not isinstance(item, StrategyPaperPerformanceBlocker) for item in self.blockers):

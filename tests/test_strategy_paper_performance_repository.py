@@ -65,6 +65,7 @@ def test_timestamp_only_retry_keeps_first_row_and_latest_is_stable(tmp_path):
 @pytest.mark.parametrize('table,column,value',[
     ('policy','policy_version','forged'),('policy','revision',8),('policy','created_at','forged'),
     ('evaluation','strategy_version_id','forged'),('evaluation','policy_revision',8),
+    ('evaluation','requested_policy_id','forged'),
     ('evaluation','verdict','FAIL'),('evaluation','evaluated_at','forged'),
     ('evaluation','payload_hash','forged'),('policy','payload_hash','forged'),
     ('evaluation','payload_json','{}'),('policy','payload_json','{}'),

@@ -77,6 +77,7 @@ class SQLiteStrategyPaperPerformanceRepository:
                     PRIMARY KEY (policy_id, revision));
                 CREATE TABLE IF NOT EXISTS strategy_paper_performance_evaluation (
                     evaluation_id TEXT PRIMARY KEY, strategy_version_id TEXT NOT NULL,
+                    requested_policy_id TEXT NOT NULL,
                     policy_id TEXT, policy_revision INTEGER, policy_version TEXT,
                     verdict TEXT NOT NULL, evaluated_at TEXT NOT NULL,
                     payload_json TEXT NOT NULL, payload_hash TEXT NOT NULL);
@@ -85,7 +86,7 @@ class SQLiteStrategyPaperPerformanceRepository:
             ''')
             for table, required in (
                 ('strategy_paper_performance_policy', {'policy_id', 'revision', 'policy_version', 'created_at', 'payload_json', 'payload_hash'}),
-                ('strategy_paper_performance_evaluation', {'evaluation_id', 'strategy_version_id', 'policy_id', 'policy_revision', 'policy_version', 'verdict', 'evaluated_at', 'payload_json', 'payload_hash'}),
+                ('strategy_paper_performance_evaluation', {'evaluation_id', 'strategy_version_id', 'requested_policy_id', 'policy_id', 'policy_revision', 'policy_version', 'verdict', 'evaluated_at', 'payload_json', 'payload_hash'}),
             ):
                 columns = {row[1] for row in connection.execute(f'PRAGMA table_info({table})')}
                 if not required <= columns:
@@ -173,8 +174,8 @@ class SQLiteStrategyPaperPerformanceRepository:
                 if before != after:
                     raise Conflict('immutable evaluation payload conflict')
                 return
-            connection.execute('INSERT INTO strategy_paper_performance_evaluation VALUES (?,?,?,?,?,?,?,?,?)',
-                               (evaluation.evaluation_id, evaluation.strategy_version_id, evaluation.policy_id,
+            connection.execute('INSERT INTO strategy_paper_performance_evaluation VALUES (?,?,?,?,?,?,?,?,?,?)',
+                               (evaluation.evaluation_id, evaluation.strategy_version_id, evaluation.requested_policy_id, evaluation.policy_id,
                                 evaluation.policy_revision, evaluation.policy_version, evaluation.verdict.value,
                                 canonical_value(evaluation.evaluated_at), text, sha256(text.encode()).hexdigest()))
 

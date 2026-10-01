@@ -120,6 +120,7 @@ class StrategyPaperPerformanceApplication:
         })
         payload = dict(
             strategy_version_id=strategy_version_id,
+            requested_policy_id=policy_id,
             policy_id=policy.policy_id if policy else None,
             policy_revision=policy.revision if policy else None,
             policy_version=policy.policy_version if policy else None,

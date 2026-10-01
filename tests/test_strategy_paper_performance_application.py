@@ -108,6 +108,20 @@ def test_missing_policy_is_durable_fail(tmp_path):
     assert components.repository.latest_for_version('a') == evaluation
 
 
+def test_missing_policy_lookup_identity_is_durable_and_not_deduplicated(tmp_path):
+    components,*_ = setup_app(tmp_path,store_policy=False)
+    first = evaluate(components,policy_id='missing-A')
+    second = evaluate(components,policy_id='missing-B')
+    assert first.requested_policy_id == 'missing-A'
+    assert second.requested_policy_id == 'missing-B'
+    assert first.policy_id is None and second.policy_id is None
+    assert first.verdict is V.FAIL and second.verdict is V.FAIL
+    assert first.evaluation_id != second.evaluation_id
+    assert components.repository.get_evaluation(first.evaluation_id) == first
+    assert components.repository.get_evaluation(second.evaluation_id) == second
+    assert len(components.repository.evaluations_for_version('a')) == 2
+
+
 def test_failure_has_no_lifecycle_side_effect(tmp_path):
     components,strategies,*_ = setup_app(tmp_path,data=history(missing_fee=True))
     evaluation = evaluate(components)

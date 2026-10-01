@@ -157,32 +157,69 @@ class _MutableAccounting:
     trades_today: int = 0
 
 
-def reconcile_portfolio_truth(
-    *,
-    now: datetime,
-    broker: BrokerAccountPortfolio,
-    broker_order_truth: BrokerOpenOrderTruth,
+@dataclass(frozen=True, slots=True)
+class PortfolioAttributedFill:
+    execution_id: str
+    order_id: str
+    session_id: str
+    portfolio_decision_id: str
+    strategy_version_id: str
+    proposal_id: str
+    symbol: str
+    signed_quantity: int
+    fill_price: Decimal
+    reference_price: Decimal
+    allocated_fee: Decimal | None
+    occurred_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioExecutionObservation:
+    """Canonical accounting delta and post-fill basis for one strategy/symbol."""
+    execution_id: str
+    order_id: str
+    session_id: str
+    portfolio_decision_id: str
+    strategy_version_id: str
+    symbol: str
+    occurred_at: datetime
+    gross_traded_notional: Decimal
+    realized_pnl: Decimal
+    allocated_fee: Decimal | None
+    slippage: Decimal
+    quantity: int
+    cost_basis: Decimal
+    completed_round_trip: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioExecutionReplay:
+    attributed_fills: tuple[PortfolioAttributedFill, ...]
+    observations: tuple[PortfolioExecutionObservation, ...]
+    blockers: tuple[PortfolioReconciliationBlocker, ...]
+    strategy_accounting: tuple[PortfolioStrategyAccounting, ...]
+    open_order_ids: tuple[str, ...]
+
+    @property
+    def attribution_complete(self) -> bool:
+        return self.blockers == ()
+
+
+def replay_portfolio_execution_truth(
+    *, now: datetime, account_alias: str,
     order_truth: PortfolioOrderTruth,
     decisions: tuple[PortfolioDecisionRecord, ...],
     execution_attributions: tuple[PortfolioExecutionAttribution, ...],
-    max_snapshot_age: timedelta = timedelta(minutes=5),
-) -> PortfolioReconciliationResult:
-    """Rebuild position ownership and accounting from durable broker/order facts."""
-
-    if not _aware(now) or not isinstance(broker, BrokerAccountPortfolio):
-        raise ValueError("reconciliation requires an aware time and broker portfolio")
+    through_at: datetime | None = None,
+) -> PortfolioExecutionReplay:
+    """The sole Stage 5 partial-fill accounting replay, in execution time order."""
+    if not _aware(now):
+        raise ValueError("replay requires an aware time")
+    if through_at is not None and (not _aware(through_at) or through_at > now):
+        raise ValueError("invalid replay cutoff")
     if not isinstance(order_truth, PortfolioOrderTruth):
         raise TypeError("order_truth must be PortfolioOrderTruth")
-    if not isinstance(broker_order_truth, BrokerOpenOrderTruth):
-        raise TypeError("broker_order_truth must be BrokerOpenOrderTruth")
-    if max_snapshot_age <= timedelta(0):
-        raise ValueError("max_snapshot_age must be positive")
-
     blockers: set[PortfolioReconciliationBlocker] = set()
-    _check_freshness(now, broker, max_snapshot_age, blockers)
-    _check_open_order_freshness(
-        now, broker, broker_order_truth, max_snapshot_age, blockers
-    )
     decision_by_id = {item.decision.decision_id: item for item in decisions}
     if len(decision_by_id) != len(decisions):
         blockers.add(PortfolioReconciliationBlocker.MISSING_PORTFOLIO_DECISION)
@@ -211,7 +248,7 @@ def reconcile_portfolio_truth(
         if order.intent.order_id in order_by_id:
             blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
             continue
-        if order.account_alias != broker.account.account_alias:
+        if order.account_alias != account_alias:
             continue
         order_by_id[order.intent.order_id] = order
         if order.intent.order_id not in attribution_by_order:
@@ -221,57 +258,6 @@ def reconcile_portfolio_truth(
         if order_id not in order_by_id:
             blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
 
-    broker_open_by_id: dict[int, BrokerOpenOrder] = {}
-    for broker_order in broker_order_truth.open_orders:
-        if (
-            not _valid_broker_open_order(broker_order)
-            or broker_order.broker_order_id in broker_open_by_id
-            or broker_order_truth.account_alias != broker.account.account_alias
-        ):
-            blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
-            continue
-        broker_open_by_id[broker_order.broker_order_id] = broker_order
-
-    local_open_by_broker_id: dict[
-        int, tuple[str, PortfolioOrderTruthRecord, OrderEvent | None]
-    ] = {}
-    for local_order_id, local_order in order_by_id.items():
-        local_event = _latest_event(local_order.events)
-        if local_event is None or not local_event.status.is_terminal:
-            if local_order.broker_order_id is None:
-                blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
-                continue
-            if local_order.broker_order_id in local_open_by_broker_id:
-                blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
-                continue
-            local_open_by_broker_id[local_order.broker_order_id] = (
-                local_order_id,
-                local_order,
-                local_event,
-            )
-    if broker_order_truth.snapshot_complete:
-        if set(broker_open_by_id) != set(local_open_by_broker_id):
-            blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
-        for broker_id in broker_open_by_id.keys() & local_open_by_broker_id.keys():
-            broker_order = broker_open_by_id[broker_id]
-            local_order_id, local_order, local_event = local_open_by_broker_id[
-                broker_id
-            ]
-            intent = local_order.intent
-            if (
-                intent is None
-                or local_order.account_alias != broker_order.account_alias
-                or local_order.broker_order_id != broker_id
-                or intent.execution_symbol != broker_order.symbol.strip().upper()
-                or intent.side is not broker_order.side
-                or Decimal(intent.quantity) != broker_order.quantity
-                or local_event is None
-                or local_event.broker_order_id != broker_id
-                or local_event.remaining != broker_order.remaining_quantity
-            ):
-                blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
-    else:
-        blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
     for record in decisions:
         if record.order_id is not None and record.order_id not in attribution_by_order:
             blockers.add(PortfolioReconciliationBlocker.PENDING_UNKNOWN_EXECUTION)
@@ -289,6 +275,8 @@ def reconcile_portfolio_truth(
         ):
             blockers.add(PortfolioReconciliationBlocker.PENDING_UNKNOWN_EXECUTION)
 
+    attributed_fills = []
+    observations = []
     seen_execution_ids: set[str] = set()
     replay_batches = []
     replay_state = {}
@@ -383,7 +371,8 @@ def reconcile_portfolio_truth(
             0,
             {key: 0 for key in contribution_by_key},
         )
-        replay_batches.extend((fill.occurred_at, fill.execution_id, order_id, fill) for fill in fills)
+        replay_batches.extend((fill.occurred_at, fill.execution_id, order_id, fill) for fill in fills
+                              if through_at is None or fill.occurred_at <= through_at)
 
     # A sell's strategy ownership depends on earlier fills from every order,
     # not on UUID order. Replay the complete durable fill stream globally.
@@ -420,6 +409,13 @@ def reconcile_portfolio_truth(
             )
             for strategy_id in affected_strategies
         }
+        before_values = {
+            strategy_id: (
+                accounting.get((strategy_id, attribution.symbol), _MutableAccounting()).realized_pnl,
+                accounting.get((strategy_id, attribution.symbol), _MutableAccounting()).fees,
+                accounting.get((strategy_id, attribution.symbol), _MutableAccounting()).slippage,
+            ) for strategy_id in affected_strategies
+        }
         _apply_fill(
             accounting=accounting,
             fill=fill,
@@ -427,6 +423,30 @@ def reconcile_portfolio_truth(
             reference_price=action.reference_price,
             blockers=blockers,
         )
+        for strategy_id in sorted(affected_strategies):
+            parts = {proposal_id: quantity for (owner, proposal_id), quantity in deltas.items()
+                     if owner == strategy_id and quantity != 0}
+            if not parts:
+                continue
+            item = accounting[(strategy_id, attribution.symbol)]
+            prior_pnl, prior_fees, prior_slippage = before_values[strategy_id]
+            allocated_fee = item.fees - prior_fees if fill.fee is not None else None
+            proposal_fees = _allocate_decimal(allocated_fee, {key: abs(qty) for key, qty in parts.items()}) if allocated_fee is not None else {}
+            for proposal_id, quantity in sorted(parts.items()):
+                attributed_fills.append(PortfolioAttributedFill(
+                    fill.execution_id, order_id, intent.session_id,
+                    attribution.portfolio_decision_id, strategy_id, proposal_id,
+                    attribution.symbol, quantity, fill.price, action.reference_price,
+                    proposal_fees.get(proposal_id), fill.occurred_at,
+                ))
+            observations.append(PortfolioExecutionObservation(
+                fill.execution_id, order_id, intent.session_id, attribution.portfolio_decision_id,
+                strategy_id, attribution.symbol, fill.occurred_at,
+                sum(abs(qty) for qty in parts.values()) * fill.price,
+                item.realized_pnl - prior_pnl, allocated_fee,
+                item.slippage - prior_slippage, item.quantity, item.cost_basis,
+                before_quantities[strategy_id] > 0 and item.quantity == 0,
+            ))
         trading_day = now.astimezone(ZoneInfo("America/New_York")).date()
         fill_day = fill.occurred_at.astimezone(ZoneInfo("America/New_York")).date()
         if fill_day == trading_day:
@@ -439,44 +459,10 @@ def reconcile_portfolio_truth(
                 if before > 0 and after == 0:
                     accounting.setdefault((strategy_id, attribution.symbol), _MutableAccounting()).trades_today += 1
 
-    broker_quantities: dict[str, Decimal] = {}
-    for position in broker.positions:
-        if (
-            not isinstance(position.quantity, Decimal)
-            or not position.quantity.is_finite()
-            or position.quantity < 0
-            or not isinstance(position.symbol, str)
-            or not position.symbol.strip()
-        ):
-            blockers.add(PortfolioReconciliationBlocker.ATTRIBUTION_MISMATCH)
-            continue
-        symbol = position.symbol.strip().upper()
-        if position.account_alias != broker.account.account_alias:
-            blockers.add(PortfolioReconciliationBlocker.ATTRIBUTION_MISMATCH)
-        broker_quantities[symbol] = broker_quantities.get(symbol, Decimal("0")) + position.quantity
-    strategy_quantities: dict[str, int] = {}
-    for (_, symbol), item in accounting.items():
-        strategy_quantities[symbol] = strategy_quantities.get(symbol, 0) + item.quantity
-    all_symbols = sorted(set(broker_quantities) | set(strategy_quantities))
-    reconciled_positions = []
-    for symbol in all_symbols:
-        broker_quantity = broker_quantities.get(symbol, Decimal("0"))
-        attributed_quantity = strategy_quantities.get(symbol, 0)
-        if symbol in broker_quantities and symbol not in strategy_quantities and broker_quantity != 0:
-            blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_POSITION)
-        elif broker_quantity != Decimal(attributed_quantity):
-            blockers.add(PortfolioReconciliationBlocker.ATTRIBUTION_MISMATCH)
-        reconciled_positions.append(
-            PortfolioReconciledPosition(symbol, broker_quantity, attributed_quantity)
-        )
-
-    open_order_ids = tuple(
-        sorted(
-            order_id
-            for order_id, order in order_by_id.items()
-            if (event := _latest_event(order.events)) is None or not event.status.is_terminal
-        )
-    )
+    open_order_ids = tuple(sorted(
+        order_id for order_id, order in order_by_id.items()
+        if (event := _latest_event(order.events)) is None or not event.status.is_terminal
+    ))
     strategy_results = tuple(
         PortfolioStrategyAccounting(
             strategy_version_id=strategy_id,
@@ -493,12 +479,136 @@ def reconcile_portfolio_truth(
         )
         for (strategy_id, symbol), item in sorted(accounting.items())
     )
+    return PortfolioExecutionReplay(
+        tuple(attributed_fills), tuple(observations),
+        tuple(sorted(blockers, key=lambda item: item.value)), strategy_results, open_order_ids,
+    )
+
+
+def reconcile_portfolio_truth(
+    *,
+    now: datetime,
+    broker: BrokerAccountPortfolio,
+    broker_order_truth: BrokerOpenOrderTruth,
+    order_truth: PortfolioOrderTruth,
+    decisions: tuple[PortfolioDecisionRecord, ...],
+    execution_attributions: tuple[PortfolioExecutionAttribution, ...],
+    max_snapshot_age: timedelta = timedelta(minutes=5),
+) -> PortfolioReconciliationResult:
+    """Rebuild position ownership and accounting from durable broker/order facts."""
+
+    if not _aware(now) or not isinstance(broker, BrokerAccountPortfolio):
+        raise ValueError("reconciliation requires an aware time and broker portfolio")
+    if not isinstance(order_truth, PortfolioOrderTruth):
+        raise TypeError("order_truth must be PortfolioOrderTruth")
+    if not isinstance(broker_order_truth, BrokerOpenOrderTruth):
+        raise TypeError("broker_order_truth must be BrokerOpenOrderTruth")
+    if max_snapshot_age <= timedelta(0):
+        raise ValueError("max_snapshot_age must be positive")
+
+    blockers: set[PortfolioReconciliationBlocker] = set()
+    _check_freshness(now, broker, max_snapshot_age, blockers)
+    _check_open_order_freshness(
+        now, broker, broker_order_truth, max_snapshot_age, blockers
+    )
+    replay = replay_portfolio_execution_truth(
+        now=now, account_alias=broker.account.account_alias, order_truth=order_truth,
+        decisions=decisions, execution_attributions=execution_attributions,
+    )
+    blockers.update(replay.blockers)
+    order_by_id = {}
+    for order in order_truth.orders:
+        if order.intent is not None and order.account_alias == broker.account.account_alias:
+            order_by_id.setdefault(order.intent.order_id, order)
+    broker_open_by_id: dict[int, BrokerOpenOrder] = {}
+    for broker_order in broker_order_truth.open_orders:
+        if (
+            not _valid_broker_open_order(broker_order)
+            or broker_order.broker_order_id in broker_open_by_id
+            or broker_order_truth.account_alias != broker.account.account_alias
+        ):
+            blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
+            continue
+        broker_open_by_id[broker_order.broker_order_id] = broker_order
+
+    local_open_by_broker_id: dict[
+        int, tuple[str, PortfolioOrderTruthRecord, OrderEvent | None]
+    ] = {}
+    for local_order_id, local_order in order_by_id.items():
+        local_event = _latest_event(local_order.events)
+        if local_event is None or not local_event.status.is_terminal:
+            if local_order.broker_order_id is None:
+                blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
+                continue
+            if local_order.broker_order_id in local_open_by_broker_id:
+                blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
+                continue
+            local_open_by_broker_id[local_order.broker_order_id] = (
+                local_order_id,
+                local_order,
+                local_event,
+            )
+    if broker_order_truth.snapshot_complete:
+        if set(broker_open_by_id) != set(local_open_by_broker_id):
+            blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
+        for broker_id in broker_open_by_id.keys() & local_open_by_broker_id.keys():
+            broker_order = broker_open_by_id[broker_id]
+            local_order_id, local_order, local_event = local_open_by_broker_id[
+                broker_id
+            ]
+            intent = local_order.intent
+            if (
+                intent is None
+                or local_order.account_alias != broker_order.account_alias
+                or local_order.broker_order_id != broker_id
+                or intent.execution_symbol != broker_order.symbol.strip().upper()
+                or intent.side is not broker_order.side
+                or Decimal(intent.quantity) != broker_order.quantity
+                or local_event is None
+                or local_event.broker_order_id != broker_id
+                or local_event.remaining != broker_order.remaining_quantity
+            ):
+                blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
+    else:
+        blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_ORDER)
+    broker_quantities: dict[str, Decimal] = {}
+    for position in broker.positions:
+        if (
+            not isinstance(position.quantity, Decimal)
+            or not position.quantity.is_finite()
+            or position.quantity < 0
+            or not isinstance(position.symbol, str)
+            or not position.symbol.strip()
+        ):
+            blockers.add(PortfolioReconciliationBlocker.ATTRIBUTION_MISMATCH)
+            continue
+        symbol = position.symbol.strip().upper()
+        if position.account_alias != broker.account.account_alias:
+            blockers.add(PortfolioReconciliationBlocker.ATTRIBUTION_MISMATCH)
+        broker_quantities[symbol] = broker_quantities.get(symbol, Decimal("0")) + position.quantity
+    strategy_quantities: dict[str, int] = {}
+    for item in replay.strategy_accounting:
+        symbol = item.symbol
+        strategy_quantities[symbol] = strategy_quantities.get(symbol, 0) + item.quantity
+    all_symbols = sorted(set(broker_quantities) | set(strategy_quantities))
+    reconciled_positions = []
+    for symbol in all_symbols:
+        broker_quantity = broker_quantities.get(symbol, Decimal("0"))
+        attributed_quantity = strategy_quantities.get(symbol, 0)
+        if symbol in broker_quantities and symbol not in strategy_quantities and broker_quantity != 0:
+            blockers.add(PortfolioReconciliationBlocker.UNEXPLAINED_POSITION)
+        elif broker_quantity != Decimal(attributed_quantity):
+            blockers.add(PortfolioReconciliationBlocker.ATTRIBUTION_MISMATCH)
+        reconciled_positions.append(
+            PortfolioReconciledPosition(symbol, broker_quantity, attributed_quantity)
+        )
+
     return PortfolioReconciliationResult(
         observed_at=now,
         blockers=tuple(sorted(blockers, key=lambda item: item.value)),
         positions=tuple(reconciled_positions),
-        strategy_accounting=strategy_results,
-        open_order_ids=open_order_ids,
+        strategy_accounting=replay.strategy_accounting,
+        open_order_ids=replay.open_order_ids,
     )
 
 

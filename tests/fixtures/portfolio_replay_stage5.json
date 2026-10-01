@@ -1,0 +1,143 @@
+{
+  "attribution_mismatch": {
+    "blockers": [
+      "attribution_mismatch"
+    ],
+    "observed_at": "2026-09-28 12:00:00+00:00",
+    "open_order_ids": [],
+    "positions": [],
+    "strategy_accounting": []
+  },
+  "duplicate_cross_order": {
+    "blockers": [
+      "attribution_mismatch",
+      "unexplained_fill"
+    ],
+    "observed_at": "2026-09-28 12:00:00+00:00",
+    "open_order_ids": [],
+    "positions": [
+      {
+        "attributed_quantity": 0,
+        "broker_quantity": "0",
+        "symbol": "AAPL"
+      }
+    ],
+    "strategy_accounting": [
+      {
+        "average_cost": null,
+        "fees": "0.6",
+        "fees_complete": true,
+        "filled_quantity": 6,
+        "quantity": 0,
+        "realized_pnl": "0",
+        "slippage": "-12",
+        "slippage_complete": true,
+        "strategy_version_id": "a",
+        "symbol": "AAPL",
+        "trades_today": 0
+      },
+      {
+        "average_cost": null,
+        "fees": "0.4",
+        "fees_complete": true,
+        "filled_quantity": 4,
+        "quantity": 0,
+        "realized_pnl": "0",
+        "slippage": "-8",
+        "slippage_complete": true,
+        "strategy_version_id": "b",
+        "symbol": "AAPL",
+        "trades_today": 0
+      }
+    ]
+  },
+  "duplicate_execution": {
+    "blockers": [
+      "unexplained_fill"
+    ],
+    "observed_at": "2026-09-28 12:00:00+00:00",
+    "open_order_ids": [],
+    "positions": [],
+    "strategy_accounting": []
+  },
+  "netting_multiple_partial_fills_sell_global_order": {
+    "blockers": [],
+    "observed_at": "2026-09-28 12:00:00+00:00",
+    "open_order_ids": [],
+    "positions": [
+      {
+        "attributed_quantity": 0,
+        "broker_quantity": "0",
+        "symbol": "AAPL"
+      }
+    ],
+    "strategy_accounting": [
+      {
+        "average_cost": null,
+        "fees": "1.838095238095238095238095238",
+        "fees_complete": true,
+        "filled_quantity": 12,
+        "quantity": 0,
+        "realized_pnl": "7.99999999999999999999999998",
+        "slippage": "-8",
+        "slippage_complete": true,
+        "strategy_version_id": "a",
+        "symbol": "AAPL",
+        "trades_today": 1
+      },
+      {
+        "average_cost": null,
+        "fees": "1.161904761904761904761904762",
+        "fees_complete": true,
+        "filled_quantity": 8,
+        "quantity": 0,
+        "realized_pnl": "5.00",
+        "slippage": "-5",
+        "slippage_complete": true,
+        "strategy_version_id": "b",
+        "symbol": "AAPL",
+        "trades_today": 1
+      }
+    ]
+  },
+  "partial_cancel_missing_fee": {
+    "blockers": [],
+    "observed_at": "2026-09-28 12:00:00+00:00",
+    "open_order_ids": [],
+    "positions": [
+      {
+        "attributed_quantity": 3,
+        "broker_quantity": "3",
+        "symbol": "AAPL"
+      }
+    ],
+    "strategy_accounting": [
+      {
+        "average_cost": "10",
+        "fees": "0",
+        "fees_complete": false,
+        "filled_quantity": 2,
+        "quantity": 2,
+        "realized_pnl": "0",
+        "slippage": "0",
+        "slippage_complete": true,
+        "strategy_version_id": "a",
+        "symbol": "AAPL",
+        "trades_today": 0
+      },
+      {
+        "average_cost": "10",
+        "fees": "0",
+        "fees_complete": false,
+        "filled_quantity": 1,
+        "quantity": 1,
+        "realized_pnl": "0",
+        "slippage": "0",
+        "slippage_complete": true,
+        "strategy_version_id": "b",
+        "symbol": "AAPL",
+        "trades_today": 0
+      }
+    ]
+  }
+}

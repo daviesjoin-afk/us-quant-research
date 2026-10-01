@@ -122,6 +122,15 @@ CANONICAL_TYPES = {
     "PortfolioReconciledPosition": "portfolio_reconciliation.py",
     "PortfolioStrategyAccounting": "portfolio_reconciliation.py",
     "PortfolioReconciliationResult": "portfolio_reconciliation.py",
+    "PortfolioAttributedFill": "portfolio_reconciliation.py",
+    "PortfolioExecutionObservation": "portfolio_reconciliation.py",
+    "PortfolioExecutionReplay": "portfolio_reconciliation.py",
+    "replay_portfolio_execution_truth": "portfolio_reconciliation.py",
+    "StrategyPaperPerformancePolicy": "strategy_paper_performance.py",
+    "StrategyPaperPerformanceMetrics": "strategy_paper_performance.py",
+    "StrategyPaperPerformanceEvaluation": "strategy_paper_performance.py",
+    "StrategyPaperPerformanceVerdict": "strategy_paper_performance.py",
+    "StrategyPaperPerformanceBlocker": "strategy_paper_performance.py",
     "RiskDecision": "risk.py",
     "RiskEvaluationRequest": "risk.py",
     "RiskLimits": "risk.py",
@@ -328,6 +337,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "strategy_gate.py",
         "strategy_lifecycle.py",
         "strategy_parameters.py",
+        "strategy_paper_performance.py",
     }
     assert {path.name for path in _python_files(PORTS_DIR)} == {
         "__init__.py",
@@ -352,6 +362,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "strategy_repository.py",
         "strategy_gate_repository.py",
         "strategy_lifecycle_repository.py",
+        "strategy_paper_performance_repository.py",
     }
 
 
@@ -1009,6 +1020,7 @@ NON_MARKET_DATA_ADAPTER_MODULES = {
     "sqlite/evidence_authentication_repository.py",
     "sqlite/strategy_coverage_repository.py",
     "sqlite/strategy_lifecycle_repository.py",
+    "sqlite/strategy_paper_performance_repository.py",
 }
 
 
@@ -1554,6 +1566,7 @@ def test_only_composition_roots_wire_adapters_into_applications() -> None:
         "trading/composition/strategy_coverage.py",
         "trading/composition/strategy_gate.py",
         "trading/composition/strategy_lifecycle.py",
+        "trading/composition/strategy_paper_performance.py",
     ], wiring_modules
 
 

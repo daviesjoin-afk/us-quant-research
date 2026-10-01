@@ -160,7 +160,14 @@ def test_the_table_has_the_frozen_columns(page) -> None:
     ] == list(VERSION_COLUMNS)
 
 
-def test_a_row_shows_the_governance_fields(page) -> None:
+def test_a_row_shows_the_catalogue_fields(page) -> None:
+    """The row carries stable facts only.
+
+    The gate column is gone rather than renamed: the page has no current
+    lifecycle read model, and a column that guessed "PASS" from a retired
+    boolean would state an authority the system does not have.
+    """
+
     page.render((_version("v1", strategy_id="dual-ma-trend"),))
 
     assert _cell(page, 0, 0) == "dual-ma-trend"
@@ -171,47 +178,27 @@ def test_a_row_shows_the_governance_fields(page) -> None:
     assert _cell(page, 0, 5) == "10.0%"
     assert _cell(page, 0, 6) == "0123456789ab"
     assert _cell(page, 0, 7) == "universe-hash-valu"
-    assert _cell(page, 0, 8) == "阻断"
-    assert _cell(page, 0, 9) == NOW.isoformat()
-    assert _cell(page, 0, 10) == "dual-ma-trend 说明"
+    assert _cell(page, 0, 8) == NOW.isoformat()
+    assert _cell(page, 0, 9) == "dual-ma-trend 说明"
 
 
-def test_a_passed_gate_reads_as_passed(page) -> None:
-    page.render((_version("v1", gate_passed=True),))
-    assert _cell(page, 0, 8) == "通过"
+def test_no_row_is_coloured_by_a_legacy_flag(page) -> None:
+    """Row colour no longer depends on a field that decides nothing."""
 
-
-def test_a_blocked_gate_is_coloured(page) -> None:
-    page.render((_version("v1"),))
-    item = page.version_table.item(0, 0)
-    assert item is not None
-    assert (
-        item.foreground().color().name()
-        == page._palette.warning.lower()  # noqa: SLF001
-    )
-
-
-def test_a_passed_gate_is_not_coloured(page) -> None:
-    page.render((_version("v1", gate_passed=True),))
-    item = page.version_table.item(0, 0)
-    assert item is not None
     palette = theme_palette("light")
-    assert (
-        item.foreground().color().name() != palette.warning.lower()
-    )
+    for gate in (True, False):
+        page.render((_version("v1", gate_passed=gate),))
+        item = page.version_table.item(0, 0)
+        assert item is not None
+        assert item.foreground().color().name() != palette.warning.lower()
 
 
 def test_the_palette_can_be_replaced(page) -> None:
-    """The window owns the theme; the page re-renders when told about it."""
+    """The window owns the theme; the page accepts it without complaint."""
 
     page.set_palette(theme_palette("dark"))
     page.render((_version("v1"),))
-    item = page.version_table.item(0, 0)
-    assert item is not None
-    assert (
-        item.foreground().color().name()
-        == theme_palette("dark").warning.lower()
-    )
+    assert page.version_table.item(0, 0) is not None
 
 
 # -- selection detail -----------------------------------------------------
@@ -234,57 +221,49 @@ def test_the_governance_block_carries_the_evidence(page) -> None:
     assert "代码 Hash：code-hash" in text
     assert "风险预算：10.0%" in text
     assert "参数约束：short_window" in text
-    assert "晋级门：阻断" in text
-    assert "尚未通过研究晋级门" in text
+    # The gate verdict is gone, and the block says where authorisation actually
+    # comes from rather than inferring it from a retired flag.
+    assert "晋级门" not in text
+    assert "本页面不根据 legacy gate 字段推断授权状态" in text
     assert "自动下单：关闭" in text
 
 
 def test_no_selection_disables_every_action(page) -> None:
     page.render(())
-    for button in (
-        page.clone_button,
-        page.shadow_button,
-        page.pause_button,
-        page.stop_button,
-    ):
+    for button in (page.clone_button, page.stop_button):
         assert not button.isEnabled()
 
 
 @pytest.mark.parametrize(
-    "status,shadow,pause,stop",
+    "status,stop",
     [
-        (StrategyStatus.RESEARCH, False, False, True),
-        (StrategyStatus.PAPER_SHADOW, False, True, True),
-        (StrategyStatus.PAUSED, False, False, True),
-        (StrategyStatus.STOPPED, False, False, False),
+        (StrategyStatus.RESEARCH, True),
+        (StrategyStatus.PAPER_SHADOW, True),
+        (StrategyStatus.PAUSED, True),
+        (StrategyStatus.STOPPED, False),
     ],
 )
-def test_the_button_rules_follow_the_status(
-    page, status, shadow, pause, stop
-) -> None:
+def test_the_button_rules_follow_the_status(page, status, stop) -> None:
+    """Only stop remains, and only from a status it can legally leave."""
+
     page.render((_version("v1", status=status),))
     assert page.clone_button.isEnabled()
-    assert page.shadow_button.isEnabled() is shadow
-    assert page.pause_button.isEnabled() is pause
     assert page.stop_button.isEnabled() is stop
 
 
-def test_a_paused_gated_version_may_ask_for_shadow(page) -> None:
-    page.render(
-        (
-            _version(
-                "v1",
-                status=StrategyStatus.PAUSED,
-                gate_passed=True,
-            ),
-        )
-    )
-    assert page.shadow_button.isEnabled()
+def test_the_page_offers_no_promotion_or_pause_control(page) -> None:
+    """The two evidence-driven transitions are not buttons any more.
 
+    Asserted as absence, because that is the change: a page that could name an
+    arbitrary lifecycle target would be a second lifecycle authority reached
+    through a widget.
+    """
 
-def test_a_research_version_may_not_ask_for_shadow(page) -> None:
     page.render((_version("v1", status=StrategyStatus.RESEARCH),))
-    assert not page.shadow_button.isEnabled()
+    assert not hasattr(page, "shadow_button")
+    assert not hasattr(page, "pause_button")
+    assert not hasattr(page, "transition_requested")
+    assert hasattr(page, "stop_requested")
 
 
 def test_the_operator_keeps_their_row_across_a_repaint(page) -> None:
@@ -355,28 +334,20 @@ def test_invalid_json_is_not_the_pages_business(page) -> None:
     assert seen[0][2] == "{not json"
 
 
-def test_a_transition_request_reports_the_target(page) -> None:
+def test_a_stop_request_reports_only_the_version(page) -> None:
+    """A version id, not a target status: the page may not name a lifecycle target."""
+
     seen: list = []
-    _record(page.transition_requested, seen)
+    _record(page.stop_requested, seen)
     page.render((_version("v1"),))
 
     page.stop_button.click()
-    assert seen[-1] == ("v1", "stopped")
+    assert seen[-1] == ("v1",)
 
     seen.clear()
     page.render((_version("v2", status=StrategyStatus.PAPER_SHADOW),))
-    page.pause_button.click()
-    assert seen[-1] == ("v2", "paused")
-
-
-def test_the_shadow_request_reports_the_target(page) -> None:
-    seen: list = []
-    _record(page.transition_requested, seen)
-    page.render(
-        (_version("v1", status=StrategyStatus.PAUSED, gate_passed=True),)
-    )
-    page.shadow_button.click()
-    assert seen[-1] == ("v1", "paper_shadow")
+    page.stop_button.click()
+    assert seen[-1] == ("v2",)
 
 
 def test_showing_a_version_does_not_touch_runtime_selection(page) -> None:

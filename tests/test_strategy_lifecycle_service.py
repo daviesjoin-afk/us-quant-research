@@ -141,7 +141,7 @@ def test_apply_prepares_then_transitions_then_marks_applied(tmp_path):
     result = service.apply(
         version=version,
         action=StrategyLifecycleAction.PROMOTE_TO_PAPER_SHADOW,
-        policy=None, authenticated=None, gate=None, coverage=None,
+        policy=None, coverage=None,
         applied_at=NOW,
     )
 
@@ -163,7 +163,7 @@ def test_a_refused_decision_is_recorded_and_changes_nothing(tmp_path):
     result = service.apply(
         version=version,
         action=StrategyLifecycleAction.PROMOTE_TO_PAPER_SHADOW,
-        policy=None, authenticated=None, gate=None, coverage=None,
+        policy=None, coverage=None,
         applied_at=NOW,
     )
 
@@ -187,7 +187,7 @@ def test_an_interruption_between_decide_and_apply_leaves_a_prepared_row(tmp_path
         service.apply(
             version=version,
             action=StrategyLifecycleAction.PROMOTE_TO_PAPER_SHADOW,
-            policy=None, authenticated=None, gate=None, coverage=None,
+            policy=None, coverage=None,
             applied_at=NOW,
         )
 
@@ -261,7 +261,7 @@ def test_reconcile_never_repeats_a_transition(tmp_path):
     service.apply(
         version=version,
         action=StrategyLifecycleAction.PROMOTE_TO_PAPER_SHADOW,
-        policy=None, authenticated=None, gate=None, coverage=None,
+        policy=None, coverage=None,
         applied_at=NOW,
     )
 

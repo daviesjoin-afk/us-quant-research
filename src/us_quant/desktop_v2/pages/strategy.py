@@ -13,7 +13,7 @@ Three boundaries are load-bearing:
   allowed -- are not re-implemented here; the page only decides which button
   to grey out, and the application decides what actually happens.
 * **it reports intent through signals.**  ``version_selected``,
-  ``clone_requested`` and ``transition_requested`` are the whole API back to
+  ``clone_requested`` and ``stop_requested`` are the whole API back to
   the window.  A page that could call a service would be an orchestrator.
 * **showing a version is not running it.**  Selecting a row means "this is the
   version I am looking at".  It must never repoint the auto-rotation or
@@ -33,7 +33,6 @@ from collections.abc import Sequence
 import json
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -82,17 +81,13 @@ VERSION_COLUMNS = (
     "风险预算",
     "参数Hash",
     "股票池Hash",
-    "研究门",
     "更新时间",
     "说明",
 )
 
-#: Statuses a version may be moved *from* by each governance button.  The
-#: application is the authority; this only decides what looks clickable.
-SHADOW_REQUEST_STATUSES = frozenset(
-    {StrategyStatus.RESEARCH, StrategyStatus.PAUSED}
-)
-PAUSABLE_STATUSES = frozenset({StrategyStatus.PAPER_SHADOW})
+#: The statuses a version may be moved *from* by the one remaining governance
+#: button.  The application is the authority; this only decides what looks
+#: clickable.
 STOPPABLE_STATUSES = frozenset(
     {
         StrategyStatus.RESEARCH,
@@ -126,7 +121,9 @@ class StrategyPage(QWidget):
 
     version_selected = Signal(str)
     clone_requested = Signal(str, str, str)
-    transition_requested = Signal(str, str)
+    #: The operator asked to stop ``version_id``.  A version id, not a target
+    #: status: promotion and pausing are evidence decisions now.
+    stop_requested = Signal(str)
 
     def __init__(
         self,
@@ -206,32 +203,22 @@ class StrategyPage(QWidget):
         panel = QFrame()
         panel.setObjectName("panel")
         layout = QVBoxLayout(panel)
-        title = QLabel("生命周期与晋级门")
+        title = QLabel("生命周期")
         title.setObjectName("sectionTitle")
         self.governance_text = QTextEdit()
         self.governance_text.setReadOnly(True)
         self.governance_text.setPlainText(
-            "选择策略查看研究门、版本哈希与安全状态。"
+            "选择策略查看版本哈希与安全状态。"
         )
         buttons = QHBoxLayout()
-        self.shadow_button = QPushButton("申请进入 Paper Shadow")
-        self.shadow_button.clicked.connect(
-            lambda: self._request_transition(StrategyStatus.PAPER_SHADOW)
-        )
-        self.pause_button = QPushButton("暂停")
-        self.pause_button.clicked.connect(
-            lambda: self._request_transition(StrategyStatus.PAUSED)
-        )
+        # One button, because one governance action is still the operator's: an
+        # explicit stop.  Promotion into Paper Shadow and pausing are
+        # evidence-driven lifecycle decisions now, made by the coverage chain and
+        # the lifecycle controller -- not by a button whose enablement was read
+        # off a legacy boolean.
         self.stop_button = QPushButton("停止")
-        self.stop_button.clicked.connect(
-            lambda: self._request_transition(StrategyStatus.STOPPED)
-        )
-        for button in (
-            self.shadow_button,
-            self.pause_button,
-            self.stop_button,
-        ):
-            buttons.addWidget(button)
+        self.stop_button.clicked.connect(self._request_stop)
+        buttons.addWidget(self.stop_button)
         layout.addWidget(title)
         layout.addWidget(self.governance_text)
         layout.addLayout(buttons)
@@ -309,9 +296,6 @@ class StrategyPage(QWidget):
                         item.setData(
                             Qt.ItemDataRole.UserRole, version.version_id
                         )
-                    if not version.gate_passed and column in {0, 3, 8}:
-                        # A blocked gate is what an operator must not miss.
-                        item.setForeground(QColor(self._palette.warning))
                     self.version_table.setItem(index, column, item)
             self.version_table.setSortingEnabled(True)
             target = previous or (rows[0].version_id if rows else None)
@@ -338,7 +322,6 @@ class StrategyPage(QWidget):
             f"{version.risk_budget_pct:.1%}",
             version.parameter_hash[:12],
             version.universe_hash[:18],
-            "通过" if version.gate_passed else "阻断",
             version.updated_at.isoformat(),
             version.description,
         )
@@ -416,12 +399,10 @@ class StrategyPage(QWidget):
             self.parameter_editor.setPlainText("")
             self.semver_input.setText("")
             self.governance_text.setPlainText(
-                "选择策略查看研究门、版本哈希与安全状态。"
+                "选择策略查看版本哈希与安全状态。"
             )
             for button in (
                 self.clone_button,
-                self.shadow_button,
-                self.pause_button,
                 self.stop_button,
             ):
                 button.setEnabled(False)
@@ -438,13 +419,6 @@ class StrategyPage(QWidget):
         self.governance_text.setPlainText(_governance_text(version))
         self.clone_button.setEnabled(
             version.status is not StrategyStatus.LEGACY_INVALIDATED
-        )
-        self.shadow_button.setEnabled(
-            version.gate_passed
-            and version.status in SHADOW_REQUEST_STATUSES
-        )
-        self.pause_button.setEnabled(
-            version.status in PAUSABLE_STATUSES
         )
         self.stop_button.setEnabled(
             version.status in STOPPABLE_STATUSES
@@ -468,11 +442,18 @@ class StrategyPage(QWidget):
             version.version_id, semver, self.parameter_editor.toPlainText()
         )
 
-    def _request_transition(self, target: StrategyStatus) -> None:
+    def _request_stop(self) -> None:
+        """Ask for the one governance action still the operator's.
+
+        A version id, not a target status: the page may not choose an arbitrary
+        lifecycle target, because promotion and pausing are evidence decisions
+        made by the lifecycle authority rather than by a button.
+        """
+
         version = self.selected_version()
         if version is None:
             return
-        self.transition_requested.emit(version.version_id, target.value)
+        self.stop_requested.emit(version.version_id)
 
     def _show_hint(self, text: str) -> None:
         self.hint_label.setText(text)
@@ -482,8 +463,11 @@ class StrategyPage(QWidget):
 def _governance_text(version: StrategyVersion) -> str:
     """The governance detail block, carried over from the retired page.
 
-    Semantics are unchanged: hashes, risk budget, parameter constraints, the
-    gate verdict and the standing "no order surface" statement.
+    Hashes, risk budget, parameter constraints and the standing "no order
+    surface" statement.  What is gone is the gate verdict and its reason: the
+    legacy ``gate_passed`` / ``gate_reason`` fields no longer decide anything, so
+    showing them here would state an authority the system does not have.  The
+    closing line says where the authorisation actually comes from instead.
     """
 
     return (
@@ -496,8 +480,8 @@ def _governance_text(version: StrategyVersion) -> str:
         f"代码 Hash：{version.code_hash}\n"
         f"风险预算：{version.risk_budget_pct:.1%}\n"
         f"参数约束：{strategy_schema_summary(version.strategy_id)}\n\n"
-        f"晋级门：{'通过' if version.gate_passed else '阻断'}\n"
-        f"原因：{version.gate_reason}\n\n"
+        "Paper 生命周期授权由独立证据链与生命周期控制器决定；\n"
+        "本页面不根据 legacy gate 字段推断授权状态。\n\n"
         "自动下单：关闭；本管理器没有订单提交接口。"
     )
 

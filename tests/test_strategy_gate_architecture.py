@@ -16,6 +16,13 @@ COMPOSITION = SRC / "trading" / "composition" / "strategy_gate.py"
 # runtime, broker-adapter or desktop module starts reaching for the gate.
 COVERAGE_DOMAIN = SRC / "trading" / "domain" / "strategy_coverage.py"
 COVERAGE_APPLICATION = SRC / "trading" / "application" / "strategy_coverage.py"
+#: The current-validity validator, which re-reads the stored gate records a
+#: coverage claim named.  Sanctioned for the same reason coverage itself is: it
+#: consumes gate verdicts as *evidence to re-check*, and never as a lifecycle
+#: input of its own.
+COVERAGE_VALIDITY_APPLICATION = (
+    SRC / "trading" / "application" / "strategy_coverage_validity.py"
+)
 # Stage 6-C lifecycle is the third sanctioned consumer, and the most deliberate
 # one: it is the authority that turns gate and coverage PASSes into a justified
 # state change, so it must be able to read them.
@@ -28,6 +35,7 @@ SANCTIONED_GATE_CONSUMERS = frozenset(
         COVERAGE_APPLICATION,
         LIFECYCLE_DOMAIN,
         LIFECYCLE_APPLICATION,
+        COVERAGE_VALIDITY_APPLICATION,
     }
 )
 
@@ -126,6 +134,7 @@ def test_a18b_sanctioned_gate_consumers_are_exactly_the_gate_and_its_governance_
     assert SANCTIONED_GATE_CONSUMERS == {
         EVALUATOR, COVERAGE_DOMAIN, COVERAGE_APPLICATION,
         LIFECYCLE_DOMAIN, LIFECYCLE_APPLICATION,
+        COVERAGE_VALIDITY_APPLICATION,
     }
 
 
@@ -149,6 +158,16 @@ def test_a21_gate_is_not_wired_into_runtime_or_lifecycle():
         SRC / "trading" / "adapters" / "sqlite" / "strategy_gate_repository.py",
         COVERAGE_DOMAIN, COVERAGE_APPLICATION,
         LIFECYCLE_DOMAIN, LIFECYCLE_APPLICATION,
+        # The current-validity validator re-reads the *stored gate record* each
+        # member of a coverage claim named.  That is the opposite of the drift
+        # this guard forbids: a gate evaluation is not becoming a lifecycle input,
+        # it is being re-checked against the claim that already admitted it.
+        COVERAGE_VALIDITY_APPLICATION,
+        # The two composition roots now build the gate store, because the shared
+        # validator needs one.  Composition is where concrete adapters are
+        # assembled by definition, so naming a repository here is its job.
+        SRC / "trading" / "composition" / "portfolio_operations.py",
+        SRC / "trading" / "composition" / "strategy_lifecycle.py",
     }
     for path in SRC.rglob("*.py"):
         if path in allowed:

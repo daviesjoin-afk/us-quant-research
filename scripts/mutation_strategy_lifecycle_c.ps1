@@ -30,8 +30,13 @@ $tService = Join-Path $projectRoot "tests\test_strategy_lifecycle_service.py"
 $tRepository = Join-Path $projectRoot "tests\test_strategy_lifecycle_repository.py"
 $tArchitecture = Join-Path $projectRoot "tests\test_strategy_lifecycle_architecture.py"
 $tStrategies = Join-Path $projectRoot "tests\test_trading_strategy_application.py"
+$tCoverageValidity = Join-Path $projectRoot "tests/test_strategy_coverage_validity.py"
+$tCoverageValidityArchitecture = Join-Path $projectRoot "tests/test_strategy_coverage_validity.py"
+$coverageValidity = Join-Path $projectRoot "src\us_quant\trading\application\strategy_coverage_validity.py"
 $tLaunchGate = Join-Path $projectRoot "tests\test_paper_authorization.py"
 $tPortfolioOps = Join-Path $projectRoot "tests\test_portfolio_operations.py"
+$tChainRegressions = Join-Path $projectRoot "tests\test_stage6c_coverage_chain_regressions.py"
+$tPromoteToPlan = Join-Path $projectRoot "tests\test_stage6c_promote_to_plan.py"
 
 $mutations = @(
     # -- authorization is the only bridge ---------------------------------
@@ -50,15 +55,15 @@ $mutations = @(
     @{ name='M11 the source status is not checked'; file=$application; find='if version\.status is not ACTION_SOURCE_STATUS\[action\]:'; repl='if False:'; tests=@($tEvaluator); select='test_the_current_status_must_match_the_action' },
 
     # -- the evidence chain ------------------------------------------------
-    @{ name='M12 a failed gate no longer blocks promotion'; file=$application; find='if gate\.verdict is not StrategyGateVerdict\.PASS:'; repl='if False:'; tests=@($tEvaluator); select='test_a_failed_gate_blocks_promotion' },
+    @{ name='M12 a failed gate no longer blocks promotion'; file=$coverageValidity; find='if gate\.verdict is not StrategyGateVerdict\.PASS:'; repl='if False:'; tests=@($tCoverageValidity); select='test_a_gate_that_no_longer_passes_invalidates_the_claim' },
     @{ name='M13 a failed coverage no longer blocks promotion'; file=$application; find='if coverage\.verdict is not StrategyCoverageVerdict\.PASS:'; repl='if False:'; tests=@($tEvaluator); select='test_a_failed_coverage_blocks_promotion' },
-    @{ name='M14 the required gate policy revision is not checked'; file=$application; find='if gate\.policy_version != policy\.required_gate_policy_version:'; repl='if False:'; tests=@($tEvaluator); select='test_gate_policy_revision_mismatch_blocks' },
+    @{ name='M14 the required gate policy revision is not checked'; file=$coverageValidity; find='if gate\.policy_version != required_gate_policy_version:'; repl='if False:'; tests=@($tCoverageValidity); select='test_a_gate_from_another_policy_revision_invalidates_the_claim' },
     @{ name='M15 the required coverage policy revision is not checked'; file=$application; find='if coverage\.policy_version != policy\.required_coverage_policy_version:'; repl='if False:'; tests=@($tEvaluator); select='test_coverage_policy_revision_mismatch_blocks' },
-    @{ name='M16 a revoked key still authorises promotion'; file=$application; find='elif key\.trust_status is EvidenceKeyTrustStatus\.REVOKED:'; repl='elif False:'; tests=@($tEvaluator); select='test_a_revoked_key_blocks_promotion' },
-    @{ name='M17 an unknown key is not reported'; file=$application; find='failures\.add\(StrategyLifecycleBlocker\.UNKNOWN_SIGNING_KEY\)'; repl='pass'; tests=@($tEvaluator); select='test_an_unknown_key_blocks_promotion' },
-    @{ name='M18 the evidence age bound is ignored'; file=$application; find='if moment - generated_at > policy\.maximum_evidence_age:'; repl='if False:'; tests=@($tEvaluator); select='test_stale_evidence_blocks_promotion' },
-    @{ name='M19 version identity is not bound'; file=$application; find='if authenticated\.strategy_version_id != version\.version_id:'; repl='if False:'; tests=@($tEvaluator); select='test_a_cross_wired_chain_is_refused' },
-    @{ name='M20 parameter hash is not bound'; file=$application; find='if authenticated\.parameter_hash != version\.parameter_hash:'; repl='if False:'; tests=@($tEvaluator); select='test_a_parameter_hash_cross_wire_is_refused' },
+    @{ name='M16 a revoked key still authorises promotion'; file=$coverageValidity; find='if key\.trust_status is EvidenceKeyTrustStatus\.REVOKED:'; repl='if False:'; tests=@($tCoverageValidity); select='test_one_revoked_member_invalidates_the_whole_claim' },
+    @{ name='M17 an unknown key is not reported'; file=$coverageValidity; find='return \{StrategyCoverageValidityBlocker\.UNKNOWN_SIGNING_KEY\}'; repl='return set()'; tests=@($tCoverageValidity); select='test_an_unknown_member_key_invalidates_the_claim' },
+    @{ name='M18 the evidence age bound is ignored'; file=$coverageValidity; find='and moment - generated_at > maximum_evidence_age'; repl='and False'; tests=@($tCoverageValidity); select='test_one_stale_member_invalidates_the_whole_claim' },
+    @{ name='M19 version identity is not bound'; file=$coverageValidity; find='or record\.strategy_version_id != coverage\.strategy_version_id'; repl='or False'; tests=@($tCoverageValidity); select='test_an_authentication_whose_identity_drifted_invalidates_the_claim' },
+    @{ name='M20 parameter hash is not bound'; file=$coverageValidity; find='or gate\.parameter_hash != coverage\.parameter_hash'; repl='or False'; tests=@($tCoverageValidity); select='test_a_gate_whose_identity_drifted_invalidates_the_claim' },
     @{ name='M21 the controller mutates lifecycle state'; file=$application; find='if not isinstance\(version, StrategyVersion\):'; repl="object.__setattr__(version, `"gate_passed`", True)`n        if not isinstance(version, StrategyVersion):"; tests=@($tEvaluator); select='test_the_controller_does_not_change_lifecycle_fields' },
     @{ name='M22 a pause can be justified by nothing'; file=$application; find='elif failures:\s*\n\s*blockers, triggers = set\(\), failures'; repl="elif failures:`n                blockers, triggers = failures, set()"; tests=@($tEvaluator); select='test_a_pause_is_authorised_by_a_named_governance_failure' },
 
@@ -75,20 +80,46 @@ $mutations = @(
     @{ name='M30 retry idempotency broken by the decision clock'; file=$repository; find='payload\.pop\("authorized_at", None\)'; repl='None'; tests=@($tRepository); select='test_record_is_idempotent_across_clocks' },
 
     # -- architecture -------------------------------------------------------
-    @{ name='M31 application imports the lifecycle adapter'; file=$application; find='from us_quant\.trading\.domain\.evidence_auth import \('; repl="from us_quant.trading.adapters.sqlite.strategy_lifecycle_repository import SQLiteStrategyLifecycleRepository  # noqa: F401`nfrom us_quant.trading.domain.evidence_auth import ("; tests=@($tArchitecture); select='test_l08_application_reaches_only_domain_and_ports' },
+    @{ name='M31 the validity validator imports the lifecycle adapter'; file=$coverageValidity; find='from us_quant\.trading\.domain\.strategy_gate import StrategyGateVerdict'; repl='import us_quant.trading.adapters.sqlite.strategy_lifecycle_repository as _adapter  # mutation'; tests=@($tCoverageValidityArchitecture); select='test_the_validator_reaches_no_adapter_and_no_authority' },
     @{ name='M32 lifecycle names a statistical threshold'; file=$application; find='class StrategyLifecycleController:'; repl="_STATISTICS_OWNER = `"MAXIMUM_PBO`"`n`n`nclass StrategyLifecycleController:"; tests=@($tArchitecture); select='test_l07_the_lifecycle_surface_never_recomputes_statistics' },
     @{ name='M33 a runtime module mints an authorization'; file=$runtimeConfig; find='from __future__ import annotations'; repl="from __future__ import annotations`nfrom us_quant.trading.domain.strategy_lifecycle import StrategyLifecycleAuthorization  # noqa: F401`n`n`ndef _forge():`n    return StrategyLifecycleAuthorization(None, None, None, None, None, _controller_token=object())"; tests=@($tArchitecture); select='test_l11_no_protected_layer_mints_an_authorization' },
 
     # -- the Paper launch gate ---------------------------------------------
     @{ name='M34 the plan boundary stops asking the launch gate'; file=$planBoundary; find='if \(\s*\n\s*self\._paper_authorization is None\s*\n\s*or not self\._paper_authorization\(version_id\)\s*\n\s*\):'; repl='if False:'; tests=@($tPortfolioOps); select='test_paper_shadow_alone_is_not_permission or test_a_plan_builder_without_an_authorizer_fails_closed' },
-    @{ name='M35 a revoked key still authorises a launch'; file=$launchGate; find='if key is None or key\.trust_status is EvidenceKeyTrustStatus\.REVOKED:'; repl='if key is None:'; tests=@($tLaunchGate); select='test_a_revoked_key_refuses' },
-    @{ name='M36 a failed authentication still authorises a launch'; file=$launchGate; find='if authentication\.verdict is not EvidenceAuthenticationVerdict\.PASS:'; repl='if False:'; tests=@($tLaunchGate); select='test_a_failed_authentication_refuses' },
-    @{ name='M37 a failed coverage still authorises a launch'; file=$launchGate; find='return coverage\.verdict is StrategyCoverageVerdict\.PASS'; repl='return True'; tests=@($tLaunchGate); select='test_a_failed_coverage_refuses' },
+    @{ name='M35 a revoked key still authorises a launch'; file=$coverageValidity; find='if key\.trust_status is EvidenceKeyTrustStatus\.REVOKED:'; repl='if False:'; tests=@($tCoverageValidity); select='test_one_revoked_member_invalidates_the_whole_claim' },
+    @{ name='M36 a failed authentication still authorises a launch'; file=$coverageValidity; find='if record\.verdict is not EvidenceAuthenticationVerdict\.PASS:'; repl='if False:'; tests=@($tCoverageValidity); select='test_an_authentication_that_no_longer_passes_invalidates_the_claim' },
+    @{ name='M37 a failed coverage still authorises a launch'; file=$coverageValidity; find='if coverage\.verdict is not StrategyCoverageVerdict\.PASS:'; repl='if False:'; tests=@($tCoverageValidity); select='test_a_claim_that_is_not_pass_is_invalid' },
     @{ name='M38 a decision that never applied authorises a launch'; file=$launchGate; find='decision\.state is StrategyLifecycleDecisionState\.APPLIED'; repl='True'; tests=@($tLaunchGate); select='test_a_prepared_decision_is_not_authority or test_a_superseded_decision_is_not_authority' },
     @{ name='M39 a pause counts as an entry decision'; file=$launchGate; find='StrategyLifecycleAction\.PROMOTE_TO_PAPER_SHADOW,\s*\n\s*StrategyLifecycleAction\.RESUME_PAPER_SHADOW,'; repl="StrategyLifecycleAction.PROMOTE_TO_PAPER_SHADOW,`n        StrategyLifecycleAction.RESUME_PAPER_SHADOW,`n        StrategyLifecycleAction.PAUSE,"; tests=@($tLaunchGate); select='test_a_pause_alone_never_authorises_a_launch or test_pause_is_not_an_entry_action' },
-    @{ name='M40 an unreadable authentication store raises instead of refusing'; file=$launchGate; find='except EvidenceAuthenticationRepositoryError:'; repl='except ZeroDivisionError:'; tests=@($tLaunchGate); select='test_an_unreadable_store_refuses_rather_than_raising' },
+    @{ name='M40 an unreadable authentication store raises instead of refusing'; file=$coverageValidity; find='except EvidenceAuthenticationRepositoryError:'; repl='except ZeroDivisionError:'; tests=@($tCoverageValidity); select='test_an_unreadable_authentication_store_invalidates_the_claim' },
     @{ name='M41 the plan boundary reads the legacy flag again'; file=$planBoundary; find='if version\.status is not StrategyStatus\.PAPER_SHADOW or version\.mode is not StrategyMode\.PAPER_SHADOW:'; repl="if version.status is not StrategyStatus.PAPER_SHADOW or version.mode is not StrategyMode.PAPER_SHADOW or not version.gate_passed:"; tests=@($tArchitecture); select='test_l20_the_plan_boundary_no_longer_reads_the_legacy_flag' },
-    @{ name='M42 the trust root moves inside the runtime store'; file=$appPaths; find='return self\.state_root / "trust"'; repl='return self.runtime_root / "trust"'; tests=@($tArchitecture); select='test_l25_the_trust_root_stays_outside_the_runtime_store' }
+    @{ name='M42 the trust root moves inside the runtime store'; file=$appPaths; find='return self\.state_root / "trust"'; repl='return self.runtime_root / "trust"'; tests=@($tArchitecture); select='test_l25_the_trust_root_stays_outside_the_runtime_store' },
+
+    # -- the repair: the claim's whole member set, and the two boundaries -----
+    #
+    # M43-M50 re-anchor onto the code the repair added.  Five of the brief's
+    # entries named branches an existing mutant already carries, and two named a
+    # branch whose defect is not reachable:
+    #
+    #   * "a REVOKED member key is ignored" duplicates M16/M35 (same line);
+    #   * "the gate policy version comparison is skipped" duplicates M14;
+    #   * "a stale member is skipped" duplicates M18.
+    #   * "exact authentication missing -> latest_for_version" and the same for the
+    #     gate are not real risks: the fallback returns a record filed under a
+    #     *different* id, so the identity comparison below it still refuses the
+    #     claim.  A mutant for them survives by construction, and a survivor is a
+    #     count, not a guard.
+    #
+    # So each entry below breaks a branch that is genuinely uncovered and genuinely
+    # reachable, and is named for what it actually does.
+    @{ name='M43 only the first coverage member is checked'; file=$coverageValidity; find='        for item in coverage\.items:'; repl='        for item in coverage.items[:1]:'; tests=@($tChainRegressions); select='test_r2b_a_revocation_on_the_last_member_also_refuses_the_launch' },
+    @{ name='M44 a duplicate member identity is not detected'; file=$coverageValidity; find='        if item\.identity in seen:'; repl='        if False:'; tests=@($tCoverageValidity); select='test_a_duplicate_member_identity_is_invalid' },
+    @{ name='M45 a member authentication is not bound to its review run'; file=$coverageValidity; find='            or record\.review_run_id != item\.review_run_id'; repl='            or False'; tests=@($tCoverageValidity); select='test_an_authentication_whose_identity_drifted_invalidates_the_claim' },
+    @{ name='M46 a member gate is not bound to its review run'; file=$coverageValidity; find='            or gate\.review_run_id != item\.review_run_id'; repl='            or False'; tests=@($tCoverageValidity); select='test_a_gate_whose_identity_drifted_invalidates_the_claim' },
+    @{ name='M47 the lifecycle drops the evidence age bound'; file=$application; find='            maximum_evidence_age=policy\.maximum_evidence_age,'; repl='            maximum_evidence_age=None,'; tests=@($tChainRegressions); select='test_r5b_a_claim_fresh_at_formation_is_stale_at_decision_time' },
+    @{ name='M48 evidence from the future is not refused'; file=$coverageValidity; find='    if generated_at > moment:'; repl='    if False:'; tests=@($tCoverageValidity); select='test_evidence_from_the_future_is_refused' },
+    @{ name='M49 the launch gate ignores the validator verdict'; file=$launchGate; find='        return validity\.valid'; repl='        return True'; tests=@($tLaunchGate); select='test_a_revoked_member_key_refuses' },
+    @{ name='M50 the launch gate reads the active policy, not the decision revision'; file=$launchGate; find='            policy = self\._lifecycle_policies\.get_policy\(\s*\n\s*decision\.policy_id, decision\.policy_revision\s*\n\s*\)'; repl='            policy = self._lifecycle_policies.active_policy(decision.policy_id)'; tests=@($tChainRegressions); select='test_r8_the_launch_reads_the_decisions_own_policy_revision' }
 )
 
 function Get-Text([string]$path) { [System.IO.File]::ReadAllText($path) }

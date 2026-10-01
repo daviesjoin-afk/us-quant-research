@@ -94,6 +94,13 @@ class StrategyLifecycleBlocker(StrEnum):
     UNKNOWN_SIGNING_KEY = "UNKNOWN_SIGNING_KEY"
     TRUST_ROOT_UNAVAILABLE = "TRUST_ROOT_UNAVAILABLE"
     STALE_EVIDENCE = "STALE_EVIDENCE"
+    #: The whole coverage claim is no longer current: some member's record is
+    #: gone, no longer passes, no longer matches the item that named it, is signed
+    #: by a key that is no longer trusted, or has aged out.  Deliberately one
+    #: blocker rather than a copy of the validator's granular list: the lifecycle
+    #: decision says *that* the chain is stale, and the validity result it was
+    #: built from carries the reasons.
+    EVIDENCE_CHAIN_NOT_CURRENT = "EVIDENCE_CHAIN_NOT_CURRENT"
     #: A pause must name the governance fact that justifies it.  Without this
     #: blocker an evaluator could suspend a running strategy for no recorded
     #: reason, which is exactly the kind of unilateral authority 6-C removes.
@@ -413,8 +420,6 @@ def stable_lifecycle_decision_id(
     target_status: StrategyStatus,
     policy_id: str | None,
     policy_revision: int | None,
-    authentication_id: str | None,
-    gate_evaluation_id: str | None,
     coverage_evaluation_id: str | None,
     blockers: tuple[StrategyLifecycleBlocker, ...],
     triggers: tuple[StrategyLifecycleBlocker, ...],
@@ -424,6 +429,14 @@ def stable_lifecycle_decision_id(
 
     ``authorized_at`` is excluded, so re-evaluating identical inputs is
     idempotent and cannot create a second, competing decision row.
+
+    The evidence identity is ``coverage_evaluation_id`` and nothing else.  A
+    coverage evaluation is immutable and names its complete member set, so it
+    already identifies the evidence; the representative ``authentication_id`` and
+    ``gate_evaluation_id`` that used to contribute here identified *one member of
+    that set*, which is exactly the model this repair removes.  Leaving them in
+    the hash would let two decisions over the same evidence differ by which member
+    happened to be passed as the representative.
     """
 
     material = {
@@ -433,8 +446,6 @@ def stable_lifecycle_decision_id(
         "target_status": target_status.value,
         "policy_id": policy_id,
         "policy_revision": policy_revision,
-        "authentication_id": authentication_id,
-        "gate_evaluation_id": gate_evaluation_id,
         "coverage_evaluation_id": coverage_evaluation_id,
         "blockers": sorted({item.value for item in blockers}),
         "triggers": sorted({item.value for item in triggers}),

@@ -421,26 +421,28 @@ def test_a_parameter_error_on_clone_is_reported(window, dialogs) -> None:
     assert dialogs and dialogs[-1][0] == "warning"
 
 
-def test_a_blocked_gate_transition_is_reported(window, dialogs) -> None:
-    source = _version_of(window, "buy-hold", "1.0.0-research")
+def test_the_window_offers_no_promotion_path(window, dialogs) -> None:
+    """The window cannot promote a version: that authority is not a button.
 
-    window.strategy_governance_orchestrator.transition(
-        source.version_id, "paper_shadow"
-    )
+    The retired handler took a target status from the page.  There is no such
+    entry point now, so a promotion can only come from the evidence-driven
+    lifecycle authority -- which is the whole point of this round.
+    """
+
+    source = _version_of(window, "buy-hold", "1.0.0-research")
+    orchestrator = window.strategy_governance_orchestrator
+    assert not hasattr(orchestrator, "transition")
 
     assert (
         window.strategies.get_version(source.version_id).status
         is StrategyStatus.RESEARCH
     )
-    assert dialogs and dialogs[-1][0] == "warning"
 
 
-def test_a_stop_transition_is_applied(window) -> None:
+def test_a_stop_is_applied_through_the_orchestrator(window) -> None:
     source = _version_of(window, "buy-hold", "1.0.0-research")
 
-    window.strategy_governance_orchestrator.transition(
-        source.version_id, "stopped"
-    )
+    window.strategy_governance_orchestrator.stop(source.version_id)
 
     assert (
         window.strategies.get_version(source.version_id).status

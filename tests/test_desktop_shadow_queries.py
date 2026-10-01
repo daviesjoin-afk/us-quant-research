@@ -269,24 +269,22 @@ def test_only_the_targeted_strategy_may_run() -> None:
     assert not queries.is_targeted_strategy("")
 
 
-def test_paper_shadow_is_conditional_on_the_evidence_gate() -> None:
-    """A version that has not passed its gate is refused like a stopped one."""
+def test_runnable_status_is_about_status_only() -> None:
+    """The legacy gate flag no longer makes Paper Shadow conditional.
 
-    assert queries.is_runnable_status(
-        StrategyStatus.RESEARCH, gate_passed=False
-    )
-    assert queries.is_runnable_status(
-        StrategyStatus.PAPER_SHADOW, gate_passed=True
-    )
-    assert not queries.is_runnable_status(
-        StrategyStatus.PAPER_SHADOW, gate_passed=False
-    )
+    It used to, which after Stage 6-C refused exactly the versions the new
+    architecture had authorised -- an evidence-driven promotion deliberately
+    leaves ``gate_passed`` False.  Authorisation is asked at the launch boundary.
+    """
+
+    assert queries.is_runnable_status(StrategyStatus.RESEARCH)
+    assert queries.is_runnable_status(StrategyStatus.PAPER_SHADOW)
     for status in (
         StrategyStatus.PAUSED,
         StrategyStatus.STOPPED,
         StrategyStatus.LEGACY_INVALIDATED,
     ):
-        assert not queries.is_runnable_status(status, gate_passed=True), status
+        assert not queries.is_runnable_status(status), status
 
 
 def test_the_symbol_pattern_is_anchored_at_both_ends() -> None:

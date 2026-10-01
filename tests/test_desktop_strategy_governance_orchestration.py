@@ -326,37 +326,45 @@ def test_a_successful_clone_refreshes_and_logs_exactly(page) -> None:
     assert recorder.events == []
 
 
-# -- G / H: the transition ----------------------------------------------
+# -- G / H: the one remaining governance action ---------------------------
 
 
-def test_a_blocked_transition_publishes_no_runtime_event(page) -> None:
+def test_a_refused_stop_publishes_no_runtime_event(page) -> None:
     application = FakeApplication((_version(),))
     application.transition_error = StrategyApplicationError(
-        "research gate blocked: 尚未通过研究晋级门"
+        "stopped is not reachable from this status"
     )
     orchestrator, recorder = _orchestrator(application, page)
     application.list_calls = 99  # sentinel: no refresh may happen
 
-    orchestrator.transition("buy-hold-1.0.0-research", "paper_shadow")
+    orchestrator.stop("buy-hold-1.0.0-research")
 
     assert recorder.warnings == [
         (
-            "晋级门阻断",
-            "research gate blocked: 尚未通过研究晋级门\n\n自动下单仍保持关闭。",
+            "停止被阻断",
+            "stopped is not reachable from this status\n\n自动下单仍保持关闭。",
         )
     ]
     assert recorder.log == [
-        "策略状态变更被阻断：research gate blocked: 尚未通过研究晋级门"
+        "策略停止被阻断：stopped is not reachable from this status"
     ]
     assert recorder.events == []
     assert application.list_calls == 99
 
 
-def test_a_successful_transition_changes_status_exactly_once(page) -> None:
+def test_a_successful_stop_changes_status_exactly_once(page) -> None:
+    """The orchestrator may only ever ask for STOPPED.
+
+    A generic ``transition(version_id, target_status)`` is what the page used to
+    drive; it is gone, because naming an arbitrary lifecycle target from a widget
+    would make this route a second lifecycle authority.  The assertion below is
+    that the one call it makes names ``stopped`` and nothing else.
+    """
+
     application = FakeApplication((_version(),))
     orchestrator, recorder = _orchestrator(application, page)
 
-    orchestrator.transition("buy-hold-1.0.0-research", "stopped")
+    orchestrator.stop("buy-hold-1.0.0-research")
 
     assert application.transition_calls == [
         ("buy-hold-1.0.0-research", "stopped", "desktop governance action")
@@ -370,6 +378,14 @@ def test_a_successful_transition_changes_status_exactly_once(page) -> None:
     assert event.component == "strategy"
     assert event.code == "STATUS_CHANGE"
     assert event.message == "buy-hold 1.0.0-research -> stopped"
+
+
+def test_the_orchestrator_has_no_generic_transition(page) -> None:
+    """Promotion and pausing left this route entirely."""
+
+    orchestrator, _ = _orchestrator(FakeApplication((_version(),)), page)
+    assert not hasattr(orchestrator, "transition")
+    assert hasattr(orchestrator, "stop")
 
 
 # -- I / J: the governance view selection --------------------------------
@@ -408,26 +424,30 @@ def test_a_missing_selected_version_is_a_silent_no_op(page) -> None:
     assert recorder.warnings == []
 
 
-def test_a_gate_passed_paper_shadow_version_publishes_the_second_notice(
-    page,
-) -> None:
-    paper = _version(
-        semver="2.0.0-paper",
-        status=StrategyStatus.PAPER_SHADOW,
-        gate_passed=True,
-        gate_reason="",
-    )
+def test_the_notice_describes_status_and_never_the_legacy_gate(page) -> None:
+    """The notice no longer infers authorisation from a retired flag.
+
+    It used to quote ``gate_reason`` and branch on ``gate_passed``, which made the
+    account notice a place where a field that decides nothing decided what the
+    operator was told about their own authorisation.
+    """
+
+    paper = _version(semver="2.0.0-paper", status=StrategyStatus.PAPER_SHADOW)
     application = FakeApplication((paper,))
     orchestrator, recorder = _orchestrator(application, page)
 
     orchestrator.select_version("buy-hold-2.0.0-paper")
-    assert "策略证据门：通过" in recorder.notices[0]
+    assert "Paper Shadow" in recorder.notices[0]
+    assert "仍必须通过当前生命周期授权检查" in recorder.notices[0]
 
-    blocked = _version(semver="3.0.0-research", gate_passed=False)
-    application._versions = (blocked,)
+    research = _version(semver="3.0.0-research")
+    application._versions = (research,)
     orchestrator.select_version("buy-hold-3.0.0-research")
-    assert "策略证据门：硬阻断" in recorder.notices[1]
-    assert "尚未通过研究晋级门" in recorder.notices[1]
+    assert "尚未进入受治理的 Paper 生命周期" in recorder.notices[1]
+
+    for notice in recorder.notices:
+        assert "策略证据门" not in notice
+        assert "晋级门" not in notice
 
 
 # -- K: the window-level catalogue fan-out -------------------------------

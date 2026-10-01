@@ -343,7 +343,6 @@ def freeze_portfolio_plan(plan: Any, strategies: Iterable[Any]) -> PaperPortfoli
     if any(
         item.status != "paper_shadow"
         or item.mode != "paper_shadow"
-        or not item.gate_passed
         for item in facts
     ):
         raise PaperLaunchIntegrityError("portfolio contains a strategy without current Paper governance")
@@ -398,7 +397,6 @@ def strategy_launch_fact(strategy: Any) -> PaperStrategyLaunchFact:
         parameters=parameters,
         status=str(getattr(getattr(strategy, "status", ""), "value", getattr(strategy, "status", ""))),
         mode=str(getattr(getattr(strategy, "mode", ""), "value", getattr(strategy, "mode", ""))),
-        gate_passed=bool(getattr(strategy, "gate_passed", False)),
     )
 
 

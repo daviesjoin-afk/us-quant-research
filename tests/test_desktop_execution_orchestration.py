@@ -639,11 +639,14 @@ def test_an_ineligible_version_is_refused_and_described() -> None:
     )
     assert eligible is False
     assert detail.startswith("1.0.0")
-    # A paper/shadow version must have passed its gate.
-    gated = _Version(status="paper_shadow", gate_passed=False)
-    assert queries.strategy_eligibility(gated)[0] is False
-    passing = _Version(status="paper_shadow", gate_passed=True)
-    assert queries.strategy_eligibility(passing)[0] is True
+    # Eligibility is about status, not about authorisation.  A Paper Shadow
+    # version is eligible whether or not the legacy flag is set: after Stage 6-C
+    # an evidence-driven promotion leaves ``gate_passed`` False, so requiring it
+    # here refused exactly the versions the new architecture had authorised.
+    # Authorisation is the lifecycle authority's answer, asked at launch.
+    for gate in (False, True):
+        shadow = _Version(status="paper_shadow", gate_passed=gate)
+        assert queries.strategy_eligibility(shadow)[0] is True, gate
     research = _Version(status="research", gate_passed=False)
     assert queries.strategy_eligibility(research)[0] is True
 

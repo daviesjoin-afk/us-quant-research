@@ -227,7 +227,7 @@ def test_the_window_wires_the_page_to_the_capability() -> None:
     for signal in (
         "version_selected",
         "clone_requested",
-        "transition_requested",
+        "stop_requested",
     ):
         assert (
             f"self.strategy_page.{signal}.connect(\n"
@@ -420,3 +420,236 @@ def test_the_account_notice_bridge_accepts_finished_text_only() -> None:
     )
     assert "Strategy" not in body, body
     assert "strategy" not in body, body
+
+# =====================================================================
+# 11. The retired lifecycle surface stays retired
+# =====================================================================
+
+
+#: Text that would mean a legacy authority came back to this route.
+_RETIRED_LIFECYCLE_TEXT = (
+    "gate_passed",
+    "gate_reason",
+    "StrategyLifecycleAuthorization",
+    "StrategyCoverageEvaluation",
+)
+
+#: Targets a widget must never name.  A page that can ask for PAPER_SHADOW or
+#: PAUSED is a page driving evidence-driven lifecycle decisions, which belong to
+#: the coverage chain and ``StrategyLifecycleController``.
+_RETIRED_TRANSITION_TARGETS = ("PAPER_SHADOW", "PAUSED")
+
+
+def _text(path: pathlib.Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _identifier_names(path: pathlib.Path) -> set[str]:
+    """Every identifier ``path`` spells, as an AST fact rather than a substring.
+
+    Attribute access and plain names both count, because ``version.gate_passed``
+    and a bare ``gate_passed`` are the same read.  Prose is deliberately
+    excluded: these modules *explain* why the retired fields are gone, and a
+    guard that rejected the explanation would be turned off rather than obeyed.
+    """
+
+    found: set[str] = set()
+    for node in ast.walk(_tree(path)):
+        if isinstance(node, ast.Name):
+            found.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            found.add(node.attr)
+    return found
+
+
+def test_the_strategy_page_reads_no_legacy_gate_field() -> None:
+    """The page may not render an authority the system no longer has.
+
+    ``gate_passed`` / ``gate_reason`` still exist as frozen schema, but nothing
+    decides anything from them.  A page that displayed a verdict derived from
+    them would tell the operator they are authorised (or blocked) on the
+    strength of a retired flag.
+    """
+
+    names = _identifier_names(_STRATEGY_PAGE)
+    for retired in ("gate_passed", "gate_reason"):
+        assert retired not in names, retired
+
+
+def test_the_governance_package_reads_no_legacy_gate_field() -> None:
+    for path in _python_files(_STRATEGY_DIR):
+        names = _identifier_names(path)
+        for retired in ("gate_passed", "gate_reason"):
+            assert retired not in names, (path.name, retired)
+
+
+def test_the_strategy_page_offers_no_lifecycle_transition() -> None:
+    """Only STOP remains, and it is asked for by version id."""
+
+    tree = _tree(_STRATEGY_PAGE)
+    signals = {
+        node.targets[0].id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "Signal"
+    }
+    assert "stop_requested" in signals
+    assert "transition_requested" not in signals
+
+    # ``StrategyStatus.PAPER_SHADOW`` still appears in ``STOPPABLE_STATUSES``,
+    # and that is correct: the question there is "may this status be stopped",
+    # not "should this status be promoted to".  What must be absent is a
+    # *target*: no emit may carry a lifecycle status, so the page cannot ask for
+    # one at all.
+    emitted = [
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "emit"
+        and "StrategyStatus" in ast.unparse(node)
+    ]
+    assert emitted == [], emitted
+
+
+def test_the_orchestrator_owns_no_evidence_lifecycle() -> None:
+    """Promotion and pausing left this route; only explicit stop is left.
+
+    Asserted on the source rather than on behaviour: the point is that the
+    capability cannot reach the evidence authorities at all, so a future edit
+    cannot reintroduce a second lifecycle path by wiring one in.
+    """
+
+    source = _text(_STRATEGY_DIR / "orchestrator.py")
+    for retired in _RETIRED_LIFECYCLE_TEXT:
+        assert retired not in source, retired
+    for target in _RETIRED_TRANSITION_TARGETS:
+        assert f"StrategyStatus.{target}" not in source, target
+    assert "StrategyStatus.STOPPED" in source
+    # A generic transition entry point is exactly what the page used to drive.
+    assert "def transition(" not in source
+    assert "def stop(" in source
+
+
+#: Production modules that still *decide* anything from the retired gate fields.
+#:
+#: The end state is the empty set, and it is reached: nothing in the product
+#: branches on ``gate_passed`` or ``gate_reason`` any more.  They survive only as
+#: the frozen domain value, the SQLite adapter that round-trips them, and two
+#: non-decision surfaces -- the ``strategies.csv`` export columns and the
+#: ``StrategySeed`` / ``StrategyVersion`` field declarations.
+#:
+#: "Decide" is the operative word, and it is why this guard reads contexts rather
+#: than identifiers.  An earlier version of this ratchet counted every mention of
+#: either name, which reported three modules as outstanding debt when none of them
+#: made a decision: a value packed into a dict and written to a CSV is *carried*,
+#: and a dataclass field declaration is not a read at all.  A ratchet that cannot
+#: reach zero because it is measuring the wrong thing is not a stricter guard, it
+#: is a guard somebody eventually widens.  So the measurement was corrected
+#: instead -- and the predicate was validated against the commit *before* this
+#: repair, where it reports all eleven of the original defects, including the two
+#: that read the flag inside a boolean expression assigned to a variable rather
+#: than inside an ``if`` test.
+#:
+#: The list is asserted for exact equality, so a new decision read anywhere fails
+#: immediately and the debt cannot grow.
+_LEGACY_GATE_READERS_PENDING_RETIREMENT = frozenset()
+
+#: Where the fields are *allowed* to remain: the frozen schema and its value.
+_LEGACY_GATE_STORAGE = frozenset(
+    {
+        "trading/adapters/sqlite/strategy_repository.py",
+        "trading/domain/strategy.py",
+    }
+)
+
+#: Contexts that mean the value is being branched on.
+_GATE_DECISION_CONTEXTS = (
+    ast.BoolOp,
+    ast.Compare,
+    ast.UnaryOp,
+    ast.If,
+    ast.While,
+    ast.IfExp,
+    ast.Assert,
+    ast.comprehension,
+)
+
+#: Contexts that mean the value is only being carried -- a payload, not a
+#: decision.  Reaching one of these first stops the outward walk.
+_GATE_CONVEYOR_CONTEXTS = (ast.Dict, ast.List, ast.Tuple, ast.Set)
+
+
+def _decides_from_a_legacy_gate_field(path: pathlib.Path) -> list[tuple[int, str]]:
+    """Attribute reads of the retired fields that feed a branch or a condition.
+
+    Attribute reads only: ``register(gate_passed=...)``'s parameter and the
+    ``StrategySeed`` field declaration are not reads of a stored version's
+    retired column.
+
+    The walk goes outward from the field and stops at the first context that
+    settles the question.  A container literal wins over a decision context,
+    which is what keeps a CSV row from counting as a branch -- and a ``BoolOp``
+    counts as a decision, which is what keeps ``eligible = (... or
+    version.gate_passed)`` counted even though no ``if`` is involved.
+    """
+
+    tree = _tree(path)
+    parents: dict[int, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute) or node.attr not in (
+            "gate_passed",
+            "gate_reason",
+        ):
+            continue
+        cursor: ast.AST = node
+        while id(cursor) in parents:
+            cursor = parents[id(cursor)]
+            if isinstance(cursor, _GATE_CONVEYOR_CONTEXTS):
+                break
+            if isinstance(cursor, _GATE_DECISION_CONTEXTS):
+                found.append((node.lineno, ast.unparse(node)))
+                break
+    return found
+
+
+def test_the_legacy_gate_fields_decide_nothing() -> None:
+    """A ratchet on the retired fields: the debt can only shrink, and is now zero.
+
+    ``gate_passed`` and ``gate_reason`` stay in the domain value and the SQLite
+    adapter because the schema is frozen and existing databases must keep
+    round-tripping.  Nothing else may *decide* from them; this pins that exactly,
+    so a new decision read fails immediately.
+    """
+
+    offenders: dict[str, list[tuple[int, str]]] = {}
+    for path in _python_files(_SRC):
+        relative = path.relative_to(_SRC).as_posix()
+        if relative in _LEGACY_GATE_STORAGE:
+            continue
+        reads = _decides_from_a_legacy_gate_field(path)
+        if reads:
+            offenders[relative] = reads
+
+    assert set(offenders) == set(_LEGACY_GATE_READERS_PENDING_RETIREMENT), offenders
+
+
+def test_the_frozen_storage_still_carries_the_fields() -> None:
+    """The other half of the ratchet: the fields are not silently dropped.
+
+    Removing them from the domain value or the adapter would break every
+    database written before this round.  That is Stage 6-G schema work, so the
+    storage surface is asserted to still be there until then.
+    """
+
+    for relative in _LEGACY_GATE_STORAGE:
+        names = _identifier_names(_SRC / relative)
+        assert "gate_passed" in names, relative

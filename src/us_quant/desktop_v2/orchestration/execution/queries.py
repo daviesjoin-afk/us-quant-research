@@ -70,7 +70,16 @@ def strategy_eligibility(
 
     Statuses are compared as enum members rather than raw strings, so a domain
     rename cannot quietly keep an ineligible version eligible.  A version in
-    research may run; a paper/shadow version must have passed its gate.
+    research may run, and so may a Paper Shadow version.
+
+    The legacy ``gate_passed`` flag is deliberately **not** consulted.  It used to
+    be required here, which after Stage 6-C meant this check rejected exactly the
+    versions the new architecture had just authorised: an evidence-driven
+    promotion deliberately leaves ``gate_passed`` False, so ``PAPER_SHADOW and
+    gate_passed`` was false for every version promoted the new way.  Whether a
+    version is *authorised* is the lifecycle authority's answer, asked at the
+    Paper launch boundary; this function answers only whether the status is one
+    that may run at all.
     """
 
     eligible = (
@@ -78,10 +87,6 @@ def strategy_eligibility(
         and strategy.strategy_id == AUTO_ROTATION_STRATEGY_ID
         and strategy.status
         in {StrategyStatus.RESEARCH, StrategyStatus.PAPER_SHADOW}
-        and (
-            strategy.status is StrategyStatus.RESEARCH
-            or strategy.gate_passed
-        )
     )
     detail = (
         f"{strategy.semver} · {strategy.status}"

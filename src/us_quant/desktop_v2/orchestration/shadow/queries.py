@@ -102,19 +102,18 @@ def is_targeted_strategy(strategy_id: str) -> bool:
     return strategy_id == TARGETED_STRATEGY_ID
 
 
-def is_runnable_status(status: StrategyStatus, *, gate_passed: bool) -> bool:
+def is_runnable_status(status: StrategyStatus) -> bool:
     """Whether a version in ``status`` may run the internal simulator.
 
-    ``PAPER_SHADOW`` is conditional: the version has to have passed its evidence
-    gate.  A ``PAPER_SHADOW`` version that has not is refused for the same reason
-    a stopped one is -- only versions that are allowed to run, run.
+    Status only.  It used to make ``PAPER_SHADOW`` conditional on the legacy
+    ``gate_passed`` flag, which after Stage 6-C refused exactly the versions the
+    new architecture had authorised: an evidence-driven promotion deliberately
+    leaves that flag False.  Authorisation is the lifecycle authority's answer,
+    asked at the Paper launch boundary; this rule answers whether the status is
+    one that may run.
     """
 
-    if status not in RUNNABLE_STATUSES:
-        return False
-    if status is StrategyStatus.PAPER_SHADOW:
-        return gate_passed
-    return True
+    return status in RUNNABLE_STATUSES
 
 
 def is_research_eligible(universe: UniverseSnapshot, symbol: str) -> bool:
@@ -222,7 +221,7 @@ def plan_start(
         return ShadowStartRefusal(
             STRATEGY_MISMATCH_TITLE, STRATEGY_MISMATCH_MESSAGE
         )
-    if not is_runnable_status(strategy.status, gate_passed=strategy.gate_passed):
+    if not is_runnable_status(strategy.status):
         return ShadowStartRefusal(STATUS_TITLE, STATUS_MESSAGE)
     if capital is None:
         return ShadowStartRefusal(CAPITAL_TITLE, CAPITAL_MESSAGE)

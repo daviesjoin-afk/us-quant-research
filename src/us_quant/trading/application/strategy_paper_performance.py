@@ -62,9 +62,14 @@ class StrategyPaperPerformanceApplication:
         )
         # Both projections consume the exact same loaded snapshot. No second
         # application load can pair a new fill with an older clean reconciliation.
+        reconciliation_options = (
+            {'max_snapshot_age': policy.maximum_reconciliation_age}
+            if policy is not None else {}
+        )
         reconciliation = reconcile_portfolio_truth(
             now=evaluated_at, broker=broker, broker_order_truth=broker_orders,
             order_truth=orders, decisions=decisions, execution_attributions=attributions,
+            **reconciliation_options,
         )
         replay = replay_portfolio_execution_truth(
             now=evaluated_at, account_alias=broker.account.account_alias,

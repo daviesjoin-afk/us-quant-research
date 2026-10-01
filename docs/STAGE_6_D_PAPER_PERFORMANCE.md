@@ -57,7 +57,7 @@ SQLite 交叉校验索引身份、规范 JSON、摘要和语义 ID；损坏抛�
 
 `tests/test_strategy_paper_performance_architecture.py` 锁定 P01–P12 边界。
 `scripts/mutation_strategy_paper_performance_d.ps1` 先检查正常测试全绿，再运行
-39 个有效变异，分别报告 survivor 与 harness error；代码在 finally 中恢复。
+40 个有效变异，分别报告 survivor 与 harness error；代码在 finally 中恢复。
 
 模拟测试中的成交不是实际 Paper 观察。只有完成受监督的多策略真实 Paper 观察、
 保存评估并在重启后从真实持久化事实重建结果，才能声明 operational complete。

@@ -135,6 +135,22 @@ def test_stale_broker_truth_cannot_gain_freshness_from_evaluator_time(tmp_path):
     assert evaluation.verdict is V.FAIL and B.RECONCILIATION_STALE in evaluation.blockers
 
 
+def test_explicit_policy_age_applies_to_reconciliation_and_performance(tmp_path):
+    components,_,_,_,source = setup_app(tmp_path)
+    components.repository.append_policy_revision(
+        policy(revision=2,maximum_adverse_slippage=Decimal(10000),maximum_reconciliation_age=timedelta(minutes=30)),
+        expected_current_revision=1,
+    )
+    observed = NOW-timedelta(minutes=10)
+    source.broker_open_order_truth = lambda: BrokerOpenOrderTruth(ACCOUNT_ALIAS,observed,True,())
+    accepted = evaluate(components,broker=broker(quantities={},observed_at=observed))
+    assert accepted.verdict is V.PASS and accepted.metrics.reconciliation_clean
+    assert accepted.reconciliation_observed_at == observed
+    observed = NOW-timedelta(minutes=31)
+    refused = evaluate(components,broker=broker(quantities={},observed_at=observed))
+    assert refused.verdict is V.FAIL and B.RECONCILIATION_STALE in refused.blockers
+
+
 def test_cutoff_excludes_future_sell_and_keeps_pre_window_basis(tmp_path):
     components,*_ = setup_app(tmp_path,data=history(pre_window=True))
     evaluation = evaluate(components,window_end=NOW-timedelta(days=2))

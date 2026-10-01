@@ -16,10 +16,10 @@ import json
 from us_quant.trading.domain.portfolio_reconciliation import (
     PortfolioExecutionReplay, PortfolioReconciliationResult,
 )
+from us_quant.trading.domain.common import ZERO
 
 EVALUATOR_VERSION = 'paper-performance-v1'
 POLICY_VERSION = 'paper-performance-policy-v1'
-ZERO = Decimal('0')
 
 
 def canonical_value(value):

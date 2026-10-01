@@ -71,8 +71,8 @@ class StrategyPaperPerformanceApplication:
             order_truth=orders, decisions=decisions, execution_attributions=attributions,
             through_at=window_end,
         )
-        observation_times = (broker.account.observed_at, broker_orders.observed_at,
-                             *(item.observed_at for item in broker.positions))
+        observation_times = tuple(sorted((broker.account.observed_at, broker_orders.observed_at,
+                                          *(item.observed_at for item in broker.positions))))
         reconciliation = replace(reconciliation, observed_at=min(observation_times))
         metrics = project_strategy_paper_performance(
             strategy_version_id=strategy_version_id, window_start=window_start,

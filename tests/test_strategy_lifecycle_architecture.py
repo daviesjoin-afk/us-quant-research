@@ -785,18 +785,19 @@ def test_the_chain_blocker_is_added_unconditionally():
     seen cannot produce an empty failure set.  Asserted on the AST rather than by
     behaviour, because the property is about ordering inside one function.
 
-    Three things are pinned, and all three are needed for the property to hold:
+    Three things are pinned:
 
-    * the branch is taken when the claim is **invalid** -- inverting it to
-      ``if validity.valid:`` is a fail-open that leaves the ordering below
-      untouched, so ordering alone is not enough;
+    * the branch is taken when the claim is **invalid** -- asserted
+      *behaviourally*, by driving the real controller with a stub validator and
+      checking that the umbrella appears for an INVALID result and not for a VALID
+      one.  A text match on the condition would have been both too strong (it
+      rejects a correct ``is False`` spelling) and too weak (it cannot tell
+      ``not validity.valid`` from ``not validity.valid or True``);
     * the umbrella ``add`` is present and unconditional;
     * it precedes the union that consults the translation table.
 
     L31 stays green when any of these break, which is why the two guards are
-    separate.  The polarity case in particular is caught by the behavioural
-    suites as well, but a guard should not be blind to the half of its own
-    property it does not look at.
+    separate.
     """
 
     tree = ast.parse(_text(APPLICATION))
@@ -821,16 +822,8 @@ def test_the_chain_blocker_is_added_unconditionally():
     )
     guarded = candidates[0]
 
-    # Polarity first: the branch must run when the claim is NOT valid.
-    test_text = ast.unparse(guarded.test)
-    assert "not validity.valid" in test_text, (
-        f"the chain-validity branch is not guarded by `not validity.valid` "
-        f"(found `{test_text}`); inverting it authorises exactly the claims the "
-        f"validator refused"
-    )
-
-    # Then ordering: the umbrella must be an unconditional add inside that branch,
-    # and it must come before the union that consults the translation table.
+    # Ordering: the umbrella must be an unconditional add inside that branch, and
+    # it must come before the union that consults the translation table.
     statements = [ast.unparse(node) for node in guarded.body]
     umbrella = [
         index
@@ -851,4 +844,130 @@ def test_the_chain_blocker_is_added_unconditionally():
     assert umbrella[0] < union[0], (
         "the umbrella must be added before the mapped union, so an unmapped "
         "reason cannot leave the failure set empty"
+    )
+
+    # Polarity, behaviourally: an INVALID claim must produce the umbrella and a
+    # VALID one must not.  This is what catches `if validity.valid:`, and unlike a
+    # text match it accepts any correct spelling of the condition.
+    _assert_chain_polarity()
+
+
+def _assert_chain_polarity() -> None:
+    """Drive `_chain_failures` with a stub validator and check the branch.
+
+    The controller is constructed with a validator whose `validate` returns a
+    chosen result, so the branch is exercised rather than read.  An INVALID result
+    must add the umbrella; a VALID one must not.  A condition written as
+    `if validity.valid:` inverts exactly that, and any equivalent-but-differently
+    spelled correct condition still passes.
+    """
+
+    from datetime import datetime, timedelta, timezone
+
+    from us_quant.trading.application.strategy_coverage_validity import (
+        StrategyCoverageValidityBlocker,
+        StrategyCoverageValidityResult,
+        StrategyCoverageValidityVerdict,
+    )
+    from us_quant.trading.application.strategy_lifecycle import (
+        StrategyLifecycleController,
+    )
+    from us_quant.trading.domain.strategy import (
+        StrategyDefinition,
+        StrategyIdentity,
+        StrategyMode,
+        StrategyStatus,
+        StrategyVersion,
+    )
+    from us_quant.trading.domain.strategy_coverage import (
+        StrategyCoverageEvaluation,
+        StrategyCoverageItem,
+        StrategyCoverageVerdict,
+    )
+    from us_quant.trading.domain.strategy_lifecycle import (
+        StrategyLifecycleAction,
+        StrategyLifecycleBlocker,
+        StrategyLifecyclePolicy,
+    )
+    from decimal import Decimal
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    class _StubValidator:
+        def __init__(self, result):
+            self._result = result
+
+        def validate(self, coverage, **_kwargs):
+            return self._result
+
+    invalid = StrategyCoverageValidityResult(
+        verdict=StrategyCoverageValidityVerdict.INVALID,
+        blockers=(StrategyCoverageValidityBlocker.STALE_MEMBER,),
+    )
+    valid = StrategyCoverageValidityResult(
+        verdict=StrategyCoverageValidityVerdict.VALID, blockers=()
+    )
+
+    version = StrategyVersion(
+        definition=StrategyDefinition("family-1", "Example", "test"),
+        identity=StrategyIdentity("family-1", "version-1", "params-1"),
+        semver="1.0.0",
+        status=StrategyStatus.RESEARCH,
+        mode=StrategyMode.RESEARCH,
+        parameters={"period": 5},
+        universe_hash="universe-1",
+        code_hash="code-1",
+        risk_budget_pct=Decimal("0.01"),
+        gate_passed=False,
+        gate_reason="legacy",
+        created_at=now,
+        updated_at=now,
+    )
+    policy = StrategyLifecyclePolicy(
+        policy_id="lifecycle-policy-1", revision=1,
+        policy_version="strategy-lifecycle-v1",
+        permitted_actions=(StrategyLifecycleAction.PROMOTE_TO_PAPER_SHADOW,),
+        required_gate_policy_version="independent-review-v1",
+        required_coverage_policy_version="evidence-coverage-v1",
+        maximum_evidence_age=timedelta(days=30), created_at=now,
+    )
+    coverage = StrategyCoverageEvaluation(
+        evaluation_id="coverage-1", strategy_version_id="version-1",
+        strategy_semver="1.0.0", parameter_hash="params-1",
+        universe_hash="universe-1", code_hash="code-1",
+        policy_id="coverage-policy-1", policy_revision=1,
+        policy_version="evidence-coverage-v1",
+        verdict=StrategyCoverageVerdict.PASS, blockers=(),
+        # A PASS claim must name at least one admitted item, so the structural
+        # checks ahead of the branch under test see a well-formed claim and do not
+        # short-circuit the comparison.
+        items=(StrategyCoverageItem(
+            symbol="AAPL", review_run_id="review-a", data_hash="data-a",
+            key_id="key-a", authentication_id="auth-a",
+            gate_evaluation_id="gate-a",
+            signed_at=now - timedelta(hours=2),
+            generated_at=now - timedelta(hours=1),
+        ),),
+        covered_symbols=("AAPL",), required_symbols=("AAPL",),
+        distinct_review_runs=1, distinct_data_hashes=1,
+        evaluator_version="coverage-1", evaluated_at=now,
+    )
+
+    def failures_for(result):
+        controller = StrategyLifecycleController(
+            coverage_validity=_StubValidator(result)
+        )
+        return controller._chain_failures(
+            version=version, policy=policy, coverage=coverage, decided_at=now
+        )
+
+    umbrella = StrategyLifecycleBlocker.EVIDENCE_CHAIN_NOT_CURRENT
+
+    assert umbrella in failures_for(invalid), (
+        "an INVALID chain-validity result did not produce "
+        "EVIDENCE_CHAIN_NOT_CURRENT; the branch is inverted (fail-open)"
+    )
+    assert umbrella not in failures_for(valid), (
+        "a VALID chain-validity result produced EVIDENCE_CHAIN_NOT_CURRENT; "
+        "the branch is inverted the other way (false refusal)"
     )

@@ -441,3 +441,109 @@ def test_l25_the_trust_root_stays_outside_the_runtime_store():
 
     assert "state_root" in reads
     assert "runtime_root" not in reads
+
+
+# -- the repair: one validator, and only by exact identity -----------------
+
+VALIDITY = SRC / "trading" / "application" / "strategy_coverage_validity.py"
+LIFECYCLE_COMPOSITION = SRC / "trading" / "composition" / "strategy_lifecycle.py"
+PLAN_COMPOSITION = SRC / "trading" / "composition" / "portfolio_operations.py"
+
+
+def test_l26_exactly_one_current_validity_validator_definition():
+    """One service answers "is this claim still current", for both boundaries.
+
+    Two definitions -- a second one beside the lifecycle controller, say -- is how
+    the launch gate and the promotion start disagreeing about the same claim.
+    """
+
+    matches = []
+    for path in (SRC / "trading").rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        tree = ast.parse(_text(path))
+        matches.extend(
+            (path, node.lineno)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef)
+            and node.name == "StrategyCoverageCurrentValidator"
+        )
+
+    assert len(matches) == 1
+    assert matches[0][0] == VALIDITY
+
+
+def test_l27_only_the_composition_layer_constructs_the_validator():
+    """The validator is wired, never built inline by a consumer.
+
+    A controller or launch gate that constructed its own would pick its own
+    stores, and "current" would mean whatever that instance happened to read.
+    """
+
+    offenders = []
+    for path in _production_files():
+        if path in (PLAN_COMPOSITION, LIFECYCLE_COMPOSITION):
+            continue
+        if "StrategyCoverageCurrentValidator(" in _text(path):
+            offenders.append(str(path.relative_to(SRC)))
+
+    assert offenders == []
+
+
+def test_l28_the_validator_takes_no_representative_argument():
+    """``validate`` is about the claim, so it cannot be handed one member.
+
+    The retired model passed a representative ``authenticated`` and ``gate``; a
+    validator that accepted one could be used to check a claim through a single
+    member, which is the defect this repair removes.
+    """
+
+    tree = ast.parse(_text(VALIDITY))
+    validator = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        and node.name == "StrategyCoverageCurrentValidator"
+    )
+    validate = next(
+        node
+        for node in ast.walk(validator)
+        if isinstance(node, ast.FunctionDef) and node.name == "validate"
+    )
+
+    parameters = {argument.arg for argument in validate.args.kwonlyargs}
+    parameters |= {argument.arg for argument in validate.args.args}
+    assert not parameters & {"authenticated", "gate", "authentication", "item"}
+    assert "coverage" in parameters
+    assert "required_gate_policy_version" in parameters
+
+
+def test_l29_the_validator_reads_members_by_exact_id_only():
+    """No ``latest_for_version`` fallback anywhere in the validity check.
+
+    The item names its own ``authentication_id`` and ``gate_evaluation_id``.  A
+    fallback to the newest record for the version would answer "is there some
+    passing evidence" while appearing to answer "is *this* evidence still good".
+    """
+
+    text = _text(VALIDITY)
+
+    assert "latest_for_version" not in text
+    assert "authentications_for_version" not in text
+    assert "evaluations_for_version" not in text
+    assert "self._authentications.get(item.authentication_id)" in text
+    assert "self._gates.get(item.gate_evaluation_id)" in text
+
+
+def test_l30_the_launch_gate_reads_no_active_policy():
+    """The decision's own revision, never "whatever is active now".
+
+    Substituting the active policy would apply today's gate revision and today's
+    age bound to a promotion justified under different ones -- and the dangerous
+    direction is a laxer revision resurrecting a promotion that was refused.
+    """
+
+    text = _text(LAUNCH_GATE)
+
+    assert "active_policy" not in text
+    assert "self._lifecycle_policies.get_policy(" in text

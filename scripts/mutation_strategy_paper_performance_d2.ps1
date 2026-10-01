@@ -18,7 +18,8 @@ $mutations = @(
     @{ name='D2-10 link omitted from payload'; file='src/us_quant/trading/adapters/sqlite/strategy_lifecycle_repository.py'; find='payload["paper_performance_evaluation_id"] = decision.paper_performance_evaluation_id'; repl='pass'; test='tests/test_strategy_paper_performance_lifecycle.py'; select='service_loads_durable' },
     @{ name='D2-11 rehashed link accepted'; file='src/us_quant/trading/adapters/sqlite/strategy_lifecycle_repository.py'; find='if expected_id != decision.decision_id and ('; repl='if False and ('; test='tests/test_strategy_paper_performance_lifecycle.py'; select='rehashed_performance' },
     @{ name='D2-12 stale fact vetoes other trigger'; file='src/us_quant/trading/application/strategy_lifecycle.py'; find='performance_issues.add(StrategyLifecycleBlocker.PAPER_PERFORMANCE_NOT_CURRENT)'; repl='structural.add(StrategyLifecycleBlocker.PAPER_PERFORMANCE_NOT_CURRENT)'; test='tests/test_strategy_paper_performance_lifecycle.py'; select='invalid_performance_cannot_veto' },
-    @{ name='D2-13 erased link bypasses identity'; file='src/us_quant/trading/adapters/sqlite/strategy_lifecycle_repository.py'; find='or (decision.decision_id.startswith("sld-")'; repl='or (False'; test='tests/test_strategy_paper_performance_lifecycle.py'; select='erased_performance_link' }
+    @{ name='D2-13 erased link bypasses identity'; file='src/us_quant/trading/adapters/sqlite/strategy_lifecycle_repository.py'; find='or (decision.decision_id.startswith("sld-")'; repl='or (False'; test='tests/test_strategy_paper_performance_lifecycle.py'; select='erased_performance_link' },
+    @{ name='D2-14 old controller hash rejected'; file='src/us_quant/trading/adapters/sqlite/strategy_lifecycle_repository.py'; find='return legacy_id == decision_id'; repl='return False'; test='tests/test_strategy_paper_performance_lifecycle.py'; select='pre_repair_controller_hash' }
 )
 $baseline = & $py -m pytest (Join-Path $projectRoot 'tests/test_strategy_paper_performance_lifecycle.py') -q 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host ($baseline -join "`n"); throw 'Baseline is not GREEN' }
@@ -42,7 +43,7 @@ foreach ($mutation in $mutations) {
         if ($LASTEXITCODE -ne 0) { $errors += "$($mutation.name): syntax error"; continue }
         $output = & $py -m pytest (Join-Path $projectRoot $mutation.test) -q -k $mutation.select --tb=short 2>&1
         $code = $LASTEXITCODE
-        if ($code -eq 1 -and ($output | Select-String -Pattern 'AssertionError|DID NOT RAISE|ValueError' -Quiet)) {
+        if ($code -eq 1 -and ($output | Select-String -Pattern 'AssertionError|DID NOT RAISE|ValueError|StrategyLifecycleRepositoryError' -Quiet)) {
             Write-Host "RED=True $($mutation.name)"
         } elseif ($code -eq 0) {
             $survivors += $mutation.name

@@ -685,10 +685,29 @@ def _row_to_decision(row: tuple[Any, ...]) -> StrategyLifecycleDecision:
         or (decision.decision_id.startswith("sld-")
             and len(decision.decision_id) == len(expected_id))
     ):
-        raise StrategyLifecycleRepositoryError(
-            "lifecycle decision identity disagrees with performance evidence"
-        )
+        if (decision.paper_performance_evaluation_id is not None
+                or not _matches_legacy_decision_id(parsed, decision.decision_id)):
+            raise StrategyLifecycleRepositoryError(
+                "lifecycle decision identity disagrees with performance evidence"
+            )
     return decision
+
+
+def _matches_legacy_decision_id(payload: dict[str, Any], decision_id: str) -> bool:
+    """Read-only hash compatibility with the pre-6C-repair stored format.
+
+    The retired representative authority is never used to create a decision.
+    This is solely the original serializer's hash material for old audit rows.
+    """
+    material = {key: payload[key] for key in (
+        "strategy_version_id", "action", "source_status", "target_status",
+        "policy_id", "policy_revision", "authentication_id", "gate_evaluation_id",
+        "coverage_evaluation_id", "blockers", "triggers", "controller_version",
+    )}
+    material["blockers"] = sorted(set(material["blockers"]))
+    material["triggers"] = sorted(set(material["triggers"]))
+    legacy_id = "sld-" + sha256(_canonical_json(material).encode("utf-8")).hexdigest()
+    return legacy_id == decision_id
 
 
 def _verified_payload(

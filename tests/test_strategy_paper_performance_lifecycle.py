@@ -248,6 +248,31 @@ def test_legacy_decision_payload_and_hash_are_unchanged(tmp_path):
         assert connection.execute('SELECT payload_json,payload_hash FROM strategy_lifecycle_decision').fetchone() == before
 
 
+@pytest.mark.parametrize('blocked', [False, True])
+def test_pre_repair_controller_hash_is_readable_and_reconcilable(tmp_path, blocked):
+    chain = _Chain(tmp_path).build()
+    service, _, store, _ = _service(tmp_path, chain, version=_version())
+    old = _decision(**(dict(state=State.BLOCKED, blockers=(B.COVERAGE_MISSING,),
+                            authentication_id=None, gate_evaluation_id=None) if blocked else {}))
+    # The exact formula captured from d284782^; includes the retired member IDs
+    # even when null. It is a fixture of stored history, never new authority.
+    material = dict(strategy_version_id=old.strategy_version_id, action=old.action.value,
+        source_status=old.source_status.value, target_status=old.target_status.value,
+        policy_id=old.policy_id, policy_revision=old.policy_revision,
+        authentication_id=old.authentication_id, gate_evaluation_id=old.gate_evaluation_id,
+        coverage_evaluation_id=old.coverage_evaluation_id,
+        blockers=sorted({b.value for b in old.blockers}), triggers=[], controller_version=old.controller_version)
+    text = json.dumps(material, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+    old = replace(old, decision_id='sld-'+sha256(text.encode()).hexdigest())
+    store.record_decision(old)
+    with sqlite3.connect(tmp_path/'lifecycle.sqlite') as connection:
+        before = connection.execute('SELECT payload_json,payload_hash FROM strategy_lifecycle_decision').fetchone()
+    assert SQLiteStrategyLifecycleRepository(tmp_path/'lifecycle.sqlite').get_decision(old.decision_id) == old
+    assert service.reconcile(version_id='version-1', now=NOW) == (() if blocked else (old,))
+    with sqlite3.connect(tmp_path/'lifecycle.sqlite') as connection:
+        assert connection.execute('SELECT payload_json,payload_hash FROM strategy_lifecycle_decision').fetchone() == before
+
+
 def test_failure_trigger_requires_a_bound_fact():
     with pytest.raises(ValueError, match='performance'):
         _decision(action=Action.PAUSE, source_status=StrategyStatus.PAPER_SHADOW, target_status=StrategyStatus.PAUSED,

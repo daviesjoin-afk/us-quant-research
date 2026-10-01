@@ -24,6 +24,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from us_quant.trading.application.strategy_coverage_validity import (
+    StrategyCoverageValidityBlocker,
+)
 from us_quant.trading.domain import strategy_lifecycle as _strategy_lifecycle
 from us_quant.trading.domain.strategy import StrategyVersion
 from us_quant.trading.domain.strategy_coverage import (
@@ -43,6 +46,37 @@ from us_quant.trading.domain.strategy_lifecycle import (
     StrategyLifecyclePolicy,
     stable_lifecycle_decision_id,
 )
+
+
+#: The validator's specific reasons, translated into the lifecycle vocabulary.
+#:
+#: The umbrella ``EVIDENCE_CHAIN_NOT_CURRENT`` is what refuses the decision, and
+#: it is added whether or not anything maps here.  This table exists so the
+#: decision also records *which* repair is needed: a revoked key, a vanished
+#: record, a drifted identity and aged-out evidence are four different operator
+#: actions, and collapsing them into one blocker was a diagnostic regression
+#: introduced when the representative checks were replaced.
+#:
+#: A reason missing from this table is not an error and cannot fail open -- the
+#: umbrella still refuses -- it simply does not contribute a specific name.
+_CHAIN_BLOCKER_BY_VALIDITY = {
+    StrategyCoverageValidityBlocker.AUTHENTICATION_RECORD_MISSING:
+        StrategyLifecycleBlocker.AUTHENTICATION_MISSING,
+    StrategyCoverageValidityBlocker.AUTHENTICATION_NOT_PASSED:
+        StrategyLifecycleBlocker.AUTHENTICATION_NOT_PASSED,
+    StrategyCoverageValidityBlocker.GATE_RECORD_MISSING:
+        StrategyLifecycleBlocker.GATE_MISSING,
+    StrategyCoverageValidityBlocker.GATE_NOT_PASSED:
+        StrategyLifecycleBlocker.GATE_NOT_PASSED,
+    StrategyCoverageValidityBlocker.REVOKED_SIGNING_KEY:
+        StrategyLifecycleBlocker.REVOKED_SIGNING_KEY,
+    StrategyCoverageValidityBlocker.UNKNOWN_SIGNING_KEY:
+        StrategyLifecycleBlocker.UNKNOWN_SIGNING_KEY,
+    StrategyCoverageValidityBlocker.TRUST_ROOT_UNAVAILABLE:
+        StrategyLifecycleBlocker.TRUST_ROOT_UNAVAILABLE,
+    StrategyCoverageValidityBlocker.STALE_MEMBER:
+        StrategyLifecycleBlocker.STALE_EVIDENCE,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,9 +239,18 @@ class StrategyLifecycleController:
             maximum_evidence_age=policy.maximum_evidence_age,
         )
         if not validity.valid:
-            failures.add(
-                StrategyLifecycleBlocker.EVIDENCE_CHAIN_NOT_CURRENT
-            )
+            # The umbrella blocker is added **first and unconditionally**, and the
+            # specific reasons are added on top.  That ordering is the safety
+            # property: if the validator ever grows a blocker this mapping does not
+            # know about, the decision still carries ``EVIDENCE_CHAIN_NOT_CURRENT``
+            # and is still refused.  A mapping that *replaced* the umbrella would
+            # fail open the moment the two lists drifted.
+            failures.add(StrategyLifecycleBlocker.EVIDENCE_CHAIN_NOT_CURRENT)
+            failures |= {
+                _CHAIN_BLOCKER_BY_VALIDITY[reason]
+                for reason in validity.blockers
+                if reason in _CHAIN_BLOCKER_BY_VALIDITY
+            }
         return failures
 
     # -- construction ----------------------------------------------------

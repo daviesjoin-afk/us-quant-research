@@ -160,15 +160,27 @@ class StrategyCoverageCurrentValidator:
         *,
         now: datetime,
         required_gate_policy_version: str,
-        maximum_evidence_age: timedelta | None = None,
+        maximum_evidence_age: timedelta | None,
     ) -> StrategyCoverageValidityResult:
         """Whether every member of ``coverage`` is still current.
 
         ``now`` must be timezone-aware; a naive instant cannot be compared with a
         stored one, and guessing a zone here would be inventing the comparison
         this method exists to make.
+
+        Both policy-derived arguments are **required keyword arguments with no
+        default**, and ``maximum_evidence_age`` is required even though ``None``
+        is a legal value.  The distinction is the point: ``None`` means "the
+        policy that governs this claim sets no age bound", which is a decision the
+        policy makes and the caller must pass on; *omitting* the argument would
+        mean "skip the freshness check", which is a decision this validator is not
+        allowed to make silently.  A default of ``None`` collapsed the two, so a
+        caller could disable the age bound by forgetting the argument -- the exact
+        shape of fail-open the mandatory gate-policy argument exists to prevent.
         """
 
+        if not isinstance(now, datetime):
+            raise TypeError("now must be a datetime")
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("now must be timezone-aware")
         # Required, not optional.  The policy revision is what says which gate
@@ -182,6 +194,13 @@ class StrategyCoverageCurrentValidator:
             raise ValueError(
                 "required_gate_policy_version must be a non-blank string"
             )
+        # ``None`` is accepted here (a policy may deliberately set no bound) but
+        # must be passed explicitly.  A non-timedelta is a caller bug, not an
+        # unbounded policy, so it is refused rather than read as "no bound".
+        if maximum_evidence_age is not None and not isinstance(
+            maximum_evidence_age, timedelta
+        ):
+            raise TypeError("maximum_evidence_age must be timedelta or None")
         if coverage is None:
             return _invalid(
                 {StrategyCoverageValidityBlocker.COVERAGE_NOT_PASSED}

@@ -378,29 +378,140 @@ def test_l21_the_plan_boundary_fails_closed_without_a_gate():
 
 
 def test_l22_the_authorizer_returns_rather_than_raising():
-    """A launch gate that can throw is one a caller wraps in a broad except.
+    """A launch gate that can throw is one a caller wraps in a broad ``except``.
 
-    Scoped to ``authorises``: the constructor *should* raise on a missing
-    dependency, since that is a wiring fault rather than a launch decision.
+    Asserted **behaviourally**, with adversarial collaborators, because the
+    previous structural version of this guard was blind to the failure it was
+    meant to catch.  It looked for a literal ``raise`` inside ``authorises`` and
+    counted ``return`` statements -- so it passed while the method delegated to
+    the current-validity validator, whose own ``ValueError`` (a naive ``now``) and
+    ``AttributeError`` (a record of the wrong type) escaped straight through it.
+    An exception raised by a *callee* is invisible to an AST scan of the caller.
+
+    Each case below hands the real authorizer a collaborator that misbehaves in
+    one specific way.  All of them must yield ``False``.
     """
 
-    tree = ast.parse(_text(LAUNCH_GATE))
-    authorizer = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ClassDef) and node.name == "PaperLaunchAuthorizer"
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    from us_quant.trading.application.paper_authorization import PaperLaunchAuthorizer
+    from us_quant.trading.application.strategy_coverage_validity import (
+        StrategyCoverageCurrentValidator,
     )
-    authorises = next(
-        node
-        for node in ast.walk(authorizer)
-        if isinstance(node, ast.FunctionDef) and node.name == "authorises"
+    from us_quant.trading.domain.evidence_auth import (
+        EvidenceAuthenticationVerdict,
+    )
+    from us_quant.trading.domain.strategy_coverage import (
+        StrategyCoverageEvaluation,
+        StrategyCoverageItem,
+        StrategyCoverageVerdict,
+    )
+    from us_quant.trading.domain.strategy_gate import StrategyGateVerdict
+    from us_quant.trading.domain.strategy_lifecycle import (
+        StrategyLifecycleAction,
+        StrategyLifecycleDecisionState,
+        StrategyLifecyclePolicy,
     )
 
-    raises = [node for node in ast.walk(authorises) if isinstance(node, ast.Raise)]
-    returns = [node for node in ast.walk(authorises) if isinstance(node, ast.Return)]
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    version_id = "version-1"
 
-    assert raises == []
-    assert len(returns) >= 8
+    item = StrategyCoverageItem(
+        symbol="AAPL", review_run_id="review-a", data_hash="data-a", key_id="key-a",
+        authentication_id="auth-a", gate_evaluation_id="gate-a",
+        signed_at=now - timedelta(hours=2), generated_at=now - timedelta(hours=1),
+    )
+    coverage = StrategyCoverageEvaluation(
+        evaluation_id="coverage-1", strategy_version_id=version_id,
+        strategy_semver="1.0.0", parameter_hash="ph", universe_hash="u", code_hash="c",
+        policy_id="coverage-policy-1", policy_revision=1,
+        policy_version="evidence-coverage-v1",
+        verdict=StrategyCoverageVerdict.PASS, blockers=(),
+        items=(item,), covered_symbols=("AAPL",), required_symbols=("AAPL",),
+        distinct_review_runs=1, distinct_data_hashes=1,
+        evaluator_version="coverage-1", evaluated_at=now - timedelta(minutes=30),
+    )
+
+    class _Decisions:
+        def decisions_for_version(self, _version_id):
+            return (
+                SimpleNamespace(
+                    state=StrategyLifecycleDecisionState.APPLIED,
+                    action=StrategyLifecycleAction.PROMOTE_TO_PAPER_SHADOW,
+                    coverage_evaluation_id="coverage-1",
+                    policy_id="lifecycle-policy-1", policy_revision=1,
+                ),
+            )
+
+    class _Coverages:
+        def get_evaluation(self, _evaluation_id):
+            return coverage
+
+    class _Policies:
+        def get_policy(self, policy_id, revision):
+            return StrategyLifecyclePolicy(
+                policy_id=policy_id, revision=revision,
+                policy_version="strategy-lifecycle-v1",
+                permitted_actions=(StrategyLifecycleAction.PROMOTE_TO_PAPER_SHADOW,),
+                required_gate_policy_version="independent-review-v1",
+                required_coverage_policy_version="evidence-coverage-v1",
+                maximum_evidence_age=timedelta(days=30), created_at=now,
+            )
+
+    class _Authentications:
+        def get(self, authentication_id):
+            return SimpleNamespace(
+                authentication_id=authentication_id, strategy_version_id=version_id,
+                review_run_id="review-a", key_id="key-a",
+                verdict=EvidenceAuthenticationVerdict.PASS,
+            )
+
+    class _Gates:
+        def get(self, evaluation_id):
+            return SimpleNamespace(
+                evaluation_id=evaluation_id, strategy_version_id=version_id,
+                review_run_id="review-a", parameter_hash="ph", data_hash="data-a",
+                symbol="AAPL", policy_version="independent-review-v1",
+                verdict=StrategyGateVerdict.PASS,
+            )
+
+    class _Keys:
+        def verification_key(self, key_id):
+            return SimpleNamespace(key_id=key_id, trust_status="ACTIVE")
+
+    def build(*, clock=lambda: now, authentications=None):
+        return PaperLaunchAuthorizer(
+            decisions=_Decisions(), coverages=_Coverages(),
+            lifecycle_policies=_Policies(),
+            coverage_validity=StrategyCoverageCurrentValidator(
+                authentications=authentications or _Authentications(),
+                gates=_Gates(), key_source=_Keys(),
+            ),
+            clock=clock,
+        )
+
+    # The happy path first, so the adversarial cases below are not passing merely
+    # because nothing ever authorises.
+    assert build().authorises(version_id) is True
+
+    def _boom():
+        raise RuntimeError("a collaborator misbehaved")
+
+    adversarial = {
+        "naive clock": dict(clock=lambda: datetime(2026, 1, 1)),
+        "None clock": dict(clock=lambda: None),
+        "clock raising": dict(clock=_boom),
+    }
+    for label, kwargs in adversarial.items():
+        assert build(**kwargs).authorises(version_id) is False, label
+
+    # A port handing back a record of the wrong shape.
+    class _WrongType:
+        def get(self, _authentication_id):
+            return object()
+
+    assert build(authentications=_WrongType()).authorises(version_id) is False
 
 
 def test_l23_pause_is_never_an_entry_action():
@@ -547,3 +658,51 @@ def test_l30_the_launch_gate_reads_no_active_policy():
 
     assert "active_policy" not in text
     assert "self._lifecycle_policies.get_policy(" in text
+
+
+def test_l31_the_chain_blocker_mapping_cannot_drift_silently():
+    """Every validator blocker is either mapped or explicitly exempt.
+
+    The lifecycle decision records the umbrella ``EVIDENCE_CHAIN_NOT_CURRENT``
+    *and* the specific reason, so an operator knows which repair is needed.  The
+    umbrella is added unconditionally, so a missing mapping cannot fail open --
+    but it would silently degrade the diagnosis, which is the regression this
+    guard exists to catch.
+
+    A new validator blocker therefore has to be classified here: either it maps to
+    a lifecycle blocker, or it is listed as deliberately unmapped with a reason.
+    """
+
+    from us_quant.trading.application.strategy_coverage_validity import (
+        StrategyCoverageValidityBlocker,
+    )
+    from us_quant.trading.application.strategy_lifecycle import (
+        _CHAIN_BLOCKER_BY_VALIDITY,
+    )
+
+    #: Reasons that are deliberately not translated.  Each is either structural
+    #: (reported by the lifecycle's own checks) or has no distinct lifecycle
+    #: vocabulary, and the umbrella plus the coverage verdict already says enough.
+    deliberately_unmapped = {
+        StrategyCoverageValidityBlocker.COVERAGE_NOT_PASSED,
+        StrategyCoverageValidityBlocker.MEMBER_IDENTITY_MISMATCH,
+        StrategyCoverageValidityBlocker.DUPLICATE_MEMBER_IDENTITY,
+        StrategyCoverageValidityBlocker.GATE_POLICY_MISMATCH,
+        StrategyCoverageValidityBlocker.FUTURE_MEMBER_TIMESTAMP,
+    }
+
+    classified = set(_CHAIN_BLOCKER_BY_VALIDITY) | deliberately_unmapped
+    every_reason = set(StrategyCoverageValidityBlocker)
+
+    assert every_reason - classified == set(), sorted(
+        reason.value for reason in every_reason - classified
+    )
+    # And nothing is mapped that is also declared unmapped.
+    assert set(_CHAIN_BLOCKER_BY_VALIDITY) & deliberately_unmapped == set()
+
+    # Every target is a real lifecycle blocker, so a rename cannot leave a
+    # dangling reference that only fails at runtime.
+    from us_quant.trading.domain.strategy_lifecycle import StrategyLifecycleBlocker
+
+    for reason, target in _CHAIN_BLOCKER_BY_VALIDITY.items():
+        assert isinstance(target, StrategyLifecycleBlocker), reason

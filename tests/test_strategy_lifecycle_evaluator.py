@@ -463,6 +463,7 @@ def test_a_claim_whose_authentication_record_vanished_blocks(tmp_path):
 
     assert result.authorised is False
     assert Blocker.EVIDENCE_CHAIN_NOT_CURRENT in result.decision.blockers
+    assert Blocker.AUTHENTICATION_MISSING in result.decision.blockers
 
 
 def test_a_claim_whose_gate_record_vanished_blocks(tmp_path):
@@ -473,10 +474,19 @@ def test_a_claim_whose_gate_record_vanished_blocks(tmp_path):
 
     assert result.authorised is False
     assert Blocker.EVIDENCE_CHAIN_NOT_CURRENT in result.decision.blockers
+    assert Blocker.GATE_MISSING in result.decision.blockers
 
 
 def test_a_failed_gate_blocks_promotion(tmp_path):
-    """The stored gate row itself says FAIL, which is what the validator reads."""
+    """A gate row tampered with underneath the store is refused.
+
+    ``corrupt_gate_verdict`` rewrites the indexed ``verdict`` column by SQL,
+    leaving the stored payload disagreeing with it.  The store's own integrity
+    check refuses to read the row back, so the member's gate is *unreadable*
+    rather than readable-and-failing -- which is why the specific reason is
+    ``GATE_MISSING`` and not ``GATE_NOT_PASSED``.  Both are a refusal; the
+    difference is what the operator is told to repair.
+    """
 
     chain = _Chain(tmp_path).build()
     chain.corrupt_gate_verdict(StrategyGateVerdict.FAIL)
@@ -484,6 +494,7 @@ def test_a_failed_gate_blocks_promotion(tmp_path):
     result = _decide(chain)
 
     assert Blocker.EVIDENCE_CHAIN_NOT_CURRENT in result.decision.blockers
+    assert Blocker.GATE_MISSING in result.decision.blockers
 
 
 def test_a_failed_coverage_blocks_promotion(tmp_path):
@@ -549,6 +560,7 @@ def test_a_revoked_member_key_blocks_promotion(tmp_path):
     result = _decide(chain)
 
     assert Blocker.EVIDENCE_CHAIN_NOT_CURRENT in result.decision.blockers
+    assert Blocker.REVOKED_SIGNING_KEY in result.decision.blockers
 
 
 def test_an_unknown_key_blocks_promotion(tmp_path):
@@ -571,16 +583,27 @@ def test_an_unknown_key_blocks_promotion(tmp_path):
     result = _decide(chain)
 
     assert Blocker.EVIDENCE_CHAIN_NOT_CURRENT in result.decision.blockers
+    assert Blocker.UNKNOWN_SIGNING_KEY in result.decision.blockers
 
 
 def test_stale_member_evidence_blocks_promotion(tmp_path):
-    """Freshness is judged per member, from the claim's own items."""
+    """Evidence aged past the policy bound is refused.
+
+    The evidence is generated 90 days before the claim is formed, so the coverage
+    *evaluation* already refuses it (``COVERAGE_NOT_PASSED``) and the claim never
+    passes.  The decision is therefore refused on the coverage verdict; the
+    decision-time freshness re-check is exercised by
+    ``test_a_claim_fresh_at_formation_is_stale_at_decision_time`` in the 6-C
+    regression file, where the claim passes at formation and the promotion
+    happens later.
+    """
 
     chain = _Chain(tmp_path).build(generated_at=NOW - timedelta(days=90))
 
     result = _decide(chain)
 
     assert Blocker.EVIDENCE_CHAIN_NOT_CURRENT in result.decision.blockers
+    assert Blocker.COVERAGE_NOT_PASSED in result.decision.blockers
 
 
 def test_evidence_within_the_age_bound_is_accepted(tmp_path):
@@ -678,7 +701,15 @@ def test_a_pause_with_nothing_wrong_is_refused(tmp_path):
 
 
 def test_a_pause_is_authorised_by_a_named_governance_failure(tmp_path):
-    """A revoked key is exactly the kind of fact a pause must name."""
+    """A revoked key is exactly the kind of fact a pause must name.
+
+    The trigger names the *specific* reason, not only the umbrella.  Collapsing
+    every chain failure into ``EVIDENCE_CHAIN_NOT_CURRENT`` was a diagnostic
+    regression: an operator pausing a version needs to know whether a key was
+    revoked, a record vanished, an identity drifted or the evidence aged out,
+    because those are four different repairs.  The umbrella is still present --
+    it is what refuses a promotion -- so both are asserted.
+    """
 
     chain = _Chain(tmp_path).build()
     version = _version(status=StrategyStatus.PAPER_SHADOW, mode=StrategyMode.PAPER_SHADOW)
@@ -688,7 +719,10 @@ def test_a_pause_is_authorised_by_a_named_governance_failure(tmp_path):
 
     assert result.authorised is True
     assert result.decision.blockers == ()
-    assert result.decision.triggers == (Blocker.EVIDENCE_CHAIN_NOT_CURRENT,)
+    assert result.decision.triggers == (
+        Blocker.EVIDENCE_CHAIN_NOT_CURRENT,
+        Blocker.REVOKED_SIGNING_KEY,
+    )
     assert result.authorization.target_status is StrategyStatus.PAUSED
 
 

@@ -295,6 +295,11 @@ class _Fixture:
 
     def validate(self, coverage=None, **kwargs):
         kwargs.setdefault("required_gate_policy_version", "gate-policy-1")
+        # Explicit, because the validator now requires the bound to be passed:
+        # ``None`` means "this policy sets no age bound" and must not be
+        # reachable by omission.  The default here is the fixture's own choice of
+        # a bound, and a case that wants no bound passes it explicitly.
+        kwargs.setdefault("maximum_evidence_age", timedelta(days=30))
         return self.validator.validate(
             coverage if coverage is not None else _coverage(self.items),
             now=kwargs.pop("now", _NOW),
@@ -406,14 +411,20 @@ def test_a_claim_naming_no_members_cannot_even_be_built() -> None:
         evaluated_at=_NOW - timedelta(minutes=30),
     )
     fixture = _Fixture(())
-    result = fixture.validator.validate(empty, now=_NOW, required_gate_policy_version='gate-policy-1')
+    result = fixture.validator.validate(
+        empty, now=_NOW, required_gate_policy_version='gate-policy-1',
+        maximum_evidence_age=None,
+    )
     assert result.verdict is StrategyCoverageValidityVerdict.INVALID
     assert StrategyCoverageValidityBlocker.COVERAGE_NOT_PASSED in result.blockers
 
 
 def test_a_missing_claim_is_invalid() -> None:
     fixture = _two_members()
-    result = fixture.validator.validate(None, now=_NOW, required_gate_policy_version='gate-policy-1')
+    result = fixture.validator.validate(
+        None, now=_NOW, required_gate_policy_version='gate-policy-1',
+        maximum_evidence_age=None,
+    )
     assert result.verdict is StrategyCoverageValidityVerdict.INVALID
 
 
@@ -436,6 +447,7 @@ def test_a_naive_now_is_refused() -> None:
             _coverage(fixture.items),
             now=datetime(2026, 9, 28, 15, 0),
             required_gate_policy_version='gate-policy-1',
+            maximum_evidence_age=None,
         )
 
 
@@ -804,6 +816,13 @@ def test_one_stale_member_invalidates_the_whole_claim() -> None:
 
 
 def test_freshness_is_not_checked_without_a_bound() -> None:
+    """``None`` means "the policy sets no age bound", and must be passed on.
+
+    It is *not* the same as omitting the argument -- see
+    ``test_the_age_bound_cannot_be_dropped_by_omission`` -- so a caller who wants
+    no bound says so explicitly, as this case does.
+    """
+
     stale = _pair(
         symbol="AAA",
         suffix="a",
@@ -812,7 +831,31 @@ def test_freshness_is_not_checked_without_a_bound() -> None:
         generated_at=_NOW - timedelta(days=400),
     )
     fixture = _Fixture((stale,))
-    assert fixture.validate().valid is True
+    assert fixture.validate(maximum_evidence_age=None).valid is True
+
+
+def test_the_age_bound_cannot_be_dropped_by_omission() -> None:
+    """The freshness half of the check cannot be disabled by forgetting it.
+
+    The validator requires ``maximum_evidence_age`` to be passed, so "no bound"
+    is only reachable by a caller that deliberately passes ``None`` -- which the
+    policy supplies.  Omitting it used to default to ``None`` and silently accept
+    arbitrarily old evidence, the same shape of fail-open the mandatory
+    ``required_gate_policy_version`` exists to prevent.
+    """
+
+    fixture = _two_members()
+    with pytest.raises(TypeError):
+        fixture.validator.validate(
+            _coverage(fixture.items),
+            now=_NOW,
+            required_gate_policy_version="gate-policy-1",
+        )
+    # And a wrong type is a caller bug, not an unbounded policy.
+    with pytest.raises(TypeError):
+        fixture.validate(maximum_evidence_age=30)
+    with pytest.raises(TypeError):
+        fixture.validate(maximum_evidence_age="30d")
 
 
 def test_evidence_from_the_future_is_refused() -> None:

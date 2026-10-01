@@ -28,8 +28,20 @@ signing key, then read ``coverage.verdict is PASS``.  A claim formed from severa
 members could therefore have one member's key revoked and still authorise a
 launch, because the one key it looked at was still fine.
 
-Every failure path returns ``False`` rather than raising.  A launch gate that
-can throw is a launch gate a caller will wrap in a broad ``except``.
+Every failure path returns ``False`` rather than raising, and that is a
+*structural* property rather than a promise: ``authorises`` is a total wrapper
+around ``_authorises``, so an exception from anything it calls -- a repository, a
+key source, the current-validity validator, or a caller-supplied clock -- becomes
+a refusal.  A launch gate that can throw is a launch gate a caller will wrap in a
+broad ``except``, and the whole point of the boundary is that the answer is
+always "may this launch", never a traceback.
+
+The distinction matters because the failure modes are not all enumerable.  A
+clock returning a naive instant, a port handing back a record of the wrong type,
+a store raising something its own port type does not name -- each one previously
+escaped as ``ValueError`` or ``AttributeError`` and reached the desktop as an
+unhandled error.  Enumerating them would mean re-auditing this method every time
+a collaborator changed; wrapping it does not.
 """
 
 from __future__ import annotations
@@ -87,6 +99,29 @@ class PaperLaunchAuthorizer:
         self._clock = clock or _utc_now
 
     def authorises(self, version_id: str) -> bool:
+        """Whether ``version_id`` may be launched into Paper right now.
+
+        Total by construction: any exception raised below this line is a refusal.
+        See the module docstring for why this is a wrapper rather than a set of
+        ``except`` clauses around each collaborator.
+        """
+
+        try:
+            return self._authorises(version_id)
+        except Exception:
+            # Deliberately broad, and the only place in this module that is.  The
+            # caller is the Paper launch boundary and it needs a boolean, not a
+            # traceback: an unreadable store, a malformed record, a clock that is
+            # not timezone-aware and a bug in a collaborator are all "we cannot
+            # establish that this may launch", which fails closed.
+            #
+            # This does not disguise a programming error as a *missing record* --
+            # the distinction the validator draws internally -- because it reports
+            # nothing about why.  It reports only that authority was not
+            # established.
+            return False
+
+    def _authorises(self, version_id: str) -> bool:
         decision = self._entering_decision(version_id)
         if decision is None:
             return False

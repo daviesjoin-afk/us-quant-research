@@ -665,24 +665,29 @@ def _row_to_decision(row: tuple[Any, ...]) -> StrategyLifecycleDecision:
         raise StrategyLifecycleRepositoryError(
             "indexed lifecycle decision columns disagree with payload"
         )
-    if decision.paper_performance_evaluation_id is not None:
-        expected_id = stable_lifecycle_decision_id(
-            strategy_version_id=decision.strategy_version_id,
-            action=decision.action,
-            source_status=decision.source_status,
-            target_status=decision.target_status,
-            policy_id=decision.policy_id,
-            policy_revision=decision.policy_revision,
-            coverage_evaluation_id=decision.coverage_evaluation_id,
-            blockers=decision.blockers,
-            triggers=decision.triggers,
-            controller_version=decision.controller_version,
-            paper_performance_evaluation_id=decision.paper_performance_evaluation_id,
+    expected_id = stable_lifecycle_decision_id(
+        strategy_version_id=decision.strategy_version_id,
+        action=decision.action,
+        source_status=decision.source_status,
+        target_status=decision.target_status,
+        policy_id=decision.policy_id,
+        policy_revision=decision.policy_revision,
+        coverage_evaluation_id=decision.coverage_evaluation_id,
+        blockers=decision.blockers,
+        triggers=decision.triggers,
+        controller_version=decision.controller_version,
+        paper_performance_evaluation_id=decision.paper_performance_evaluation_id,
+    )
+    # Canonical controller IDs are checked even when a link was erased.
+    # Historical explicitly assigned IDs remain readable as before D2.
+    if expected_id != decision.decision_id and (
+        decision.paper_performance_evaluation_id is not None
+        or (decision.decision_id.startswith("sld-")
+            and len(decision.decision_id) == len(expected_id))
+    ):
+        raise StrategyLifecycleRepositoryError(
+            "lifecycle decision identity disagrees with performance evidence"
         )
-        if expected_id != decision.decision_id:
-            raise StrategyLifecycleRepositoryError(
-                "lifecycle decision identity disagrees with performance evidence"
-            )
     return decision
 
 

@@ -75,6 +75,8 @@ SQLite 交叉校验索引身份、规范 JSON、摘要和语义 ID；损坏抛�
 - PASS、INSUFFICIENT 或尚无评估，不能单独授权暂停；其它治理失败仍按原规则处理。
 - 首次 Research → Paper 保持原研究证据链要求，不要求已有 Paper 绩效。
 
+过期、未来或版本不符的绩效不能授权绩效暂停，也不会否决其它有效治理原因。
+
 决策保存不可变 `paper_performance_evaluation_id`，并将其纳入决策 ID；
 现有 PREPARED → APPLIED 流程仍负责中断恢复。旧决策不增加空字段、不重写摘要，
 原策略表和生命周期表结构不变。不增加绩效布尔接口、第二个状态控制器、Live 或 AI。

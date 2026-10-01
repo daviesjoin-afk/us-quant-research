@@ -23,7 +23,7 @@ from us_quant.trading.domain.strategy_paper_performance import StrategyPaperPerf
 from us_quant.trading.ports.strategy_lifecycle_repository import StrategyLifecycleRepositoryError
 
 
-def _fact(tmp_path, kind=Verdict.FAIL, **changes):
+def _fact(tmp_path, kind=Verdict.FAIL, *, time_offset=timedelta(0), **changes):
     # Build an actual D1 evaluation from durable partial-fill truth; adapt only
     # its version/time identity to the existing sealed research-chain fixture.
     components, *_ = setup_app(tmp_path, data=history(sell_price='90' if kind is Verdict.FAIL else '110'))
@@ -34,7 +34,7 @@ def _fact(tmp_path, kind=Verdict.FAIL, **changes):
         )
     source = evaluate(components)
     assert source.verdict is kind
-    offset = NOW - PERFORMANCE_NOW
+    offset = NOW - PERFORMANCE_NOW + time_offset
     metric_values = {f.name: getattr(source.metrics, f.name) for f in fields(source.metrics)}
     metric_values = {k: v + offset if isinstance(v, datetime) else v for k, v in metric_values.items()}
     metric_values['strategy_version_id'] = 'version-1'
@@ -43,6 +43,7 @@ def _fact(tmp_path, kind=Verdict.FAIL, **changes):
     values = {k: v + offset if isinstance(v, datetime) else v for k, v in values.items()}
     values.update(strategy_version_id='version-1', metrics=metrics)
     values.update(changes)
+    values['metrics'] = replace(values['metrics'], strategy_version_id=values['strategy_version_id'])
     return StrategyPaperPerformanceEvaluation(evaluation_id=stable_strategy_paper_performance_evaluation_id(values), **values)
 
 
@@ -111,11 +112,11 @@ def test_initial_promotion_needs_no_performance_prerequisite(tmp_path, kind):
     assert result.decision.triggers == ()
 
 
-@pytest.mark.parametrize('age', [timedelta(seconds=-1), timedelta(days=31)])
-def test_future_or_stale_fact_does_not_grant_authority(tmp_path, age):
+@pytest.mark.parametrize('offset', [timedelta(seconds=1), timedelta(days=-31)])
+def test_future_or_stale_fact_does_not_grant_authority(tmp_path, offset):
     chain = _Chain(tmp_path).build()
-    fact = _fact(tmp_path/'facts')
-    result = _decide(chain, fact, decided_at=NOW+age)
+    fact = _fact(tmp_path/'facts', time_offset=offset)
+    result = _decide(chain, fact)
     assert not result.authorised
     assert B.PAPER_PERFORMANCE_NOT_CURRENT in result.decision.blockers
     assert result.decision.triggers == ()
@@ -123,12 +124,38 @@ def test_future_or_stale_fact_does_not_grant_authority(tmp_path, age):
 
 def test_cross_version_fact_cannot_grant_pause_authority(tmp_path):
     chain = _Chain(tmp_path).build()
-    fact = _fact(tmp_path/'facts')
-    other = replace(_paper(), identity=replace(_paper().identity, version_id='other'))
-    result = _decide(chain, fact, version=other)
+    fact = _fact(tmp_path/'facts', strategy_version_id='other')
+    result = _decide(chain, fact)
     assert not result.authorised
     assert B.VERSION_IDENTITY_MISMATCH in result.decision.blockers
     assert result.decision.triggers == ()
+
+
+@pytest.mark.parametrize('offset', [timedelta(seconds=1), timedelta(days=-31)])
+def test_invalid_performance_cannot_veto_other_pause_triggers(tmp_path, offset):
+    chain = _Chain(tmp_path).build()
+    fact = _fact(tmp_path/'facts', time_offset=offset)
+    result = _decide(chain, fact, coverage=None)
+    assert result.authorised
+    assert result.decision.triggers == (B.COVERAGE_MISSING,)
+    assert result.decision.blockers == ()
+
+
+@pytest.mark.parametrize('coverage_missing', [False, True])
+def test_erased_performance_link_with_rehashed_payload_is_rejected(tmp_path, coverage_missing):
+    chain = _Chain(tmp_path).build()
+    fact = _fact(tmp_path/'facts', Verdict.INSUFFICIENT)
+    decision = _decide(chain, fact, coverage=None if coverage_missing else chain.coverage).decision
+    path = tmp_path/'lifecycle.sqlite'
+    store = SQLiteStrategyLifecycleRepository(path)
+    store.record_decision(decision)
+    with sqlite3.connect(path) as connection:
+        payload = json.loads(connection.execute('SELECT payload_json FROM strategy_lifecycle_decision').fetchone()[0])
+        del payload['paper_performance_evaluation_id']
+        text = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+        connection.execute('UPDATE strategy_lifecycle_decision SET payload_json=?, payload_hash=?', (text, sha256(text.encode()).hexdigest()))
+    with pytest.raises(StrategyLifecycleRepositoryError, match='identity'):
+        store.get_decision(decision.decision_id)
 
 
 def test_service_loads_durable_fail_and_restart_preserves_applied_fact(tmp_path):

@@ -164,15 +164,16 @@ class StrategyLifecycleController:
             structural.add(StrategyLifecycleBlocker.ACTION_NOT_PERMITTED)
         if version.status is not ACTION_SOURCE_STATUS[action]:
             structural.add(StrategyLifecycleBlocker.CURRENT_STATUS_NOT_ELIGIBLE)
+        performance_issues: set[StrategyLifecycleBlocker] = set()
         if paper_performance is not None:
             if paper_performance.strategy_version_id != version.version_id:
-                structural.add(StrategyLifecycleBlocker.VERSION_IDENTITY_MISMATCH)
+                performance_issues.add(StrategyLifecycleBlocker.VERSION_IDENTITY_MISMATCH)
             if (
                 paper_performance.evaluated_at > decided_at
                 or (policy.maximum_evidence_age is not None
                     and decided_at - paper_performance.evaluated_at > policy.maximum_evidence_age)
             ):
-                structural.add(StrategyLifecycleBlocker.PAPER_PERFORMANCE_NOT_CURRENT)
+                performance_issues.add(StrategyLifecycleBlocker.PAPER_PERFORMANCE_NOT_CURRENT)
 
         failures = self._chain_failures(
             version=version,
@@ -180,7 +181,7 @@ class StrategyLifecycleController:
             coverage=coverage,
             decided_at=decided_at,
         )
-        if (paper_performance is not None
+        if (paper_performance is not None and not performance_issues
                 and paper_performance.verdict is StrategyPaperPerformanceVerdict.FAIL):
             failures.add(StrategyLifecycleBlocker.PAPER_PERFORMANCE_FAILED)
 
@@ -192,7 +193,7 @@ class StrategyLifecycleController:
             elif failures:
                 blockers, triggers = set(), failures
             else:
-                blockers = {StrategyLifecycleBlocker.PAUSE_NOT_JUSTIFIED}
+                blockers = performance_issues or {StrategyLifecycleBlocker.PAUSE_NOT_JUSTIFIED}
                 triggers = set()
         else:
             blockers, triggers = structural | failures, set()

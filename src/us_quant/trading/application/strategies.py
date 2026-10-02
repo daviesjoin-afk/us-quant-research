@@ -138,11 +138,57 @@ class StrategyApplication:
             raise StrategyApplicationError(
                 "调用方不能自行声明晋级门通过；当前独立 gate evaluator 尚未启用"
             )
-        budget = _risk_budget(risk_budget_pct)
-        # ``validate_strategy_parameters`` normalises in place, and the
-        # normalised form is what gets hashed: ``"50"`` becomes ``"50.0"``.
-        # Hashing the raw input would change every version's identity.
+        return self._create_version(
+            version_id=str(uuid4()),
+            strategy_id=strategy_id,
+            name=name,
+            description=description,
+            semver=semver,
+            parameters=parameters,
+            universe_hash=universe_hash,
+            code_hash=code_hash,
+            risk_budget_pct=_risk_budget(risk_budget_pct),
+            status=resolved_status,
+            mode=resolved_mode,
+            gate_reason=gate_reason,
+            audit_event="registered",
+            audit_detail=f"{semver} / {resolved_status}",
+        )
+
+    def _create_version(
+        self,
+        *,
+        version_id: str,
+        strategy_id: str,
+        name: str,
+        description: str,
+        semver: str,
+        parameters: Mapping[str, Any],
+        universe_hash: str,
+        code_hash: str,
+        risk_budget_pct: Decimal,
+        status: StrategyStatus,
+        mode: StrategyMode,
+        gate_reason: str,
+        audit_event: str,
+        audit_detail: str,
+        parameters_must_differ_from: str | None = None,
+    ) -> StrategyVersion:
+        """The sole StrategyVersion construction and insert path.
+
+        Callers choose identity and intent. This primitive performs the single
+        canonical parameter validation, creates an unproven version, records
+        its opening audit event, and returns the stored row.
+        """
+
         validated = validate_strategy_parameters(strategy_id, parameters)
+        parameter_hash = parameter_hash_for(validated)
+        if parameters_must_differ_from is not None and (
+            parameter_hash == parameters_must_differ_from
+        ):
+            raise StrategyApplicationError(
+                "research candidate must change the parent parameters"
+            )
         now = _now()
         version = StrategyVersion(
             definition=StrategyDefinition(
@@ -152,16 +198,16 @@ class StrategyApplication:
             ),
             identity=StrategyIdentity(
                 strategy_id=strategy_id,
-                version_id=str(uuid4()),
-                parameter_hash=parameter_hash_for(validated),
+                version_id=version_id,
+                parameter_hash=parameter_hash,
             ),
             semver=semver,
-            status=resolved_status,
-            mode=resolved_mode,
+            status=status,
+            mode=mode,
             parameters=validated,
             universe_hash=universe_hash,
             code_hash=code_hash,
-            risk_budget_pct=budget,
+            risk_budget_pct=risk_budget_pct,
             gate_passed=False,
             gate_reason=gate_reason,
             created_at=now,
@@ -172,8 +218,8 @@ class StrategyApplication:
             audit=StrategyAuditEvent(
                 strategy_id=strategy_id,
                 version_id=version.version_id,
-                event="registered",
-                detail=f"{semver} / {resolved_status}",
+                event=audit_event,
+                detail=audit_detail,
                 occurred_at=now,
             ),
         )
@@ -210,6 +256,45 @@ class StrategyApplication:
             mode=StrategyMode.RESEARCH,
             gate_passed=False,
             gate_reason="参数变化后必须重新研究验证",
+        )
+
+    def clone_research_candidate(
+        self,
+        parent_version_id: str,
+        *,
+        candidate_version_id: str,
+        semver: str,
+        parameters: Mapping[str, Any],
+    ) -> StrategyVersion:
+        """Create a new, unproven RESEARCH challenger under a deterministic ID."""
+
+        source = self.get_version(parent_version_id)
+        if source.status is StrategyStatus.LEGACY_INVALIDATED:
+            raise StrategyApplicationError(
+                "已失效旧结果只能审计，不能克隆为新策略"
+            )
+        if not _is_candidate_version_id(candidate_version_id):
+            raise StrategyApplicationError(
+                "candidate_version_id must be scv- followed by a SHA-256 digest"
+            )
+        if candidate_version_id == source.version_id:
+            raise StrategyApplicationError("candidate must have a new version identity")
+        return self._create_version(
+            version_id=candidate_version_id,
+            strategy_id=source.strategy_id,
+            name=source.name,
+            description=source.description,
+            semver=semver,
+            parameters=parameters,
+            universe_hash=source.universe_hash,
+            code_hash=source.code_hash,
+            risk_budget_pct=source.risk_budget_pct,
+            status=StrategyStatus.RESEARCH,
+            mode=StrategyMode.RESEARCH,
+            gate_reason="候选参数尚未经过独立研究验证",
+            audit_event="candidate_created",
+            audit_detail=f"{semver} / research candidate from {source.version_id}",
+            parameters_must_differ_from=source.parameter_hash,
         )
 
     def transition(
@@ -409,6 +494,15 @@ def _risk_budget(value: Decimal | float | str) -> Decimal:
     if not ZERO < budget <= MAX_RISK_BUDGET_PCT:
         raise ValueError("strategy risk budget must be in (0, 10%]")
     return budget
+
+
+def _is_candidate_version_id(value: Any) -> bool:
+    if not isinstance(value, str) or not value.startswith("scv-"):
+        return False
+    digest = value[4:]
+    return len(digest) == 64 and all(
+        character in "0123456789abcdef" for character in digest
+    )
 
 
 def _now() -> datetime:

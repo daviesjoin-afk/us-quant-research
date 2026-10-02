@@ -556,7 +556,9 @@ def test_the_orchestrator_owns_no_evidence_lifecycle() -> None:
 #:
 #: The list is asserted for exact equality, so a new decision read anywhere fails
 #: immediately and the debt cannot grow.
-_LEGACY_GATE_READERS_PENDING_RETIREMENT = frozenset()
+_LEGACY_GATE_IDENTITY_CHECKS_ALLOWED = frozenset(
+    {"trading/application/strategy_candidate_generation.py"}
+)
 
 #: Where the fields are *allowed* to remain: the frozen schema and its value.
 _LEGACY_GATE_STORAGE = frozenset(
@@ -621,13 +623,14 @@ def _decides_from_a_legacy_gate_field(path: pathlib.Path) -> list[tuple[int, str
     return found
 
 
-def test_the_legacy_gate_fields_decide_nothing() -> None:
-    """A ratchet on the retired fields: the debt can only shrink, and is now zero.
+def test_legacy_gate_field_is_used_only_for_candidate_identity_recovery() -> None:
+    """Only crash-recovery equality may inspect the legacy flag.
 
     ``gate_passed`` and ``gate_reason`` stay in the domain value and the SQLite
     adapter because the schema is frozen and existing databases must keep
-    round-tripping.  Nothing else may *decide* from them; this pins that exactly,
-    so a new decision read fails immediately.
+    round-tripping. The candidate app compares an existing row with the
+    required unproven identity; it cannot grant lifecycle authority. Every
+    other decision read remains forbidden.
     """
 
     offenders: dict[str, list[tuple[int, str]]] = {}
@@ -639,7 +642,12 @@ def test_the_legacy_gate_fields_decide_nothing() -> None:
         if reads:
             offenders[relative] = reads
 
-    assert set(offenders) == set(_LEGACY_GATE_READERS_PENDING_RETIREMENT), offenders
+    assert set(offenders) == set(_LEGACY_GATE_IDENTITY_CHECKS_ALLOWED), offenders
+    assert all(
+        expression == "child.gate_passed"
+        for rows in offenders.values()
+        for _, expression in rows
+    ), offenders
 
 
 def test_the_frozen_storage_still_carries_the_fields() -> None:

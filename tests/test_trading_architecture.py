@@ -338,6 +338,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "strategy_lifecycle.py",
         "strategy_parameters.py",
         "strategy_paper_performance.py",
+        "strategy_search.py",
     }
     assert {path.name for path in _python_files(PORTS_DIR)} == {
         "__init__.py",
@@ -363,6 +364,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "strategy_gate_repository.py",
         "strategy_lifecycle_repository.py",
         "strategy_paper_performance_repository.py",
+        "strategy_search_repository.py",
     }
 
 
@@ -1013,6 +1015,7 @@ NON_MARKET_DATA_ADAPTER_MODULES = {
     "sqlite/order_repository.py",
     "sqlite/portfolio_repository.py",
     "sqlite/strategy_repository.py",
+    "sqlite/strategy_search_repository.py",
     "research_evidence.py",
     "sqlite/strategy_gate_repository.py",
     "evidence_signature.py",
@@ -1563,6 +1566,7 @@ def test_only_composition_roots_wire_adapters_into_applications() -> None:
         "trading/composition/portfolio_operations.py",
         "trading/composition/portfolio_paper.py",
         "trading/composition/strategies.py",
+        "trading/composition/strategy_candidate_generation.py",
         "trading/composition/strategy_coverage.py",
         "trading/composition/strategy_gate.py",
         "trading/composition/strategy_lifecycle.py",
@@ -1945,7 +1949,10 @@ def test_only_strategy_composition_wires_the_concrete_strategy_repository() -> (
             wiring_modules.append(path.relative_to(_SRC).as_posix())
     # The sqlite package's own ``__init__`` re-exports the adapter, so it
     # names the concrete class too -- but it knows no application service.
-    assert wiring_modules == ["trading/composition/strategies.py"], (
+    assert wiring_modules == [
+        "trading/composition/strategies.py",
+        "trading/composition/strategy_candidate_generation.py",
+    ], (
         wiring_modules
     )
 

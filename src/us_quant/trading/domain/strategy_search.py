@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException, InvalidOperation
 from enum import StrEnum
 from hashlib import sha256
 from typing import Any, Mapping
@@ -29,6 +29,7 @@ from us_quant.trading.domain.strategy_parameters import (
 SEARCH_POLICY_VERSION = "strategy-search-policy-v1"
 STRATEGY_CANDIDATE_GENERATOR_VERSION = "strategy-candidate-generator-v1"
 _HASH_LENGTH = 64
+_MAXIMUM_NEIGHBOR_STEPS_PER_RULE = 256
 
 
 class StrategySearchError(ValueError):
@@ -63,6 +64,12 @@ class StrategySearchParameterRule:
             raise ValueError("step must be positive")
         if self.maximum_delta <= 0:
             raise ValueError("maximum_delta must be positive")
+        try:
+            step_count = self.maximum_delta // self.step
+        except DecimalException as error:
+            raise ValueError("neighbor grid exceeds the supported bound") from error
+        if not step_count.is_finite() or step_count > _MAXIMUM_NEIGHBOR_STEPS_PER_RULE:
+            raise ValueError("neighbor grid exceeds the supported bound")
         if self.value_kind is StrategySearchValueKind.INTEGER:
             for name in ("minimum", "maximum", "step", "maximum_delta"):
                 if getattr(self, name) != getattr(self, name).to_integral_value():

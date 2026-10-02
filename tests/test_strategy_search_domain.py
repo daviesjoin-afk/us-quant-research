@@ -92,6 +92,12 @@ def test_rules_require_exact_decimal_bounds_and_positive_movement():
         _rule(step=Decimal("0"))
     with pytest.raises(ValueError, match="maximum_delta"):
         _rule(maximum_delta=Decimal("0"))
+    with pytest.raises(ValueError, match="neighbor grid"):
+        _rule(
+            kind=Kind.DECIMAL,
+            step=Decimal("1e-9"),
+            maximum_delta=Decimal("1"),
+        )
     with pytest.raises(ValueError, match="minimum"):
         _rule(minimum=Decimal("9"), maximum=Decimal("8"))
     with pytest.raises(ValueError, match="integral"):

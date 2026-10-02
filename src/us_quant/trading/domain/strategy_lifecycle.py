@@ -40,7 +40,7 @@ from us_quant.trading.domain.strategy import StrategyStatus
 #: Policy schema this controller understands.  An unknown value fails closed.
 SUPPORTED_LIFECYCLE_POLICY_VERSIONS: tuple[str, ...] = ("strategy-lifecycle-v1",)
 
-LIFECYCLE_CONTROLLER_VERSION = "strategy-lifecycle-v1"
+LIFECYCLE_CONTROLLER_VERSION = "strategy-lifecycle-v2"
 
 
 class StrategyLifecycleAction(StrEnum):

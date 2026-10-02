@@ -77,7 +77,8 @@ SQLite 交叉校验索引身份、规范 JSON、摘要和语义 ID；损坏抛�
 
 过期、未来或版本不符的绩效不能授权绩效暂停，也不会否决其它有效治理原因。
 
-决策保存不可变 `paper_performance_evaluation_id`，并将其纳入决策 ID；
+D2 控制器版本升为 `strategy-lifecycle-v2`。决策保存不可变
+`paper_performance_evaluation_id`，并将其纳入决策 ID；
 现有 PREPARED → APPLIED 流程仍负责中断恢复。旧决策不增加空字段、不重写摘要，
 原策略表和生命周期表结构不变。不增加绩效布尔接口、第二个状态控制器、Live 或 AI。
 存储层只读校验兼容 6-C 修正前的历史 ID 摘要字段，不重新启用旧证据授权逻辑。

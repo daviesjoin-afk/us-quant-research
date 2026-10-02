@@ -273,6 +273,25 @@ def test_pre_repair_controller_hash_is_readable_and_reconcilable(tmp_path, block
         assert connection.execute('SELECT payload_json,payload_hash FROM strategy_lifecycle_decision').fetchone() == before
 
 
+def test_legacy_explicit_hash_shaped_id_remains_readable(tmp_path):
+    store = SQLiteStrategyLifecycleRepository(tmp_path/'lifecycle.sqlite')
+    explicit_id = 'sld-' + 'a' * 64
+    old = _decision(decision_id=explicit_id)
+    store.record_decision(old)
+    assert SQLiteStrategyLifecycleRepository(tmp_path/'lifecycle.sqlite').get_decision(explicit_id) == old
+
+
+def test_current_controller_rejects_noncanonical_hash_shaped_id(tmp_path):
+    from us_quant.trading.domain.strategy_lifecycle import LIFECYCLE_CONTROLLER_VERSION
+    chain = _Chain(tmp_path).build()
+    decision = _decide(chain, None, version=_version(), action=Action.PROMOTE_TO_PAPER_SHADOW).decision
+    forged = replace(decision, decision_id='sld-'+'a'*64)
+    assert forged.controller_version == LIFECYCLE_CONTROLLER_VERSION
+    store = SQLiteStrategyLifecycleRepository(tmp_path/'lifecycle.sqlite')
+    with pytest.raises(StrategyLifecycleRepositoryError, match='canonical'):
+        store.record_decision(forged)
+
+
 def test_failure_trigger_requires_a_bound_fact():
     with pytest.raises(ValueError, match='performance'):
         _decision(action=Action.PAUSE, source_status=StrategyStatus.PAPER_SHADOW, target_status=StrategyStatus.PAUSED,

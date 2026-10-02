@@ -46,6 +46,12 @@ from us_quant.trading.domain.strategy_lifecycle import (
     StrategyLifecyclePolicy,
     stable_lifecycle_decision_id,
 )
+from us_quant.trading.domain.strategy_paper_performance import (
+    StrategyPaperPerformanceEvaluation, StrategyPaperPerformanceVerdict,
+)
+from us_quant.trading.ports.strategy_paper_performance_repository import (
+    StrategyPaperPerformanceRepositoryPort,
+)
 
 
 #: The validator's specific reasons, translated into the lifecycle vocabulary.
@@ -119,6 +125,7 @@ class StrategyLifecycleController:
         policy: StrategyLifecyclePolicy | None,
         coverage: StrategyCoverageEvaluation | None,
         decided_at: datetime,
+        paper_performance: StrategyPaperPerformanceEvaluation | None = None,
     ) -> StrategyLifecycleDecisionResult:
         if not isinstance(version, StrategyVersion):
             raise TypeError("version must be StrategyVersion")
@@ -128,6 +135,14 @@ class StrategyLifecycleController:
             raise TypeError("decided_at must be a datetime")
         if decided_at.tzinfo is None or decided_at.utcoffset() is None:
             raise ValueError("decided_at must be timezone-aware")
+        # Initial promotion (and the existing research-based resume) has no
+        # performance prerequisite. Only running Paper PAUSE consumes this fact.
+        if action is not StrategyLifecycleAction.PAUSE:
+            paper_performance = None
+        if paper_performance is not None and not isinstance(
+            paper_performance, StrategyPaperPerformanceEvaluation
+        ):
+            raise TypeError("paper_performance must be an immutable evaluation")
 
         # Without a policy there is no authority to mutate anything.  This is
         # the fail-closed default, not an oversight.
@@ -139,6 +154,7 @@ class StrategyLifecycleController:
                 blockers={StrategyLifecycleBlocker.POLICY_MISSING},
                 coverage=coverage,
                 decided_at=decided_at,
+                paper_performance=paper_performance,
             )
 
         structural: set[StrategyLifecycleBlocker] = set()
@@ -148,6 +164,25 @@ class StrategyLifecycleController:
             structural.add(StrategyLifecycleBlocker.ACTION_NOT_PERMITTED)
         if version.status is not ACTION_SOURCE_STATUS[action]:
             structural.add(StrategyLifecycleBlocker.CURRENT_STATUS_NOT_ELIGIBLE)
+        performance_issues: set[StrategyLifecycleBlocker] = set()
+        if paper_performance is not None:
+            approved_policy_id = policy.paper_performance_policy_id
+            if (
+                approved_policy_id is None
+                or paper_performance.requested_policy_id != approved_policy_id
+                or paper_performance.policy_id != approved_policy_id
+                or paper_performance.policy_revision is None
+                or paper_performance.policy_version is None
+            ):
+                performance_issues.add(StrategyLifecycleBlocker.PAPER_PERFORMANCE_NOT_CURRENT)
+            if paper_performance.strategy_version_id != version.version_id:
+                performance_issues.add(StrategyLifecycleBlocker.VERSION_IDENTITY_MISMATCH)
+            if (
+                paper_performance.evaluated_at > decided_at
+                or (policy.maximum_evidence_age is not None
+                    and decided_at - paper_performance.evaluated_at > policy.maximum_evidence_age)
+            ):
+                performance_issues.add(StrategyLifecycleBlocker.PAPER_PERFORMANCE_NOT_CURRENT)
 
         failures = self._chain_failures(
             version=version,
@@ -155,6 +190,9 @@ class StrategyLifecycleController:
             coverage=coverage,
             decided_at=decided_at,
         )
+        if (paper_performance is not None and not performance_issues
+                and paper_performance.verdict is StrategyPaperPerformanceVerdict.FAIL):
+            failures.add(StrategyLifecycleBlocker.PAPER_PERFORMANCE_FAILED)
 
         if action is StrategyLifecycleAction.PAUSE:
             # A pause is authorised *because* something became invalid, so it
@@ -164,7 +202,7 @@ class StrategyLifecycleController:
             elif failures:
                 blockers, triggers = set(), failures
             else:
-                blockers = {StrategyLifecycleBlocker.PAUSE_NOT_JUSTIFIED}
+                blockers = performance_issues or {StrategyLifecycleBlocker.PAUSE_NOT_JUSTIFIED}
                 triggers = set()
         else:
             blockers, triggers = structural | failures, set()
@@ -177,6 +215,7 @@ class StrategyLifecycleController:
                 blockers=blockers,
                 coverage=coverage,
                 decided_at=decided_at,
+                paper_performance=paper_performance,
             )
         return self._authorise(
             version=version,
@@ -185,6 +224,7 @@ class StrategyLifecycleController:
             triggers=triggers,
             coverage=coverage,
             decided_at=decided_at,
+            paper_performance=paper_performance,
         )
 
     # -- the evidence chain ----------------------------------------------
@@ -264,6 +304,7 @@ class StrategyLifecycleController:
         blockers: set[StrategyLifecycleBlocker],
         coverage,
         decided_at: datetime,
+        paper_performance: StrategyPaperPerformanceEvaluation | None = None,
     ) -> StrategyLifecycleDecisionResult:
         resolved = set(blockers)
         if not resolved:
@@ -280,6 +321,7 @@ class StrategyLifecycleController:
             coverage=coverage,
             decided_at=decided_at,
             applied_at=None,
+            paper_performance=paper_performance,
         )
         return StrategyLifecycleDecisionResult(decision=decision, authorization=None)
 
@@ -292,6 +334,7 @@ class StrategyLifecycleController:
         triggers: set[StrategyLifecycleBlocker],
         coverage,
         decided_at: datetime,
+        paper_performance: StrategyPaperPerformanceEvaluation | None = None,
     ) -> StrategyLifecycleDecisionResult:
         decision = self._build(
             version=version,
@@ -303,6 +346,7 @@ class StrategyLifecycleController:
             coverage=coverage,
             decided_at=decided_at,
             applied_at=None,
+            paper_performance=paper_performance,
         )
         authorization = StrategyLifecycleAuthorization(
             version.version_id,
@@ -328,6 +372,7 @@ class StrategyLifecycleController:
         coverage,
         decided_at: datetime,
         applied_at: datetime | None,
+        paper_performance: StrategyPaperPerformanceEvaluation | None = None,
     ) -> StrategyLifecycleDecision:
         policy_id = policy.policy_id if policy is not None else None
         policy_revision = policy.revision if policy is not None else None
@@ -345,6 +390,7 @@ class StrategyLifecycleController:
         )
         blockers_tuple = tuple(sorted(set(blockers), key=lambda item: item.value))
         triggers_tuple = tuple(sorted(set(triggers), key=lambda item: item.value))
+        performance_id = paper_performance.evaluation_id if paper_performance is not None else None
         return StrategyLifecycleDecision(
             decision_id=stable_lifecycle_decision_id(
                 strategy_version_id=version.version_id,
@@ -357,6 +403,7 @@ class StrategyLifecycleController:
                 blockers=blockers_tuple,
                 triggers=triggers_tuple,
                 controller_version=LIFECYCLE_CONTROLLER_VERSION,
+                paper_performance_evaluation_id=performance_id,
             ),
             strategy_version_id=version.version_id,
             strategy_semver=version.semver,
@@ -380,6 +427,7 @@ class StrategyLifecycleController:
             controller_version=LIFECYCLE_CONTROLLER_VERSION,
             authorized_at=decided_at,
             applied_at=applied_at,
+            paper_performance_evaluation_id=performance_id,
         )
 
 
@@ -402,12 +450,14 @@ class StrategyLifecycleService:
     refuses a transition that is no longer legal.
     """
 
-    def __init__(self, *, controller, decisions, strategies) -> None:
+    def __init__(self, *, controller, decisions, strategies,
+                 paper_performance_repository: StrategyPaperPerformanceRepositoryPort | None = None) -> None:
         if controller is None or decisions is None or strategies is None:
             raise TypeError("controller, decisions and strategies are required")
         self._controller = controller
         self._decisions = decisions
         self._strategies = strategies
+        self._paper_performance_repository = paper_performance_repository
 
     def apply(
         self,
@@ -417,13 +467,38 @@ class StrategyLifecycleService:
         policy: StrategyLifecyclePolicy | None,
         coverage: StrategyCoverageEvaluation | None,
         applied_at: datetime,
+        paper_performance: StrategyPaperPerformanceEvaluation | None = None,
     ) -> StrategyLifecycleDecisionResult:
+        if action is StrategyLifecycleAction.PAUSE:
+            if self._paper_performance_repository is not None:
+                current = None
+                expected_policy_id = (
+                    policy.paper_performance_policy_id
+                    if isinstance(policy, StrategyLifecyclePolicy) else None
+                )
+                if expected_policy_id is not None:
+                    active_performance_policy = self._paper_performance_repository.active_policy(
+                        expected_policy_id
+                    )
+                    if active_performance_policy is not None:
+                        current = next((item for item in self._paper_performance_repository.evaluations_for_version(
+                            version.version_id
+                        ) if item.requested_policy_id == expected_policy_id
+                            and item.policy_id == expected_policy_id
+                            and item.policy_revision == active_performance_policy.revision
+                            and item.policy_version == active_performance_policy.policy_version), None)
+                if paper_performance is not None and current != paper_performance:
+                    raise ValueError("paper_performance must be the current durable evaluation")
+                paper_performance = current
+            elif paper_performance is not None:
+                raise TypeError("a performance fact requires its durable repository")
         outcome = self._controller.decide(
             version=version,
             action=action,
             policy=policy,
             coverage=coverage,
             decided_at=applied_at,
+            paper_performance=paper_performance,
         )
         # A refusal is recorded too: "we looked and declined" is exactly the
         # audit fact a later reviewer needs.

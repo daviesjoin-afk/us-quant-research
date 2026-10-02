@@ -40,7 +40,7 @@ from us_quant.trading.domain.strategy import StrategyStatus
 #: Policy schema this controller understands.  An unknown value fails closed.
 SUPPORTED_LIFECYCLE_POLICY_VERSIONS: tuple[str, ...] = ("strategy-lifecycle-v1",)
 
-LIFECYCLE_CONTROLLER_VERSION = "strategy-lifecycle-v1"
+LIFECYCLE_CONTROLLER_VERSION = "strategy-lifecycle-v2"
 
 
 class StrategyLifecycleAction(StrEnum):
@@ -105,6 +105,8 @@ class StrategyLifecycleBlocker(StrEnum):
     #: blocker an evaluator could suspend a running strategy for no recorded
     #: reason, which is exactly the kind of unilateral authority 6-C removes.
     PAUSE_NOT_JUSTIFIED = "PAUSE_NOT_JUSTIFIED"
+    PAPER_PERFORMANCE_FAILED = "PAPER_PERFORMANCE_FAILED"
+    PAPER_PERFORMANCE_NOT_CURRENT = "PAPER_PERFORMANCE_NOT_CURRENT"
 
 
 class StrategyLifecycleDecisionState(StrEnum):
@@ -139,6 +141,7 @@ class StrategyLifecyclePolicy:
     required_coverage_policy_version: str
     maximum_evidence_age: timedelta | None
     created_at: datetime
+    paper_performance_policy_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.policy_id, "policy_id")
@@ -159,6 +162,8 @@ class StrategyLifecyclePolicy:
             self.required_coverage_policy_version,
             "required_coverage_policy_version",
         )
+        if self.paper_performance_policy_id is not None:
+            _require_text(self.paper_performance_policy_id, "paper_performance_policy_id")
         if self.maximum_evidence_age is not None:
             if not isinstance(self.maximum_evidence_age, timedelta):
                 raise TypeError("maximum_evidence_age must be timedelta or None")
@@ -201,6 +206,7 @@ class StrategyLifecycleDecision:
     controller_version: str
     authorized_at: datetime
     applied_at: datetime | None
+    paper_performance_evaluation_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -241,6 +247,7 @@ class StrategyLifecycleDecision:
         for name in (
             "policy_id", "policy_version", "authentication_id",
             "gate_evaluation_id", "coverage_evaluation_id", "coverage_policy_id",
+            "paper_performance_evaluation_id",
         ):
             value = getattr(self, name)
             if value is not None:
@@ -275,6 +282,9 @@ class StrategyLifecycleDecision:
         elif self.applied_at is not None:
             raise ValueError("only an applied decision may record applied_at")
         _require_aware(self.authorized_at, "authorized_at")
+        if (StrategyLifecycleBlocker.PAPER_PERFORMANCE_FAILED in self.triggers
+                and self.paper_performance_evaluation_id is None):
+            raise ValueError("performance pause must name its durable evaluation")
 
     @property
     def authorised(self) -> bool:
@@ -352,7 +362,7 @@ def policy_to_payload(policy: StrategyLifecyclePolicy) -> dict[str, object]:
 
     if not isinstance(policy, StrategyLifecyclePolicy):
         raise TypeError("policy must be StrategyLifecyclePolicy")
-    return {
+    payload = {
         "policy_id": policy.policy_id,
         "revision": policy.revision,
         "policy_version": policy.policy_version,
@@ -366,6 +376,9 @@ def policy_to_payload(policy: StrategyLifecyclePolicy) -> dict[str, object]:
         ),
         "created_at": policy.created_at.isoformat(),
     }
+    if policy.paper_performance_policy_id is not None:
+        payload["paper_performance_policy_id"] = policy.paper_performance_policy_id
+    return payload
 
 
 def policy_from_payload(payload: object) -> StrategyLifecyclePolicy:
@@ -407,6 +420,7 @@ def policy_from_payload(payload: object) -> StrategyLifecyclePolicy:
                 None if age_seconds is None else timedelta(seconds=age_seconds)
             ),
             created_at=parsed_created_at,
+            paper_performance_policy_id=values.get("paper_performance_policy_id"),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise StrategyLifecyclePolicyMalformed(f"policy is invalid: {error}") from error
@@ -424,6 +438,7 @@ def stable_lifecycle_decision_id(
     blockers: tuple[StrategyLifecycleBlocker, ...],
     triggers: tuple[StrategyLifecycleBlocker, ...],
     controller_version: str,
+    paper_performance_evaluation_id: str | None = None,
 ) -> str:
     """Deterministic identity of one semantic decision.
 
@@ -451,6 +466,8 @@ def stable_lifecycle_decision_id(
         "triggers": sorted({item.value for item in triggers}),
         "controller_version": controller_version,
     }
+    if paper_performance_evaluation_id is not None:
+        material["paper_performance_evaluation_id"] = paper_performance_evaluation_id
     digest = sha256(_canonical_json(material).encode("utf-8")).hexdigest()
     return f"sld-{digest}"
 

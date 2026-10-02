@@ -29,10 +29,12 @@ from us_quant.trading.domain.strategy_lifecycle import (
     StrategyLifecycleBlocker,
     StrategyLifecycleDecision,
     StrategyLifecycleDecisionState,
+    LIFECYCLE_CONTROLLER_VERSION,
     StrategyLifecyclePolicy,
     StrategyLifecyclePolicyMalformed,
     policy_from_payload,
     policy_to_payload,
+    stable_lifecycle_decision_id,
 )
 from us_quant.trading.ports.strategy_lifecycle_repository import (
     StrategyLifecycleRepositoryConflict,
@@ -243,6 +245,12 @@ class SQLiteStrategyLifecycleRepository:
     def record_decision(self, decision: StrategyLifecycleDecision) -> None:
         if not isinstance(decision, StrategyLifecycleDecision):
             raise TypeError("decision must be StrategyLifecycleDecision")
+        expected_id = _canonical_decision_id(decision)
+        if (_is_current_controller(decision)
+                and expected_id != decision.decision_id):
+            raise StrategyLifecycleRepositoryError(
+                "current lifecycle controller decision ID is not canonical"
+            )
         payload_json = _canonical_json(_decision_payload(decision))
         payload_hash = sha256(payload_json.encode("utf-8")).hexdigest()
         try:
@@ -482,7 +490,7 @@ def _replace_state(
 
 
 def _decision_payload(decision: StrategyLifecycleDecision) -> dict[str, Any]:
-    return {
+    payload = {
         "decision_id": decision.decision_id,
         "strategy_version_id": decision.strategy_version_id,
         "strategy_semver": decision.strategy_semver,
@@ -509,6 +517,9 @@ def _decision_payload(decision: StrategyLifecycleDecision) -> dict[str, Any]:
             None if decision.applied_at is None else decision.applied_at.isoformat()
         ),
     }
+    if decision.paper_performance_evaluation_id is not None:
+        payload["paper_performance_evaluation_id"] = decision.paper_performance_evaluation_id
+    return payload
 
 
 def _decision_column_values(
@@ -550,7 +561,8 @@ def _row_to_policy(row: tuple[Any, ...]) -> StrategyLifecyclePolicy:
         )
     policy_id, revision, policy_version, created_at, payload_json, payload_hash = row
     parsed = _verified_payload(
-        payload_json, payload_hash, _POLICY_KEYS, "lifecycle policy"
+        payload_json, payload_hash, _POLICY_KEYS, "lifecycle policy",
+        optional_keys=frozenset({"paper_performance_policy_id"}),
     )
     try:
         policy = policy_from_payload(parsed)
@@ -584,7 +596,8 @@ def _row_to_decision(row: tuple[Any, ...]) -> StrategyLifecycleDecision:
         authorized_at, applied_at, payload_json, payload_hash,
     ) = row
     parsed = _verified_payload(
-        payload_json, payload_hash, _DECISION_KEYS, "lifecycle decision"
+        payload_json, payload_hash, _DECISION_KEYS, "lifecycle decision",
+        optional_keys=frozenset({"paper_performance_evaluation_id"}),
     )
     try:
         decision = StrategyLifecycleDecision(
@@ -617,6 +630,9 @@ def _row_to_decision(row: tuple[Any, ...]) -> StrategyLifecycleDecision:
                 parsed, "coverage_policy_revision"
             ),
             controller_version=_payload_text(parsed, "controller_version"),
+            paper_performance_evaluation_id=_payload_optional_text(
+                parsed, "paper_performance_evaluation_id"
+            ),
             authorized_at=datetime.fromisoformat(parsed["authorized_at"]),
             applied_at=(
                 None
@@ -657,11 +673,39 @@ def _row_to_decision(row: tuple[Any, ...]) -> StrategyLifecycleDecision:
         raise StrategyLifecycleRepositoryError(
             "indexed lifecycle decision columns disagree with payload"
         )
+    expected_id = _canonical_decision_id(decision)
+    if (expected_id != decision.decision_id
+            and (_is_current_controller(decision)
+                 or decision.paper_performance_evaluation_id is not None)):
+        raise StrategyLifecycleRepositoryError(
+            "lifecycle decision identity disagrees with performance evidence"
+        )
     return decision
 
 
+def _canonical_decision_id(decision: StrategyLifecycleDecision) -> str:
+    return stable_lifecycle_decision_id(
+        strategy_version_id=decision.strategy_version_id,
+        action=decision.action,
+        source_status=decision.source_status,
+        target_status=decision.target_status,
+        policy_id=decision.policy_id,
+        policy_revision=decision.policy_revision,
+        coverage_evaluation_id=decision.coverage_evaluation_id,
+        blockers=decision.blockers,
+        triggers=decision.triggers,
+        controller_version=decision.controller_version,
+        paper_performance_evaluation_id=decision.paper_performance_evaluation_id,
+    )
+
+
+def _is_current_controller(decision: StrategyLifecycleDecision) -> bool:
+    return decision.controller_version == LIFECYCLE_CONTROLLER_VERSION
+
+
 def _verified_payload(
-    payload_json: object, payload_hash: object, keys: frozenset[str], label: str
+    payload_json: object, payload_hash: object, keys: frozenset[str], label: str,
+    *, optional_keys: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     _require_text(payload_json, "payload_json")
     _require_text(payload_hash, "payload_hash")
@@ -677,7 +721,7 @@ def _verified_payload(
         )
     if sha256(payload_json.encode("utf-8")).hexdigest() != payload_hash:
         raise StrategyLifecycleRepositoryError(f"{label} payload hash mismatch")
-    if set(parsed) != keys:
+    if not keys <= set(parsed) or not set(parsed) <= keys | optional_keys:
         raise StrategyLifecycleRepositoryError(
             f"{label} payload has an unexpected shape"
         )

@@ -137,6 +137,7 @@ class StrategyCandidateGenerationApplication:
                 raise StrategyCandidateGenerationError(
                     "generation identity already exists with different semantics"
                 )
+            self._verify_replayed_generation_children(parent, specs, stored)
             return stored
 
         versions = self._strategies.list_versions()
@@ -296,6 +297,38 @@ class StrategyCandidateGenerationApplication:
             raise StrategyCandidateGenerationError("maximum_total_candidates exceeded")
         if len(active_ids | intended_ids) > policy.maximum_active_candidates:
             raise StrategyCandidateGenerationError("maximum_active_candidates exceeded")
+
+    def _verify_replayed_generation_children(self, parent, specs, stored) -> None:
+        expected_ids = tuple(spec.candidate_version_id for spec in specs)
+        stored_ids = tuple(
+            lineage.child_version_id for lineage in stored.candidate_lineages
+        )
+        if stored_ids != expected_ids:
+            raise StrategyCandidateGenerationError(
+                "stored generation lineage differs from deterministic candidates"
+            )
+        for spec in specs:
+            try:
+                child = self._strategies.get_version(spec.candidate_version_id)
+            except StrategyNotFoundError as error:
+                raise StrategyCandidateGenerationError(
+                    "stored generation references a missing candidate version"
+                ) from error
+            identity_matches = (
+                child.version_id == spec.candidate_version_id
+                and child.strategy_id == parent.strategy_id
+                and child.semver == spec.semver
+                and child.parameter_hash == spec.candidate_parameter_hash
+                and canonical_parameters_json(child.parameters)
+                == canonical_parameters_json(spec.parameters)
+                and child.universe_hash == parent.universe_hash
+                and child.code_hash == parent.code_hash
+                and child.risk_budget_pct == parent.risk_budget_pct
+            )
+            if not identity_matches:
+                raise StrategyCandidateGenerationError(
+                    "stored generation candidate identity no longer matches its lineage"
+                )
 
     @staticmethod
     def _verify_existing_child(parent, spec, child) -> None:

@@ -12,6 +12,7 @@ from us_quant.trading.adapters.sqlite.strategy_search_repository import (
 from us_quant.trading.application.strategies import (
     StrategyApplication,
     StrategyApplicationError,
+    StrategyNotFoundError,
 )
 from us_quant.trading.application.strategy_candidate_generation import (
     StrategyCandidateGenerationApplication,
@@ -121,6 +122,28 @@ def test_exact_retry_uses_stored_generation_before_cooldown(setup):
     )
     assert replay == first
     assert len(search_repo.generations_for_policy("dual-ma-trend", "search-dual-ma")) == 1
+
+
+def test_exact_retry_fails_closed_when_a_lineage_child_is_missing(setup, monkeypatch):
+    strategies, _, app, parent = setup
+    first = app.generate(
+        parent_version_id=parent.version_id, policy_id="search-dual-ma",
+        policy_revision=1, generation=1, generated_at=NOW,
+    )
+    missing_id = first.candidate_lineages[0].child_version_id
+    get_version = strategies.get_version
+
+    def missing_candidate(version_id):
+        if version_id == missing_id:
+            raise StrategyNotFoundError(version_id)
+        return get_version(version_id)
+
+    monkeypatch.setattr(strategies, "get_version", missing_candidate)
+    with pytest.raises(StrategyCandidateGenerationError, match="missing candidate"):
+        app.generate(
+            parent_version_id=parent.version_id, policy_id="search-dual-ma",
+            policy_revision=1, generation=1, generated_at=NOW + timedelta(days=1),
+        )
 
 
 def test_cooldown_and_generation_bounds_are_enforced(setup):

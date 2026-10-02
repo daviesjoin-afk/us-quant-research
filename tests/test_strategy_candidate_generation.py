@@ -3,7 +3,9 @@ from decimal import Decimal
 
 import pytest
 
-from us_quant.trading.adapters.sqlite.strategy_repository import SQLiteStrategyRepository
+from us_quant.trading.adapters.sqlite.strategy_repository import (
+    SQLiteStrategyRepository,
+)
 from us_quant.trading.adapters.sqlite.strategy_search_repository import (
     SQLiteStrategySearchRepository,
 )
@@ -25,9 +27,16 @@ from us_quant.trading.domain.strategy_search import (
 )
 from us_quant.trading.ports.strategy_repository import StrategyRepositoryConflict
 
-
 UTC = timezone.utc
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+class _TestClock:
+    def __init__(self):
+        self.current = NOW
+
+    def __call__(self):
+        return self.current
 
 
 def _policy(**changes):
@@ -66,7 +75,9 @@ def setup(tmp_path):
     )
     search_repo = SQLiteStrategySearchRepository(tmp_path / "search.sqlite3")
     search_repo.append_policy_revision(_policy(), expected_current_revision=None)
-    app = StrategyCandidateGenerationApplication(strategies, search_repo)
+    clock = _TestClock()
+    app = StrategyCandidateGenerationApplication(strategies, search_repo, clock=clock)
+    app._test_clock = clock
     return strategies, search_repo, app, parent
 
 
@@ -218,6 +229,7 @@ def test_crash_orphan_counts_against_later_active_candidate_limit(setup, monkeyp
         _policy(revision=2, maximum_active_candidates=4),
         expected_current_revision=1,
     )
+    app._test_clock.current = NOW + timedelta(minutes=2)
     with pytest.raises(StrategyCandidateGenerationError, match="maximum_active"):
         app.generate(
             parent_version_id=parent.version_id, policy_id="search-dual-ma",
@@ -271,6 +283,86 @@ def test_repository_version_conflict_is_translated_to_generation_error(
         )
 
 
+def test_caller_timestamp_cannot_bypass_or_extend_cooldown(setup):
+    _, repo, app, parent = setup
+    far_future = NOW + timedelta(days=365)
+    app.generate(
+        parent_version_id=parent.version_id, policy_id="search-dual-ma",
+        policy_revision=1, generation=1, generated_at=far_future,
+    )
+    with pytest.raises(StrategyCandidateGenerationError, match="cooldown"):
+        app.generate(
+            parent_version_id=parent.version_id, policy_id="search-dual-ma",
+            policy_revision=1, generation=2, generated_at=far_future + timedelta(days=1),
+        )
+    app._test_clock.current = NOW + timedelta(seconds=60)
+    second = app.generate(
+        parent_version_id=parent.version_id, policy_id="search-dual-ma",
+        policy_revision=1, generation=2, generated_at=far_future + timedelta(days=1),
+    )
+    rows = repo.generations_for_policy("dual-ma-trend", "search-dual-ma")
+    assert second.admitted_at == NOW + timedelta(seconds=60)
+    assert rows[0].generated_at == far_future
+
+
+def test_concurrent_generations_serialize_resource_admission(setup, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier, BrokenBarrierError
+
+    strategies, repo, app, parent = setup
+    repo.append_policy_revision(
+        _policy(
+            revision=2,
+            maximum_active_candidates=4,
+            generation_cooldown=timedelta(0),
+        ),
+        expected_current_revision=1,
+    )
+    other = StrategyCandidateGenerationApplication(
+        strategies, repo, clock=app._test_clock
+    )
+    admission_barrier = Barrier(2)
+    for application in (app, other):
+        enforce_bounds = application._enforce_resource_bounds
+
+        def synchronized_bounds(*args, _enforce=enforce_bounds):
+            _enforce(*args)
+            try:
+                admission_barrier.wait(timeout=0.25)
+            except BrokenBarrierError:
+                pass
+
+        monkeypatch.setattr(application, "_enforce_resource_bounds", synchronized_bounds)
+
+    def generate(application, generation):
+        return application.generate(
+            parent_version_id=parent.version_id,
+            policy_id="search-dual-ma",
+            policy_revision=2,
+            generation=generation,
+            generated_at=NOW,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = (
+            executor.submit(generate, app, 1),
+            executor.submit(generate, other, 2),
+        )
+        results = []
+        errors = []
+        for future in futures:
+            try:
+                results.append(future.result())
+            except StrategyCandidateGenerationError as error:
+                errors.append(error)
+
+    assert len(results) == 1
+    assert len(errors) == 1
+    assert "maximum_active_candidates exceeded" in str(errors[0])
+    assert len(repo.generations_for_policy("dual-ma-trend", "search-dual-ma")) == 1
+    assert len(strategies.list_versions()) == 1 + len(results[0].candidate_lineages)
+
+
 def test_naive_generated_at_is_rejected(setup):
     _, _, app, parent = setup
     with pytest.raises(StrategyCandidateGenerationError, match="timezone-aware"):
@@ -314,6 +406,7 @@ def test_explicit_policy_revision_is_used_even_after_a_new_revision_is_active(se
         parent_version_id=parent.version_id, policy_id="search-dual-ma",
         policy_revision=1, generation=1, generated_at=NOW,
     )
+    app._test_clock.current = NOW + timedelta(minutes=2)
     new_revision = app.generate(
         parent_version_id=parent.version_id, policy_id="search-dual-ma",
         policy_revision=2, generation=1, generated_at=NOW + timedelta(minutes=2),

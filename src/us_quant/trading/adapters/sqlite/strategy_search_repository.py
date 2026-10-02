@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from contextlib import closing
+import json
+import sqlite3
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
-import json
 from pathlib import Path
-import sqlite3
 from typing import Any
 
 from us_quant.sqlite_support import connect_sqlite
@@ -27,7 +27,6 @@ from us_quant.trading.ports.strategy_search_repository import (
     StrategySearchRepositoryError,
     StrategySearchRepositoryNotFound,
 )
-
 
 _CREATE_POLICY_TABLE = """
 CREATE TABLE IF NOT EXISTS strategy_search_policy (
@@ -53,6 +52,7 @@ CREATE TABLE IF NOT EXISTS strategy_search_generation (
     policy_revision INTEGER NOT NULL,
     policy_version TEXT NOT NULL,
     generated_at TEXT NOT NULL,
+    admitted_at TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     payload_hash TEXT NOT NULL
 )
@@ -65,7 +65,7 @@ _POLICY_COLUMNS = (
 _GENERATION_COLUMNS = (
     "generation_id, strategy_id, parent_version_id, parent_parameter_hash, "
     "generation_number, policy_id, policy_revision, policy_version, "
-    "generated_at, payload_json, payload_hash"
+    "generated_at, admitted_at, payload_json, payload_hash"
 )
 
 
@@ -76,6 +76,41 @@ class SQLiteStrategySearchRepository:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
+        self._initialize_generation_lock()
+
+    @contextmanager
+    def serialize_generation_admission(self):
+        """Serialize admission across processes without locking the data DB."""
+        lock_path = self.path.with_name(self.path.name + ".generation-lock.sqlite3")
+        try:
+            connection = sqlite3.connect(lock_path, timeout=30)
+            connection.execute("PRAGMA busy_timeout = 30000")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+        except sqlite3.Error as error:
+            raise StrategySearchRepositoryError(
+                f"cannot serialize generation admission: {error}"
+            ) from error
+
+    def _initialize_generation_lock(self) -> None:
+        lock_path = self.path.with_name(self.path.name + ".generation-lock.sqlite3")
+        try:
+            with closing(sqlite3.connect(lock_path, timeout=30)) as connection:
+                connection.execute("PRAGMA busy_timeout = 30000")
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS generation_lock (id INTEGER PRIMARY KEY)"
+                )
+        except sqlite3.Error as error:
+            raise StrategySearchRepositoryError(
+                f"cannot initialize generation admission lock: {error}"
+            ) from error
 
     def append_policy_revision(
         self,
@@ -201,7 +236,7 @@ class SQLiteStrategySearchRepository:
                     return stored
                 connection.execute(
                     f"INSERT INTO strategy_search_generation ({_GENERATION_COLUMNS}) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         generation.generation_id,
                         generation.strategy_id,
@@ -212,6 +247,7 @@ class SQLiteStrategySearchRepository:
                         generation.policy_revision,
                         generation.policy_version,
                         _utc_text(generation.generated_at),
+                        _utc_text(generation.admitted_at),
                         payload_json,
                         payload_hash,
                     ),
@@ -408,6 +444,7 @@ def _generation_to_payload(
     return {
         **generation_semantic_payload(generation),
         "generated_at": _utc_text(generation.generated_at),
+        "admitted_at": _utc_text(generation.admitted_at),
         "candidate_lineages": [
             {
                 **_lineage_to_payload(item),
@@ -442,7 +479,8 @@ def _generation_from_payload(payload: Any) -> StrategySearchGeneration:
     expected = {
         "generation_id", "strategy_id", "parent_version_id", "parent_parameter_hash",
         "generation", "policy_id", "policy_revision", "policy_version",
-        "deterministic_seed", "generator_version", "generated_at", "candidate_lineages",
+        "deterministic_seed", "generator_version", "generated_at", "admitted_at",
+        "candidate_lineages",
     }
     if not isinstance(payload, dict) or set(payload) != expected:
         raise ValueError("search generation payload keys are invalid")
@@ -492,6 +530,7 @@ def _generation_from_payload(payload: Any) -> StrategySearchGeneration:
         candidate_lineages=tuple(values),
         generator_version=payload["generator_version"],
         generated_at=_parse_timestamp(payload["generated_at"]),
+        admitted_at=_parse_timestamp(payload["admitted_at"]),
     )
 
 
@@ -534,6 +573,7 @@ def _row_to_generation(row: sqlite3.Row) -> StrategySearchGeneration:
             or row["policy_revision"] != generation.policy_revision
             or row["policy_version"] != generation.policy_version
             or row["generated_at"] != _utc_text(generation.generated_at)
+            or row["admitted_at"] != _utc_text(generation.admitted_at)
         ):
             raise ValueError("indexed generation identity differs from its payload")
         return generation

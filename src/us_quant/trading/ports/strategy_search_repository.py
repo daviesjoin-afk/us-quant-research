@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from typing import Protocol
 
-from us_quant.trading.domain.strategy_search import StrategySearchGeneration, StrategySearchPolicy
+from us_quant.trading.domain.strategy_search import (
+    StrategySearchGeneration,
+    StrategySearchPolicy,
+)
 
 
 class StrategySearchRepositoryError(RuntimeError):
@@ -20,6 +24,8 @@ class StrategySearchRepositoryNotFound(StrategySearchRepositoryError):
 
 
 class StrategySearchRepositoryPort(Protocol):
+    def serialize_generation_admission(self) -> AbstractContextManager[None]: ...
+
     def append_policy_revision(
         self,
         policy: StrategySearchPolicy,

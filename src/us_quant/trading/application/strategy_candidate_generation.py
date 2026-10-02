@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 from us_quant.trading.application.strategies import (
@@ -24,13 +25,13 @@ from us_quant.trading.domain.strategy_search import (
     generation_id_for,
     generation_semantic_payload,
 )
+from us_quant.trading.ports.strategy_repository import StrategyRepositoryConflict
 from us_quant.trading.ports.strategy_search_repository import (
     StrategySearchRepositoryConflict,
+    StrategySearchRepositoryError,
     StrategySearchRepositoryNotFound,
     StrategySearchRepositoryPort,
 )
-from us_quant.trading.ports.strategy_repository import StrategyRepositoryConflict
-
 
 _ACTIVE_STATUSES = frozenset(
     {StrategyStatus.RESEARCH, StrategyStatus.PAPER_SHADOW, StrategyStatus.PAUSED}
@@ -48,9 +49,12 @@ class StrategyCandidateGenerationApplication:
         self,
         strategies: StrategyApplication,
         repository: StrategySearchRepositoryPort,
+        *,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._strategies = strategies
         self._repository = repository
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def generate(
         self,
@@ -62,6 +66,31 @@ class StrategyCandidateGenerationApplication:
         generated_at: datetime,
     ) -> StrategySearchGeneration:
         _require_aware(generated_at)
+        try:
+            with self._repository.serialize_generation_admission():
+                admitted_at = self._clock()
+                _require_aware(admitted_at)
+                return self._generate_locked(
+                    parent_version_id=parent_version_id,
+                    policy_id=policy_id,
+                    policy_revision=policy_revision,
+                    generation=generation,
+                    generated_at=generated_at,
+                    admitted_at=admitted_at,
+                )
+        except StrategySearchRepositoryError as error:
+            raise StrategyCandidateGenerationError(str(error)) from error
+
+    def _generate_locked(
+        self,
+        *,
+        parent_version_id: str,
+        policy_id: str,
+        policy_revision: int,
+        generation: int,
+        generated_at: datetime,
+        admitted_at: datetime,
+    ) -> StrategySearchGeneration:
         if type(policy_revision) is not int or policy_revision < 1:
             raise StrategyCandidateGenerationError("policy_revision must be positive")
         try:
@@ -92,7 +121,10 @@ class StrategyCandidateGenerationApplication:
             deterministic_seed=policy.deterministic_seed,
             generator_version=STRATEGY_CANDIDATE_GENERATOR_VERSION,
         )
-        expected = self._generation(parent, policy, generation, generation_id, specs, generated_at)
+        expected = self._generation(
+            parent, policy, generation, generation_id, specs, generated_at,
+            admitted_at=admitted_at,
+        )
 
         # Exact-generation replay is checked before cooldown and current child
         # status: its immutable record describes generation-time truth.
@@ -108,7 +140,7 @@ class StrategyCandidateGenerationApplication:
             return stored
 
         versions = self._strategies.list_versions()
-        self._enforce_cooldown(parent, policy, generated_at)
+        self._enforce_cooldown(parent, policy, admitted_at)
         self._enforce_resource_bounds(parent, policy, specs, versions)
 
         existing: dict[str, StrategyVersion] = {}
@@ -160,6 +192,7 @@ class StrategyCandidateGenerationApplication:
         completed = self._generation(
             parent, policy, generation, generation_id, specs, generated_at,
             candidate_lineages=tuple(lineages),
+            admitted_at=admitted_at,
         )
         try:
             return self._repository.record_generation(completed)
@@ -168,7 +201,7 @@ class StrategyCandidateGenerationApplication:
 
     @staticmethod
     def _generation(parent, policy, generation, generation_id, specs, generated_at,
-                    candidate_lineages=()):
+                    candidate_lineages=(), admitted_at=None):
         lineages = tuple(candidate_lineages)
         if not lineages and specs:
             lineages = tuple(
@@ -205,18 +238,21 @@ class StrategyCandidateGenerationApplication:
             candidate_lineages=lineages,
             generator_version=STRATEGY_CANDIDATE_GENERATOR_VERSION,
             generated_at=generated_at,
+            admitted_at=admitted_at or generated_at,
         )
 
-    def _enforce_cooldown(self, parent, policy, generated_at) -> None:
+    def _enforce_cooldown(self, parent, policy, admitted_at) -> None:
         previous = self._repository.generations_for_policy(
             parent.strategy_id, policy.policy_id
         )
         if not previous:
             return
-        latest = max(item.generated_at.astimezone(timezone.utc) for item in previous)
-        current = generated_at.astimezone(timezone.utc)
+        latest = max(item.admitted_at.astimezone(timezone.utc) for item in previous)
+        current = admitted_at.astimezone(timezone.utc)
         if current < latest:
-            raise StrategyCandidateGenerationError("generated_at precedes the latest generation")
+            raise StrategyCandidateGenerationError(
+                "trusted clock precedes the latest generation admission"
+            )
         if current - latest < policy.generation_cooldown:
             raise StrategyCandidateGenerationError("generation cooldown has not elapsed")
 

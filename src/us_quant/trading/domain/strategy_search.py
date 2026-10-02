@@ -8,12 +8,12 @@ order. It has no persistence, clock, lifecycle, evidence, or execution access.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from hashlib import sha256
-import json
 from typing import Any, Mapping
 
 from us_quant.trading.domain.common import freeze_parameters
@@ -25,7 +25,6 @@ from us_quant.trading.domain.strategy_parameters import (
     StrategyParameterError,
     validate_strategy_parameters,
 )
-
 
 SEARCH_POLICY_VERSION = "strategy-search-policy-v1"
 STRATEGY_CANDIDATE_GENERATOR_VERSION = "strategy-candidate-generator-v1"
@@ -205,6 +204,7 @@ class StrategySearchGeneration:
     candidate_lineages: tuple[StrategyCandidateLineage, ...]
     generator_version: str
     generated_at: datetime
+    admitted_at: datetime | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -220,6 +220,9 @@ class StrategySearchGeneration:
         if not isinstance(self.candidate_lineages, tuple):
             raise TypeError("candidate_lineages must be a tuple")
         _require_aware(self.generated_at, "generated_at")
+        if self.admitted_at is None:
+            object.__setattr__(self, "admitted_at", self.generated_at)
+        _require_aware(self.admitted_at, "admitted_at")
         if self.generator_version != STRATEGY_CANDIDATE_GENERATOR_VERSION:
             raise ValueError(f"unsupported generator version: {self.generator_version}")
         if self.generation_id != generation_id_for(

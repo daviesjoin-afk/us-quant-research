@@ -7,7 +7,7 @@ import sqlite3
 
 import pytest
 
-from paper_performance_support import NOW as PERFORMANCE_NOW, history
+from paper_performance_support import NOW as PERFORMANCE_NOW, history, policy as performance_policy
 from test_strategy_paper_performance_application import setup_app, evaluate
 from test_strategy_lifecycle_evaluator import NOW, _Chain, _controller, _policy, _version
 from test_strategy_lifecycle_service import _decision
@@ -23,16 +23,18 @@ from us_quant.trading.domain.strategy_paper_performance import StrategyPaperPerf
 from us_quant.trading.ports.strategy_lifecycle_repository import StrategyLifecycleRepositoryError
 
 
-def _fact(tmp_path, kind=Verdict.FAIL, *, time_offset=timedelta(0), **changes):
+def _fact(tmp_path, kind=Verdict.FAIL, *, time_offset=timedelta(0),
+          policy_id='paper-policy', policy_exists=True, **changes):
     # Build an actual D1 evaluation from durable partial-fill truth; adapt only
     # its version/time identity to the existing sealed research-chain fixture.
-    components, *_ = setup_app(tmp_path, data=history(sell_price='90' if kind is Verdict.FAIL else '110'))
+    components, *_ = setup_app(tmp_path, data=history(sell_price='90' if kind is Verdict.FAIL else '110'),
+                               store_policy=policy_exists, performance_policy_id=policy_id)
     if kind is Verdict.INSUFFICIENT:
         components.repository.append_policy_revision(
             replace(components.repository.active_policy('paper-policy'), revision=2,
                     minimum_distinct_sessions=3), expected_current_revision=1
         )
-    source = evaluate(components)
+    source = evaluate(components, policy_id=policy_id)
     assert source.verdict is kind
     offset = NOW - PERFORMANCE_NOW + time_offset
     metric_values = {f.name: getattr(source.metrics, f.name) for f in fields(source.metrics)}
@@ -51,8 +53,12 @@ def _paper():
     return _version(status=StrategyStatus.PAPER_SHADOW, mode=StrategyMode.PAPER_SHADOW)
 
 
+def _approved_policy():
+    return _policy(paper_performance_policy_id='paper-policy')
+
+
 def _decide(chain, fact, **changes):
-    values = dict(version=_paper(), action=Action.PAUSE, policy=_policy(), coverage=chain.coverage,
+    values = dict(version=_paper(), action=Action.PAUSE, policy=_approved_policy(), coverage=chain.coverage,
                   decided_at=NOW, paper_performance=fact)
     values.update(changes)
     return _controller(chain).decide(**values)
@@ -99,6 +105,62 @@ def test_insufficient_does_not_suppress_another_governance_failure(tmp_path):
     result = _decide(chain, fact, coverage=None)
     assert result.authorised
     assert result.decision.triggers == (B.COVERAGE_MISSING,)
+
+
+def test_controller_requires_the_lifecycle_policy_approved_performance_policy(tmp_path):
+    chain = _Chain(tmp_path).build()
+    unrelated = _fact(tmp_path/'fact', policy_id='other-policy')
+    result = _decide(chain, unrelated)
+    assert not result.authorised
+    assert B.PAPER_PERFORMANCE_NOT_CURRENT in result.decision.blockers
+    assert result.decision.triggers == ()
+
+
+def test_unapproved_policy_fail_cannot_trigger_pause(tmp_path):
+    chain = _Chain(tmp_path).build()
+    service, strategies, decisions, facts = _service(tmp_path, chain)
+    facts.append_policy_revision(replace(performance_policy(), policy_id='unrelated-policy'),
+                                 expected_current_revision=None)
+    fact = _fact(tmp_path/'fact', policy_id='unrelated-policy')
+    facts.record_evaluation(fact)
+    result = service.apply(version=_paper(), action=Action.PAUSE, policy=_approved_policy(),
+                           coverage=chain.coverage, applied_at=NOW)
+    assert not result.authorised
+    assert result.decision.blockers == (B.PAUSE_NOT_JUSTIFIED,)
+    assert result.decision.paper_performance_evaluation_id is None
+    assert strategies.get_version('version-1').status is StrategyStatus.PAPER_SHADOW
+
+
+@pytest.mark.parametrize('policy_id,policy_exists', [('paper-policy', False), ('paper-typo', False)])
+def test_missing_or_mistyped_performance_policy_fail_cannot_trigger_pause(
+    tmp_path, policy_id, policy_exists
+):
+    chain = _Chain(tmp_path).build()
+    service, strategies, _, facts = _service(tmp_path, chain)
+    facts.append_policy_revision(performance_policy(), expected_current_revision=None)
+    fact = _fact(tmp_path/'fact', policy_id=policy_id, policy_exists=policy_exists)
+    facts.record_evaluation(fact)
+    result = service.apply(version=_paper(), action=Action.PAUSE, policy=_approved_policy(),
+                           coverage=chain.coverage, applied_at=NOW)
+    assert not result.authorised
+    assert result.decision.blockers == (B.PAUSE_NOT_JUSTIFIED,)
+    assert result.decision.paper_performance_evaluation_id is None
+    assert strategies.get_version('version-1').status is StrategyStatus.PAPER_SHADOW
+
+
+def test_old_revision_fail_cannot_override_approved_active_revision(tmp_path):
+    chain = _Chain(tmp_path).build()
+    service, strategies, _, facts = _service(tmp_path, chain)
+    first = performance_policy()
+    facts.append_policy_revision(first, expected_current_revision=None)
+    facts.record_evaluation(_fact(tmp_path/'old', policy_id=first.policy_id))
+    facts.append_policy_revision(replace(first, revision=2, require_positive_net_result=False),
+                                 expected_current_revision=1)
+    result = service.apply(version=_paper(), action=Action.PAUSE, policy=_approved_policy(),
+                           coverage=chain.coverage, applied_at=NOW)
+    assert not result.authorised
+    assert result.decision.blockers == (B.PAUSE_NOT_JUSTIFIED,)
+    assert strategies.get_version('version-1').status is StrategyStatus.PAPER_SHADOW
 
 
 @pytest.mark.parametrize('kind', [Verdict.FAIL, Verdict.INSUFFICIENT, None])
@@ -162,8 +224,9 @@ def test_service_loads_durable_fail_and_restart_preserves_applied_fact(tmp_path)
     chain = _Chain(tmp_path).build()
     service, strategies, decisions, facts = _service(tmp_path, chain)
     fact = _fact(tmp_path/'facts')
+    facts.append_policy_revision(performance_policy(), expected_current_revision=None)
     facts.record_evaluation(fact)
-    result = service.apply(version=_paper(), action=Action.PAUSE, policy=_policy(), coverage=chain.coverage, applied_at=NOW)
+    result = service.apply(version=_paper(), action=Action.PAUSE, policy=_approved_policy(), coverage=chain.coverage, applied_at=NOW)
     assert result.authorised and result.decision.state is State.APPLIED
     assert strategies.get_version('version-1').status is StrategyStatus.PAUSED
     restarted = SQLiteStrategyLifecycleRepository(tmp_path/'lifecycle.sqlite')
@@ -175,11 +238,17 @@ def test_service_loads_durable_fail_and_restart_preserves_applied_fact(tmp_path)
 def test_service_rejects_noncurrent_supplied_fact_and_consumes_latest(tmp_path):
     chain = _Chain(tmp_path).build()
     service, strategies, decisions, facts = _service(tmp_path, chain)
+    first_policy = performance_policy()
+    facts.append_policy_revision(first_policy, expected_current_revision=None)
+    facts.append_policy_revision(
+        replace(first_policy, revision=2, minimum_distinct_sessions=3),
+        expected_current_revision=1,
+    )
     old = _fact(tmp_path/'old')
     current = _fact(tmp_path/'current', Verdict.INSUFFICIENT, evaluated_at=NOW+timedelta(seconds=1))
     facts.record_evaluation(old)
     facts.record_evaluation(current)
-    args = dict(version=_paper(), action=Action.PAUSE, policy=_policy(), coverage=chain.coverage, applied_at=NOW+timedelta(seconds=1))
+    args = dict(version=_paper(), action=Action.PAUSE, policy=_approved_policy(), coverage=chain.coverage, applied_at=NOW+timedelta(seconds=1))
     with pytest.raises(ValueError, match='current durable'):
         service.apply(**args, paper_performance=old)
     outcome = service.apply(**args)
@@ -192,11 +261,12 @@ def test_performance_pause_interruption_recovers_with_same_fact(tmp_path, monkey
     chain = _Chain(tmp_path).build()
     service, strategies, decisions, facts = _service(tmp_path, chain)
     fact = _fact(tmp_path/'facts')
+    facts.append_policy_revision(performance_policy(), expected_current_revision=None)
     facts.record_evaluation(fact)
     def interrupted(*args, **kwargs):
         raise RuntimeError('interrupted before transition')
     monkeypatch.setattr(strategies, 'transition', interrupted)
-    args = dict(version=_paper(), action=Action.PAUSE, policy=_policy(), coverage=chain.coverage, applied_at=NOW)
+    args = dict(version=_paper(), action=Action.PAUSE, policy=_approved_policy(), coverage=chain.coverage, applied_at=NOW)
     with pytest.raises(RuntimeError, match='interrupted'):
         service.apply(**args)
     prepared, = decisions.prepared_decisions('version-1')
@@ -216,7 +286,7 @@ def test_supplied_fact_requires_a_durable_repository(tmp_path):
     chain = _Chain(tmp_path).build()
     service, *_ = _service(tmp_path, chain, with_performance=False)
     with pytest.raises(TypeError, match='durable repository'):
-        service.apply(version=_paper(), action=Action.PAUSE, policy=_policy(), coverage=chain.coverage,
+        service.apply(version=_paper(), action=Action.PAUSE, policy=_approved_policy(), coverage=chain.coverage,
                       applied_at=NOW, paper_performance=_fact(tmp_path/'facts'))
 
 

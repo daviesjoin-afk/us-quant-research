@@ -1,6 +1,7 @@
 """Stage 6-C: durable lifecycle policies, decisions and the crash-safe protocol."""
 
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 import json
 import sqlite3
 
@@ -105,6 +106,28 @@ def test_policy_first_revision_and_bump(tmp_path):
     assert repository.policy_revisions("lifecycle-policy-1") == (1, 2)
     assert repository.active_policy("lifecycle-policy-1") == _policy(revision=2)
     assert repository.get_policy("lifecycle-policy-1", 1) == _policy()
+
+
+def test_lifecycle_performance_policy_is_explicit_and_legacy_payload_is_unchanged(tmp_path):
+    repository = _repository(tmp_path)
+    legacy = _policy()
+    repository.append_policy_revision(legacy, expected_current_revision=None)
+    path = tmp_path / "lifecycle.sqlite3"
+    with sqlite3.connect(path) as connection:
+        payload_before = connection.execute(
+            "SELECT payload_json,payload_hash FROM strategy_lifecycle_policy"
+        ).fetchone()
+    assert "paper_performance_policy_id" not in json.loads(payload_before[0])
+    repository.append_policy_revision(
+        replace(legacy, revision=2, paper_performance_policy_id="paper-policy"),
+        expected_current_revision=1,
+    )
+    restarted = SQLiteStrategyLifecycleRepository(path)
+    assert restarted.active_policy("lifecycle-policy-1").paper_performance_policy_id == "paper-policy"
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT payload_json,payload_hash FROM strategy_lifecycle_policy WHERE revision=1"
+        ).fetchone() == payload_before
 
 
 def test_policy_cas_refuses_a_stale_writer(tmp_path):

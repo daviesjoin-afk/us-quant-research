@@ -141,6 +141,7 @@ class StrategyLifecyclePolicy:
     required_coverage_policy_version: str
     maximum_evidence_age: timedelta | None
     created_at: datetime
+    paper_performance_policy_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.policy_id, "policy_id")
@@ -161,6 +162,8 @@ class StrategyLifecyclePolicy:
             self.required_coverage_policy_version,
             "required_coverage_policy_version",
         )
+        if self.paper_performance_policy_id is not None:
+            _require_text(self.paper_performance_policy_id, "paper_performance_policy_id")
         if self.maximum_evidence_age is not None:
             if not isinstance(self.maximum_evidence_age, timedelta):
                 raise TypeError("maximum_evidence_age must be timedelta or None")
@@ -359,7 +362,7 @@ def policy_to_payload(policy: StrategyLifecyclePolicy) -> dict[str, object]:
 
     if not isinstance(policy, StrategyLifecyclePolicy):
         raise TypeError("policy must be StrategyLifecyclePolicy")
-    return {
+    payload = {
         "policy_id": policy.policy_id,
         "revision": policy.revision,
         "policy_version": policy.policy_version,
@@ -373,6 +376,9 @@ def policy_to_payload(policy: StrategyLifecyclePolicy) -> dict[str, object]:
         ),
         "created_at": policy.created_at.isoformat(),
     }
+    if policy.paper_performance_policy_id is not None:
+        payload["paper_performance_policy_id"] = policy.paper_performance_policy_id
+    return payload
 
 
 def policy_from_payload(payload: object) -> StrategyLifecyclePolicy:
@@ -414,6 +420,7 @@ def policy_from_payload(payload: object) -> StrategyLifecyclePolicy:
                 None if age_seconds is None else timedelta(seconds=age_seconds)
             ),
             created_at=parsed_created_at,
+            paper_performance_policy_id=values.get("paper_performance_policy_id"),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise StrategyLifecyclePolicyMalformed(f"policy is invalid: {error}") from error

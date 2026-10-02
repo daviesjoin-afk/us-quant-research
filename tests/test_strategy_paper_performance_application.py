@@ -15,7 +15,7 @@ from us_quant.trading.adapters.sqlite.order_repository import SQLiteOrderReposit
 from us_quant.trading.composition.strategy_paper_performance import build_strategy_paper_performance_components
 
 
-def setup_app(tmp_path, *, data=None, store_policy=True):
+def setup_app(tmp_path, *, data=None, store_policy=True, performance_policy_id='paper-policy'):
     strategies = SQLiteStrategyRepository(tmp_path/'strategy.sqlite')
     version = _new_version(version_id='a', status=StrategyStatus.PAPER_SHADOW, mode=StrategyMode.PAPER_SHADOW)
     strategies.insert_version(version, audit=_audit(version))
@@ -35,7 +35,8 @@ def setup_app(tmp_path, *, data=None, store_policy=True):
     components = build_strategy_paper_performance_components(database_path=tmp_path/'performance.sqlite', strategies=strategies,
         portfolio_repository=portfolio,order_truth=order_store,broker_order_truth=source)
     if store_policy:
-        components.repository.append_policy_revision(policy(maximum_adverse_slippage=Decimal(10000)),expected_current_revision=None)
+        components.repository.append_policy_revision(replace(policy(maximum_adverse_slippage=Decimal(10000)),
+            policy_id=performance_policy_id),expected_current_revision=None)
     return components, strategies, portfolio, order_store, source
 
 

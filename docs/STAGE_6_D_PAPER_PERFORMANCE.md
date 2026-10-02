@@ -67,9 +67,11 @@ SQLite 交叉校验索引身份、规范 JSON、摘要和语义 ID；损坏抛�
 ## D2 生命周期使用
 
 继续使用 `build_strategy_lifecycle_components`；它将同一数据库中的持久化绩效
-仓库接入原有生命周期服务。先保存 D1 评估，再调用原有 `service.apply`，
-`action=StrategyLifecycleAction.PAUSE`。服务读取该策略最新的持久化评估，
-控制器检查策略身份和原生命周期政策的证据时效要求。
+仓库接入原有生命周期服务。生命周期策略修订需明确指定
+`paper_performance_policy_id`；服务只读取该策略当前生效修订下的评估。
+缺失政策和其它政策的 FAIL 不授权绩效暂停。先保存 D1 评估，再调用原有 `service.apply`，
+`action=StrategyLifecycleAction.PAUSE`。服务只读取与生命周期策略批准的政策 ID、
+当前修订和版本完全相符的持久化评估；控制器再检查策略身份和生命周期策略规定的证据时效。
 
 - 当前 FAIL 可以通过 `PAPER_PERFORMANCE_FAILED` 授权 Paper → Paused。
 - PASS、INSUFFICIENT 或尚无评估，不能单独授权暂停；其它治理失败仍按原规则处理。
@@ -81,4 +83,5 @@ D2 控制器版本升为 `strategy-lifecycle-v2`。决策保存不可变
 `paper_performance_evaluation_id`，并将其纳入决策 ID；
 现有 PREPARED → APPLIED 流程仍负责中断恢复。旧决策不增加空字段、不重写摘要，
 原策略表和生命周期表结构不变。不增加绩效布尔接口、第二个状态控制器、Live 或 AI。
-存储层只读校验兼容 6-C 修正前的历史 ID 摘要字段，不重新启用旧证据授权逻辑。
+旧版生命周期记录保留原 ID 并继续只读审计；升级后的记录按新版控制器语义校验，
+不会因兼容读取而重新启用旧证据授权逻辑。

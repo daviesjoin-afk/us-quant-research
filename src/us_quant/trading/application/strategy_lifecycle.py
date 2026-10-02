@@ -166,6 +166,15 @@ class StrategyLifecycleController:
             structural.add(StrategyLifecycleBlocker.CURRENT_STATUS_NOT_ELIGIBLE)
         performance_issues: set[StrategyLifecycleBlocker] = set()
         if paper_performance is not None:
+            approved_policy_id = policy.paper_performance_policy_id
+            if (
+                approved_policy_id is None
+                or paper_performance.requested_policy_id != approved_policy_id
+                or paper_performance.policy_id != approved_policy_id
+                or paper_performance.policy_revision is None
+                or paper_performance.policy_version is None
+            ):
+                performance_issues.add(StrategyLifecycleBlocker.PAPER_PERFORMANCE_NOT_CURRENT)
             if paper_performance.strategy_version_id != version.version_id:
                 performance_issues.add(StrategyLifecycleBlocker.VERSION_IDENTITY_MISMATCH)
             if (
@@ -462,9 +471,22 @@ class StrategyLifecycleService:
     ) -> StrategyLifecycleDecisionResult:
         if action is StrategyLifecycleAction.PAUSE:
             if self._paper_performance_repository is not None:
-                current = self._paper_performance_repository.latest_for_version(
-                    version.version_id
+                current = None
+                expected_policy_id = (
+                    policy.paper_performance_policy_id
+                    if isinstance(policy, StrategyLifecyclePolicy) else None
                 )
+                if expected_policy_id is not None:
+                    active_performance_policy = self._paper_performance_repository.active_policy(
+                        expected_policy_id
+                    )
+                    if active_performance_policy is not None:
+                        current = next((item for item in self._paper_performance_repository.evaluations_for_version(
+                            version.version_id
+                        ) if item.requested_policy_id == expected_policy_id
+                            and item.policy_id == expected_policy_id
+                            and item.policy_revision == active_performance_policy.revision
+                            and item.policy_version == active_performance_policy.policy_version), None)
                 if paper_performance is not None and current != paper_performance:
                     raise ValueError("paper_performance must be the current durable evaluation")
                 paper_performance = current

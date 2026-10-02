@@ -561,7 +561,8 @@ def _row_to_policy(row: tuple[Any, ...]) -> StrategyLifecyclePolicy:
         )
     policy_id, revision, policy_version, created_at, payload_json, payload_hash = row
     parsed = _verified_payload(
-        payload_json, payload_hash, _POLICY_KEYS, "lifecycle policy"
+        payload_json, payload_hash, _POLICY_KEYS, "lifecycle policy",
+        optional_keys=frozenset({"paper_performance_policy_id"}),
     )
     try:
         policy = policy_from_payload(parsed)

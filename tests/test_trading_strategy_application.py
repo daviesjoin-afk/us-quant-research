@@ -55,6 +55,7 @@ from us_quant.trading.domain.strategy_parameters import (
     StrategyParameterError,
     validate_strategy_parameters,
 )
+from us_quant.trading.domain.strategy_search import candidate_version_id_for
 from us_quant.trading.ports.strategy_repository import (
     StrategyRepositoryNotFound,
 )
@@ -524,6 +525,115 @@ def test_cloning_validates_the_new_parameters(seeded, application) -> None:
                 "whole_shares": True,
             },
         )
+
+
+def test_deterministic_candidate_clone_is_new_and_unproven(application, repository) -> None:
+    source = _register(
+        application,
+        parameters={"lookback": 20},
+        universe_hash="universe",
+        code_hash="code",
+    )
+    candidate_parameters = {"lookback": 21}
+    candidate_id = candidate_version_id_for(
+        parent_version_id=source.version_id,
+        parent_parameter_hash=source.parameter_hash,
+        policy_id="policy",
+        policy_revision=1,
+        generation=1,
+        candidate_parameter_hash=parameter_hash_for(candidate_parameters),
+    )
+    child = application.clone_research_candidate(
+        source.version_id,
+        candidate_version_id=candidate_id,
+        semver="1.0-g1-p1-candidate",
+        parameters=candidate_parameters,
+    )
+    assert child.version_id == candidate_id and child.version_id != source.version_id
+    assert child.parameter_hash != source.parameter_hash
+    assert child.parameters == candidate_parameters
+    assert child.status is StrategyStatus.RESEARCH
+    assert child.mode is StrategyMode.RESEARCH
+    assert child.gate_passed is False
+    assert child.universe_hash == source.universe_hash == "universe"
+    assert child.code_hash == source.code_hash == "code"
+    assert child.risk_budget_pct == source.risk_budget_pct
+    assert repository.audits[-1].event == "candidate_created"
+
+
+def test_deterministic_candidate_clone_rejects_bad_identity_and_unchanged_parameters(
+    application,
+) -> None:
+    source = _register(application, parameters={"lookback": 20})
+    with pytest.raises(StrategyApplicationError, match="SHA-256"):
+        application.clone_research_candidate(
+            source.version_id,
+            candidate_version_id="candidate-id",
+            semver="2",
+            parameters={"lookback": 21},
+        )
+    candidate_id = candidate_version_id_for(
+        parent_version_id=source.version_id,
+        parent_parameter_hash=source.parameter_hash,
+        policy_id="policy",
+        policy_revision=1,
+        generation=1,
+        candidate_parameter_hash=source.parameter_hash,
+    )
+    with pytest.raises(StrategyApplicationError, match="change"):
+        application.clone_research_candidate(
+            source.version_id,
+            candidate_version_id=candidate_id,
+            semver="2",
+            parameters={"lookback": 20},
+        )
+
+
+def test_deterministic_candidate_clone_refuses_legacy_invalidated_parent(
+    application,
+) -> None:
+    source = _register(
+        application,
+        status=StrategyStatus.LEGACY_INVALIDATED,
+        parameters={"lookback": 20},
+    )
+    candidate_id = candidate_version_id_for(
+        parent_version_id=source.version_id,
+        parent_parameter_hash=source.parameter_hash,
+        policy_id="policy",
+        policy_revision=1,
+        generation=1,
+        candidate_parameter_hash=parameter_hash_for({"lookback": 21}),
+    )
+    with pytest.raises(StrategyApplicationError, match="不能克隆"):
+        application.clone_research_candidate(
+            source.version_id,
+            candidate_version_id=candidate_id,
+            semver="2",
+            parameters={"lookback": 21},
+        )
+
+
+def test_deterministic_candidate_does_not_inherit_a_legacy_gate_flag(
+    application, repository
+) -> None:
+    source = _register(application, parameters={"lookback": 20})
+    repository.versions[-1] = replace(source, gate_passed=True)
+    candidate_id = candidate_version_id_for(
+        parent_version_id=source.version_id,
+        parent_parameter_hash=source.parameter_hash,
+        policy_id="policy",
+        policy_revision=1,
+        generation=1,
+        candidate_parameter_hash=parameter_hash_for({"lookback": 21}),
+    )
+    child = application.clone_research_candidate(
+        source.version_id,
+        candidate_version_id=candidate_id,
+        semver="2",
+        parameters={"lookback": 21},
+    )
+    assert child.gate_passed is False
 
 
 # -- transition -----------------------------------------------------------

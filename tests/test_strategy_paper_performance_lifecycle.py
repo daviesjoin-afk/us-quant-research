@@ -1,6 +1,6 @@
 """D2: durable performance facts through the sole lifecycle authority."""
 from dataclasses import fields, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 import sqlite3
@@ -160,6 +160,33 @@ def test_old_revision_fail_cannot_override_approved_active_revision(tmp_path):
                            coverage=chain.coverage, applied_at=NOW)
     assert not result.authorised
     assert result.decision.blockers == (B.PAUSE_NOT_JUSTIFIED,)
+    assert strategies.get_version('version-1').status is StrategyStatus.PAPER_SHADOW
+
+
+def test_service_selects_latest_evaluation_by_instant_across_offsets(tmp_path, monkeypatch):
+    chain = _Chain(tmp_path).build()
+    service, strategies, _, facts = _service(tmp_path, chain)
+    facts.append_policy_revision(performance_policy(), expected_current_revision=None)
+    older_fail = _fact(
+        tmp_path/'older',
+        evaluated_at=datetime(2026, 1, 1, 13, tzinfo=timezone(timedelta(hours=2))),
+    )
+    newer_pass = _fact(
+        tmp_path/'newer', Verdict.PASS,
+        evaluated_at=datetime(2026, 1, 1, 12, tzinfo=timezone.utc),
+    )
+    facts.record_evaluation(older_fail)
+    facts.record_evaluation(newer_pass)
+    # Simulate a repository response ordered lexicographically by offset text.
+    monkeypatch.setattr(facts, 'evaluations_for_version', lambda _version_id: (older_fail, newer_pass))
+
+    result = service.apply(
+        version=_paper(), action=Action.PAUSE, policy=_approved_policy(),
+        coverage=chain.coverage, applied_at=NOW+timedelta(hours=13),
+    )
+
+    assert not result.authorised
+    assert result.decision.paper_performance_evaluation_id == newer_pass.evaluation_id
     assert strategies.get_version('version-1').status is StrategyStatus.PAPER_SHADOW
 
 

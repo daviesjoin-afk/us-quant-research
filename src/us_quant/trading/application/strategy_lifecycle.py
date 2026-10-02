@@ -22,7 +22,7 @@ controller cannot promote on hope or suspend on a whim.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from us_quant.trading.application.strategy_coverage_validity import (
     StrategyCoverageValidityBlocker,
@@ -481,12 +481,19 @@ class StrategyLifecycleService:
                         expected_policy_id
                     )
                     if active_performance_policy is not None:
-                        current = next((item for item in self._paper_performance_repository.evaluations_for_version(
-                            version.version_id
-                        ) if item.requested_policy_id == expected_policy_id
+                        eligible = (
+                            item for item in self._paper_performance_repository.evaluations_for_version(
+                                version.version_id
+                            ) if item.requested_policy_id == expected_policy_id
                             and item.policy_id == expected_policy_id
                             and item.policy_revision == active_performance_policy.revision
-                            and item.policy_version == active_performance_policy.policy_version), None)
+                            and item.policy_version == active_performance_policy.policy_version
+                        )
+                        current = max(
+                            eligible,
+                            key=lambda item: item.evaluated_at.astimezone(timezone.utc),
+                            default=None,
+                        )
                 if paper_performance is not None and current != paper_performance:
                     raise ValueError("paper_performance must be the current durable evaluation")
                 paper_performance = current

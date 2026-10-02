@@ -117,6 +117,7 @@ def test_generation_is_durable_idempotent_and_timestamp_independent(tmp_path):
     assert stored == first
     assert restarted.get_generation(first.generation_id) == first
     assert restarted.generations_for_policy("family-a", "policy-a") == (first,)
+    assert restarted.generations_for_strategy("family-a") == (first,)
 
 
 def test_same_generation_id_with_other_lineage_semantics_conflicts(tmp_path):

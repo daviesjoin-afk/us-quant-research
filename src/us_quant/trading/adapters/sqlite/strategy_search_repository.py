@@ -272,6 +272,31 @@ class SQLiteStrategySearchRepository:
             )
         )
 
+    def generations_for_strategy(
+        self, strategy_id: str
+    ) -> tuple[StrategySearchGeneration, ...]:
+        _require_text(strategy_id, "strategy_id")
+        try:
+            with closing(self._connect()) as connection:
+                rows = connection.execute(
+                    f"SELECT {_GENERATION_COLUMNS} FROM strategy_search_generation "
+                    "WHERE strategy_id = ?",
+                    (strategy_id,),
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise StrategySearchRepositoryError(
+                f"cannot read strategy search generations: {error}"
+            ) from error
+        values = tuple(_row_to_generation(row) for row in rows)
+        return tuple(
+            sorted(
+                values,
+                key=lambda item: (
+                    item.generated_at.astimezone(timezone.utc), item.generation_id
+                ),
+            )
+        )
+
     def _initialize(self) -> None:
         try:
             with closing(self._connect()) as connection:

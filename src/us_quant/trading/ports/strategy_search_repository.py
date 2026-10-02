@@ -41,6 +41,10 @@ class StrategySearchRepositoryPort(Protocol):
         self, strategy_id: str, policy_id: str
     ) -> tuple[StrategySearchGeneration, ...]: ...
 
+    def generations_for_strategy(
+        self, strategy_id: str
+    ) -> tuple[StrategySearchGeneration, ...]: ...
+
 
 __all__ = [
     "StrategySearchRepositoryConflict",

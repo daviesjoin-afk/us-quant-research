@@ -23,6 +23,7 @@ from us_quant.trading.domain.strategy_search import (
     StrategySearchValueKind,
     generate_strategy_candidate_specs,
 )
+from us_quant.trading.ports.strategy_repository import StrategyRepositoryConflict
 
 
 UTC = timezone.utc
@@ -192,6 +193,82 @@ def test_completed_retry_ignores_child_lifecycle_status(setup):
         parent_version_id=parent.version_id, policy_id="search-dual-ma",
         policy_revision=1, generation=1, generated_at=NOW + timedelta(days=1),
     ) == first
+
+
+def test_crash_orphan_counts_against_later_active_candidate_limit(setup, monkeypatch):
+    strategies, repo, app, parent = setup
+    original = strategies.clone_research_candidate
+    calls = 0
+
+    def fail_on_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise StrategyApplicationError("simulated interrupted generation")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(strategies, "clone_research_candidate", fail_on_second)
+    with pytest.raises(StrategyCandidateGenerationError):
+        app.generate(
+            parent_version_id=parent.version_id, policy_id="search-dual-ma",
+            policy_revision=1, generation=1, generated_at=NOW,
+        )
+    monkeypatch.setattr(strategies, "clone_research_candidate", original)
+    repo.append_policy_revision(
+        _policy(revision=2, maximum_active_candidates=4),
+        expected_current_revision=1,
+    )
+    with pytest.raises(StrategyCandidateGenerationError, match="maximum_active"):
+        app.generate(
+            parent_version_id=parent.version_id, policy_id="search-dual-ma",
+            policy_revision=2, generation=2, generated_at=NOW + timedelta(minutes=2),
+        )
+    assert len(strategies.list_versions()) == 2
+
+
+def test_distinct_policies_do_not_collide_on_candidate_semver(setup):
+    strategies, repo, app, parent = setup
+    first = app.generate(
+        parent_version_id=parent.version_id, policy_id="search-dual-ma",
+        policy_revision=1, generation=1, generated_at=NOW,
+    )
+    second_policy = _policy(policy_id="search-dual-ma-alt")
+    repo.append_policy_revision(second_policy, expected_current_revision=None)
+    second_app = StrategyCandidateGenerationApplication(strategies, repo)
+    second = second_app.generate(
+        parent_version_id=parent.version_id, policy_id=second_policy.policy_id,
+        policy_revision=1, generation=1, generated_at=NOW,
+    )
+    first_versions = tuple(
+        strategies.get_version(item.child_version_id)
+        for item in first.candidate_lineages
+    )
+    second_versions = tuple(
+        strategies.get_version(item.child_version_id)
+        for item in second.candidate_lineages
+    )
+    assert {item.parameter_hash for item in first_versions} == {
+        item.parameter_hash for item in second_versions
+    }
+    assert {item.semver for item in first_versions}.isdisjoint(
+        {item.semver for item in second_versions}
+    )
+
+
+def test_repository_version_conflict_is_translated_to_generation_error(
+    setup, monkeypatch
+):
+    strategies, _, app, parent = setup
+
+    def conflict(*_args, **_kwargs):
+        raise StrategyRepositoryConflict("concurrent version insert")
+
+    monkeypatch.setattr(strategies, "clone_research_candidate", conflict)
+    with pytest.raises(StrategyCandidateGenerationError, match="materialization failed"):
+        app.generate(
+            parent_version_id=parent.version_id, policy_id="search-dual-ma",
+            policy_revision=1, generation=1, generated_at=NOW,
+        )
 
 
 def test_naive_generated_at_is_rejected(setup):

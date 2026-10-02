@@ -188,6 +188,22 @@ def test_seed_changes_order_and_generation_identity_but_not_candidate_set():
     )
 
 
+def test_policy_identity_keeps_candidate_semvers_unique():
+    parent = _parent()
+    first = generate_strategy_candidate_specs(
+        parent=parent, policy=_policy(policy_id="policy-one"), generation=1
+    )
+    second = generate_strategy_candidate_specs(
+        parent=parent, policy=_policy(policy_id="policy-two"), generation=1
+    )
+    assert {item.candidate_parameter_hash for item in first} == {
+        item.candidate_parameter_hash for item in second
+    }
+    assert {item.semver for item in first}.isdisjoint(
+        {item.semver for item in second}
+    )
+
+
 def test_policy_minimum_maximum_delta_and_generation_cap_bound_candidates():
     parent = _parent()
     policy = _policy(_rule(

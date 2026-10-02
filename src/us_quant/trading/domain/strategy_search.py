@@ -346,7 +346,7 @@ def generate_strategy_candidate_specs(
                     candidate_version_id=candidate_id,
                     semver=(
                         f"{parent.semver}-g{generation}-p{policy.revision}-"
-                        f"{candidate_hash[:12]}"
+                        f"{candidate_id}"
                     ),
                     parameters=normalized,
                     candidate_parameter_hash=candidate_hash,

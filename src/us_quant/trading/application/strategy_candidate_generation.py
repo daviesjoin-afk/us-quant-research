@@ -29,6 +29,7 @@ from us_quant.trading.ports.strategy_search_repository import (
     StrategySearchRepositoryNotFound,
     StrategySearchRepositoryPort,
 )
+from us_quant.trading.ports.strategy_repository import StrategyRepositoryConflict
 
 
 _ACTIVE_STATUSES = frozenset(
@@ -130,7 +131,7 @@ class StrategyCandidateGenerationApplication:
                         semver=spec.semver,
                         parameters=spec.parameters,
                     )
-                except StrategyApplicationError as error:
+                except (StrategyApplicationError, StrategyRepositoryConflict) as error:
                     # A concurrent writer or a conflicting semver must never
                     # be guessed into lineage.
                     raise StrategyCandidateGenerationError(
@@ -223,23 +224,39 @@ class StrategyCandidateGenerationApplication:
         generations = self._repository.generations_for_policy(
             parent.strategy_id, policy.policy_id
         )
+        strategy_generations = self._repository.generations_for_strategy(
+            parent.strategy_id
+        )
         lineage_ids = {
             lineage.child_version_id
             for item in generations
             for lineage in item.candidate_lineages
         }
+        all_lineage_ids = {
+            lineage.child_version_id
+            for item in strategy_generations
+            for lineage in item.candidate_lineages
+        }
         by_id = {version.version_id: version for version in versions}
-        missing = lineage_ids - by_id.keys()
+        missing = all_lineage_ids - by_id.keys()
         if missing:
             raise StrategyCandidateGenerationError(
                 "a prior candidate lineage references a missing strategy version"
             )
+        intended_ids = {spec.candidate_version_id for spec in specs}
+        orphan_ids = {
+            version.version_id
+            for version in versions
+            if version.strategy_id == parent.strategy_id
+            and version.version_id.startswith("scv-")
+            and version.version_id not in all_lineage_ids
+            and version.version_id not in intended_ids
+        }
         active_ids = {
-            version_id for version_id in lineage_ids
+            version_id for version_id in lineage_ids | orphan_ids
             if by_id[version_id].status in _ACTIVE_STATUSES
         }
-        intended_ids = {spec.candidate_version_id for spec in specs}
-        if len(lineage_ids) + len(intended_ids) > policy.maximum_total_candidates:
+        if len(lineage_ids | orphan_ids | intended_ids) > policy.maximum_total_candidates:
             raise StrategyCandidateGenerationError("maximum_total_candidates exceeded")
         if len(active_ids | intended_ids) > policy.maximum_active_candidates:
             raise StrategyCandidateGenerationError("maximum_active_candidates exceeded")

@@ -1,0 +1,67 @@
+# Stage 6-D.5 semantic mutation gate: all named safety regressions must fail.
+$ErrorActionPreference = 'Stop'
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$env:PYTHONPATH = (Join-Path $projectRoot 'src') + ';' + (Join-Path $projectRoot 'tests')
+$env:PYTHONDONTWRITEBYTECODE = '1'
+$env:PYTHONUTF8 = '1'
+$py = Join-Path $projectRoot '.venv\Scripts\python.exe'
+if (-not (Test-Path -LiteralPath $py)) { $py = (Get-Command python -ErrorAction Stop).Source }
+$mutations = @(
+    @{ name='D5-01 overwrite existing minute'; file='src/us_quant/minute_data.py'; find='ON CONFLICT(symbol, minute, provider) DO NOTHING'; repl='ON CONFLICT(symbol, minute, provider) DO UPDATE SET bid = excluded.bid'; test='tests/test_market_evidence_capture_d5.py'; select='capture_append_once_restart_and_next_minute' },
+    @{ name='D5-02 restart clears durable fact'; file='src/us_quant/minute_data.py'; find='                connection.execute(`n                    """`n                    CREATE INDEX IF NOT EXISTS'; repl='                connection.execute("DELETE FROM minute_quote")`n                connection.execute(`n                    """`n                    CREATE INDEX IF NOT EXISTS'; test='tests/test_market_evidence_capture_d5.py'; select='capture_append_once_restart_and_next_minute' },
+    @{ name='D5-03 minute sampling keeps seconds'; file='src/us_quant/minute_data.py'; find='return value.replace(second=0, microsecond=0).isoformat()'; repl='return value.isoformat()'; test='tests/test_market_evidence_capture_d5.py'; select='capture_append_once_restart_and_next_minute' },
+    @{ name='D5-04 symbol independence removed'; file='src/us_quant/minute_data.py'; find='UNIQUE(symbol, minute, provider)'; repl='UNIQUE(minute, provider)'; test='tests/test_market_evidence_capture_d5.py'; select='symbols_and_providers_remain_independent' },
+    @{ name='D5-05 provider independence removed'; file='src/us_quant/minute_data.py'; find='UNIQUE(symbol, minute, provider)'; repl='UNIQUE(symbol, minute)'; test='tests/test_market_evidence_capture_d5.py'; select='symbols_and_providers_remain_independent' },
+    @{ name='D5-06 stale observations filtered'; file='src/us_quant/minute_data.py'; find='for quote in snapshot.quotes:'; repl='for quote in snapshot.quotes:`n        if quote.stale:`n            continue'; test='tests/test_market_evidence_capture_d5.py'; select='persists_bad_rows' },
+    @{ name='D5-07 delayed observations filtered'; file='src/us_quant/minute_data.py'; find='for quote in snapshot.quotes:'; repl='for quote in snapshot.quotes:`n        if quote.mode is not MarketDataMode.REALTIME:`n            continue'; test='tests/test_market_evidence_capture_d5.py'; select='persists_bad_rows' },
+    @{ name='D5-08 missing bid or ask filtered'; file='src/us_quant/minute_data.py'; find='for quote in snapshot.quotes:'; repl='for quote in snapshot.quotes:`n        if quote.bid is None or quote.ask is None:`n            continue'; test='tests/test_market_evidence_capture_d5.py'; select='persists_bad_rows' },
+    @{ name='D5-09 production origin is not captured_stream'; file='src/us_quant/minute_data.py'; find='evidence_origin="captured_stream",'; repl='evidence_origin="synthetic_preview",'; test='tests/test_market_evidence_capture_d5.py'; select='persists_bad_rows' },
+    @{ name='D5-10 preview origin admitted'; file='src/us_quant/trading/application/market_evidence_readiness.py'; find='if row.evidence_origin == "captured_stream"'; repl='if True'; test='tests/test_market_evidence_capture_d5.py'; select='rejects_identity_mismatch_and_preview' },
+    @{ name='D5-11 source identity mismatch accepted'; file='src/us_quant/trading/application/market_evidence_capture.py'; find='if snapshot.source_id != self.source_id:'; repl='if False:'; test='tests/test_market_evidence_capture_d5.py'; select='rejects_identity_mismatch_and_preview' },
+    @{ name='D5-12 provider identity mismatch accepted'; file='src/us_quant/trading/application/market_evidence_capture.py'; find='if quote.source_id != self.source_id or quote.source_label != self.provider:'; repl='if False:'; test='tests/test_market_evidence_capture_d5.py'; select='quote_provider_identity_mismatch' },
+    @{ name='D5-13 out-of-campaign symbol accepted'; file='src/us_quant/trading/application/market_evidence_capture.py'; find='if quote.symbol != quote.symbol.strip().upper() or quote.symbol not in allowed:'; repl='if False:'; test='tests/test_market_evidence_capture_d5.py'; select='rejects_identity_mismatch_and_preview' },
+    @{ name='D5-14 duplicate count omitted'; file='src/us_quant/minute_data.py'; find='duplicate_rows_ignored=len(rows) - len(inserted_rows),'; repl='duplicate_rows_ignored=0,'; test='tests/test_market_evidence_capture_d5.py'; select='capture_append_once_restart_and_next_minute' },
+    @{ name='D5-15 readiness combines providers'; file='src/us_quant/trading/application/market_evidence_readiness.py'; find='if len(providers) > 1:'; repl='if False:'; test='tests/test_market_evidence_capture_d5.py'; select='provider_mixing_rejected' },
+    @{ name='D5-16 24 sessions marked READY'; file='src/us_quant/trading/application/market_evidence_readiness.py'; find='ready = review_ready >= required_sessions'; repl='ready = review_ready >= required_sessions - 1'; test='tests/test_market_evidence_capture_d5.py'; select='exact_25_qualified_sessions_ready_and_24_collecting' },
+    @{ name='D5-17 completeness threshold ignored'; file='src/us_quant/trading/domain/market_evidence_quality.py'; find='MINIMUM_COMPLETENESS = Decimal("0.98")'; repl='MINIMUM_COMPLETENESS = Decimal("0")'; test='tests/test_market_evidence_capture_d5.py'; select='eight_disjoint_missing_minutes_fail_completeness_only' },
+    @{ name='D5-18 consecutive gaps accepted'; file='src/us_quant/trading/domain/market_evidence_quality.py'; find='MAXIMUM_CONSECUTIVE_MISSING = 2'; repl='MAXIMUM_CONSECUTIVE_MISSING = 8'; test='tests/test_market_evidence_capture_d5.py'; select='bad_completeness_gap_or_age' },
+    @{ name='D5-19 excessive source age accepted'; file='src/us_quant/trading/domain/market_evidence_quality.py'; find='MAXIMUM_P95_SOURCE_AGE_SECONDS = Decimal("5")'; repl='MAXIMUM_P95_SOURCE_AGE_SECONDS = Decimal("500")'; test='tests/test_market_evidence_capture_d5.py'; select='bad_completeness_gap_or_age' },
+    @{ name='D5-20 UTC time replaces New York session window'; file='src/us_quant/trading/domain/market_evidence_quality.py'; find='def minute_is_in_evaluation_window(`n    value: str,`n    session_dates: tuple[str, ...] | None = None,`n) -> bool:`n    eastern = parse_minute(value).astimezone(NEW_YORK)'; repl='def minute_is_in_evaluation_window(`n    value: str,`n    session_dates: tuple[str, ...] | None = None,`n) -> bool:`n    eastern = parse_minute(value).astimezone(timezone.utc)'; test='tests/test_market_evidence_capture_d5.py'; select='new_york_dst_and_weekends' },
+    @{ name='D5-21 weekends counted'; file='src/us_quant/trading/domain/market_evidence_quality.py'; find='if eastern.weekday() >= 5:'; repl='if False:'; test='tests/test_market_evidence_capture_d5.py'; select='new_york_dst_and_weekends' },
+    @{ name='D5-22 stale rows count as usable'; file='src/us_quant/trading/domain/market_evidence_quality.py'; find='def _quality_usable(row: MinuteEvidenceRecord) -> bool:`n    return (`n        row.realtime_ready`n        and not row.stale'; repl='def _quality_usable(row: MinuteEvidenceRecord) -> bool:`n    return (`n        row.realtime_ready'; test='tests/test_minute_evidence_quality_characterization.py'; select='one_stale_minute' },
+    @{ name='D5-23 missing bid ignored'; file='src/us_quant/trading/domain/market_evidence_quality.py'; find='and row.bid is not None`n        and row.ask is not None`n        and row.bid > 0'; repl='and row.ask is not None`n        and row.bid > 0'; test='tests/test_market_evidence_capture_d5.py'; select='missing_quote_side' },
+    @{ name='D5-24 missing ask ignored'; file='src/us_quant/trading/domain/market_evidence_quality.py'; find='and row.ask is not None`n        and row.bid > 0`n        and row.ask >= row.bid'; repl='and row.bid > 0`n        and row.ask >= row.bid'; test='tests/test_market_evidence_capture_d5.py'; select='missing_quote_side' },
+    @{ name='D5-25 CLI gains forbidden trading authority'; file='src/us_quant/market_evidence_capture.py'; find='from us_quant.config import load_config'; repl='from us_quant.trading.application.execution import ExecutionApplication`nfrom us_quant.config import load_config'; test='tests/test_market_evidence_capture_d5.py'; select='capture_cli_has_no_trading_or_qt_authority' }
+)
+$baseline = & $py -m pytest (Join-Path $projectRoot 'tests/test_market_evidence_capture_d5.py') (Join-Path $projectRoot 'tests/test_minute_evidence_quality_characterization.py') -q 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host ($baseline -join "`n"); throw 'Baseline is not GREEN' }
+$survivors = @()
+$errors = @()
+foreach ($mutation in $mutations) {
+    $path = [IO.Path]::GetFullPath((Join-Path $projectRoot $mutation.file))
+    if (-not $path.StartsWith([IO.Path]::GetFullPath($projectRoot) + [IO.Path]::DirectorySeparatorChar)) { throw 'Mutation path escaped workspace' }
+    $original = [IO.File]::ReadAllText($path).Replace("`r`n", "`n")
+    $anchor = $mutation.find.Replace("`r`n", "`n").Replace('`n', "`n")
+    $replacement = $mutation.repl.Replace("`r`n", "`n").Replace('`n', "`n")
+    $count = [regex]::Matches($original, [regex]::Escape($anchor)).Count
+    if ($count -ne 1) { $errors += "$($mutation.name): anchors=$count"; continue }
+    try {
+        [IO.File]::WriteAllText($path, $original.Replace($anchor, $replacement), [Text.UTF8Encoding]::new($false))
+        $output = & $py -m pytest (Join-Path $projectRoot $mutation.test) -q -k $mutation.select --tb=short 2>&1
+        $code = $LASTEXITCODE
+        if ($code -eq 1 -and ($output | Select-String -Pattern 'FAILED|AssertionError|DID NOT RAISE|NameError|TypeError|ValueError|IntegrityError' -Quiet) -and -not ($output | Select-String -Pattern 'no tests ran|ERROR collecting' -Quiet)) {
+            Write-Host "RED=True $($mutation.name)"
+        } elseif ($code -eq 0) {
+            $survivors += $mutation.name
+            Write-Host "SURVIVOR $($mutation.name)"
+        } else {
+            $errors += "$($mutation.name): exit=$code; $($output -join ' ')"
+        }
+    } finally {
+        [IO.File]::WriteAllText($path, $original, [Text.UTF8Encoding]::new($false))
+    }
+}
+Write-Host "mutations=$($mutations.Count) red=$($mutations.Count-$survivors.Count-$errors.Count) survivors=$($survivors.Count) harness_errors=$($errors.Count)"
+foreach ($item in ($survivors + $errors)) { Write-Host $item }
+if ($survivors.Count -gt 0 -or $errors.Count -gt 0) { exit 1 }
+exit 0

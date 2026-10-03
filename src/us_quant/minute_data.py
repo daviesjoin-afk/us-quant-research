@@ -48,6 +48,13 @@ class MinuteDataSummary:
     evidence_origins: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class MinuteEvidenceWriteResult:
+    rows_written: int
+    duplicate_rows_ignored: int
+    inserted_records: tuple[MinuteQuoteRecord, ...]
+
+
 class MinuteQuoteStore:
     """Local minute-level Level-I evidence with explicit quality metadata."""
 
@@ -69,41 +76,11 @@ class MinuteQuoteStore:
             "imported_research",
         }:
             raise ValueError("unsupported minute evidence origin")
-        allowed = (
-            {symbol.strip().upper() for symbol in symbols}
-            if symbols is not None
-            else None
+        rows = _records_from_snapshot(
+            snapshot,
+            symbols=symbols,
+            evidence_origin=evidence_origin,
         )
-        rows: list[MinuteQuoteRecord] = []
-        for quote in snapshot.quotes:
-            if allowed is not None and quote.symbol not in allowed:
-                continue
-            # Both fields are timezone-aware ``datetime`` in the domain type,
-            # so this is a normalisation step, not a parse.  A quote with no
-            # usable timestamp falls back to the snapshot's own observation
-            # time, which is what the pre-migration code did with the ISO
-            # string fallback.
-            observed = _as_utc(quote.updated_at or snapshot.observed_at)
-            rows.append(
-                MinuteQuoteRecord(
-                    symbol=quote.symbol,
-                    minute=_minute_iso(observed),
-                    provider=quote.source_label or snapshot.source_label,
-                    coverage=quote.coverage or snapshot.coverage,
-                    bid=quote.bid,
-                    ask=quote.ask,
-                    last=quote.last,
-                    mode=quote.mode,
-                    realtime_ready=quote.realtime_ready,
-                    stale=quote.stale,
-                    stale_reason=quote.stale_reason,
-                    generation=snapshot.generation,
-                    evidence_origin=evidence_origin,
-                    source_age_seconds=quote.age_seconds,
-                    bid_size=quote.bid_size,
-                    ask_size=quote.ask_size,
-                )
-            )
         if not rows:
             return 0
         with closing(self._connect()) as connection:
@@ -134,30 +111,54 @@ class MinuteQuoteStore:
                         ask_size = excluded.ask_size,
                         recorded_at = excluded.recorded_at
                     """,
-                    [
-                        (
-                            row.symbol,
-                            row.minute,
-                            row.provider,
-                            row.coverage,
-                            _decimal_text(row.bid),
-                            _decimal_text(row.ask),
-                            _decimal_text(row.last),
-                            row.mode.value,
-                            int(row.realtime_ready),
-                            int(row.stale),
-                            row.stale_reason,
-                            row.generation,
-                            datetime.now(timezone.utc).isoformat(),
-                            row.evidence_origin,
-                            row.source_age_seconds,
-                            _decimal_text(row.bid_size),
-                            _decimal_text(row.ask_size),
-                        )
-                        for row in rows
-                    ],
+                    [_record_values(row) for row in rows],
                 )
         return len(rows)
+
+    def record_evidence_snapshot_once(
+        self,
+        snapshot: MarketSnapshot,
+        *,
+        symbols: Iterable[str] | None = None,
+    ) -> MinuteEvidenceWriteResult:
+        """Append captured evidence without rewriting a minute fact.
+
+        The provenance is fixed here so production callers cannot label an
+        imported or preview snapshot as a captured stream. Inserted records
+        let the capture health report distinguish durable progress from a
+        duplicate poll.
+        """
+
+        rows = _records_from_snapshot(
+            snapshot,
+            symbols=symbols,
+            evidence_origin="captured_stream",
+        )
+        if not rows:
+            return MinuteEvidenceWriteResult(0, 0, ())
+        inserted_rows: list[MinuteQuoteRecord] = []
+        with closing(self._connect()) as connection:
+            with connection:
+                statement = """
+                    INSERT INTO minute_quote (
+                        symbol, minute, provider, coverage, bid, ask, last,
+                        mode, realtime_ready, stale,
+                        stale_reason, generation, recorded_at
+                        , evidence_origin, source_age_seconds,
+                        bid_size, ask_size
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                              ?, ?, ?)
+                    ON CONFLICT(symbol, minute, provider) DO NOTHING
+                    """
+                for row in rows:
+                    cursor = connection.execute(statement, _record_values(row))
+                    if cursor.rowcount == 1:
+                        inserted_rows.append(row)
+        return MinuteEvidenceWriteResult(
+            rows_written=len(inserted_rows),
+            duplicate_rows_ignored=len(rows) - len(inserted_rows),
+            inserted_records=tuple(inserted_rows),
+        )
 
     def load(
         self,
@@ -347,6 +348,71 @@ class MinuteQuoteStore:
 
     def _connect(self) -> sqlite3.Connection:
         return connect_sqlite(self.path)
+
+
+def _records_from_snapshot(
+    snapshot: MarketSnapshot,
+    *,
+    symbols: Iterable[str] | None,
+    evidence_origin: str,
+) -> tuple[MinuteQuoteRecord, ...]:
+    allowed = (
+        {symbol.strip().upper() for symbol in symbols}
+        if symbols is not None
+        else None
+    )
+    rows: list[MinuteQuoteRecord] = []
+    for quote in snapshot.quotes:
+        if allowed is not None and quote.symbol not in allowed:
+            continue
+        # Both fields are timezone-aware ``datetime`` in the domain type,
+        # so this is a normalisation step, not a parse. A quote with no usable
+        # timestamp uses the snapshot's observation time, an actual capture
+        # timestamp rather than an invented market timestamp.
+        observed = _as_utc(quote.updated_at or snapshot.observed_at)
+        rows.append(
+            MinuteQuoteRecord(
+                symbol=quote.symbol,
+                minute=_minute_iso(observed),
+                provider=quote.source_label or snapshot.source_label,
+                coverage=quote.coverage or snapshot.coverage,
+                bid=quote.bid,
+                ask=quote.ask,
+                last=quote.last,
+                mode=quote.mode,
+                realtime_ready=quote.realtime_ready,
+                stale=quote.stale,
+                stale_reason=quote.stale_reason,
+                generation=snapshot.generation,
+                evidence_origin=evidence_origin,
+                source_age_seconds=quote.age_seconds,
+                bid_size=quote.bid_size,
+                ask_size=quote.ask_size,
+            )
+        )
+    return tuple(rows)
+
+
+def _record_values(row: MinuteQuoteRecord) -> tuple[object, ...]:
+    return (
+        row.symbol,
+        row.minute,
+        row.provider,
+        row.coverage,
+        _decimal_text(row.bid),
+        _decimal_text(row.ask),
+        _decimal_text(row.last),
+        row.mode.value,
+        int(row.realtime_ready),
+        int(row.stale),
+        row.stale_reason,
+        row.generation,
+        datetime.now(timezone.utc).isoformat(),
+        row.evidence_origin,
+        row.source_age_seconds,
+        _decimal_text(row.bid_size),
+        _decimal_text(row.ask_size),
+    )
 
 
 def _migrate_legacy_market_data_type(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 import json
 import os
@@ -10,19 +10,17 @@ from statistics import median
 import tempfile
 from typing import Any
 from uuid import uuid4
-from zoneinfo import ZoneInfo
 
+from us_quant.trading.domain.market_evidence_quality import (
+    EXPECTED_MINUTES,
+    MinuteEvidenceSessionQuality,
+    evaluate_minute_evidence_session,
+    group_regular_sessions,
+    minute_is_in_evaluation_window,
+    percentile as _percentile,
+)
 from us_quant.minute_data import MinuteQuoteRecord, MinuteQuoteStore
 from us_quant.targeted_robustness import TargetedRobustnessResult
-
-
-NEW_YORK = ZoneInfo("America/New_York")
-WINDOW_START = time(10, 0)
-WINDOW_END = time(15, 45)
-EXPECTED_MINUTES = 346
-MINIMUM_COMPLETENESS = Decimal("0.98")
-MAXIMUM_CONSECUTIVE_MISSING = 2
-MAXIMUM_P95_SOURCE_AGE_SECONDS = Decimal("5")
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,24 +88,13 @@ def run_targeted_data_quality(
             }
         )
     )
-    by_date: dict[str, dict[str, MinuteQuoteRecord]] = {}
-    for record in raw_records:
-        eastern = _parse(record.minute).astimezone(NEW_YORK)
-        wall_time = eastern.time().replace(tzinfo=None)
-        session_date = eastern.date().isoformat()
-        if (
-            session_date not in usable_dates
-            or not WINDOW_START <= wall_time <= WINDOW_END
-        ):
-            continue
-        by_date.setdefault(session_date, {})[
-            eastern.strftime("%H:%M")
-        ] = record
-
+    by_date = dict(group_regular_sessions(raw_records))
     sessions = tuple(
-        _session_quality(
-            session_date,
-            by_date.get(session_date, {}),
+        _quality_result(
+            evaluate_minute_evidence_session(
+                session_date,
+                by_date.get(session_date, ()),
+            )
         )
         for session_date in usable_dates
     )
@@ -119,7 +106,7 @@ def run_targeted_data_quality(
         for record in raw_records
         if record.source_age_seconds is not None
         and record.source_age_seconds >= 0
-        and _in_evaluation_window(record.minute, usable_dates)
+        and minute_is_in_evaluation_window(record.minute, usable_dates)
     )
     total_usable = sum(row.usable_rows for row in sessions)
     total_size = sum(row.size_sample_count for row in sessions)
@@ -333,150 +320,27 @@ def load_targeted_data_quality(
     return tuple(results)
 
 
-def _session_quality(
-    session_date: str,
-    rows: dict[str, MinuteQuoteRecord],
+def _quality_result(
+    quality: MinuteEvidenceSessionQuality,
 ) -> SessionDataQuality:
-    expected = _expected_keys()
-    usable_keys = {
-        key
-        for key, row in rows.items()
-        if _usable(row)
-    }
-    missing_flags = tuple(key not in usable_keys for key in expected)
-    missing = sum(missing_flags)
-    maximum_missing = _longest_true_run(missing_flags)
-    raw_rows = len(rows)
-    stale = sum(row.stale for row in rows.values())
-    invalid = sum(
-        row.bid is not None
-        and row.ask is not None
-        and (
-            row.bid <= 0
-            or row.ask <= 0
-            or row.ask < row.bid
-        )
-        for row in rows.values()
-    )
-    ages = sorted(
-        Decimal(str(row.source_age_seconds))
-        for row in rows.values()
-        if row.source_age_seconds is not None
-        and row.source_age_seconds >= 0
-    )
-    size_samples = sum(
-        key in usable_keys
-        and row.bid_size is not None
-        and row.ask_size is not None
-        and row.bid_size > 0
-        and row.ask_size > 0
-        for key, row in rows.items()
-    )
-    usable_count = len(usable_keys)
-    completeness = Decimal(usable_count) / Decimal(EXPECTED_MINUTES)
-    p95_age = (
-        _percentile(ages, Decimal("0.95")) if ages else None
-    )
-    reasons: list[str] = []
-    if completeness < MINIMUM_COMPLETENESS:
-        reasons.append("完整率低于 98%")
-    if maximum_missing > MAXIMUM_CONSECUTIVE_MISSING:
-        reasons.append("连续缺口超过 2 分钟")
-    if invalid:
-        reasons.append("存在非正或倒挂报价")
-    if p95_age is None:
-        reasons.append("行情年龄不可估计")
-    elif p95_age > MAXIMUM_P95_SOURCE_AGE_SECONDS:
-        reasons.append("行情年龄 P95 超过 5 秒")
     return SessionDataQuality(
-        session_date=session_date,
-        expected_minutes=EXPECTED_MINUTES,
-        raw_rows=raw_rows,
-        usable_rows=usable_count,
-        completeness=completeness,
-        missing_minutes=missing,
-        maximum_consecutive_missing=maximum_missing,
-        stale_rows=stale,
-        invalid_quote_rows=invalid,
-        age_sample_count=len(ages),
-        median_source_age_seconds=(
-            median(ages) if ages else None
-        ),
-        p95_source_age_seconds=p95_age,
-        maximum_source_age_seconds=max(ages) if ages else None,
-        size_sample_count=size_samples,
-        size_coverage_fraction=(
-            Decimal(size_samples) / Decimal(usable_count)
-            if usable_count
-            else Decimal("0")
-        ),
-        high_quality=not reasons,
-        failure_reasons=tuple(reasons),
-    )
-
-
-def _usable(row: MinuteQuoteRecord) -> bool:
-    return (
-        row.realtime_ready
-        and not row.stale
-        and row.bid is not None
-        and row.ask is not None
-        and row.bid > 0
-        and row.ask >= row.bid
-    )
-
-
-def _expected_keys() -> tuple[str, ...]:
-    start = datetime.combine(
-        datetime(2000, 1, 1).date(), WINDOW_START
-    )
-    return tuple(
-        (start + timedelta(minutes=index)).strftime("%H:%M")
-        for index in range(EXPECTED_MINUTES)
-    )
-
-
-def _longest_true_run(values: tuple[bool, ...]) -> int:
-    longest = 0
-    current = 0
-    for value in values:
-        current = current + 1 if value else 0
-        longest = max(longest, current)
-    return longest
-
-
-def _percentile(
-    values: list[Decimal],
-    quantile: Decimal,
-) -> Decimal:
-    if not values:
-        raise ValueError("percentile requires values")
-    if len(values) == 1:
-        return values[0]
-    position = quantile * Decimal(len(values) - 1)
-    lower = int(position)
-    upper = min(lower + 1, len(values) - 1)
-    fraction = position - Decimal(lower)
-    return values[lower] + (values[upper] - values[lower]) * fraction
-
-
-def _parse(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _in_evaluation_window(
-    value: str,
-    usable_dates: tuple[str, ...],
-) -> bool:
-    eastern = _parse(value).astimezone(NEW_YORK)
-    return (
-        eastern.date().isoformat() in usable_dates
-        and WINDOW_START
-        <= eastern.time().replace(tzinfo=None)
-        <= WINDOW_END
+        session_date=quality.session_date,
+        expected_minutes=quality.expected_minutes,
+        raw_rows=quality.raw_rows,
+        usable_rows=quality.usable_rows,
+        completeness=quality.completeness,
+        missing_minutes=quality.missing_minutes,
+        maximum_consecutive_missing=quality.maximum_consecutive_missing,
+        stale_rows=quality.stale_rows,
+        invalid_quote_rows=quality.invalid_quote_rows,
+        age_sample_count=quality.age_sample_count,
+        median_source_age_seconds=quality.median_source_age_seconds,
+        p95_source_age_seconds=quality.p95_source_age_seconds,
+        maximum_source_age_seconds=quality.maximum_source_age_seconds,
+        size_sample_count=quality.size_sample_count,
+        size_coverage_fraction=quality.size_coverage_fraction,
+        high_quality=quality.high_quality,
+        failure_reasons=quality.failure_reasons,
     )
 
 

@@ -15,7 +15,10 @@ from us_quant.minute_evidence_quality import (
     evaluate_minute_evidence_session,
     minute_is_in_evaluation_window,
 )
-from us_quant.trading.application.market_data import SOURCE_IBKR
+from us_quant.trading.application.market_data import (
+    SOURCE_IBKR,
+    SOURCE_IBKR_EXTENDED,
+)
 from us_quant.trading.application.market_evidence_capture import (
     MarketEvidenceCaptureApplication,
     MarketEvidenceCaptureError,
@@ -417,7 +420,6 @@ def test_capture_health_requires_every_expected_symbol_realtime(
     partial = capture.health(snapshot(minute), now_monotonic=1.0)
     assert partial.realtime_symbols == ("SPY",)
     assert not partial.market_stream_realtime
-
     complete_snapshot = replace(
         snapshot(minute),
         quotes=(quote(minute, symbol="SPY"), quote(minute, symbol="QQQ")),
@@ -425,6 +427,22 @@ def test_capture_health_requires_every_expected_symbol_realtime(
     complete = capture.health(complete_snapshot, now_monotonic=2.0)
     assert complete.realtime_symbols == ("QQQ", "SPY")
     assert complete.market_stream_realtime
+
+
+def test_health_status_reports_disconnected_and_not_ready() -> None:
+    from types import SimpleNamespace
+
+    from us_quant.market_evidence_capture import _health_status
+
+    assert _health_status(
+        SimpleNamespace(connected=False, capture_stalled=False, ready=False)
+    ) == "DISCONNECTED"
+    assert _health_status(
+        SimpleNamespace(connected=True, capture_stalled=False, ready=False)
+    ) == "NOT_READY"
+    assert _health_status(
+        SimpleNamespace(connected=True, capture_stalled=True, ready=False)
+    ) == "CAPTURE_STALLED"
 
 
 def test_desktop_minute_recorder_uses_mutable_live_cache_origin() -> None:
@@ -623,6 +641,37 @@ def test_capture_cli_keeps_durable_writes_off_push_listener() -> None:
     )
     preparation = source.split("market_data.prepare(request)", 1)[0]
     assert "listener=capture.capture" not in preparation
+
+
+def test_extended_route_target_only_tracks_extended_ibkr() -> None:
+    from us_quant.market_evidence_capture import _extended_route_target
+
+    class Routing:
+        prepared_market_exchange = "SMART"
+
+        @staticmethod
+        def desired_market_exchange(_source_id: str) -> str:
+            return "OVERNIGHT"
+
+    routing = Routing()
+    assert _extended_route_target(SOURCE_IBKR_EXTENDED, routing) == "OVERNIGHT"
+    assert _extended_route_target(SOURCE_IBKR, routing) is None
+    routing.prepared_market_exchange = "OVERNIGHT"
+    assert _extended_route_target(SOURCE_IBKR_EXTENDED, routing) is None
+
+
+def test_capture_cli_restarts_extended_route_after_runner_stops() -> None:
+    source = Path("src/us_quant/market_evidence_capture.py").read_text(
+        encoding="utf-8"
+    )
+    loop = source.split("while not stopping.is_set():", 1)[1].split(
+        "except KeyboardInterrupt:", 1
+    )[0]
+    assert "_extended_route_target(" in loop
+    assert "market_data.stop()" in loop
+    assert "runner.join(timeout=10)" in loop
+    assert "replace(request, market_exchange=desired_exchange)" in loop
+    assert "runner = start_market_data_runner()" in loop
 
 
 def test_new_york_dst_and_weekends_are_not_counted() -> None:

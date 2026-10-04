@@ -8,6 +8,7 @@ capture application; it has no order, risk, portfolio, or strategy imports.
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -22,6 +23,7 @@ from us_quant.desktop_credentials import DesktopCredentialService
 from us_quant.minute_data import MinuteQuoteStore
 from us_quant.paths import ApplicationPaths
 from us_quant.trading.application.market_data import (
+    SOURCE_IBKR_EXTENDED,
     SOURCE_LABELS,
     SUPPORTED_SOURCES,
     MarketDataCredentials,
@@ -78,7 +80,7 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         "--poll-interval",
         type=float,
         default=DEFAULT_POLL_INTERVAL_SECONDS,
-        help="非 push 行情源的 snapshot 轮询周期（秒）",
+        help="snapshot 与 durable evidence 采样周期（秒）",
     )
     return parser.parse_args(argv)
 
@@ -111,8 +113,27 @@ def _health_payload(health: object, *, source_id: str) -> dict[str, object]:
         "last_durable_minute": health.last_durable_minute,
         "rows_written": health.rows_written,
         "duplicate_rows_ignored": health.duplicate_rows_ignored,
-        "status": "CAPTURE_STALLED" if health.capture_stalled else "RUNNING",
+        "status": _health_status(health),
     }
+
+
+def _health_status(health: object) -> str:
+    if not health.connected:
+        return "DISCONNECTED"
+    if health.capture_stalled:
+        return "CAPTURE_STALLED"
+    if not health.ready:
+        return "NOT_READY"
+    return "RUNNING"
+
+
+def _extended_route_target(source_id: str, market_data: object) -> str | None:
+    if source_id != SOURCE_IBKR_EXTENDED:
+        return None
+    desired_exchange = market_data.desired_market_exchange(source_id)
+    if desired_exchange == market_data.prepared_market_exchange:
+        return None
+    return desired_exchange
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -171,8 +192,14 @@ def main(argv: list[str] | None = None) -> int:
             runner_errors.append(error)
             stopping.set()
 
-    runner = Thread(target=run_market_data, name="market-data", daemon=True)
-    runner.start()
+    def start_market_data_runner() -> Thread:
+        thread = Thread(
+            target=run_market_data, name="market-data", daemon=True
+        )
+        thread.start()
+        return thread
+
+    runner = start_market_data_runner()
 
     def request_stop(_signum: int, _frame: object) -> None:
         stopping.set()
@@ -198,6 +225,36 @@ def main(argv: list[str] | None = None) -> int:
                 last_health = now
             if runner_errors:
                 break
+            desired_exchange = _extended_route_target(
+                args.source, market_data
+            )
+            if desired_exchange is not None:
+                print(
+                    "IBKR extended session changed; rotating route "
+                    f"from {market_data.prepared_market_exchange} "
+                    f"to {desired_exchange}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                market_data.stop()
+                runner.join(timeout=10)
+                if runner.is_alive():
+                    runner_errors.append(
+                        RuntimeError(
+                            "market data stream did not stop for session rotation"
+                        )
+                    )
+                    break
+                if stopping.is_set() or runner_errors:
+                    break
+                try:
+                    market_data.prepare(
+                        replace(request, market_exchange=desired_exchange)
+                    )
+                except (OSError, ValueError, RuntimeError) as error:
+                    runner_errors.append(error)
+                    break
+                runner = start_market_data_runner()
             stopping.wait(args.poll_interval)
     except KeyboardInterrupt:
         stopping.set()

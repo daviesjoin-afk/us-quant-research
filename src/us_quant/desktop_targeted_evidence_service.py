@@ -227,23 +227,17 @@ class DesktopTargetedEvidenceService:
 
         symbol = inputs.symbol
         progress(f"按行情源读取 {symbol} 的 durable 分钟会话…")
-        captured = tuple(
-            row
-            for row in self._store.load(symbol)
-            if row.evidence_origin == "captured_stream"
-        )
+        captured = tuple(row for row in self._store.load(symbol)
+                         if row.evidence_origin == "captured_stream")
         chosen = _choose_provider(captured)
         if chosen is None:
             raise ValueError(
                 f"{symbol} 尚无可用 durable 行情证据；请先录制多个交易日"
             )
         provider, selected = chosen
-        raw_selected = tuple(
-            row
-            for row in self._store.load(symbol, usable_only=False)
-            if row.provider == provider
-            and row.evidence_origin == "captured_stream"
-        )
+        raw_selected = tuple(row for row in self._store.load(symbol, usable_only=False)
+                             if row.provider == provider
+                             and row.evidence_origin == "captured_stream")
         progress(
             f"使用单一行情源 {provider}；按纽约交易日分组并运行"
             "基准及四组参数扰动…"

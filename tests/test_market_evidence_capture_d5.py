@@ -438,11 +438,32 @@ def test_health_status_reports_disconnected_and_not_ready() -> None:
         SimpleNamespace(connected=False, capture_stalled=False, ready=False)
     ) == "DISCONNECTED"
     assert _health_status(
-        SimpleNamespace(connected=True, capture_stalled=False, ready=False)
+        SimpleNamespace(
+            connected=True,
+            capture_stalled=False,
+            market_stream_realtime=True,
+            ready=False,
+        )
     ) == "NOT_READY"
     assert _health_status(
         SimpleNamespace(connected=True, capture_stalled=True, ready=False)
     ) == "CAPTURE_STALLED"
+    assert _health_status(
+        SimpleNamespace(
+            connected=True,
+            capture_stalled=False,
+            market_stream_realtime=False,
+            ready=True,
+        )
+    ) == "NON_REALTIME"
+    assert _health_status(
+        SimpleNamespace(
+            connected=True,
+            capture_stalled=False,
+            market_stream_realtime=True,
+            ready=True,
+        )
+    ) == "RUNNING"
 
 
 def test_desktop_minute_recorder_uses_mutable_live_cache_origin() -> None:

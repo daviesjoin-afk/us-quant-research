@@ -122,6 +122,8 @@ def _health_status(health: object) -> str:
         return "DISCONNECTED"
     if health.capture_stalled:
         return "CAPTURE_STALLED"
+    if not health.market_stream_realtime:
+        return "NON_REALTIME"
     if not health.ready:
         return "NOT_READY"
     return "RUNNING"

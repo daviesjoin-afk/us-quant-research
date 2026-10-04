@@ -197,13 +197,15 @@ def test_capture_append_once_restart_and_next_minute(tmp_path: Path) -> None:
     assert rows[0].bid == Decimal("100")
 
 
-def test_real_capture_replaces_preview_for_same_minute_then_is_immutable(
+@pytest.mark.parametrize("origin", ["synthetic_preview", "live_stream_cache"])
+def test_real_capture_replaces_non_durable_row_then_is_immutable(
     tmp_path: Path,
+    origin: str,
 ) -> None:
     store = MinuteQuoteStore(tmp_path / "minute.sqlite3")
     minute = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
     store.record_snapshot(
-        snapshot(minute, bid="80"), evidence_origin="synthetic_preview"
+        snapshot(minute, bid="80"), evidence_origin=origin
     )
     capture = MarketEvidenceCaptureApplication(
         store=store, source_id=SOURCE_IBKR, provider="IBKR", symbols=("SPY",)
@@ -256,6 +258,25 @@ def test_duplicate_snapshot_key_is_rejected_before_durable_write(
     with pytest.raises(MarketEvidenceCaptureError, match="invalid capture snapshot"):
         capture.capture(duplicated)
     assert store.load("SPY", usable_only=False) == ()
+
+
+def test_stale_quote_is_bucketed_by_observation_minute(tmp_path: Path) -> None:
+    store = MinuteQuoteStore(tmp_path / "minute.sqlite3")
+    sampled_at = datetime(2026, 7, 6, 14, 2, tzinfo=timezone.utc)
+    old_quote = quote(
+        sampled_at - timedelta(minutes=2), stale=True, age=None
+    )
+    capture = MarketEvidenceCaptureApplication(
+        store=store, source_id=SOURCE_IBKR, provider="IBKR", symbols=("SPY",)
+    )
+
+    capture.capture(replace(snapshot(sampled_at), quotes=(old_quote,)))
+
+    rows = store.load("SPY", provider="IBKR", usable_only=False)
+    assert len(rows) == 1
+    assert rows[0].minute == sampled_at.isoformat()
+    assert rows[0].stale
+    assert rows[0].source_age_seconds == 120
 
 
 def test_capture_persists_bad_rows_but_excludes_them_from_usable_store(tmp_path: Path) -> None:
@@ -381,6 +402,14 @@ def test_capture_health_requires_every_expected_symbol_realtime(
     complete = capture.health(complete_snapshot, now_monotonic=2.0)
     assert complete.realtime_symbols == ("QQQ", "SPY")
     assert complete.market_stream_realtime
+
+
+def test_desktop_minute_recorder_uses_mutable_live_cache_origin() -> None:
+    source = Path("src/us_quant/desktop.py").read_text(encoding="utf-8")
+    method = source.split("    def _record_minute_snapshot(", 1)[1].split(
+        "    def ", 1
+    )[0]
+    assert 'evidence_origin="live_stream_cache"' in method
 
 
 def test_normalized_symbols_are_fixed_and_deterministic() -> None:

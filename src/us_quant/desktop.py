@@ -3345,7 +3345,9 @@ class MainWindow(QMainWindow):
             return
         try:
             self.minute_quote_store.record_snapshot(
-                snapshot, symbols=symbols_to_record
+                snapshot,
+                symbols=symbols_to_record,
+                evidence_origin="live_stream_cache",
             )
         except (OSError, sqlite3.Error) as error:
             self.runtime_events_orchestrator.record(

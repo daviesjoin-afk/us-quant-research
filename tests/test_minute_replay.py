@@ -90,11 +90,11 @@ class MinuteReplayTests(unittest.TestCase):
             minute = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
             store.record_snapshot(
                 snapshot(minute, bid="50.00", ask="50.02"),
-                evidence_origin="synthetic_preview",
+                evidence_origin="live_stream_cache",
             )
             store.record_snapshot(
                 snapshot(minute, bid="50.10", ask="50.12"),
-                evidence_origin="synthetic_preview",
+                evidence_origin="live_stream_cache",
             )
             store.record_snapshot(
                 snapshot(

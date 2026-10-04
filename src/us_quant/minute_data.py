@@ -72,6 +72,7 @@ class MinuteQuoteStore:
     ) -> int:
         if evidence_origin not in {
             "captured_stream",
+            "live_stream_cache",
             "synthetic_preview",
             "imported_research",
         }:
@@ -360,11 +361,10 @@ def _records_from_snapshot(
     for quote in snapshot.quotes:
         if allowed is not None and quote.symbol not in allowed:
             continue
-        # Both fields are timezone-aware ``datetime`` in the domain type,
-        # so this is a normalisation step, not a parse. A quote with no usable
-        # timestamp uses the snapshot's observation time, an actual capture
-        # timestamp rather than an invented market timestamp.
-        observed = _as_utc(quote.updated_at or snapshot.observed_at)
+        # Bucket the evidence by when this snapshot was observed. The quote's
+        # own timestamp remains useful for estimating age when the provider
+        # did not supply an explicit age.
+        observed = _as_utc(snapshot.observed_at)
         minute = _minute_iso(observed)
         provider = quote.source_label or snapshot.source_label
         key = (quote.symbol, minute, provider)
@@ -373,6 +373,11 @@ def _records_from_snapshot(
                 "snapshot contains duplicate symbol/minute/provider evidence"
             )
         seen_keys.add(key)
+        source_age_seconds = quote.age_seconds
+        if source_age_seconds is None and quote.updated_at is not None:
+            quote_updated = _as_utc(quote.updated_at)
+            if quote_updated <= observed:
+                source_age_seconds = (observed - quote_updated).total_seconds()
         rows.append(
             MinuteQuoteRecord(
                 symbol=quote.symbol,
@@ -388,7 +393,7 @@ def _records_from_snapshot(
                 stale_reason=quote.stale_reason,
                 generation=snapshot.generation,
                 evidence_origin=evidence_origin,
-                source_age_seconds=quote.age_seconds,
+                source_age_seconds=source_age_seconds,
                 bid_size=quote.bid_size,
                 ask_size=quote.ask_size,
             )

@@ -121,12 +121,13 @@ class MinuteQuoteStore:
         *,
         symbols: Iterable[str] | None = None,
     ) -> MinuteEvidenceWriteResult:
-        """Append captured evidence without rewriting a minute fact.
+        """Append captured evidence without rewriting a captured minute fact.
 
         The provenance is fixed here so production callers cannot label an
-        imported or preview snapshot as a captured stream. Inserted records
-        let the capture health report distinguish durable progress from a
-        duplicate poll.
+        imported or preview snapshot as a captured stream. A captured row is
+        immutable; when an older non-capture row occupies the cache key, the
+        actual capture replaces it. Inserted records let health distinguish
+        durable progress from a duplicate poll.
         """
 
         rows = _records_from_snapshot(
@@ -148,7 +149,22 @@ class MinuteQuoteStore:
                         bid_size, ask_size
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                               ?, ?, ?)
-                    ON CONFLICT(symbol, minute, provider) DO NOTHING
+                    ON CONFLICT(symbol, minute, provider) DO UPDATE SET
+                        coverage = excluded.coverage,
+                        bid = excluded.bid,
+                        ask = excluded.ask,
+                        last = excluded.last,
+                        mode = excluded.mode,
+                        realtime_ready = excluded.realtime_ready,
+                        stale = excluded.stale,
+                        stale_reason = excluded.stale_reason,
+                        generation = excluded.generation,
+                        evidence_origin = excluded.evidence_origin,
+                        source_age_seconds = excluded.source_age_seconds,
+                        bid_size = excluded.bid_size,
+                        ask_size = excluded.ask_size,
+                        recorded_at = excluded.recorded_at
+                    WHERE minute_quote.evidence_origin <> 'captured_stream'
                     """
                 for row in rows:
                     cursor = connection.execute(statement, _record_values(row))

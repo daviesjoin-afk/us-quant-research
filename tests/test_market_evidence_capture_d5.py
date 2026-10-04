@@ -197,6 +197,27 @@ def test_capture_append_once_restart_and_next_minute(tmp_path: Path) -> None:
     assert rows[0].bid == Decimal("100")
 
 
+def test_real_capture_replaces_preview_for_same_minute_then_is_immutable(
+    tmp_path: Path,
+) -> None:
+    store = MinuteQuoteStore(tmp_path / "minute.sqlite3")
+    minute = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    store.record_snapshot(
+        snapshot(minute, bid="80"), evidence_origin="synthetic_preview"
+    )
+    capture = MarketEvidenceCaptureApplication(
+        store=store, source_id=SOURCE_IBKR, provider="IBKR", symbols=("SPY",)
+    )
+    captured = capture.capture(snapshot(minute, bid="100"))
+    duplicate = capture.capture(snapshot(minute, bid="120"))
+    rows = store.load("SPY", usable_only=False)
+    assert captured.rows_written == 1
+    assert duplicate.duplicate_rows_ignored == 1
+    assert len(rows) == 1
+    assert rows[0].evidence_origin == "captured_stream"
+    assert rows[0].bid == Decimal("100")
+
+
 def test_capture_persists_bad_rows_but_excludes_them_from_usable_store(tmp_path: Path) -> None:
     store = MinuteQuoteStore(tmp_path / "minute.sqlite3")
     capture = MarketEvidenceCaptureApplication(

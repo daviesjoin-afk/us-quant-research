@@ -364,6 +364,53 @@ def test_the_store_is_the_fallback_when_environment_is_unset() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("provider", "expected_loads"),
+    [
+        (PROVIDER_FINNHUB_TRADES, ["finnhub_api_key"]),
+        (PROVIDER_ALPACA_IEX, ["alpaca_api_key", "alpaca_api_secret"]),
+        (PROVIDER_IBKR, []),
+        (PROVIDER_IBKR_EXTENDED, []),
+    ],
+)
+def test_only_selected_provider_credentials_are_resolved(
+    provider: str, expected_loads: list[str]
+) -> None:
+    store = _FakeStore(
+        {
+            "finnhub_api_key": "stored-finnhub",
+            "alpaca_api_key": "stored-alpaca-key",
+            "alpaca_api_secret": "stored-alpaca-secret",
+        }
+    )
+
+    resolved = _service(store).resolve_stream_credentials(
+        provider=provider, environment={}
+    )
+
+    assert store.loads == expected_loads
+    if provider == PROVIDER_FINNHUB_TRADES:
+        assert resolved.finnhub_api_key == "stored-finnhub"
+        assert resolved.alpaca_api_key == resolved.alpaca_api_secret == ""
+    elif provider == PROVIDER_ALPACA_IEX:
+        assert resolved.finnhub_api_key == ""
+        assert resolved.alpaca_api_key == "stored-alpaca-key"
+        assert resolved.alpaca_api_secret == "stored-alpaca-secret"
+    else:
+        assert resolved == StreamCredentials("", "", "")
+
+
+def test_ibkr_resolution_ignores_unreadable_other_provider_blobs() -> None:
+    store = _FakeStore(load_error=CredentialStoreError("broken blob"))
+
+    resolved = _service(store).resolve_stream_credentials(
+        provider=PROVIDER_IBKR, environment={}
+    )
+
+    assert resolved == StreamCredentials("", "", "")
+    assert store.loads == []
+
+
 def test_each_credential_falls_back_independently() -> None:
     """One override must not change how the other two resolve."""
 

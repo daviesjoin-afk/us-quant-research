@@ -53,6 +53,7 @@ class _Record:
     coverage: str = "Type 1"
     realtime_ready: bool = True
     stale: bool = False
+    evidence_origin: str = "captured_stream"
 
 
 class _Store:
@@ -496,6 +497,63 @@ def test_data_quality_reads_the_same_providers_raw_rows(monkeypatch) -> None:
     assert len(seen["raw"]) == 4
     # Both loads were for the same symbol, one usable and one raw.
     assert store.calls == [("AAPL", True), ("AAPL", False)]
+
+
+def test_robustness_excludes_cache_origins_from_all_research_inputs(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+    robustness = _stub_pipeline(monkeypatch, calls)
+    captured = _two_providers()
+    cache_rows = [
+        _Record(
+            "AAPL",
+            "LEGACY_CACHE",
+            f"2026-07-20T14:{minute:02d}:00+00:00",
+            evidence_origin="live_stream_cache",
+        )
+        for minute in range(5)
+    ]
+    raw = captured + cache_rows + [
+        _Record(
+            "AAPL",
+            "IBKR",
+            "2026-07-20T14:03:00+00:00",
+            stale=True,
+            evidence_origin="live_stream_cache",
+        )
+    ]
+    store = _Store(usable=captured + cache_rows, raw=raw)
+    seen: dict[str, tuple[_Record, ...]] = {}
+
+    def capture_robustness(records, **_kwargs):
+        seen["usable"] = tuple(records)
+        return robustness
+
+    def capture_quality(_result, records):
+        seen["raw"] = tuple(records)
+        return "quality"
+
+    monkeypatch.setattr(
+        f"{_MODULE}.run_targeted_robustness", capture_robustness
+    )
+    monkeypatch.setattr(
+        f"{_MODULE}.run_targeted_data_quality", capture_quality
+    )
+    monkeypatch.setattr(
+        f"{_MODULE}.save_targeted_data_quality", lambda *_a, **_k: None
+    )
+
+    _service(store).run_robustness(_inputs(), progress=lambda _m: None)
+
+    assert {row.provider for row in seen["usable"]} == {"IBKR"}
+    assert {row.evidence_origin for row in seen["usable"]} == {
+        "captured_stream"
+    }
+    assert {row.provider for row in seen["raw"]} == {"IBKR"}
+    assert {row.evidence_origin for row in seen["raw"]} == {
+        "captured_stream"
+    }
 
 
 def test_the_bundle_carries_exactly_what_was_produced(monkeypatch) -> None:

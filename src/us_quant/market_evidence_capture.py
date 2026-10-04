@@ -156,7 +156,9 @@ def main(argv: list[str] | None = None) -> int:
         paths = ApplicationPaths.discover()
         credential_store = WindowsCredentialStore(paths.state_root / "credentials")
         credentials_service = DesktopCredentialService(credential_store)
-        resolved = credentials_service.resolve_stream_credentials()
+        resolved = credentials_service.resolve_stream_credentials(
+            provider=args.source
+        )
         credentials = MarketDataCredentials(
             alpaca_api_key=resolved.alpaca_api_key,
             alpaca_api_secret=resolved.alpaca_api_secret,

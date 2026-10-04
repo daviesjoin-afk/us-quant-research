@@ -643,6 +643,7 @@ def test_capture_cli_has_no_trading_or_qt_authority() -> None:
     assert "market_data.snapshot()" in source
     assert "market_data.prepare(request)" in source
     assert "market_data.prepare(request, listener=capture.capture)" not in source
+    assert "provider=args.source" in source
 
 
 def test_capture_cli_polls_push_sources_for_stale_transitions() -> None:

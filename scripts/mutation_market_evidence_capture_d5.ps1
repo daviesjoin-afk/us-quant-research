@@ -45,7 +45,8 @@ $mutations = @(
     @{ name='D5-36 push listener writes synchronously'; file='src/us_quant/market_evidence_capture.py'; find='market_data.prepare(request)'; repl='market_data.prepare(request, listener=capture.capture)'; test='tests/test_market_evidence_capture_d5.py'; select='capture_cli_keeps_durable_writes_off_push_listener' },
     @{ name='D5-37 rotate non-extended provider'; file='src/us_quant/market_evidence_capture.py'; find='if source_id != SOURCE_IBKR_EXTENDED:'; repl='if False:'; test='tests/test_market_evidence_capture_d5.py'; select='extended_route_target_only_tracks_extended_ibkr' },
     @{ name='D5-38 disconnected stream reports healthy'; file='src/us_quant/market_evidence_capture.py'; find='if not health.connected:'; repl='if False:'; test='tests/test_market_evidence_capture_d5.py'; select='health_status_reports_disconnected_and_not_ready' },
-    @{ name='D5-39 non-realtime stream reports healthy'; file='src/us_quant/market_evidence_capture.py'; find='if not health.market_stream_realtime:'; repl='if False:'; test='tests/test_market_evidence_capture_d5.py'; select='health_status_reports_disconnected_and_not_ready' }
+    @{ name='D5-39 non-realtime stream reports healthy'; file='src/us_quant/market_evidence_capture.py'; find='if not health.market_stream_realtime:'; repl='if False:'; test='tests/test_market_evidence_capture_d5.py'; select='health_status_reports_disconnected_and_not_ready' },
+    @{ name='D5-40 CLI resolves all provider credentials'; file='src/us_quant/market_evidence_capture.py'; find='provider=args.source'; repl='provider=None'; test='tests/test_market_evidence_capture_d5.py'; select='capture_cli_has_no_trading_or_qt_authority' }
 )
 $baseline = & $py -m pytest (Join-Path $projectRoot 'tests/test_market_evidence_capture_d5.py') (Join-Path $projectRoot 'tests/test_minute_evidence_quality_characterization.py') -q 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host ($baseline -join "`n"); throw 'Baseline is not GREEN' }

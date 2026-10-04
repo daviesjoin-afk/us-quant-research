@@ -279,6 +279,29 @@ def test_stale_quote_is_bucketed_by_observation_minute(tmp_path: Path) -> None:
     assert rows[0].source_age_seconds == 120
 
 
+def test_generic_live_cache_keeps_quote_minute(tmp_path: Path) -> None:
+    store = MinuteQuoteStore(tmp_path / "minute.sqlite3")
+    observed_at = datetime(2026, 7, 6, 14, 2, tzinfo=timezone.utc)
+    quote_time = observed_at - timedelta(minutes=2)
+
+    store.record_snapshot(
+        replace(snapshot(observed_at), quotes=(quote(quote_time, age=120),))
+    )
+
+    rows = store.load("SPY", provider="IBKR", usable_only=False)
+    assert len(rows) == 1
+    assert rows[0].minute == quote_time.isoformat()
+    assert rows[0].evidence_origin == "live_stream_cache"
+
+
+def test_generic_snapshot_cannot_claim_durable_origin(tmp_path: Path) -> None:
+    store = MinuteQuoteStore(tmp_path / "minute.sqlite3")
+    minute = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="record_evidence_snapshot_once"):
+        store.record_snapshot(snapshot(minute), evidence_origin="captured_stream")
+    assert store.load("SPY", usable_only=False) == ()
+
+
 def test_capture_persists_bad_rows_but_excludes_them_from_usable_store(tmp_path: Path) -> None:
     store = MinuteQuoteStore(tmp_path / "minute.sqlite3")
     capture = MarketEvidenceCaptureApplication(
@@ -580,6 +603,17 @@ def test_capture_cli_has_no_trading_or_qt_authority() -> None:
     assert "build_market_data_application" in source
     assert "PUSH_LISTENER_SOURCES" in source
     assert "market_data.snapshot()" in source
+
+
+def test_capture_cli_polls_push_sources_for_stale_transitions() -> None:
+    source = Path("src/us_quant/market_evidence_capture.py").read_text(
+        encoding="utf-8"
+    )
+    loop = source.split("while not stopping.is_set():", 1)[1].split(
+        "except KeyboardInterrupt:", 1
+    )[0]
+    assert "capture.capture(snapshot)" in loop
+    assert "args.source not in PUSH_LISTENER_SOURCES" not in loop
 
 
 def test_new_york_dst_and_weekends_are_not_counted() -> None:

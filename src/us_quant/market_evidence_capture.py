@@ -182,8 +182,7 @@ def main(argv: list[str] | None = None) -> int:
         last_health = 0.0
         while not stopping.is_set():
             snapshot = market_data.snapshot()
-            if args.source not in PUSH_LISTENER_SOURCES:
-                capture.capture(snapshot)
+            capture.capture(snapshot)
             now = monotonic()
             if now - last_health >= args.health_interval:
                 health = capture.health(snapshot, now_monotonic=now)

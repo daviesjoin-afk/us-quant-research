@@ -68,19 +68,22 @@ class MinuteQuoteStore:
         snapshot: MarketSnapshot,
         *,
         symbols: Iterable[str] | None = None,
-        evidence_origin: str = "captured_stream",
+        evidence_origin: str = "live_stream_cache",
     ) -> int:
         if evidence_origin not in {
-            "captured_stream",
             "live_stream_cache",
             "synthetic_preview",
             "imported_research",
         }:
-            raise ValueError("unsupported minute evidence origin")
+            raise ValueError(
+                "unsupported generic snapshot origin; captured evidence "
+                "must use record_evidence_snapshot_once"
+            )
         rows = _records_from_snapshot(
             snapshot,
             symbols=symbols,
             evidence_origin=evidence_origin,
+            use_snapshot_observation=False,
         )
         if not rows:
             return 0
@@ -106,6 +109,7 @@ class MinuteQuoteStore:
             snapshot,
             symbols=symbols,
             evidence_origin="captured_stream",
+            use_snapshot_observation=True,
         )
         if not rows:
             return MinuteEvidenceWriteResult(0, 0, ())
@@ -301,6 +305,13 @@ class MinuteQuoteStore:
                     ON minute_quote(symbol, minute)
                     """
                 )
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS minute_quote_migration (
+                        migration_id TEXT PRIMARY KEY
+                    )
+                    """
+                )
                 # Snapshot of the schema the database *arrived* with, taken
                 # before any ALTER below: it is what tells us whether this is
                 # a Market Data v1 database that still carries the retired
@@ -340,6 +351,7 @@ class MinuteQuoteStore:
                         connection,
                         columns=columns,
                     )
+                _migrate_legacy_capture_origin(connection)
 
     def _connect(self) -> sqlite3.Connection:
         return connect_sqlite(self.path)
@@ -350,6 +362,7 @@ def _records_from_snapshot(
     *,
     symbols: Iterable[str] | None,
     evidence_origin: str,
+    use_snapshot_observation: bool,
 ) -> tuple[MinuteQuoteRecord, ...]:
     allowed = (
         {symbol.strip().upper() for symbol in symbols}
@@ -364,7 +377,11 @@ def _records_from_snapshot(
         # Bucket the evidence by when this snapshot was observed. The quote's
         # own timestamp remains useful for estimating age when the provider
         # did not supply an explicit age.
-        observed = _as_utc(snapshot.observed_at)
+        observed = _as_utc(
+            snapshot.observed_at
+            if use_snapshot_observation
+            else (quote.updated_at or snapshot.observed_at)
+        )
         minute = _minute_iso(observed)
         provider = quote.source_label or snapshot.source_label
         key = (quote.symbol, minute, provider)
@@ -376,8 +393,9 @@ def _records_from_snapshot(
         source_age_seconds = quote.age_seconds
         if source_age_seconds is None and quote.updated_at is not None:
             quote_updated = _as_utc(quote.updated_at)
-            if quote_updated <= observed:
-                source_age_seconds = (observed - quote_updated).total_seconds()
+            sample_time = _as_utc(snapshot.observed_at)
+            if quote_updated <= sample_time:
+                source_age_seconds = (sample_time - quote_updated).total_seconds()
         rows.append(
             MinuteQuoteRecord(
                 symbol=quote.symbol,
@@ -399,6 +417,34 @@ def _records_from_snapshot(
             )
         )
     return tuple(rows)
+
+
+def _migrate_legacy_capture_origin(connection: sqlite3.Connection) -> None:
+    """Demote rows written before the immutable capture API existed.
+
+    Earlier desktop builds used the generic upsert path while labeling rows as
+    captured. Those rows cannot prove append-once provenance, so they remain
+    available as mutable live cache data but cannot satisfy durable readiness.
+    The marker makes this provenance correction a one-time migration.
+    """
+
+    migration_id = "legacy_captured_stream_rows_to_live_cache_v1"
+    if connection.execute(
+        "SELECT 1 FROM minute_quote_migration WHERE migration_id = ?",
+        (migration_id,),
+    ).fetchone():
+        return
+    connection.execute(
+        """
+        UPDATE minute_quote
+        SET evidence_origin = 'live_stream_cache'
+        WHERE evidence_origin = 'captured_stream'
+        """
+    )
+    connection.execute(
+        "INSERT INTO minute_quote_migration (migration_id) VALUES (?)",
+        (migration_id,),
+    )
 
 
 def _record_values(row: MinuteQuoteRecord) -> tuple[object, ...]:

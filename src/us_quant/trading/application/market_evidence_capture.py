@@ -100,10 +100,15 @@ class MarketEvidenceCaptureApplication:
         self._validate_identity(snapshot)
         self._last_snapshot_at = snapshot.observed_at
         self._observed_symbols.update(quote.symbol for quote in snapshot.quotes)
-        result = self._store.record_evidence_snapshot_once(
-            snapshot,
-            symbols=self.expected_symbols,
-        )
+        try:
+            result = self._store.record_evidence_snapshot_once(
+                snapshot,
+                symbols=self.expected_symbols,
+            )
+        except ValueError as error:
+            raise MarketEvidenceCaptureError(
+                f"invalid capture snapshot: {error}"
+            ) from error
         self._rows_written += result.rows_written
         self._duplicates_ignored += result.duplicate_rows_ignored
         if result.inserted_records:

@@ -356,6 +356,7 @@ def _records_from_snapshot(
         else None
     )
     rows: list[MinuteQuoteRecord] = []
+    seen_keys: set[tuple[str, str, str]] = set()
     for quote in snapshot.quotes:
         if allowed is not None and quote.symbol not in allowed:
             continue
@@ -364,11 +365,19 @@ def _records_from_snapshot(
         # timestamp uses the snapshot's observation time, an actual capture
         # timestamp rather than an invented market timestamp.
         observed = _as_utc(quote.updated_at or snapshot.observed_at)
+        minute = _minute_iso(observed)
+        provider = quote.source_label or snapshot.source_label
+        key = (quote.symbol, minute, provider)
+        if key in seen_keys:
+            raise ValueError(
+                "snapshot contains duplicate symbol/minute/provider evidence"
+            )
+        seen_keys.add(key)
         rows.append(
             MinuteQuoteRecord(
                 symbol=quote.symbol,
-                minute=_minute_iso(observed),
-                provider=quote.source_label or snapshot.source_label,
+                minute=minute,
+                provider=provider,
                 coverage=quote.coverage or snapshot.coverage,
                 bid=quote.bid,
                 ask=quote.ask,

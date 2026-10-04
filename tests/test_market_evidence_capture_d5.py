@@ -238,6 +238,26 @@ def test_generic_snapshot_cannot_overwrite_captured_minute(
     assert rows[0].bid == Decimal("100")
 
 
+def test_duplicate_snapshot_key_is_rejected_before_durable_write(
+    tmp_path: Path,
+) -> None:
+    store = MinuteQuoteStore(tmp_path / "minute.sqlite3")
+    capture = MarketEvidenceCaptureApplication(
+        store=store, source_id=SOURCE_IBKR, provider="IBKR", symbols=("SPY",)
+    )
+    minute = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    duplicated = replace(
+        snapshot(minute),
+        quotes=(
+            quote(minute, stale=True, bid=None, ask=None),
+            quote(minute, bid=Decimal("100"), ask=Decimal("100.01")),
+        ),
+    )
+    with pytest.raises(MarketEvidenceCaptureError, match="invalid capture snapshot"):
+        capture.capture(duplicated)
+    assert store.load("SPY", usable_only=False) == ()
+
+
 def test_capture_persists_bad_rows_but_excludes_them_from_usable_store(tmp_path: Path) -> None:
     store = MinuteQuoteStore(tmp_path / "minute.sqlite3")
     capture = MarketEvidenceCaptureApplication(

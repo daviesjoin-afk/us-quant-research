@@ -482,8 +482,8 @@ class LegacyMinuteMigrationTests(unittest.TestCase):
                     {"AAPL": mode.value},
                 )
 
-    def test_record_snapshot_never_writes_the_legacy_column(self) -> None:
-        source = inspect.getsource(MinuteQuoteStore.record_snapshot)
+    def test_shared_snapshot_writer_uses_current_columns_only(self) -> None:
+        source = inspect.getsource(MinuteQuoteStore._upsert_records)
         self.assertIn("mode", source)
         self.assertNotIn("market_data_type", source)
 

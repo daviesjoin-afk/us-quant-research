@@ -83,36 +83,7 @@ class MinuteQuoteStore:
         )
         if not rows:
             return 0
-        with closing(self._connect()) as connection:
-            with connection:
-                connection.executemany(
-                    """
-                    INSERT INTO minute_quote (
-                        symbol, minute, provider, coverage, bid, ask, last,
-                        mode, realtime_ready, stale,
-                        stale_reason, generation, recorded_at
-                        , evidence_origin, source_age_seconds,
-                        bid_size, ask_size
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                              ?, ?, ?)
-                    ON CONFLICT(symbol, minute, provider) DO UPDATE SET
-                        coverage = excluded.coverage,
-                        bid = excluded.bid,
-                        ask = excluded.ask,
-                        last = excluded.last,
-                        mode = excluded.mode,
-                        realtime_ready = excluded.realtime_ready,
-                        stale = excluded.stale,
-                        stale_reason = excluded.stale_reason,
-                        generation = excluded.generation,
-                        evidence_origin = excluded.evidence_origin,
-                        source_age_seconds = excluded.source_age_seconds,
-                        bid_size = excluded.bid_size,
-                        ask_size = excluded.ask_size,
-                        recorded_at = excluded.recorded_at
-                    """,
-                    [_record_values(row) for row in rows],
-                )
+        self._upsert_records(rows)
         return len(rows)
 
     def record_evidence_snapshot_once(
@@ -137,44 +108,51 @@ class MinuteQuoteStore:
         )
         if not rows:
             return MinuteEvidenceWriteResult(0, 0, ())
-        inserted_rows: list[MinuteQuoteRecord] = []
-        with closing(self._connect()) as connection:
-            with connection:
-                statement = """
-                    INSERT INTO minute_quote (
-                        symbol, minute, provider, coverage, bid, ask, last,
-                        mode, realtime_ready, stale,
-                        stale_reason, generation, recorded_at
-                        , evidence_origin, source_age_seconds,
-                        bid_size, ask_size
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                              ?, ?, ?)
-                    ON CONFLICT(symbol, minute, provider) DO UPDATE SET
-                        coverage = excluded.coverage,
-                        bid = excluded.bid,
-                        ask = excluded.ask,
-                        last = excluded.last,
-                        mode = excluded.mode,
-                        realtime_ready = excluded.realtime_ready,
-                        stale = excluded.stale,
-                        stale_reason = excluded.stale_reason,
-                        generation = excluded.generation,
-                        evidence_origin = excluded.evidence_origin,
-                        source_age_seconds = excluded.source_age_seconds,
-                        bid_size = excluded.bid_size,
-                        ask_size = excluded.ask_size,
-                        recorded_at = excluded.recorded_at
-                    WHERE minute_quote.evidence_origin <> 'captured_stream'
-                    """
-                for row in rows:
-                    cursor = connection.execute(statement, _record_values(row))
-                    if cursor.rowcount == 1:
-                        inserted_rows.append(row)
+        inserted_rows = self._upsert_records(rows)
         return MinuteEvidenceWriteResult(
             rows_written=len(inserted_rows),
             duplicate_rows_ignored=len(rows) - len(inserted_rows),
             inserted_records=tuple(inserted_rows),
         )
+
+    def _upsert_records(
+        self,
+        rows: tuple[MinuteQuoteRecord, ...],
+    ) -> list[MinuteQuoteRecord]:
+        """Share the cache conflict rule across all snapshot write paths."""
+
+        inserted_rows: list[MinuteQuoteRecord] = []
+        statement = """
+            INSERT INTO minute_quote (
+                symbol, minute, provider, coverage, bid, ask, last,
+                mode, realtime_ready, stale,
+                stale_reason, generation, recorded_at,
+                evidence_origin, source_age_seconds, bid_size, ask_size
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(symbol, minute, provider) DO UPDATE SET
+                coverage = excluded.coverage,
+                bid = excluded.bid,
+                ask = excluded.ask,
+                last = excluded.last,
+                mode = excluded.mode,
+                realtime_ready = excluded.realtime_ready,
+                stale = excluded.stale,
+                stale_reason = excluded.stale_reason,
+                generation = excluded.generation,
+                evidence_origin = excluded.evidence_origin,
+                source_age_seconds = excluded.source_age_seconds,
+                bid_size = excluded.bid_size,
+                ask_size = excluded.ask_size,
+                recorded_at = excluded.recorded_at
+            WHERE minute_quote.evidence_origin <> 'captured_stream'
+            """
+        with closing(self._connect()) as connection:
+            with connection:
+                for row in rows:
+                    cursor = connection.execute(statement, _record_values(row))
+                    if cursor.rowcount == 1:
+                        inserted_rows.append(row)
+        return inserted_rows
 
     def load(
         self,

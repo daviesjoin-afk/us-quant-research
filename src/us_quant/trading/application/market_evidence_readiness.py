@@ -193,6 +193,7 @@ class MarketEvidenceReadinessApplication:
     ) -> MarketEvidenceReadiness:
         rows = self._store.load(
             symbol,
+            provider=provider,
             usable_only=False,
         )
         return assess_market_evidence_readiness(

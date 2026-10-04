@@ -218,6 +218,26 @@ def test_real_capture_replaces_preview_for_same_minute_then_is_immutable(
     assert rows[0].bid == Decimal("100")
 
 
+@pytest.mark.parametrize("origin", ["synthetic_preview", "imported_research"])
+def test_generic_snapshot_cannot_overwrite_captured_minute(
+    tmp_path: Path,
+    origin: str,
+) -> None:
+    store = MinuteQuoteStore(tmp_path / f"{origin}.sqlite3")
+    minute = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    capture = MarketEvidenceCaptureApplication(
+        store=store, source_id=SOURCE_IBKR, provider="IBKR", symbols=("SPY",)
+    )
+    capture.capture(snapshot(minute, bid="100"))
+
+    store.record_snapshot(snapshot(minute, bid="80"), evidence_origin=origin)
+
+    rows = store.load("SPY", provider="IBKR", usable_only=False)
+    assert len(rows) == 1
+    assert rows[0].evidence_origin == "captured_stream"
+    assert rows[0].bid == Decimal("100")
+
+
 def test_capture_persists_bad_rows_but_excludes_them_from_usable_store(tmp_path: Path) -> None:
     store = MinuteQuoteStore(tmp_path / "minute.sqlite3")
     capture = MarketEvidenceCaptureApplication(
@@ -319,6 +339,30 @@ def test_capture_health_marks_stalled_after_five_minutes(tmp_path: Path) -> None
     assert not delayed.market_stream_realtime
 
 
+def test_capture_health_requires_every_expected_symbol_realtime(
+    tmp_path: Path,
+) -> None:
+    store = MinuteQuoteStore(tmp_path / "minute.sqlite3")
+    capture = MarketEvidenceCaptureApplication(
+        store=store,
+        source_id=SOURCE_IBKR,
+        provider="IBKR",
+        symbols=("SPY", "QQQ"),
+    )
+    minute = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    partial = capture.health(snapshot(minute), now_monotonic=1.0)
+    assert partial.realtime_symbols == ("SPY",)
+    assert not partial.market_stream_realtime
+
+    complete_snapshot = replace(
+        snapshot(minute),
+        quotes=(quote(minute, symbol="SPY"), quote(minute, symbol="QQQ")),
+    )
+    complete = capture.health(complete_snapshot, now_monotonic=2.0)
+    assert complete.realtime_symbols == ("QQQ", "SPY")
+    assert complete.market_stream_realtime
+
+
 def test_normalized_symbols_are_fixed_and_deterministic() -> None:
     from us_quant.market_evidence_capture import _normalized_symbols
 
@@ -415,7 +459,7 @@ def test_provider_mixing_rejected_and_input_order_is_deterministic() -> None:
     assert mixed.blockers == ("MULTIPLE_PROVIDERS",)
 
 
-def test_readiness_application_sees_and_rejects_other_provider_rows(
+def test_readiness_application_scopes_rows_to_requested_provider(
     tmp_path: Path,
 ) -> None:
     store = MinuteQuoteStore(tmp_path / "minute.sqlite3")
@@ -453,8 +497,14 @@ def test_readiness_application_sees_and_rejects_other_provider_rows(
     result = MarketEvidenceReadinessApplication(store).inspect(
         symbol="SPY", provider="IBKR", parameters=PARAMETERS
     )
-    assert result.status == "DATA_INVALID"
-    assert result.blockers == ("MULTIPLE_PROVIDERS",)
+    alpaca_result = MarketEvidenceReadinessApplication(store).inspect(
+        symbol="SPY", provider="Alpaca", parameters=PARAMETERS
+    )
+    assert result.provider == "IBKR"
+    assert result.status != "DATA_INVALID"
+    assert "MULTIPLE_PROVIDERS" not in result.blockers
+    assert alpaca_result.provider == "Alpaca"
+    assert alpaca_result.status != "DATA_INVALID"
 
 
 def test_capture_cli_has_no_trading_or_qt_authority() -> None:

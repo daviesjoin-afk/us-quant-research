@@ -141,7 +141,9 @@ class MarketEvidenceCaptureApplication:
             provider=self.provider,
             connected=connected,
             ready=snapshot.ready,
-            market_stream_realtime=bool(realtime_symbols),
+            market_stream_realtime=(
+                set(realtime_symbols) == set(self.expected_symbols)
+            ),
             expected_symbols=self.expected_symbols,
             observed_symbols=tuple(sorted(self._observed_symbols)),
             realtime_symbols=realtime_symbols,

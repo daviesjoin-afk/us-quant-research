@@ -22,7 +22,6 @@ from us_quant.desktop_credentials import DesktopCredentialService
 from us_quant.minute_data import MinuteQuoteStore
 from us_quant.paths import ApplicationPaths
 from us_quant.trading.application.market_data import (
-    PUSH_LISTENER_SOURCES,
     SOURCE_LABELS,
     SUPPORTED_SOURCES,
     MarketDataCredentials,
@@ -154,8 +153,10 @@ def main(argv: list[str] | None = None) -> int:
             symbols=symbols,
             credentials=credentials,
         )
-        listener = capture.capture if args.source in PUSH_LISTENER_SOURCES else None
-        market_data.prepare(request, listener=listener)
+        # Capture on the bounded polling loop below, not on the provider's
+        # WebSocket receive thread. This keeps SQLite work off the push path
+        # while still sampling current and stale states at each interval.
+        market_data.prepare(request)
     except (OSError, ValueError, RuntimeError) as error:
         print(f"market evidence capture cannot start: {error}", file=sys.stderr)
         return 2

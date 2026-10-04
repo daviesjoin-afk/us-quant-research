@@ -601,8 +601,9 @@ def test_capture_cli_has_no_trading_or_qt_authority() -> None:
         for token in ("qt", "execution", "risk", "portfolio", "strategy")
     )
     assert "build_market_data_application" in source
-    assert "PUSH_LISTENER_SOURCES" in source
     assert "market_data.snapshot()" in source
+    assert "market_data.prepare(request)" in source
+    assert "market_data.prepare(request, listener=capture.capture)" not in source
 
 
 def test_capture_cli_polls_push_sources_for_stale_transitions() -> None:
@@ -614,6 +615,14 @@ def test_capture_cli_polls_push_sources_for_stale_transitions() -> None:
     )[0]
     assert "capture.capture(snapshot)" in loop
     assert "args.source not in PUSH_LISTENER_SOURCES" not in loop
+
+
+def test_capture_cli_keeps_durable_writes_off_push_listener() -> None:
+    source = Path("src/us_quant/market_evidence_capture.py").read_text(
+        encoding="utf-8"
+    )
+    preparation = source.split("market_data.prepare(request)", 1)[0]
+    assert "listener=capture.capture" not in preparation
 
 
 def test_new_york_dst_and_weekends_are_not_counted() -> None:

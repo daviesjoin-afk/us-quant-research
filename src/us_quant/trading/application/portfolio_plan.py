@@ -1,0 +1,321 @@
+"""Read and validate the durable operator-authored portfolio plan."""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Callable
+from datetime import UTC, datetime
+from decimal import Decimal
+from uuid import uuid4
+
+from us_quant.trading.application.strategies import StrategyApplication
+from us_quant.trading.domain.portfolio import (
+    PortfolioCapitalPolicy,
+    PortfolioStrategyAllocation,
+)
+from us_quant.trading.domain.portfolio_operations import (
+    PortfolioOperatingPlan,
+    PortfolioPlanAuditEvent,
+)
+from us_quant.trading.domain.strategy import StrategyMode, StrategyStatus
+from us_quant.trading.ports.portfolio_operating_plan import (
+    PortfolioOperatingPlanConflict,
+    PortfolioOperatingPlanRepositoryPort,
+)
+
+
+class PortfolioOperatingPlanApplication:
+    """Validates governed selections and stores operator plans with CAS audit."""
+
+    def __init__(
+        self,
+        *,
+        repository: PortfolioOperatingPlanRepositoryPort,
+        strategies: StrategyApplication,
+        active_session: Callable[[], bool] | None = None,
+        paper_authorization: Callable[[str], bool] | None = None,
+    ) -> None:
+        self._repository = repository
+        self._strategies = strategies
+        self._active_session = active_session or (lambda: False)
+        # Fail closed: a plan builder with no way to check whether a promotion is
+        # still authorised refuses every selection rather than assuming it is.
+        # This is the launch boundary, so it is the one place the check belongs
+        # -- instruction 25 keeps it out of the runtime, risk and execution
+        # layers, which trust an already-composed plan.
+        self._paper_authorization = paper_authorization
+
+    def load(self) -> PortfolioOperatingPlan:
+        plan = self._repository.load()
+        if plan is None:
+            raise PortfolioPlanRefused("no portfolio operating plan is configured")
+        self._validate(plan.selected_version_ids, plan.policy)
+        return plan
+
+    def selected_versions(self, plan: PortfolioOperatingPlan | None = None) -> tuple:
+        """Read the exact governed versions a frozen plan names."""
+
+        current = plan or self.load()
+        versions = tuple(self._strategies.list_versions())
+        self._validate(current.selected_version_ids, current.policy, catalogue=versions)
+        by_id = {item.version_id: item for item in versions}
+        return tuple(by_id[version_id] for version_id in current.selected_version_ids)
+
+    def selected_versions_for_ids(self, version_ids: tuple[str, ...]) -> tuple:
+        """Return versions only when the ids still match the durable plan."""
+
+        current = self.load()
+        if tuple(version_ids) != current.selected_version_ids:
+            raise PortfolioPlanRefused(
+                "requested Paper strategies no longer match the portfolio plan"
+            )
+        return self.selected_versions(current)
+
+    def editor_state(self) -> tuple[tuple[str, ...], dict[str, object] | None]:
+        """Return display-only options and editable values for the Desktop page."""
+
+        versions = self._strategies.list_versions()
+        # The label reports what the launch gate would actually decide.  It used
+        # to read the retired ``gate_passed`` flag, which nothing writes any
+        # more -- so every evidence-authorised promotion would have been
+        # displayed as blocked.
+        authorises = self._paper_authorization or (lambda _version_id: False)
+        options = tuple(
+            f"{item.version_id} / {item.status.value} / {item.mode.value} / paper={'AUTHORISED' if authorises(item.version_id) else 'NOT_AUTHORISED'} / worker={'READY' if item.strategy_id == 'intraday-auto-rotation' else 'UNAVAILABLE'}"
+            for item in sorted(versions, key=lambda value: value.version_id)
+        )
+        plan = self._repository.load()
+        if plan is None:
+            return options, None
+        policy = plan.policy
+        limits = (
+            policy.total_capital_limit,
+            policy.max_gross_exposure,
+            policy.max_net_exposure,
+            policy.max_single_position_notional,
+            policy.max_symbol_concentration,
+            policy.max_strategy_concentration,
+            policy.max_positions,
+            policy.max_open_orders,
+        )
+        allocations = tuple(
+            (
+                item.strategy_version_id,
+                item.capital_weight,
+                item.max_capital,
+                item.max_gross_exposure,
+                str(item.enabled).lower(),
+            )
+            for item in policy.allocations
+        )
+        return options, {
+            "revision": plan.revision,
+            "selected_version_ids": plan.selected_version_ids,
+            "limits": limits,
+            "allocations": allocations,
+        }
+
+    def save_editor(self, command: object) -> PortfolioOperatingPlan:
+        """Parse the Page's raw form values, then run the canonical validation."""
+
+        if not isinstance(command, dict):
+            raise PortfolioPlanRefused("portfolio plan form is invalid")
+        try:
+            expected_revision = int(command["expected_revision"])
+            selected = tuple(
+                sorted(
+                    {
+                        item.strip()
+                        for item in command["selected_version_ids"].split(",")
+                        if item.strip()
+                    }
+                )
+            )
+            raw_limits = tuple(item.strip() for item in command["limits"].split("|"))
+            if len(raw_limits) != 8:
+                raise ValueError("exactly eight portfolio hard limits are required")
+            allocations = []
+            for line in command["allocations"].splitlines():
+                if not line.strip():
+                    continue
+                parts = tuple(item.strip() for item in line.split("|"))
+                if len(parts) != 5 or parts[4].lower() not in {"true", "false"}:
+                    raise ValueError(
+                        "allocation rows require id|weight|capital|gross|enabled"
+                    )
+                allocations.append(
+                    PortfolioStrategyAllocation(
+                        strategy_version_id=parts[0],
+                        capital_weight=Decimal(parts[1]),
+                        max_capital=Decimal(parts[2]),
+                        max_gross_exposure=Decimal(parts[3]),
+                        enabled=parts[4].lower() == "true",
+                    )
+                )
+            policy = PortfolioCapitalPolicy(
+                total_capital_limit=Decimal(raw_limits[0]),
+                max_gross_exposure=Decimal(raw_limits[1]),
+                max_net_exposure=Decimal(raw_limits[2]),
+                max_single_position_notional=Decimal(raw_limits[3]),
+                max_symbol_concentration=Decimal(raw_limits[4]),
+                max_strategy_concentration=Decimal(raw_limits[5]),
+                max_positions=int(raw_limits[6]),
+                max_open_orders=int(raw_limits[7]),
+                allocations=tuple(allocations),
+            )
+            reason = str(command["operator_reason"])
+        except (KeyError, TypeError, ValueError, ArithmeticError) as error:
+            raise PortfolioPlanRefused(
+                f"portfolio plan form is invalid: {error}"
+            ) from error
+        return self.save(
+            selected_version_ids=selected,
+            policy=policy,
+            expected_revision=expected_revision,
+            operator_reason=reason,
+        )
+
+    def save(
+        self,
+        *,
+        selected_version_ids: tuple[str, ...],
+        policy: PortfolioCapitalPolicy,
+        expected_revision: int,
+        operator_reason: str,
+        changed_at: datetime | None = None,
+    ) -> PortfolioOperatingPlan:
+        if self._active_session():
+            raise PortfolioPlanRefused(
+                "portfolio plan cannot change during an active Paper session"
+            )
+        self._validate(selected_version_ids, policy)
+        if not isinstance(operator_reason, str) or not operator_reason.strip():
+            raise PortfolioPlanRefused("operator reason is required")
+        if re.search(
+            r"(?i)password|credential|secret|api[_ -]?key|token|\bDU\d{6,}\b",
+            operator_reason,
+        ):
+            raise PortfolioPlanRefused(
+                "operator reason must not contain credentials or raw account identifiers"
+            )
+        now = changed_at or datetime.now(UTC)
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise PortfolioPlanRefused("plan timestamp must be timezone-aware")
+        current = self._repository.load()
+        current_revision = 0 if current is None else current.revision
+        if type(expected_revision) is not int or expected_revision != current_revision:
+            raise PortfolioOperatingPlanConflict(
+                "portfolio plan changed; stale update was refused"
+            )
+        selected = tuple(sorted(selected_version_ids))
+        plan = PortfolioOperatingPlan(
+            plan_id=current.plan_id if current else uuid4().hex,
+            revision=current_revision + 1,
+            selected_version_ids=selected,
+            policy=policy,
+            created_at=current.created_at if current else now,
+            updated_at=now,
+        )
+        limits = tuple(
+            (
+                item.strategy_version_id,
+                str(item.capital_weight),
+                str(item.max_capital),
+                str(item.max_gross_exposure),
+                item.enabled,
+            )
+            for item in sorted(
+                policy.allocations, key=lambda value: value.strategy_version_id
+            )
+        )
+        audit = PortfolioPlanAuditEvent(
+            plan_id=plan.plan_id,
+            revision=plan.revision,
+            changed_at=now,
+            selected_version_ids=selected,
+            policy_limits=(
+                str(policy.total_capital_limit),
+                str(policy.max_gross_exposure),
+                str(policy.max_net_exposure),
+                str(policy.max_single_position_notional),
+                str(policy.max_symbol_concentration),
+                str(policy.max_strategy_concentration),
+                str(policy.max_positions),
+                str(policy.max_open_orders),
+            ),
+            allocation_limits=limits,
+            operator_reason=operator_reason.strip(),
+        )
+        return self._repository.save(
+            plan, expected_revision=current_revision, audit=audit
+        )
+
+    def _validate(
+        self,
+        selected_version_ids: tuple[str, ...],
+        policy: PortfolioCapitalPolicy,
+        *,
+        catalogue: tuple | None = None,
+    ) -> None:
+        if not isinstance(selected_version_ids, tuple) or not selected_version_ids:
+            raise PortfolioPlanRefused("select at least one governed Paper strategy")
+        if len(set(selected_version_ids)) != len(selected_version_ids):
+            raise PortfolioPlanRefused("selected strategy versions must be unique")
+        if not isinstance(policy, PortfolioCapitalPolicy) or not policy.is_configured:
+            raise PortfolioPlanRefused(
+                "portfolio hard capital limits must all be configured"
+            )
+        versions = {
+            item.version_id: item
+            for item in (
+                catalogue if catalogue is not None else self._strategies.list_versions()
+            )
+        }
+        for version_id in selected_version_ids:
+            version = versions.get(version_id)
+            if version is None:
+                raise PortfolioPlanRefused(
+                    f"selected strategy version does not exist: {version_id}"
+                )
+            if (
+                version.status is not StrategyStatus.PAPER_SHADOW
+                or version.mode is not StrategyMode.PAPER_SHADOW
+            ):
+                raise PortfolioPlanRefused(
+                    f"selected strategy version is not governed for Paper: {version_id}"
+                )
+            # The legacy ``gate_passed`` column is not consulted.  Nothing writes
+            # it any more, so requiring it would refuse every evidence-authorised
+            # promotion -- which is exactly the gap this check replaces.  What
+            # matters is whether the decision that entered Paper is still valid
+            # *now*: a question about the lifecycle record and the evidence
+            # behind it, not about a stored boolean.
+            if self._paper_authorization is None or not self._paper_authorization(
+                version_id
+            ):
+                raise PortfolioPlanRefused(
+                    f"selected strategy version has no current Paper lifecycle "
+                    f"authorization: {version_id}"
+                )
+            if version.strategy_id != "intraday-auto-rotation":
+                raise PortfolioPlanRefused(
+                    f"no production Paper signal worker is registered for strategy family: {version.strategy_id}"
+                )
+            allocation = policy.allocation_for(version_id)
+            if (
+                allocation is None
+                or not allocation.enabled
+                or allocation.capital_weight <= 0
+                or allocation.max_capital <= 0
+                or allocation.max_gross_exposure <= 0
+            ):
+                raise PortfolioPlanRefused(
+                    f"selected strategy lacks an enabled positive allocation: {version_id}"
+                )
+
+
+class PortfolioPlanRefused(RuntimeError):
+    """An operating plan is missing or violates a Paper launch constraint."""
+
+
+__all__ = ["PortfolioOperatingPlanApplication", "PortfolioPlanRefused"]

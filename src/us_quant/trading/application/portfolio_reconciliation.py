@@ -14,6 +14,8 @@ from us_quant.trading.ports.broker_open_order_truth import BrokerOpenOrderTruthS
 from us_quant.trading.ports.portfolio_order_truth import PortfolioOrderTruthSource
 from us_quant.trading.ports.portfolio_repository import PortfolioStateRepositoryPort
 
+DEFAULT_MAX_RECONCILIATION_SNAPSHOT_AGE = timedelta(minutes=5)
+
 
 class PortfolioReconciliationApplication:
     """Stateless recovery authority; each call reloads every durable input."""
@@ -24,7 +26,7 @@ class PortfolioReconciliationApplication:
         portfolio_repository: PortfolioStateRepositoryPort,
         order_truth: PortfolioOrderTruthSource,
         broker_order_truth: BrokerOpenOrderTruthSource,
-        max_snapshot_age: timedelta = timedelta(minutes=5),
+        max_snapshot_age: timedelta = DEFAULT_MAX_RECONCILIATION_SNAPSHOT_AGE,
     ) -> None:
         self._portfolio_repository = portfolio_repository
         self._order_truth = order_truth
@@ -58,4 +60,7 @@ class PortfolioReconciliationApplication:
         )
 
 
-__all__ = ["PortfolioReconciliationApplication"]
+__all__ = [
+    "DEFAULT_MAX_RECONCILIATION_SNAPSHOT_AGE",
+    "PortfolioReconciliationApplication",
+]

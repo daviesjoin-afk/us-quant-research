@@ -167,6 +167,7 @@ def test_a21_gate_is_not_wired_into_runtime_or_lifecycle():
         # validator needs one.  Composition is where concrete adapters are
         # assembled by definition, so naming a repository here is its job.
         SRC / "trading" / "composition" / "portfolio_operations.py",
+        SRC / "trading" / "composition" / "paper_canary_readiness.py",
         SRC / "trading" / "composition" / "strategy_lifecycle.py",
     }
     for path in SRC.rglob("*.py"):

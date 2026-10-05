@@ -7,6 +7,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
+from us_quant.sqlite_support import connect_sqlite_readonly
 
 from us_quant.trading.domain.strategy_paper_performance import (
     StrategyPaperPerformancePolicy, StrategyPaperPerformanceEvaluation,
@@ -65,11 +66,14 @@ def _decode_evaluation(payload):
 
 
 class SQLiteStrategyPaperPerformanceRepository:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, read_only: bool = False):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connection() as connection:
-            connection.executescript('''
+        self._read_only = read_only
+        if not read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not read_only:
+            with self._connection() as connection:
+                connection.executescript('''
                 CREATE TABLE IF NOT EXISTS strategy_paper_performance_policy (
                     policy_id TEXT NOT NULL, revision INTEGER NOT NULL,
                     policy_version TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -83,19 +87,24 @@ class SQLiteStrategyPaperPerformanceRepository:
                     payload_json TEXT NOT NULL, payload_hash TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS idx_paper_performance_version_time ON
                     strategy_paper_performance_evaluation(strategy_version_id, evaluated_at, evaluation_id);
-            ''')
-            for table, required in (
-                ('strategy_paper_performance_policy', {'policy_id', 'revision', 'policy_version', 'created_at', 'payload_json', 'payload_hash'}),
-                ('strategy_paper_performance_evaluation', {'evaluation_id', 'strategy_version_id', 'requested_policy_id', 'policy_id', 'policy_revision', 'policy_version', 'verdict', 'evaluated_at', 'payload_json', 'payload_hash'}),
-            ):
-                columns = {row[1] for row in connection.execute(f'PRAGMA table_info({table})')}
-                if not required <= columns:
-                    raise StoreError(f'{table}: incomplete schema')
+                ''')
+                for table, required in (
+                    ('strategy_paper_performance_policy', {'policy_id', 'revision', 'policy_version', 'created_at', 'payload_json', 'payload_hash'}),
+                    ('strategy_paper_performance_evaluation', {'evaluation_id', 'strategy_version_id', 'requested_policy_id', 'policy_id', 'policy_revision', 'policy_version', 'verdict', 'evaluated_at', 'payload_json', 'payload_hash'}),
+                ):
+                    columns = {row[1] for row in connection.execute(f'PRAGMA table_info({table})')}
+                    if not required <= columns:
+                        raise StoreError(f'{table}: incomplete schema')
 
     @contextmanager
     def _connection(self):
         try:
-            with closing(sqlite3.connect(self.path, timeout=30)) as connection:
+            connection = (
+                connect_sqlite_readonly(self.path)
+                if self._read_only
+                else sqlite3.connect(self.path, timeout=30)
+            )
+            with closing(connection) as connection:
                 connection.row_factory = sqlite3.Row
                 with connection:
                     yield connection

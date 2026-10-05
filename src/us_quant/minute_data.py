@@ -48,6 +48,13 @@ class MinuteDataSummary:
     evidence_origins: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class MinuteEvidenceWriteResult:
+    rows_written: int
+    duplicate_rows_ignored: int
+    inserted_records: tuple[MinuteQuoteRecord, ...]
+
+
 class MinuteQuoteStore:
     """Local minute-level Level-I evidence with explicit quality metadata."""
 
@@ -61,103 +68,96 @@ class MinuteQuoteStore:
         snapshot: MarketSnapshot,
         *,
         symbols: Iterable[str] | None = None,
-        evidence_origin: str = "captured_stream",
+        evidence_origin: str = "live_stream_cache",
     ) -> int:
         if evidence_origin not in {
-            "captured_stream",
+            "live_stream_cache",
             "synthetic_preview",
             "imported_research",
         }:
-            raise ValueError("unsupported minute evidence origin")
-        allowed = (
-            {symbol.strip().upper() for symbol in symbols}
-            if symbols is not None
-            else None
-        )
-        rows: list[MinuteQuoteRecord] = []
-        for quote in snapshot.quotes:
-            if allowed is not None and quote.symbol not in allowed:
-                continue
-            # Both fields are timezone-aware ``datetime`` in the domain type,
-            # so this is a normalisation step, not a parse.  A quote with no
-            # usable timestamp falls back to the snapshot's own observation
-            # time, which is what the pre-migration code did with the ISO
-            # string fallback.
-            observed = _as_utc(quote.updated_at or snapshot.observed_at)
-            rows.append(
-                MinuteQuoteRecord(
-                    symbol=quote.symbol,
-                    minute=_minute_iso(observed),
-                    provider=quote.source_label or snapshot.source_label,
-                    coverage=quote.coverage or snapshot.coverage,
-                    bid=quote.bid,
-                    ask=quote.ask,
-                    last=quote.last,
-                    mode=quote.mode,
-                    realtime_ready=quote.realtime_ready,
-                    stale=quote.stale,
-                    stale_reason=quote.stale_reason,
-                    generation=snapshot.generation,
-                    evidence_origin=evidence_origin,
-                    source_age_seconds=quote.age_seconds,
-                    bid_size=quote.bid_size,
-                    ask_size=quote.ask_size,
-                )
+            raise ValueError(
+                "unsupported generic snapshot origin; captured evidence "
+                "must use record_evidence_snapshot_once"
             )
+        rows = _records_from_snapshot(
+            snapshot,
+            symbols=symbols,
+            evidence_origin=evidence_origin,
+            use_snapshot_observation=False,
+        )
         if not rows:
             return 0
+        self._upsert_records(rows)
+        return len(rows)
+
+    def record_evidence_snapshot_once(
+        self,
+        snapshot: MarketSnapshot,
+        *,
+        symbols: Iterable[str] | None = None,
+    ) -> MinuteEvidenceWriteResult:
+        """Append captured evidence without rewriting a captured minute fact.
+
+        The provenance is fixed here so production callers cannot label an
+        imported or preview snapshot as a captured stream. A captured row is
+        immutable; when an older non-capture row occupies the cache key, the
+        actual capture replaces it. Inserted records let health distinguish
+        durable progress from a duplicate poll.
+        """
+
+        rows = _records_from_snapshot(
+            snapshot,
+            symbols=symbols,
+            evidence_origin="captured_stream",
+            use_snapshot_observation=True,
+        )
+        if not rows:
+            return MinuteEvidenceWriteResult(0, 0, ())
+        inserted_rows = self._upsert_records(rows)
+        return MinuteEvidenceWriteResult(
+            rows_written=len(inserted_rows),
+            duplicate_rows_ignored=len(rows) - len(inserted_rows),
+            inserted_records=tuple(inserted_rows),
+        )
+
+    def _upsert_records(
+        self,
+        rows: tuple[MinuteQuoteRecord, ...],
+    ) -> list[MinuteQuoteRecord]:
+        """Share the cache conflict rule across all snapshot write paths."""
+
+        inserted_rows: list[MinuteQuoteRecord] = []
+        statement = """
+            INSERT INTO minute_quote (
+                symbol, minute, provider, coverage, bid, ask, last,
+                mode, realtime_ready, stale,
+                stale_reason, generation, recorded_at,
+                evidence_origin, source_age_seconds, bid_size, ask_size
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(symbol, minute, provider) DO UPDATE SET
+                coverage = excluded.coverage,
+                bid = excluded.bid,
+                ask = excluded.ask,
+                last = excluded.last,
+                mode = excluded.mode,
+                realtime_ready = excluded.realtime_ready,
+                stale = excluded.stale,
+                stale_reason = excluded.stale_reason,
+                generation = excluded.generation,
+                evidence_origin = excluded.evidence_origin,
+                source_age_seconds = excluded.source_age_seconds,
+                bid_size = excluded.bid_size,
+                ask_size = excluded.ask_size,
+                recorded_at = excluded.recorded_at
+            WHERE minute_quote.evidence_origin <> 'captured_stream'
+            """
         with closing(self._connect()) as connection:
             with connection:
-                connection.executemany(
-                    """
-                    INSERT INTO minute_quote (
-                        symbol, minute, provider, coverage, bid, ask, last,
-                        mode, realtime_ready, stale,
-                        stale_reason, generation, recorded_at
-                        , evidence_origin, source_age_seconds,
-                        bid_size, ask_size
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                              ?, ?, ?)
-                    ON CONFLICT(symbol, minute, provider) DO UPDATE SET
-                        coverage = excluded.coverage,
-                        bid = excluded.bid,
-                        ask = excluded.ask,
-                        last = excluded.last,
-                        mode = excluded.mode,
-                        realtime_ready = excluded.realtime_ready,
-                        stale = excluded.stale,
-                        stale_reason = excluded.stale_reason,
-                        generation = excluded.generation,
-                        evidence_origin = excluded.evidence_origin,
-                        source_age_seconds = excluded.source_age_seconds,
-                        bid_size = excluded.bid_size,
-                        ask_size = excluded.ask_size,
-                        recorded_at = excluded.recorded_at
-                    """,
-                    [
-                        (
-                            row.symbol,
-                            row.minute,
-                            row.provider,
-                            row.coverage,
-                            _decimal_text(row.bid),
-                            _decimal_text(row.ask),
-                            _decimal_text(row.last),
-                            row.mode.value,
-                            int(row.realtime_ready),
-                            int(row.stale),
-                            row.stale_reason,
-                            row.generation,
-                            datetime.now(timezone.utc).isoformat(),
-                            row.evidence_origin,
-                            row.source_age_seconds,
-                            _decimal_text(row.bid_size),
-                            _decimal_text(row.ask_size),
-                        )
-                        for row in rows
-                    ],
-                )
-        return len(rows)
+                for row in rows:
+                    cursor = connection.execute(statement, _record_values(row))
+                    if cursor.rowcount == 1:
+                        inserted_rows.append(row)
+        return inserted_rows
 
     def load(
         self,
@@ -305,6 +305,13 @@ class MinuteQuoteStore:
                     ON minute_quote(symbol, minute)
                     """
                 )
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS minute_quote_migration (
+                        migration_id TEXT PRIMARY KEY
+                    )
+                    """
+                )
                 # Snapshot of the schema the database *arrived* with, taken
                 # before any ALTER below: it is what tells us whether this is
                 # a Market Data v1 database that still carries the retired
@@ -344,9 +351,122 @@ class MinuteQuoteStore:
                         connection,
                         columns=columns,
                     )
+                _migrate_legacy_capture_origin(connection)
 
     def _connect(self) -> sqlite3.Connection:
         return connect_sqlite(self.path)
+
+
+def _records_from_snapshot(
+    snapshot: MarketSnapshot,
+    *,
+    symbols: Iterable[str] | None,
+    evidence_origin: str,
+    use_snapshot_observation: bool,
+) -> tuple[MinuteQuoteRecord, ...]:
+    allowed = (
+        {symbol.strip().upper() for symbol in symbols}
+        if symbols is not None
+        else None
+    )
+    rows: list[MinuteQuoteRecord] = []
+    seen_keys: set[tuple[str, str, str]] = set()
+    for quote in snapshot.quotes:
+        if allowed is not None and quote.symbol not in allowed:
+            continue
+        # Bucket the evidence by when this snapshot was observed. The quote's
+        # own timestamp remains useful for estimating age when the provider
+        # did not supply an explicit age.
+        observed = _as_utc(
+            snapshot.observed_at
+            if use_snapshot_observation
+            else (quote.updated_at or snapshot.observed_at)
+        )
+        minute = _minute_iso(observed)
+        provider = quote.source_label or snapshot.source_label
+        key = (quote.symbol, minute, provider)
+        if key in seen_keys:
+            raise ValueError(
+                "snapshot contains duplicate symbol/minute/provider evidence"
+            )
+        seen_keys.add(key)
+        source_age_seconds = quote.age_seconds
+        if source_age_seconds is None and quote.updated_at is not None:
+            quote_updated = _as_utc(quote.updated_at)
+            sample_time = _as_utc(snapshot.observed_at)
+            if quote_updated <= sample_time:
+                source_age_seconds = (sample_time - quote_updated).total_seconds()
+        rows.append(
+            MinuteQuoteRecord(
+                symbol=quote.symbol,
+                minute=minute,
+                provider=provider,
+                coverage=quote.coverage or snapshot.coverage,
+                bid=quote.bid,
+                ask=quote.ask,
+                last=quote.last,
+                mode=quote.mode,
+                realtime_ready=quote.realtime_ready,
+                stale=quote.stale,
+                stale_reason=quote.stale_reason,
+                generation=snapshot.generation,
+                evidence_origin=evidence_origin,
+                source_age_seconds=source_age_seconds,
+                bid_size=quote.bid_size,
+                ask_size=quote.ask_size,
+            )
+        )
+    return tuple(rows)
+
+
+def _migrate_legacy_capture_origin(connection: sqlite3.Connection) -> None:
+    """Demote rows written before the immutable capture API existed.
+
+    Earlier desktop builds used the generic upsert path while labeling rows as
+    captured. Those rows cannot prove append-once provenance, so they remain
+    available as mutable live cache data but cannot satisfy durable readiness.
+    The marker makes this provenance correction a one-time migration.
+    """
+
+    migration_id = "legacy_captured_stream_rows_to_live_cache_v1"
+    if connection.execute(
+        "SELECT 1 FROM minute_quote_migration WHERE migration_id = ?",
+        (migration_id,),
+    ).fetchone():
+        return
+    connection.execute(
+        """
+        UPDATE minute_quote
+        SET evidence_origin = 'live_stream_cache'
+        WHERE evidence_origin = 'captured_stream'
+        """
+    )
+    connection.execute(
+        "INSERT INTO minute_quote_migration (migration_id) VALUES (?)",
+        (migration_id,),
+    )
+
+
+def _record_values(row: MinuteQuoteRecord) -> tuple[object, ...]:
+    return (
+        row.symbol,
+        row.minute,
+        row.provider,
+        row.coverage,
+        _decimal_text(row.bid),
+        _decimal_text(row.ask),
+        _decimal_text(row.last),
+        row.mode.value,
+        int(row.realtime_ready),
+        int(row.stale),
+        row.stale_reason,
+        row.generation,
+        datetime.now(timezone.utc).isoformat(),
+        row.evidence_origin,
+        row.source_age_seconds,
+        _decimal_text(row.bid_size),
+        _decimal_text(row.ask_size),
+    )
 
 
 def _migrate_legacy_market_data_type(

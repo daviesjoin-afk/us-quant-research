@@ -192,27 +192,40 @@ class DesktopCredentialService:
     def resolve_stream_credentials(
         self,
         *,
+        provider: str | None = None,
         environment: Mapping[str, str] | None = None,
     ) -> StreamCredentials:
-        """The credentials a stream start should use, each resolved alone.
+        """Resolve all credentials or only those used by one provider.
 
         Environment first, store second, per credential: an environment
         variable with a non-empty value means the corresponding blob is
-        never read.  A whitespace-only variable counts as unset.
+        never read. A whitespace-only variable counts as unset. A provider
+        selection keeps unrelated credential blobs out of that startup path.
         """
 
         source = os.environ if environment is None else environment
+        if provider is not None and provider not in STREAM_CREDENTIAL_SOURCES:
+            raise ValueError(f"unsupported credential provider: {provider!r}")
+        resolve_all = provider is None
         finnhub_sources = STREAM_CREDENTIAL_SOURCES[
             PROVIDER_FINNHUB_TRADES
         ]
         alpaca_sources = STREAM_CREDENTIAL_SOURCES[PROVIDER_ALPACA_IEX]
         return StreamCredentials(
-            finnhub_api_key=self._resolve(
-                source, finnhub_sources[0][0]
+            finnhub_api_key=(
+                self._resolve(source, finnhub_sources[0][0])
+                if resolve_all or provider == PROVIDER_FINNHUB_TRADES
+                else ""
             ),
-            alpaca_api_key=self._resolve(source, alpaca_sources[0][0]),
-            alpaca_api_secret=self._resolve(
-                source, alpaca_sources[1][0]
+            alpaca_api_key=(
+                self._resolve(source, alpaca_sources[0][0])
+                if resolve_all or provider == PROVIDER_ALPACA_IEX
+                else ""
+            ),
+            alpaca_api_secret=(
+                self._resolve(source, alpaca_sources[1][0])
+                if resolve_all or provider == PROVIDER_ALPACA_IEX
+                else ""
             ),
         )
 

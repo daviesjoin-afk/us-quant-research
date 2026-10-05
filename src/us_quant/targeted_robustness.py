@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, time, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
@@ -11,18 +11,17 @@ from statistics import median
 import tempfile
 from typing import Any, Iterable
 from uuid import uuid4
-from zoneinfo import ZoneInfo
 
+from us_quant.trading.domain.market_evidence_quality import (
+    EVALUATION_END,
+    EVALUATION_START,
+    MINIMUM_SESSION_ROWS,
+    NEW_YORK,
+    evaluate_minute_evidence_session,
+    group_regular_sessions,
+)
 from us_quant.minute_data import MinuteQuoteRecord, MinuteQuoteStore
 from us_quant.targeted_replay import run_targeted_replay
-
-
-NEW_YORK = ZoneInfo("America/New_York")
-REGULAR_OPEN = time(9, 30)
-REGULAR_CLOSE = time(16, 0)
-EVALUATION_START = time(10, 0)
-EVALUATION_END = time(15, 45)
-MINIMUM_SESSION_ROWS = 300
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,14 +109,13 @@ def run_targeted_robustness(
     usable: list[tuple[str, tuple[MinuteQuoteRecord, ...]]] = []
     skipped: list[str] = []
     for session_date, rows in sessions:
-        first = _parse_minute(rows[0].minute).astimezone(NEW_YORK)
-        last = _parse_minute(rows[-1].minute).astimezone(NEW_YORK)
-        if (
-            len(rows) < required
-            or _longest_contiguous_run(rows) < signal_required
-            or first.time().replace(tzinfo=None) > EVALUATION_START
-            or last.time().replace(tzinfo=None) < EVALUATION_END
-        ):
+        quality = evaluate_minute_evidence_session(
+            session_date,
+            rows,
+            minimum_rows=required,
+            minimum_contiguous_run=signal_required,
+        )
+        if not quality.robustness_usable:
             skipped.append(session_date)
         else:
             usable.append((session_date, rows))
@@ -244,25 +242,6 @@ def run_targeted_robustness(
                 }
             )
         ),
-    )
-
-
-def group_regular_sessions(
-    records: Iterable[MinuteQuoteRecord],
-) -> tuple[tuple[str, tuple[MinuteQuoteRecord, ...]], ...]:
-    grouped: dict[str, list[MinuteQuoteRecord]] = {}
-    for record in sorted(records, key=lambda row: row.minute):
-        observed = _parse_minute(record.minute)
-        eastern = observed.astimezone(NEW_YORK)
-        if eastern.weekday() >= 5:
-            continue
-        wall_time = eastern.time().replace(tzinfo=None)
-        if not REGULAR_OPEN <= wall_time < REGULAR_CLOSE:
-            continue
-        grouped.setdefault(eastern.date().isoformat(), []).append(record)
-    return tuple(
-        (session_date, tuple(rows))
-        for session_date, rows in sorted(grouped.items())
     )
 
 
@@ -471,30 +450,6 @@ def _parameter_hash(parameters: dict[str, object]) -> str:
         separators=(",", ":"),
     )
     return sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _parse_minute(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _longest_contiguous_run(
-    records: tuple[MinuteQuoteRecord, ...],
-) -> int:
-    longest = 0
-    current = 0
-    previous: datetime | None = None
-    for row in records:
-        observed = _parse_minute(row.minute)
-        if previous is None or (observed - previous).total_seconds() == 60:
-            current += 1
-        else:
-            current = 1
-        longest = max(longest, current)
-        previous = observed
-    return longest
 
 
 def _compound(returns: Iterable[Decimal]) -> Decimal:

@@ -320,6 +320,7 @@ def test_domain_and_ports_have_the_expected_modules() -> None:
         "live_startup.py",
         "live_safety.py",
         "market.py",
+        "market_evidence_quality.py",
         "orders.py",
         "paper_autonomy.py",
         "paper_autonomy_supervisor.py",

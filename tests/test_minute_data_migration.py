@@ -428,6 +428,24 @@ class LegacyMinuteMigrationTests(unittest.TestCase):
                 {symbol: mode for symbol, _, mode in LEGACY_MODE_CASES},
             )
 
+    def test_legacy_captured_rows_are_demoted_from_durable_evidence_once(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "minute.sqlite3"
+            _legacy_database(path)
+
+            first_store = MinuteQuoteStore(path)
+            self.assertEqual(
+                first_store.load("AAPL", usable_only=False)[0].evidence_origin,
+                "live_stream_cache",
+            )
+            second_store = MinuteQuoteStore(path)
+            self.assertEqual(
+                second_store.load("AAPL", usable_only=False)[0].evidence_origin,
+                "live_stream_cache",
+            )
+
     def test_empty_mode_string_is_backfilled(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "minute.sqlite3"
@@ -482,8 +500,8 @@ class LegacyMinuteMigrationTests(unittest.TestCase):
                     {"AAPL": mode.value},
                 )
 
-    def test_record_snapshot_never_writes_the_legacy_column(self) -> None:
-        source = inspect.getsource(MinuteQuoteStore.record_snapshot)
+    def test_shared_snapshot_writer_uses_current_columns_only(self) -> None:
+        source = inspect.getsource(MinuteQuoteStore._upsert_records)
         self.assertIn("mode", source)
         self.assertNotIn("market_data_type", source)
 

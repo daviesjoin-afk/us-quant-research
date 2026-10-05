@@ -396,7 +396,9 @@ def test_targeted_robustness_reads_the_updated_canonical_capital(
     monkeypatch.setattr(
         window.minute_quote_store,
         "load",
-        lambda symbol, **kwargs: (SimpleNamespace(provider="p"),),
+        lambda symbol, **kwargs: (
+            SimpleNamespace(provider="p", evidence_origin="captured_stream"),
+        ),
     )
     monkeypatch.setattr(
         "us_quant.desktop_targeted_evidence_service.run_targeted_robustness",

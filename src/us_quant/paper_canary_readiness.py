@@ -7,7 +7,7 @@ import json
 import subprocess
 import sys
 from dataclasses import fields, is_dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
@@ -48,9 +48,20 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
 def resolve_git_head() -> str | None:
     """Resolve the checkout revision in the CLI layer only."""
     try:
+        cwd = ApplicationPaths.discover().resource_root
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if status.stdout.strip():
+            return None
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=ApplicationPaths.discover().resource_root,
+            cwd=cwd,
             check=True,
             capture_output=True,
             text=True,
@@ -105,6 +116,10 @@ def _broker_projection(config, *, live_check: bool) -> BrokerCheckProjection | N
         observed_at=account.observed_at,
         freshness=freshness,
         age_seconds=age,
+        net_liquidation_available=(
+            account.net_liquidation is not None and account.net_liquidation > 0
+        ),
+        cash_available=account.cash is not None and account.cash > 0,
     )
 
 
@@ -113,6 +128,8 @@ def _json_value(value):
         return value.value
     if isinstance(value, datetime):
         return value.isoformat()
+    if isinstance(value, timedelta):
+        return str(value)
     if isinstance(value, Decimal):
         return str(value)
     if is_dataclass(value):
@@ -173,7 +190,9 @@ def _print_text(report) -> None:
             f"{report.broker_check.configured_port} "
             f"client_id={report.broker_check.configured_client_id} "
             f"paper_orders_enabled={str(report.broker_check.paper_order_submission_enabled).lower()} "
-            f"api_read_only={str(report.broker_check.api_read_only).lower()}"
+            f"api_read_only={str(report.broker_check.api_read_only).lower()} "
+            f"net_liquidation_available={str(report.broker_check.net_liquidation_available).lower()} "
+            f"cash_available={str(report.broker_check.cash_available).lower()}"
         )
         print(
             f"broker_truth = {report.broker_check.broker_environment or 'UNKNOWN'} "

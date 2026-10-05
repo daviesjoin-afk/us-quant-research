@@ -187,6 +187,8 @@ class BrokerCheckProjection:
     observed_at: datetime | None = None
     freshness: str = "NOT_RUN"
     age_seconds: float | None = None
+    net_liquidation_available: bool = False
+    cash_available: bool = False
     last_error: str | None = None
 
 
@@ -574,6 +576,8 @@ class PaperCanaryReadinessApplication:
             and (broker.broker_environment or "").lower() == "paper"
             and broker.freshness == "FRESH"
             and bool(broker.account_alias)
+            and broker.net_liquidation_available
+            and broker.cash_available
         )
 
     @staticmethod
@@ -592,6 +596,10 @@ class PaperCanaryReadinessApplication:
             blockers.append("BROKER_TRUTH_NOT_FRESH")
         if not broker.account_alias:
             blockers.append("BROKER_ACCOUNT_TRUTH_MISSING")
+        if not broker.net_liquidation_available:
+            blockers.append("BROKER_NET_LIQUIDATION_UNAVAILABLE")
+        if not broker.cash_available:
+            blockers.append("BROKER_CASH_UNAVAILABLE")
         return tuple(blockers)
 
 

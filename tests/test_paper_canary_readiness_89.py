@@ -221,6 +221,8 @@ def _broker(*, success=True, freshness="FRESH"):
         broker_environment="paper",
         observed_at=NOW if success else None,
         freshness=freshness,
+        net_liquidation_available=True,
+        cash_available=True,
         last_error=None if success else "ConnectionError",
     )
 
@@ -439,6 +441,28 @@ def test_c89_16_reconciliation_blocker_is_preserved():
     )
     assert report.overall_status is PaperCanaryInspectionStatus.RECONCILIATION_NOT_READY
     assert report.reconciliation.blockers == ("unexplained_fill",)
+
+
+@pytest.mark.parametrize(
+    ("field", "expected_blocker"),
+    (
+        ("net_liquidation_available", "BROKER_NET_LIQUIDATION_UNAVAILABLE"),
+        ("cash_available", "BROKER_CASH_UNAVAILABLE"),
+    ),
+)
+def test_broker_missing_required_balance_blocks_canary(field, expected_blocker):
+    from dataclasses import replace
+
+    app, _ = _app()
+    broker = _broker()
+    broker = replace(broker, **{field: False})
+    report = app.inspect(
+        current_runtime_revision="rev",
+        broker_check=broker,
+        reconciliation_result=SimpleNamespace(blockers=()),
+    )
+    assert report.overall_status is PaperCanaryInspectionStatus.BROKER_NOT_READY
+    assert expected_blocker in report.blockers
 
 
 def test_c89_17_only_clean_canonical_reconciliation_allows_ready_diagnostic():
@@ -697,12 +721,49 @@ def test_git_revision_is_resolved_from_application_checkout(monkeypatch):
 
     def fake_run(*args, **kwargs):
         observed["args"] = args
-        observed["kwargs"] = kwargs
+        observed.setdefault("calls", []).append((args, kwargs))
+        if args[0][1] == "status":
+            return SimpleNamespace(stdout="")
         return SimpleNamespace(stdout="application-revision\n")
 
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
     assert cli.resolve_git_head() == "application-revision"
-    assert observed["kwargs"]["cwd"] == ApplicationPaths.discover().resource_root
+    assert len(observed["calls"]) == 2
+    assert all(
+        kwargs["cwd"] == ApplicationPaths.discover().resource_root
+        for _args, kwargs in observed["calls"]
+    )
+
+
+def test_dirty_application_checkout_has_unknown_revision(monkeypatch):
+    from types import SimpleNamespace
+
+    from us_quant import paper_canary_readiness as cli
+
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(stdout=" M src/us_quant/paper_canary_readiness.py\n")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli.resolve_git_head() is None
+    assert len(calls) == 1
+
+
+def test_json_projection_serializes_performance_durations():
+    import json
+    from dataclasses import dataclass
+    from datetime import timedelta
+
+    from us_quant.paper_canary_readiness import _json_value
+
+    @dataclass(frozen=True)
+    class PerformanceProjection:
+        evidence_duration: timedelta
+
+    payload = _json_value(PerformanceProjection(timedelta(seconds=2)))
+    assert json.dumps(payload, sort_keys=True) == '{"evidence_duration": "0:00:02"}'
 
 
 def test_cli_shell_revision_is_outside_application_and_has_no_write_actions():

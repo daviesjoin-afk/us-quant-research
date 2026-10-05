@@ -1,6 +1,11 @@
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 import pytest
 
@@ -61,6 +66,90 @@ def test_restart_rebuilds_same_evaluation_from_real_sqlite_truth(tmp_path):
     assert second.source_portfolio_decision_ids == ('buy','sell')
     assert len(restarted.repository.evaluations_for_version('a')) == 1
     assert strategies.get_version('a').status is StrategyStatus.PAPER_SHADOW
+
+
+def test_process_exit_restart_rehydrates_same_durable_evaluation(tmp_path):
+    """Persist in one interpreter, then load the semantic result read-only in another."""
+    components, *_ = setup_app(tmp_path)
+    project_root = Path(__file__).resolve().parents[1]
+    performance_db = tmp_path/'performance.sqlite'
+    strategy_db = tmp_path/'strategy.sqlite'
+    portfolio_db = tmp_path/'portfolio.sqlite'
+    orders_db = tmp_path/'orders.sqlite'
+    child_code = r"""
+import sys
+from datetime import timedelta
+from types import SimpleNamespace
+from paper_performance_support import NOW, ACCOUNT_ALIAS, broker
+from us_quant.trading.domain.portfolio_reconciliation import BrokerOpenOrderTruth
+from us_quant.trading.domain.strategy_paper_performance import canonical_json
+from us_quant.trading.adapters.sqlite.strategy_repository import SQLiteStrategyRepository
+from us_quant.trading.adapters.sqlite.portfolio_repository import SQLitePortfolioRepository
+from us_quant.trading.adapters.sqlite.order_repository import SQLiteOrderRepository
+from us_quant.trading.composition.strategy_paper_performance import build_strategy_paper_performance_components
+
+performance_db, strategy_db, portfolio_db, orders_db = sys.argv[1:5]
+offset_seconds = int(sys.argv[5])
+source = SimpleNamespace(
+    broker_open_order_truth=lambda: BrokerOpenOrderTruth(ACCOUNT_ALIAS, NOW, True, ())
+)
+components = build_strategy_paper_performance_components(
+    database_path=performance_db,
+    strategies=SQLiteStrategyRepository(strategy_db),
+    portfolio_repository=SQLitePortfolioRepository(portfolio_db),
+    order_truth=SQLiteOrderRepository(orders_db),
+    broker_order_truth=source,
+)
+evaluation = components.application.evaluate(
+    strategy_version_id='a',
+    policy_id='paper-policy',
+    window_start=NOW-timedelta(days=3),
+    window_end=NOW,
+    broker=broker(quantities={}),
+    evaluated_at=NOW+timedelta(seconds=offset_seconds),
+)
+print(canonical_json(evaluation))
+"""
+    child_environment = os.environ.copy()
+    child_environment['PYTHONPATH'] = os.pathsep.join((
+        str(project_root/'src'), str(project_root/'tests'),
+    ))
+
+    def evaluate_in_process(offset_seconds):
+        return subprocess.run(
+            [sys.executable, '-c', child_code, str(performance_db), str(strategy_db),
+             str(portfolio_db), str(orders_db), str(offset_seconds)],
+            cwd=project_root, env=child_environment, capture_output=True,
+            text=True, timeout=60, check=False,
+        )
+
+    first_process = evaluate_in_process(0)
+    assert first_process.returncode == 0, first_process.stderr
+    first_evaluation = json.loads(first_process.stdout)
+
+    # The evaluator process has exited. The restarted process uses only the
+    # immutable performance record; it does not reconnect to a broker or reuse
+    # the first process's in-memory objects.
+    reader_code = r"""
+import sys
+from us_quant.trading.domain.strategy_paper_performance import canonical_json
+from us_quant.trading.adapters.sqlite.strategy_paper_performance_repository import SQLiteStrategyPaperPerformanceRepository
+
+repository = SQLiteStrategyPaperPerformanceRepository(sys.argv[1], read_only=True)
+print(canonical_json(repository.get_evaluation(sys.argv[2])))
+"""
+    restarted_process = subprocess.run(
+        [sys.executable, '-c', reader_code, str(performance_db),
+         first_evaluation['evaluation_id']],
+        cwd=project_root, env=child_environment, capture_output=True,
+        text=True, timeout=60, check=False,
+    )
+    assert restarted_process.returncode == 0, restarted_process.stderr
+    restored_evaluation = json.loads(restarted_process.stdout)
+
+    assert restored_evaluation == first_evaluation
+    assert restored_evaluation['evaluation_id'] == first_evaluation['evaluation_id']
+    assert len(components.repository.evaluations_for_version('a')) == 1
 
 
 def test_query_order_and_callback_order_do_not_change_identity(tmp_path):

@@ -1564,6 +1564,7 @@ def test_only_composition_roots_wire_adapters_into_applications() -> None:
         "trading/composition/market_data.py",
         "trading/composition/paper_autonomy.py",
         "trading/composition/paper_autonomy_supervisor.py",
+        "trading/composition/paper_canary_readiness.py",
         "trading/composition/portfolio_operations.py",
         "trading/composition/portfolio_paper.py",
         "trading/composition/strategies.py",
@@ -1951,6 +1952,7 @@ def test_only_strategy_composition_wires_the_concrete_strategy_repository() -> (
     # The sqlite package's own ``__init__`` re-exports the adapter, so it
     # names the concrete class too -- but it knows no application service.
     assert wiring_modules == [
+        "trading/composition/paper_canary_readiness.py",
         "trading/composition/strategies.py",
         "trading/composition/strategy_candidate_generation.py",
     ], (

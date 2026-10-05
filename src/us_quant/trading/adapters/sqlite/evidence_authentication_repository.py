@@ -21,7 +21,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
-from us_quant.sqlite_support import connect_sqlite
+from us_quant.sqlite_support import connect_sqlite, connect_sqlite_readonly
 from us_quant.trading.domain.evidence_auth import (
     EvidenceAuthenticationBlocker,
     EvidenceAuthenticationResult,
@@ -79,10 +79,12 @@ _PLACEHOLDERS = ", ".join("?" for _ in _COLUMNS.split(","))
 class SQLiteEvidenceAuthenticationRepository:
     """Persist authentication records without owning lifecycle policy."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, read_only: bool = False) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._initialize()
+        self._read_only = read_only
+        if not read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._initialize()
 
     def record(self, result: EvidenceAuthenticationResult) -> None:
         if not isinstance(result, EvidenceAuthenticationResult):
@@ -222,6 +224,8 @@ class SQLiteEvidenceAuthenticationRepository:
 
     def _connect(self) -> sqlite3.Connection:
         try:
+            if self._read_only:
+                return connect_sqlite_readonly(self.path)
             return connect_sqlite(self.path)
         except sqlite3.Error as error:
             raise EvidenceAuthenticationRepositoryError(

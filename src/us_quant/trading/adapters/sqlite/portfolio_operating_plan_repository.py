@@ -9,7 +9,7 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
-from us_quant.sqlite_support import connect_sqlite
+from us_quant.sqlite_support import connect_sqlite, connect_sqlite_readonly
 from us_quant.trading.domain.portfolio import PortfolioCapitalPolicy, PortfolioStrategyAllocation
 from us_quant.trading.domain.portfolio_operations import PortfolioOperatingPlan, PortfolioPlanAuditEvent
 from us_quant.trading.ports.portfolio_operating_plan import PortfolioOperatingPlanConflict
@@ -102,16 +102,18 @@ def _decode_plan(raw: str) -> PortfolioOperatingPlan:
 class SQLitePortfolioOperatingPlanRepository:
     """One current plan row plus append-only audit revisions."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, read_only: bool = False) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(connect_sqlite(self.path)) as connection, connection:
-            connection.execute("CREATE TABLE IF NOT EXISTS portfolio_operating_plan (key TEXT PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL)")
-            connection.execute("CREATE TABLE IF NOT EXISTS portfolio_operating_plan_audit (plan_id TEXT NOT NULL, revision INTEGER NOT NULL, changed_at TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(plan_id, revision))")
+        self._read_only = read_only
+        if not read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with closing(connect_sqlite(self.path)) as connection, connection:
+                connection.execute("CREATE TABLE IF NOT EXISTS portfolio_operating_plan (key TEXT PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL)")
+                connection.execute("CREATE TABLE IF NOT EXISTS portfolio_operating_plan_audit (plan_id TEXT NOT NULL, revision INTEGER NOT NULL, changed_at TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(plan_id, revision))")
 
     def load(self) -> PortfolioOperatingPlan | None:
         try:
-            with closing(connect_sqlite(self.path)) as connection:
+            with closing(self._connect()) as connection:
                 row = connection.execute("SELECT payload FROM portfolio_operating_plan WHERE key='current'").fetchone()
             return _decode_plan(row[0]) if row else None
         except PortfolioOperatingPlanStoreUnreadable:
@@ -120,12 +122,16 @@ class SQLitePortfolioOperatingPlanRepository:
             raise PortfolioOperatingPlanStoreUnreadable("portfolio operating plan could not be read") from error
 
     def save(self, plan: PortfolioOperatingPlan, *, expected_revision: int, audit: PortfolioPlanAuditEvent) -> PortfolioOperatingPlan:
+        if self._read_only:
+            raise PortfolioOperatingPlanStoreUnreadable(
+                "portfolio operating plan repository is read-only"
+            )
         if type(expected_revision) is not int or expected_revision < 0 or plan.revision != expected_revision + 1:
             raise ValueError("plan revision must advance exactly once")
         if audit.plan_id != plan.plan_id or audit.revision != plan.revision or audit.changed_at != plan.updated_at:
             raise ValueError("audit event must describe the saved plan revision")
         try:
-            with closing(connect_sqlite(self.path)) as connection:
+            with closing(self._connect()) as connection:
                 connection.isolation_level = None
                 connection.execute("BEGIN IMMEDIATE")
                 try:
@@ -160,7 +166,7 @@ class SQLitePortfolioOperatingPlanRepository:
 
     def audit_events(self) -> tuple[PortfolioPlanAuditEvent, ...]:
         try:
-            with closing(connect_sqlite(self.path)) as connection:
+            with closing(self._connect()) as connection:
                 rows = connection.execute("SELECT plan_id, revision, changed_at, payload FROM portfolio_operating_plan_audit ORDER BY revision").fetchall()
             result = []
             for plan_id, revision, changed_at, raw in rows:
@@ -177,3 +183,7 @@ class SQLitePortfolioOperatingPlanRepository:
             return tuple(result)
         except Exception as error:  # noqa: BLE001
             raise PortfolioOperatingPlanStoreUnreadable("portfolio operating plan audit is unreadable") from error
+
+    def _connect(self):
+        connect = connect_sqlite_readonly if self._read_only else connect_sqlite
+        return connect(self.path)

@@ -320,7 +320,7 @@ def test_l18_lifecycle_paths_do_not_import_the_signing_tool():
 # -- the Paper launch gate ------------------------------------------------
 
 LAUNCH_GATE = SRC / "trading" / "application" / "paper_authorization.py"
-PLAN_BOUNDARY = SRC / "trading" / "application" / "portfolio_operations.py"
+PLAN_BOUNDARY = SRC / "trading" / "application" / "portfolio_plan.py"
 PLAN_COMPOSITION = SRC / "trading" / "composition" / "portfolio_operations.py"
 PATHS = SRC / "paths.py"
 
@@ -654,7 +654,11 @@ def test_l27_only_the_composition_layer_constructs_the_validator():
 
     offenders = []
     for path in _production_files():
-        if path in (PLAN_COMPOSITION, LIFECYCLE_COMPOSITION):
+        if path in (
+            PLAN_COMPOSITION,
+            LIFECYCLE_COMPOSITION,
+            SRC / "trading" / "composition" / "paper_canary_readiness.py",
+        ):
             continue
         if "StrategyCoverageCurrentValidator(" in _text(path):
             offenders.append(str(path.relative_to(SRC)))

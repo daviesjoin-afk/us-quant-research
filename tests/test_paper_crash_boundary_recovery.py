@@ -118,3 +118,27 @@ def test_terminal_fill_reconciles_cleanly_after_restart(run_boundary):
     assert report["performance"] == report["phase_a"]["performance"]
     assert report["reconciliation_positions"] == [{"symbol": "AAPL", "broker_quantity": "10", "attributed_quantity": 10}]
     assert report["reconciliation_accounting"] == [{"strategy_version_id": "crash-matrix-v1", "symbol": "AAPL", "quantity": 10, "filled_quantity": 10}]
+
+
+def test_unrelated_repository_recovery_error_fails_the_restart_process(tmp_path):
+    project_root = Path(__file__).resolve().parents[1]
+    helper = project_root / "tests" / "support" / "paper_crash_process.py"
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join((str(project_root / "src"), str(project_root / "tests")))
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["PYTHONUTF8"] = "1"
+
+    phase_a = subprocess.run(
+        [sys.executable, str(helper), "a", str(tmp_path), "decision_only"],
+        cwd=project_root, env=environment, capture_output=True, text=True,
+        timeout=45, check=False,
+    )
+    assert phase_a.returncode == 0, phase_a.stderr
+
+    phase_b = subprocess.run(
+        [sys.executable, str(helper), "b", str(tmp_path), "injected_recovery_error"],
+        cwd=project_root, env=environment, capture_output=True, text=True,
+        timeout=45, check=False,
+    )
+    assert phase_b.returncode != 0
+    assert "injected repository recovery read failure" in phase_b.stderr

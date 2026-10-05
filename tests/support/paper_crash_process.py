@@ -261,20 +261,28 @@ def phase_b(root_text: str, boundary: str) -> None:
     broker = _Broker(broker_path, outcome="never")
     path = _RiskPath(ExecutionApplication(repository=orders, broker=broker), broker, submit_enabled=False)
     decisions_before = portfolio.decisions()
+    runtime_repository = portfolio
+    if boundary == "injected_recovery_error":
+        class _FailDuringRecoveryRead:
+            def __init__(self, repository):
+                self._repository = repository
+
+            def __getattr__(self, name):
+                return getattr(self._repository, name)
+
+            def decision(self, decision_id):
+                raise ValueError("injected repository recovery read failure")
+
+        runtime_repository = _FailDuringRecoveryRead(portfolio)
     runtime = PortfolioRuntime(
         strategies=_Strategies(), proposals=_Proposals(), snapshots=_Snapshots(),
-        repository=portfolio, risk_path=path,
+        repository=runtime_repository, risk_path=path,
     )
-    cycle = None
-    try:
-        cycle = runtime.evaluate_cycle(
-            portfolio_cycle_id="crash-cycle", observed_at=NOW, proposal_cutoff=NOW,
-            snapshot_identity="snapshot-1", policy=_policy(), policy_identity="paper-policy",
-            policy_revision="1", selected_version_ids=frozenset({VERSION_ID}),
-        )
-    except Exception:
-        # A restart must fail closed if it attempts to enter the submit path.
-        pass
+    cycle = runtime.evaluate_cycle(
+        portfolio_cycle_id="crash-cycle", observed_at=NOW, proposal_cutoff=NOW,
+        snapshot_identity="snapshot-1", policy=_policy(), policy_identity="paper-policy",
+        policy_revision="1", selected_version_ids=frozenset({VERSION_ID}),
+    )
     with sqlite3.connect(broker_path) as db:
         broker_rows = db.execute("SELECT COUNT(*) FROM broker_truth").fetchone()[0]
     order_truth = orders.portfolio_order_truth()

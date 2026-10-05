@@ -27,8 +27,28 @@ $mutations = @(
     @{ name='M19 restart workflow auto-arms'; file='src/us_quant/trading/runtime/workflow.py'; find='self._phase = PaperWorkflowPhase.IDLE'; repl='self._phase = PaperWorkflowPhase.RUNNING'; test='tests/test_runtime_workflow.py'; select='cancel_preparing_returns_to_idle' },
     @{ name='M20 restart digest changes with evaluation time'; file='src/us_quant/trading/application/strategy_paper_performance.py'; find="'window': (window_start, window_end),"; repl="'window': (window_start, window_end, evaluated_at),"; test='tests/test_paper_crash_boundary_recovery.py'; select='partial_fill_and_attribution_reconstruct_once' }
 )
-$baseline = & $py -m pytest (Join-Path $projectRoot 'tests/test_paper_crash_boundary_recovery.py') -q 2>&1
-if ($LASTEXITCODE -ne 0) { Write-Host ($baseline -join "`n"); throw 'Baseline is not GREEN' }
+$baselineTargets = @(
+    $mutations |
+        ForEach-Object { "$($_.test)|$($_.select)" } |
+        Sort-Object -Unique
+)
+foreach ($target in $baselineTargets) {
+    $parts = $target.Split('|', 2)
+    $testPath = Join-Path $projectRoot $parts[0]
+    $selector = $parts[1]
+    $baseline = & $py -m pytest $testPath -q -k $selector --tb=short 2>&1
+    $code = $LASTEXITCODE
+    $outputText = $baseline -join "`n"
+    $executed = 0
+    foreach ($match in [regex]::Matches($outputText, '(\d+) (passed|failed|error|errors|xfailed|xpassed)')) {
+        $executed += [int]$match.Groups[1].Value
+    }
+    if ($code -ne 0 -or $executed -lt 1 -or $outputText -match 'no tests ran|ERROR collecting') {
+        Write-Host $outputText
+        throw "Baseline is not GREEN: $($parts[0]) -k $selector (exit=$code, executed=$executed)"
+    }
+    Write-Host "BASELINE GREEN $($parts[0]) -k $selector (executed=$executed)"
+}
 $survivors = @()
 $errors = @()
 foreach ($mutation in $mutations) {

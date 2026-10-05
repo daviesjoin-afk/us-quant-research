@@ -220,6 +220,25 @@ class PortfolioRuntime:
                     or decision.action is None
                 ):
                     continue
+                if previous is not None and previous.risk_outcome is None:
+                    # A durable decision without a durable Risk verdict may be
+                    # the remnant of a process that stopped at this boundary.
+                    # It is not permission to evaluate or dispatch again after
+                    # restart; require reconciliation/operator action instead.
+                    actions.append(
+                        PortfolioActionResult(
+                            decision=decision,
+                            risk=None,
+                            dispatch=PortfolioDispatchResult(
+                                submitted=False,
+                                halt=True,
+                                order_id=previous.order_id,
+                                status="Durable decision has no Risk outcome; reconciliation required",
+                            ),
+                            recovered=True,
+                        )
+                    )
+                    break
                 if previous is not None and previous.risk_outcome is not None:
                     # Durable Risk state means this action was already judged;
                     # even an uncertain submit is reconciled, never regenerated.

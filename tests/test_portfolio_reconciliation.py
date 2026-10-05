@@ -784,6 +784,33 @@ def test_durable_intent_without_broker_status_blocks_as_unknown_execution():
     assert not result.can_open_exposure
 
 
+def test_local_order_without_portfolio_attribution_blocks():
+    record = decision_record("d-no-link", (("a", "pa", 1),), order_id="o-no-link")
+    order, _ = linked_order(record, fills=(), status=OrderStatus.CANCELED)
+    result = reconcile({}, records=(replace(record, order_id=None),), orders=(order,), attributions=())
+    assert Blocker.UNEXPLAINED_ORDER in result.blockers
+    assert not result.can_open_exposure
+
+
+def test_decision_order_reference_without_attribution_blocks():
+    record = decision_record("d-missing-link", (("a", "pa", 1),), order_id="o-missing-link")
+    result = reconcile({}, records=(record,), orders=(), attributions=())
+    assert Blocker.PENDING_UNKNOWN_EXECUTION in result.blockers
+    assert not result.can_open_exposure
+
+
+def test_partial_fill_event_totals_must_match_durable_fills():
+    record = decision_record("d-fill-total", (("a", "pa", 2),), order_id="o-fill-total")
+    order, attribution = linked_order(record, fills=(fill("e-fill-total", "o-fill-total", 2),))
+    bad_event = replace(order.events[0], filled=Decimal(1), remaining=Decimal(1))
+    result = reconcile(
+        {"AAPL": 2}, records=(record,), orders=(replace(order, events=(bad_event,)),),
+        attributions=(attribution,),
+    )
+    assert Blocker.PENDING_UNKNOWN_EXECUTION in result.blockers
+    assert not result.can_open_exposure
+
+
 def test_callback_with_wrong_broker_order_id_is_unexplained():
     record = decision_record("d", (("a", "pa", 1),), order_id="o")
     order, attribution = linked_order(

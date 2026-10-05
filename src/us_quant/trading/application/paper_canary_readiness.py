@@ -82,6 +82,9 @@ class PaperCanaryInspectionSpec:
             for item in self.evidence_targets
         ):
             raise ValueError("every evidence target must name an inspected version")
+        targeted_versions = {item.strategy_version_id for item in self.evidence_targets}
+        if targeted_versions != set(self.strategy_version_ids):
+            raise ValueError("every inspected version must have an evidence target")
         if not self.provider.strip():
             raise ValueError("provider must not be blank")
         if (

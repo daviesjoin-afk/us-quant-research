@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from contextlib import closing
 
 from us_quant.minute_data import MinuteQuoteStore
@@ -66,15 +67,24 @@ class _EmptyPerformanceReadPort:
         del version_id
 
 
+class _FailedPerformanceReadPort:
+    def latest_for_version(self, version_id: str):
+        del version_id
+        raise RuntimeError("paper performance evidence store is unreadable")
+
+
 def _performance_read_port(governance_path):
     if not governance_path.exists():
         return _EmptyPerformanceReadPort()
-    with closing(connect_sqlite_readonly(governance_path)) as connection:
-        row = connection.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE type = 'table' "
-            "AND name = 'strategy_paper_performance_evaluation'"
-        ).fetchone()
+    try:
+        with closing(connect_sqlite_readonly(governance_path)) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' "
+                "AND name = 'strategy_paper_performance_evaluation'"
+            ).fetchone()
+    except (OSError, sqlite3.Error):
+        return _FailedPerformanceReadPort()
     if row is None:
         return _EmptyPerformanceReadPort()
     return SQLiteStrategyPaperPerformanceRepository(governance_path, read_only=True)

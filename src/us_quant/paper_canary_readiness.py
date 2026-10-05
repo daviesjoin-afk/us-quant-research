@@ -50,6 +50,7 @@ def resolve_git_head() -> str | None:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
+            cwd=ApplicationPaths.discover().resource_root,
             check=True,
             capture_output=True,
             text=True,
@@ -191,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _arguments(argv)
     try:
         spec = _parse_spec(args)
-        config = load_config(args.config)
+        config = load_config(args.config) if args.live_broker_check else None
         application = build_paper_canary_readiness_application(spec)
         broker = _broker_projection(config, live_check=args.live_broker_check)
         report = application.inspect(

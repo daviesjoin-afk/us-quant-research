@@ -547,6 +547,15 @@ def test_spec_rejects_duplicate_targets_and_targets_outside_version_set():
         )
 
 
+def test_every_inspected_version_requires_at_least_one_evidence_target():
+    with pytest.raises(ValueError, match="every inspected version"):
+        PaperCanaryInspectionSpec(
+            strategy_version_ids=(VERSION_A, VERSION_B),
+            evidence_targets=(PaperCanaryEvidenceTarget(VERSION_A, "SPY"),),
+            provider="IBKR",
+        )
+
+
 def test_application_layer_has_no_shell_qt_execution_or_risk_authority():
     path = Path("src/us_quant/trading/application/paper_canary_readiness.py")
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -630,6 +639,70 @@ def test_uncreated_performance_table_means_no_observation(tmp_path):
         connection.execute("CREATE TABLE unrelated_fact (value TEXT)")
     reader = _performance_read_port(database)
     assert reader.latest_for_version(VERSION_A) is None
+
+
+def test_unreadable_performance_store_becomes_a_read_failure_blocker(tmp_path):
+    from us_quant.trading.composition.paper_canary_readiness import (
+        _performance_read_port,
+    )
+
+    database = tmp_path / "governance.sqlite3"
+    database.write_bytes(b"not a sqlite database")
+    app, _ = _app()
+    app._paper_performance = _performance_read_port(database)
+    report = app.inspect(current_runtime_revision="rev")
+    assert "PERFORMANCE_READ_FAILED" in report.strategies[0].blockers
+
+
+def test_offline_cli_does_not_load_broker_config(monkeypatch, tmp_path, capsys):
+    from us_quant import paper_canary_readiness as cli
+
+    app, _ = _app()
+    monkeypatch.setattr(
+        cli, "build_paper_canary_readiness_application", lambda _spec: app
+    )
+    monkeypatch.setattr(cli, "resolve_git_head", lambda: "rev")
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda _path: pytest.fail("offline inspection must not load broker config"),
+    )
+    assert (
+        cli.main(
+            [
+                "--strategy-version",
+                VERSION_A,
+                "--strategy-version",
+                VERSION_B,
+                "--evidence-target",
+                f"{VERSION_B}:SPY",
+                "--evidence-target",
+                f"{VERSION_A}:SPY",
+                "--config",
+                str(tmp_path / "missing.toml"),
+            ]
+        )
+        == 0
+    )
+    assert "overall_status =" in capsys.readouterr().out
+
+
+def test_git_revision_is_resolved_from_application_checkout(monkeypatch):
+    from types import SimpleNamespace
+
+    from us_quant import paper_canary_readiness as cli
+    from us_quant.paths import ApplicationPaths
+
+    observed = {}
+
+    def fake_run(*args, **kwargs):
+        observed["args"] = args
+        observed["kwargs"] = kwargs
+        return SimpleNamespace(stdout="application-revision\n")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli.resolve_git_head() == "application-revision"
+    assert observed["kwargs"]["cwd"] == ApplicationPaths.discover().resource_root
 
 
 def test_cli_shell_revision_is_outside_application_and_has_no_write_actions():

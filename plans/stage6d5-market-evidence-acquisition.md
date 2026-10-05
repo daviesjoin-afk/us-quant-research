@@ -19,11 +19,13 @@ Add one read-only, restart-safe market evidence capture path that uses the exist
 - [x] M5a: Freeze PR #88 on exact head (CI, Codex review and zero unresolved threads).
 - [x] M5b: PR #88 merged; start the separate read-only canary readiness inspector PR #89 from its actual merge SHA.
 - [x] M6: Implement and locally verify PR #89 inspector, CLI, read-only composition, architecture guards, mutation gates, and full regression suite.
-- [ ] M7: Commit/push PR #89 branch, open PR, then validate exact-head CI/review and unresolved threads.
+- [x] M7: Commit/push PR #89 branch, open PR, then validate exact-head CI/review and unresolved threads; merge only after all exact-head gates pass.
+- [x] M8: Add a subprocess exit/restart regression that persists a Paper performance evaluation in one process and rehydrates the same canonical result read-only in a fresh process; keep this separate from real operational evidence.
 
 ## Decision log
 - 2026-10-03: Keep scope to PR #88 first because the request explicitly sequences #89 after its merge.
 - 2026-10-03: No review or governance artifacts may be generated from the empty quote DB; collector readiness cannot manufacture evidence.
+- 2026-10-05: The pre-existing performance "restart" test rebuilt repository/application objects in the same Python process and reused in-memory broker observations. Added a two-process regression: one process writes the evaluation and exits; a fresh process loads the canonical evaluation read-only from SQLite. Its deterministic broker fixture is test input only and does not prove real broker observations are durable.
 
 ## Completion record
 - 2026-10-03: Exact-baseline feature branch confirmed; shared quality primitive and append-once capture path implemented; focused suite currently 49/49 green, compileall and diff check pass.
@@ -45,3 +47,5 @@ Add one read-only, restart-safe market evidence capture path that uses the exist
 - 2026-10-05: After both review rounds: focused tests 45/45; #89 mutations 47/47; D5 40/40; D2 15/15; 6-E 37/37; full suite 6469 passed, 1 Windows/POSIX-only skip. Doctor, compileall, Ruff on new files, checkpoint validation, and diff check passed. Actual offline CLI remains DATA_COLLECTION, five targets 0/25, both strategies RESEARCH, plan MISSING, broker NOT_RUN, reconciliation NOT_CHECKED, 6-F BLOCKED. Second-round commit and exact-head CI/review remain pending.
 - 2026-10-05: Third exact-head review found ancestor-worktree Git revision resolution and stale reconciliation reuse. Revision resolution now checks clean status and that Git top-level equals the resource root. Reconciliation freshness reuses the canonical five-minute snapshot limit and must follow the supplied broker snapshot; no reconciliation algorithm was copied.
 - 2026-10-05: After three review rounds: focused inspector tests 48/48; #89 mutations 49/49; D5 40/40; D2 15/15; 6-E 37/37; full suite 6472 passed, 1 Windows/POSIX-only skip. Doctor, compileall, Ruff, checkpoint validation, and diff check passed. Final review fixes remain uncommitted pending the next exact-head remote CI/review.
+- 2026-10-05: PR #89 exact head `d9a7e49649563f6070d66802b5f321d136b75c62` passed CI run `37313173642`; exact-head Codex review found no major issues and all 9 review threads are resolved. User authorized a merge commit; PR #89 merged as `dd14f6792eedf999f636721ee3f8c9106bc700da`, equal to `origin/main`. Frozen `STAGE_6_CANARY_READINESS_BASELINE` at that actual merge SHA. Canary readiness is implemented; current offline CLI still reports DATA_COLLECTION with five targets at 0/25. Stage 6-D operational remains incomplete and Stage 6-F remains blocked. Port 4002 is not listening; no real recorder was started.
+- 2026-10-05: Added a process-boundary regression for Paper performance: one subprocess writes the evaluation and exits; a fresh subprocess opens the performance store read-only and rehydrates the same canonical evaluation without a broker connection. Its write process uses a deterministic test broker fixture. Focused application tests pass 14/14; real-canary evidence and operational restart proof remain outstanding.

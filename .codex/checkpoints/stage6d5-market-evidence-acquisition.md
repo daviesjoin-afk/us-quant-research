@@ -7,14 +7,16 @@ Complete PR #89 as a read-only supervised Paper canary readiness inspector.
 Work only in `D:\Codex\USQuant-stage6`; no extra worktree and do not use `D:\Codex\USQuant`. Keep Stage 6-F blocked until real supervised Paper evidence survives process restart and semantic evaluation matches.
 
 ## Current phase
-PR #89 open; three rounds of exact-head review findings fixed locally; current full validation complete; follow-up push and final exact-head checks pending.
+PR #89 merged by merge commit `dd14f6792eedf999f636721ee3f8c9106bc700da`; a process-exit/restart regression now persists a Paper performance evaluation in one interpreter and rehydrates it read-only in a fresh interpreter. The real-evidence line is waiting for IBKR Paper port 4002 to return.
 
 ## Frozen state
-- PR #88 merged; exact feature head `01fce42993dacbf3b39c3434fd5d8e3f1db46c45`; actual merge SHA and `origin/main`: `612d940a6d83636c102524bc867556887472381b`.
+- PR #88 actual merge SHA: `612d940a6d83636c102524bc867556887472381b`.
 - `STAGE_6_D5_BASELINE = STAGE_6_89_BASE = 612d940a6d83636c102524bc867556887472381b`.
-- PR #89 branch `feat/stage6d5-paper-canary-readiness-inspector` starts at that SHA.
-- PR #89: https://github.com/daviesjoin-afk/us-quant-research/pull/89; current pushed head `e893bf6c4c3c2fdc1fef025875040b9714b13a08`; OPEN/MERGEABLE, based on `main` at the frozen baseline. First two review rounds' 7 issues are fixed and resolved. Third review found 2 P2s (ancestor worktree revision and stale reconciliation); both fixed locally with regressions, follow-up push/re-review pending.
-- D5 implementation complete; operational capture incomplete; Stage 6-F BLOCKED.
+- PR #89 `https://github.com/daviesjoin-afk/us-quant-research/pull/89` merged; exact feature head `d9a7e49649563f6070d66802b5f321d136b75c62`; actual merge SHA and `origin/main`: `dd14f6792eedf999f636721ee3f8c9106bc700da`.
+- `STAGE_6_CANARY_READINESS_BASELINE = dd14f6792eedf999f636721ee3f8c9106bc700da`.
+- Stage 6-D.5 implementation and canary readiness inspector are complete. Market evidence is still 0/25; Stage 6-D operational is incomplete; Stage 6-F remains BLOCKED.
+- IBKR Paper port `127.0.0.1:4002` is currently not listening; no recorder was started.
+- The new subprocess regression is engineering coverage only: the evaluator writes a durable SQLite performance record using deterministic test broker truth, then a fresh process rehydrates only that record read-only. It is not real-canary evidence or an operational restart pass.
 
 ## Decisions
 - Use read-only SQLite composition; missing performance table means NOT_YET_OBSERVED, without schema writes.
@@ -36,4 +38,4 @@ PR #89 open; three rounds of exact-head review findings fixed locally; current f
 Real market capture, governed Paper strategies, portfolio plan, live broker preflight, canonical reconciliation, and supervised restart proof remain outstanding; 6-F is BLOCKED.
 
 ## Next action
-Commit/push the third-round fixes, reply/resolve addressed threads, then wait for exact-head CI and Codex review; inspect unresolved threads. Do not merge without all user-specified gates. Operational collection and restart proof remain outstanding.
+Inspect how production broker account/open-order observations can participate in a durable restart proof without treating a test fixture as operational truth. In parallel, recheck port 4002; start the real evidence recorder only after the Paper API is reachable and never switch providers as a fallback. Keep Stage 6-F BLOCKED until real supervised Paper evidence survives restart with the same semantic evaluation.

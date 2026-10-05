@@ -254,6 +254,7 @@ def _app(
         market_evidence_readiness=market,
         portfolio_plan_repository=_PlanRepository(plan),
         portfolio_plan_application=_PlanApplication(plan, valid=plan_valid),
+        clock=lambda: NOW,
     )
     return app, market
 
@@ -433,7 +434,7 @@ def test_c89_15_broker_success_does_not_clear_unchecked_reconciliation():
 
 def test_c89_16_reconciliation_blocker_is_preserved():
     app, _ = _app()
-    result = SimpleNamespace(blockers=("unexplained_fill",))
+    result = SimpleNamespace(blockers=("unexplained_fill",), observed_at=NOW)
     report = app.inspect(
         current_runtime_revision="rev",
         broker_check=_broker(),
@@ -470,9 +471,34 @@ def test_c89_17_only_clean_canonical_reconciliation_allows_ready_diagnostic():
     report = app.inspect(
         current_runtime_revision="rev",
         broker_check=_broker(),
-        reconciliation_result=SimpleNamespace(blockers=()),
+        reconciliation_result=SimpleNamespace(blockers=(), observed_at=NOW),
     )
     assert report.overall_status is PaperCanaryInspectionStatus.READY_FOR_CANARY
+
+
+def test_stale_reconciliation_cannot_be_reused_for_canary():
+    app, _ = _app()
+    result = SimpleNamespace(blockers=(), observed_at=NOW - timedelta(minutes=6))
+    report = app.inspect(
+        current_runtime_revision="rev",
+        broker_check=_broker(),
+        reconciliation_result=result,
+    )
+    assert report.overall_status is PaperCanaryInspectionStatus.RECONCILIATION_NOT_READY
+    assert report.reconciliation.status == "STALE"
+    assert report.reconciliation.blockers == ("RECONCILIATION_STALE",)
+
+
+def test_reconciliation_must_follow_the_supplied_broker_snapshot():
+    app, _ = _app()
+    result = SimpleNamespace(blockers=(), observed_at=NOW - timedelta(seconds=1))
+    report = app.inspect(
+        current_runtime_revision="rev",
+        broker_check=_broker(),
+        reconciliation_result=result,
+    )
+    assert report.overall_status is PaperCanaryInspectionStatus.RECONCILIATION_NOT_READY
+    assert report.reconciliation.blockers == ("RECONCILIATION_PREDATES_BROKER_TRUTH",)
 
 
 def test_c89_18_missing_performance_does_not_block_first_canary_preflight():
@@ -724,11 +750,15 @@ def test_git_revision_is_resolved_from_application_checkout(monkeypatch):
         observed.setdefault("calls", []).append((args, kwargs))
         if args[0][1] == "status":
             return SimpleNamespace(stdout="")
+        if "--show-toplevel" in args[0]:
+            return SimpleNamespace(
+                stdout=str(ApplicationPaths.discover().resource_root)
+            )
         return SimpleNamespace(stdout="application-revision\n")
 
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
     assert cli.resolve_git_head() == "application-revision"
-    assert len(observed["calls"]) == 2
+    assert len(observed["calls"]) == 3
     assert all(
         kwargs["cwd"] == ApplicationPaths.discover().resource_root
         for _args, kwargs in observed["calls"]
@@ -749,6 +779,31 @@ def test_dirty_application_checkout_has_unknown_revision(monkeypatch):
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
     assert cli.resolve_git_head() is None
     assert len(calls) == 1
+
+
+def test_git_revision_rejects_an_ancestor_worktree(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from us_quant import paper_canary_readiness as cli
+
+    resource_root = tmp_path / "app" / "dist"
+    repository_root = tmp_path / "app"
+    resource_root.mkdir(parents=True)
+    monkeypatch.setattr(
+        cli.ApplicationPaths,
+        "discover",
+        lambda: SimpleNamespace(resource_root=resource_root),
+    )
+
+    def fake_run(args, **kwargs):
+        if args[1] == "status":
+            return SimpleNamespace(stdout="")
+        if "--show-toplevel" in args:
+            return SimpleNamespace(stdout=str(repository_root))
+        pytest.fail("must reject an ancestor worktree before resolving HEAD")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli.resolve_git_head() is None
 
 
 def test_json_projection_serializes_performance_durations():

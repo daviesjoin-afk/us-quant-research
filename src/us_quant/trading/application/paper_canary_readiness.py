@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -10,6 +11,9 @@ from typing import Protocol
 from us_quant.trading.application.market_evidence_readiness import (
     REQUIRED_CAPTURE_SESSIONS,
     MarketEvidenceReadinessApplication,
+)
+from us_quant.trading.application.portfolio_reconciliation import (
+    DEFAULT_MAX_RECONCILIATION_SNAPSHOT_AGE,
 )
 from us_quant.trading.domain.strategy import StrategyMode, StrategyStatus
 
@@ -196,6 +200,7 @@ class BrokerCheckProjection:
 class ReconciliationProjection:
     status: str
     blockers: tuple[str, ...]
+    observed_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +258,7 @@ class PaperCanaryReadinessApplication:
         market_evidence_readiness: MarketEvidenceReadinessApplication,
         portfolio_plan_repository: _PlanRepository,
         portfolio_plan_application: _PlanApplication,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._spec = spec
         self._strategies = strategies
@@ -265,6 +271,7 @@ class PaperCanaryReadinessApplication:
         self._market_evidence_readiness = market_evidence_readiness
         self._portfolio_plan_repository = portfolio_plan_repository
         self._portfolio_plan_application = portfolio_plan_application
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def inspect(
         self,
@@ -299,7 +306,7 @@ class PaperCanaryReadinessApplication:
             paper_order_submission_enabled=False,
             api_read_only=False,
         )
-        reconciliation = self._reconciliation_projection(reconciliation_result)
+        reconciliation = self._reconciliation_projection(reconciliation_result, broker)
         blockers: list[str] = []
         if (
             self._spec.expected_runtime_revision is not None
@@ -538,12 +545,48 @@ class PaperCanaryReadinessApplication:
             blockers=tuple(blockers),
         )
 
-    @staticmethod
-    def _reconciliation_projection(result: object | None) -> ReconciliationProjection:
+    def _reconciliation_projection(
+        self,
+        result: object | None,
+        broker: BrokerCheckProjection,
+    ) -> ReconciliationProjection:
         if result is None:
             return ReconciliationProjection(
                 status="NOT_CHECKED",
                 blockers=("CANONICAL_RECONCILIATION_NOT_COMPOSED",),
+            )
+        observed_at = getattr(result, "observed_at", None)
+        now = self._clock()
+        if (
+            not isinstance(observed_at, datetime)
+            or observed_at.tzinfo is None
+            or observed_at.utcoffset() is None
+            or now.tzinfo is None
+            or now.utcoffset() is None
+        ):
+            return ReconciliationProjection(
+                status="NOT_CHECKED",
+                blockers=("RECONCILIATION_TIMESTAMP_INVALID",),
+            )
+        observed_at_utc = observed_at.astimezone(UTC)
+        now_utc = now.astimezone(UTC)
+        if (
+            observed_at_utc > now_utc
+            or now_utc - observed_at_utc > DEFAULT_MAX_RECONCILIATION_SNAPSHOT_AGE
+        ):
+            return ReconciliationProjection(
+                status="STALE",
+                blockers=("RECONCILIATION_STALE",),
+                observed_at=observed_at,
+            )
+        if (
+            broker.observed_at is None
+            or observed_at_utc < broker.observed_at.astimezone(UTC)
+        ):
+            return ReconciliationProjection(
+                status="STALE",
+                blockers=("RECONCILIATION_PREDATES_BROKER_TRUTH",),
+                observed_at=observed_at,
             )
         blockers = tuple(
             sorted(
@@ -554,6 +597,7 @@ class PaperCanaryReadinessApplication:
         return ReconciliationProjection(
             status="CLEAN" if not blockers else "BLOCKED",
             blockers=blockers,
+            observed_at=observed_at,
         )
 
     def _plan_matches(self, plan: PortfolioPlanProjection) -> bool:

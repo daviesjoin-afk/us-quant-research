@@ -59,6 +59,16 @@ def resolve_git_head() -> str | None:
         )
         if status.stdout.strip():
             return None
+        top_level = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if Path(top_level.stdout.strip()).resolve() != cwd.resolve():
+            return None
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=cwd,

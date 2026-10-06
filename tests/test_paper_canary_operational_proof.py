@@ -505,10 +505,12 @@ def test_two_os_processes_durable_only_proof(tmp_path, corruption):
     root = Path(__file__).resolve().parents[1]
     helper = root / "tests/support/paper_proof_process.py"
     env = dict(os.environ, PYTHONPATH=os.pathsep.join((str(root / "src"), str(root / "tests"))), PYTHONUTF8="1")
-    first = subprocess.run([sys.executable, str(helper), "a", str(tmp_path)], capture_output=True, text=True, env=env, timeout=30)
+    # Shared Windows CI can be much slower than local execution under four
+    # workers. Keep a bounded timeout without retrying or swallowing failures.
+    first = subprocess.run([sys.executable, str(helper), "a", str(tmp_path)], capture_output=True, text=True, env=env, timeout=120)
     assert first.returncode == 0, first.stderr
     before = json.loads(first.stdout)
-    second = subprocess.run([sys.executable, str(helper), "b", str(tmp_path), corruption], capture_output=True, text=True, env=env, timeout=30)
+    second = subprocess.run([sys.executable, str(helper), "b", str(tmp_path), corruption], capture_output=True, text=True, env=env, timeout=120)
     assert second.returncode == 0, second.stderr
     after = json.loads(second.stdout)
     if corruption == "none":

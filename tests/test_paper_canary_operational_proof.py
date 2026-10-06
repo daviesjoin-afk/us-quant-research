@@ -349,6 +349,26 @@ def test_missing_or_ineligible_restart_baseline_cannot_pass(facts):
     assert compare_restart(artifact(proof), dirty).status is S.RECONCILIATION_BLOCKED
 
 
+@pytest.mark.parametrize("revision", [None, "", " "])
+def test_unknown_runtime_revision_blocks_inspection(facts, revision):
+    spec = replace(spec_for(facts.evaluations), expected_runtime_revision=None)
+    proof = inspect_memory(facts, spec=spec, revision=revision)
+    assert proof.status is S.RESTART_MISMATCH
+    assert proof.blockers == ("runtime_revision_unknown",)
+
+
+@pytest.mark.parametrize("before_revision,after_revision", [
+    (None, None), (None, "runtime-sha"), ("runtime-sha", None),
+])
+def test_unknown_runtime_revision_blocks_comparison(facts, before_revision, after_revision):
+    proof = proof_for(facts.root, facts.evaluations)
+    baseline = edge.validate_artifact(artifact(replace(proof, runtime_revision=before_revision)))
+    current = replace(proof, runtime_revision=after_revision)
+    result = compare_restart(baseline, current)
+    assert result.status is S.RESTART_MISMATCH
+    assert result.blockers == ("runtime_revision_unknown",)
+
+
 def test_baseline_self_hash_and_write_once(facts):
     value = artifact(proof_for(facts.root, facts.evaluations))
     path = facts.root / "baseline.json"

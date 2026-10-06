@@ -40,6 +40,10 @@ class PerformanceComparison(StrEnum):
     FRESH_RECONSTRUCTION = "fresh-reconstruction"
 
 
+def _runtime_revision_known(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _identities(values: tuple[str, ...], *, name: str, required: bool = True):
     if (not isinstance(values, tuple) or (required and not values)
             or any(not isinstance(x, str) or not x.strip() or x != x.strip() for x in values)
@@ -279,6 +283,8 @@ class PaperCanaryOperationalProofApplication:
             block(ProofStatus.INCOMPLETE_SESSION_TRUTH, "decision_order_outside_session")
         if any(x.intent.order_id not in {a.order_id for a in campaign_attrs} for x in campaign_orders):
             block(ProofStatus.INCOMPLETE_SESSION_TRUTH, "missing_execution_attribution")
+        if not _runtime_revision_known(runtime_revision):
+            block(ProofStatus.RESTART_MISMATCH, "runtime_revision_unknown")
         if self.spec.expected_runtime_revision is not None and runtime_revision != self.spec.expected_runtime_revision:
             block(ProofStatus.RESTART_MISMATCH, "runtime_revision_mismatch")
 
@@ -390,6 +396,9 @@ def compare_restart(baseline: Mapping | None, current: PaperCanaryOperationalPro
         return replace(current, status=ProofStatus.RESTART_MISMATCH, blockers=("baseline_not_eligible",))
     if current.blockers:
         return current
+    if not _runtime_revision_known(baseline.get("runtime_revision")) or not _runtime_revision_known(current.runtime_revision):
+        return replace(current, status=ProofStatus.RESTART_MISMATCH,
+                       blockers=("runtime_revision_unknown",))
     if mode is PerformanceComparison.FRESH_RECONSTRUCTION and (
         set(baseline.get("performance_evaluation_ids", ()))
         & {x.evaluation_id for x in current.performance_evaluations}

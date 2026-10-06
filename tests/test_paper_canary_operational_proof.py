@@ -199,6 +199,48 @@ def test_future_decision_truth_cannot_prove_completion(tmp_path, field):
         assert result.status is not S.OPERATIONAL_PROOF_PASS
 
 
+def test_same_ibkr_second_fill_is_valid_after_order_intent(tmp_path):
+    decisions, attrs, truth = history()
+    order = next(x for x in truth.orders if x.intent.order_id == "a-sell")
+    fill_at = order.fills[0].occurred_at
+    intent_at = fill_at + timedelta(milliseconds=900)
+    changed = replace(order, intent=replace(order.intent, created_at=intent_at))
+    truth = PortfolioOrderTruth(tuple(changed if x is order else x for x in truth.orders))
+    _, _, _, account, source, evaluations = persist_facts(tmp_path, data=(decisions, attrs, truth))
+    proof = proof_for(tmp_path, evaluations, account=account, source=source)
+    assert not proof.blockers
+    assert compare_restart(artifact(proof), proof).status is S.OPERATIONAL_PROOF_PASS
+
+
+def test_fill_before_intent_by_a_reported_second_blocks(tmp_path):
+    decisions, attrs, truth = history()
+    order = next(x for x in truth.orders if x.intent.order_id == "a-sell")
+    intent_at = order.fills[0].occurred_at + timedelta(seconds=1)
+    changed = replace(order, intent=replace(order.intent, created_at=intent_at))
+    truth = PortfolioOrderTruth(tuple(changed if x is order else x for x in truth.orders))
+    _, _, _, account, source, evaluations = persist_facts(tmp_path, data=(decisions, attrs, truth))
+    proof = proof_for(tmp_path, evaluations, account=account, source=source)
+    assert proof.status is S.INCOMPLETE_SESSION_TRUTH
+    assert "fill_precedes_order_intent_at_broker_precision" in proof.blockers
+    assert compare_restart(artifact(proof), proof).status is not S.OPERATIONAL_PROOF_PASS
+
+
+def test_fractional_fill_before_intent_blocks_at_reported_precision(tmp_path):
+    decisions, attrs, truth = history()
+    order = next(x for x in truth.orders if x.intent.order_id == "a-sell")
+    exact_fill_at = order.fills[0].occurred_at + timedelta(milliseconds=100)
+    changed = replace(
+        order,
+        intent=replace(order.intent, created_at=exact_fill_at + timedelta(milliseconds=400)),
+        fills=(replace(order.fills[0], occurred_at=exact_fill_at),),
+    )
+    truth = PortfolioOrderTruth(tuple(changed if x is order else x for x in truth.orders))
+    _, _, _, account, source, evaluations = persist_facts(tmp_path, data=(decisions, attrs, truth))
+    proof = proof_for(tmp_path, evaluations, account=account, source=source)
+    assert proof.status is S.INCOMPLETE_SESSION_TRUTH
+    assert "fill_precedes_order_intent_at_broker_precision" in proof.blockers
+
+
 def test_evaluation_before_last_session_fill_is_incomplete(tmp_path):
     decisions, attrs, truth = history()
     sell = next(x for x in truth.orders if x.intent.order_id == "a-sell")

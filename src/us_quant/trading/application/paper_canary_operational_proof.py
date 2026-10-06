@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 
@@ -290,6 +290,22 @@ class PaperCanaryOperationalProofApplication:
             for x in orders.orders
         ):
             block(ProofStatus.INCOMPLETE_SESSION_TRUTH, "order_truth_in_future")
+        # Both IBKR whole-second and fractional ISO timestamps are accepted by
+        # the adapters. Do not reject a coarse second that could truncate a real
+        # sub-second fill; fractional timestamps have enough precision to compare.
+        if any(
+            x.intent is not None
+            and any(
+                f.occurred_at < x.intent.created_at
+                and (
+                    f.occurred_at.microsecond != 0
+                    or x.intent.created_at - f.occurred_at >= timedelta(seconds=1)
+                )
+                for f in x.fills
+            )
+            for x in orders.orders
+        ):
+            block(ProofStatus.INCOMPLETE_SESSION_TRUTH, "fill_precedes_order_intent_at_broker_precision")
         if any(x.created_at > now or x.observed_at > now for x in decisions):
             block(ProofStatus.INCOMPLETE_SESSION_TRUTH, "decision_truth_in_future")
         if not _runtime_revision_known(runtime_revision):

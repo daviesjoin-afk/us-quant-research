@@ -1564,6 +1564,7 @@ def test_only_composition_roots_wire_adapters_into_applications() -> None:
         "trading/composition/market_data.py",
         "trading/composition/paper_autonomy.py",
         "trading/composition/paper_autonomy_supervisor.py",
+        "trading/composition/paper_canary_operational_proof.py",
         "trading/composition/paper_canary_readiness.py",
         "trading/composition/portfolio_operations.py",
         "trading/composition/portfolio_paper.py",

@@ -21,28 +21,31 @@ trading capability and no new authority.
 - STAGE_6_D_OPERATIONAL_PROOF_TOOLING_BASELINE = 416bced523297ae226cbdf668c0c4826c7f94d69
 
 ## Current phase
-PR #93 OPEN at head `3289f216456ad2d3731e4f78d269f227e89011ef`. All local gates
-green; waiting on exact-head CI and the review pass.
+PR #93 OPEN at head `f85584f70eb1ce0d7b6412df9e7efbe043fdcd70`. All local gates
+green; awaiting exact-head CI and review.
 
 ## Decisions
 - Status vocabulary is READY / DATA_COLLECTION / BLOCKED. DATA_COLLECTION is the
   "stream is up, nothing captured yet" case; the CLI renders it as
   BLOCKED_DATA_COLLECTION because it still blocks the operator.
 - Live ports 4001/7496 are refused by name, distinct from "not a paper port".
-- A health snapshot older than 120 s is treated as a stalled stream.
-- Review follow-up: an expected symbol that is not in the realtime symbol list
-  blocks, and a future health timestamp fails closed.
+- A health snapshot older than 120 s, or with a future timestamp, is treated as
+  stalled.
+- An expected symbol absent from the realtime symbol list blocks.
+- The recorder prints health JSON to stdout and owns no log file, so the
+  transport is explicit: `--health-log <redirected file>` or `--health-stdin`.
+  Absent both, the stream is reported unobserved and blocks.
 
 ## Changed files
 - `src/us_quant/trading/application/paper_evidence_readiness.py` — pure projection.
 - `src/us_quant/trading/composition/paper_evidence_readiness.py` — read-only wiring.
 - `src/us_quant/paper_evidence_readiness.py` — CLI.
-- `tests/test_paper_evidence_readiness.py` — R93-01..R93-10 (50 tests).
-- `scripts/mutation_paper_evidence_readiness_93.ps1` — 32 mutants.
+- `tests/test_paper_evidence_readiness.py` — R93-01..R93-10 (54 tests).
+- `scripts/mutation_paper_evidence_readiness_93.ps1` — 35 mutants.
 
-## Verification (final commit 3289f21)
-- Full pytest — 6637 passed, 1 skipped.
-- #93 mutation — 32/32 RED, 0 survivors, 0 harness errors.
+## Verification (final commit f85584f)
+- Full pytest — 6641 passed, 1 skipped.
+- #93 mutation — 35/35 RED, 0 survivors, 0 harness errors.
 - #92 mutation — 70/70; #91 20/20; D5 40/40; D2 15/15; 6-E 37/37, all zero
   survivors and zero harness errors.
 - doctor, compileall — passed.
@@ -51,9 +54,9 @@ green; waiting on exact-head CI and the review pass.
 ## Blockers or risks
 - `127.0.0.1:4002` is closed locally, so the CLI reports BLOCKED on this machine;
   that is the correct answer, not a defect.
-- Mutation gates mutate `src/` in place, so they must run strictly one at a time.
-  A parallel run leaves LF-rewritten files behind; `git diff --quiet` still exits
-  0 (no content change) under `core.autocrlf=true`.
+- Mutation gates mutate `src/` in place, so they must run strictly one at a time;
+  a parallel run leaves LF-rewritten files behind. Under `core.autocrlf=true`
+  those show as `M` in `git status` while `git diff --quiet` still exits 0.
 
 ## Next action
 Confirm exact-head CI, resolve review threads, report.

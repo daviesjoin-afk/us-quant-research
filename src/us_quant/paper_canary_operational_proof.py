@@ -243,7 +243,7 @@ def main(argv=None):
         now = datetime.now(UTC)
         proof = application.inspect(now=now, runtime_revision=resolve_runtime_revision(), broker=broker)
         if args.mode == "snapshot":
-            write_artifact_once(args.output, make_artifact(proof, generated_at=now))
+            write_artifact_once(args.output, make_artifact(proof, generated_at=datetime.now(UTC)))
         else:
             proof = compare_restart(baseline, proof, mode=PerformanceComparison(args.comparison))
         print(canonical_json(proof))

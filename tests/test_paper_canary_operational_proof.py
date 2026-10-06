@@ -621,6 +621,54 @@ def test_cli_snapshot_then_verify_is_readonly(facts, capsys, monkeypatch):
     assert "self-hash" in json.loads(capsys.readouterr().out)["blockers"][0]
 
 
+def test_snapshot_boundary_is_after_inspection(facts, capsys, monkeypatch):
+    from datetime import datetime
+    clock = [NOW]
+    created_during_inspection = []
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+    application = build(spec_for(facts.evaluations), runtime_root=facts.root,
+                        broker_order_truth=facts.source)
+    def inspect(**kwargs):
+        proof = application.inspect(**kwargs)
+        # Simulate an independent formal writer completing during the read.
+        at = NOW + timedelta(seconds=1)
+        facts.components.application._broker_orders = broker_source(observed_at=at)
+        created_during_inspection.extend(facts.components.application.evaluate(
+            strategy_version_id=v, policy_id="paper-policy", window_start=x.window_start,
+            window_end=x.window_end, broker=broker(quantities={}, observed_at=at), evaluated_at=at,
+        ) for v, x in zip(("a", "b"), facts.evaluations))
+        clock[0] = NOW + timedelta(seconds=2)
+        return proof
+    monkeypatch.setattr(edge, "datetime", Clock)
+    monkeypatch.setattr(edge, "resolve_runtime_revision", lambda: "runtime-sha")
+    monkeypatch.setattr(edge, "build_paper_canary_operational_proof_application",
+                        lambda *args, **kwargs: SimpleNamespace(inspect=inspect))
+    observation = facts.root / "broker.json"
+    observation.write_text(canonical_json({"portfolio": facts.account,
+                                          "open_orders": facts.source.broker_open_order_truth()}), encoding="utf-8")
+    path = facts.root / "baseline.json"
+    evaluation_args = [part for x in facts.evaluations for part in ("--evaluation-id", x.evaluation_id)]
+    assert edge.main(["snapshot", "--strategy-version", "a", "--strategy-version", "b",
+                      "--session-id", "buy-session", "--session-id", "sell-session",
+                      "--runtime-root", str(facts.root), "--broker-observation", str(observation),
+                      "--output", str(path), *evaluation_args]) == 0
+    capsys.readouterr()
+    baseline = edge.load_artifact(path)
+    assert datetime.fromisoformat(baseline["generated_at"]) == clock[0]
+    after_at = NOW + timedelta(seconds=3)
+    after = build(spec_for(tuple(created_during_inspection)), runtime_root=facts.root,
+                  broker_order_truth=broker_source(observed_at=after_at)).inspect(
+        now=after_at, runtime_revision="runtime-sha", broker=broker(quantities={}, observed_at=after_at),
+    )
+    assert not after.blockers
+    result = compare_restart(baseline, after, mode=Mode.FRESH_RECONSTRUCTION)
+    assert result.status is S.RESTART_MISMATCH
+    assert result.blockers == ("fresh_evaluation_must_postdate_baseline",)
+
+
 @pytest.mark.parametrize("kind", ["missing", "baseline", "mixed", "fresh", "preexisting", "equal"])
 def test_cli_fresh_requires_explicit_new_evaluations(facts, capsys, monkeypatch, kind):
     from datetime import datetime

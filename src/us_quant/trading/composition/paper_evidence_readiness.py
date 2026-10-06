@@ -16,7 +16,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from us_quant.config import AppConfig
 from us_quant.ibkr import IBKRConnectionConfig, probe_ibkr_socket
 from us_quant.minute_data import MinuteQuoteStore
 from us_quant.trading.application.market_data import SOURCE_LABELS
@@ -25,7 +24,6 @@ from us_quant.trading.application.market_evidence_readiness import (
     MarketEvidenceReadinessApplication,
 )
 from us_quant.trading.application.paper_evidence_readiness import (
-    EVIDENCE_READY_STATUS,
     IbkrConnectionProjection,
     MarketStreamProjection,
     PaperEvidenceReadinessApplication,
@@ -174,10 +172,6 @@ def projection_from_payload(
     )
 
 
-#: Backwards-compatible private alias used by the CLI.
-_projection_from_payload = projection_from_payload
-
-
 def build_evidence_readiness(
     *,
     spec: PaperEvidenceReadinessSpec,
@@ -216,10 +210,6 @@ def build_paper_evidence_readiness_application(
     return PaperEvidenceReadinessApplication(spec=spec)
 
 
-def is_evidence_ready(row: MarketEvidenceReadiness) -> bool:
-    return row.status == EVIDENCE_READY_STATUS
-
-
 def _parse_timestamp(value: object) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -232,21 +222,13 @@ def _parse_timestamp(value: object) -> datetime | None:
     return parsed
 
 
-def provider_label(source_id: str, config: AppConfig | None = None) -> str:
-    """Resolve the provider label the recorder would use for a source id."""
-
-    return SOURCE_LABELS.get(source_id, source_id)
-
-
 __all__ = [
     "EvidenceStoreReadPort",
     "EvidenceStoreUnavailable",
     "build_evidence_readiness",
     "build_ibkr_projection",
     "build_paper_evidence_readiness_application",
-    "is_evidence_ready",
     "load_stream_projection",
     "projection_from_payload",
-    "provider_label",
     "unobserved_stream",
 ]

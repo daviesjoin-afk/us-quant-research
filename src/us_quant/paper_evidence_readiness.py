@@ -23,6 +23,7 @@ from us_quant.trading.application.market_data import (
     SUPPORTED_SOURCES,
 )
 from us_quant.trading.application.paper_evidence_readiness import (
+    STORE_UNAVAILABLE_BLOCKER,
     PaperEvidenceReadinessReport,
     PaperEvidenceReadinessSpec,
     PaperEvidenceReadinessStatus,
@@ -150,7 +151,7 @@ def build_report(
             parameters=parameters,
         )
     except EvidenceStoreUnavailable:
-        unavailable = "EVIDENCE_STORE_UNAVAILABLE"
+        unavailable = STORE_UNAVAILABLE_BLOCKER
     application = build_paper_evidence_readiness_application(spec)
     return application.inspect(
         ibkr=ibkr,

@@ -331,6 +331,8 @@ class PaperCanaryOperationalProofApplication:
         if not {x.execution_id for x in fills} <= {e for x in evaluations for e in x.source_execution_ids}:
             block(ProofStatus.PERFORMANCE_MISSING, "performance_does_not_cover_all_session_fills")
         for evaluation in evaluations:
+            if evaluation.evaluated_at > now:
+                block(ProofStatus.PERFORMANCE_MISSING, "performance_evaluated_in_future")
             if (not set(evaluation.source_portfolio_decision_ids) <= {x.decision.decision_id for x in decisions}
                     or not set(evaluation.source_order_ids) <= {x.intent.order_id for x in orders.orders if x.intent}
                     or not set(evaluation.source_execution_ids) <= {f.execution_id for x in orders.orders for f in x.fills}):

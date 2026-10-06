@@ -323,6 +323,34 @@ def test_fresh_evaluations_must_postdate_baseline(facts, seconds):
         assert result.blockers == ("fresh_evaluation_must_postdate_baseline",)
 
 
+@pytest.mark.parametrize("seconds", [(10, 10), (10, 3), (3, 3)])
+def test_future_evaluation_cannot_prove_reconstruction(facts, seconds):
+    before = proof_for(facts.root, facts.evaluations)
+    baseline = edge.make_artifact(before, generated_at=NOW + timedelta(seconds=2))
+    at = NOW + timedelta(seconds=1)
+    facts.components.application._broker_orders = broker_source(observed_at=at)
+    fresh = tuple(facts.components.application.evaluate(
+        strategy_version_id=v, policy_id="paper-policy", window_start=x.window_start,
+        window_end=x.window_end, broker=broker(quantities={}, observed_at=at),
+        evaluated_at=NOW + timedelta(seconds=delta),
+    ) for v, x, delta in zip(("a", "b"), facts.evaluations, seconds))
+    assert not {x.evaluation_id for x in fresh} & {x.evaluation_id for x in facts.evaluations}
+    verification_at = NOW + timedelta(seconds=3)
+    after = build(spec_for(fresh), runtime_root=facts.root,
+                  broker_order_truth=broker_source(observed_at=verification_at)).inspect(
+        now=verification_at, runtime_revision="runtime-sha",
+        broker=broker(quantities={}, observed_at=verification_at),
+    )
+    result = compare_restart(baseline, after, mode=Mode.FRESH_RECONSTRUCTION)
+    if seconds == (3, 3):
+        assert not after.blockers
+        assert result.status is S.OPERATIONAL_PROOF_PASS
+    else:
+        assert after.blockers == ("performance_evaluated_in_future",)
+        assert result.status is S.PERFORMANCE_MISSING
+        assert result.blockers == after.blockers
+
+
 def test_fresh_comparison_binds_requested_missing_policy(facts):
     def evaluate_missing(name, at):
         return tuple(facts.components.application.evaluate(
@@ -335,7 +363,10 @@ def test_fresh_comparison_binds_requested_missing_policy(facts):
     assert first[0].metrics == second[0].metrics
     assert first[0].verdict == second[0].verdict
     assert first[0].blockers == second[0].blockers
-    before, after = proof_for(facts.root, first), proof_for(facts.root, second)
+    before = proof_for(facts.root, first)
+    after = build(spec_for(second), runtime_root=facts.root, broker_order_truth=facts.source).inspect(
+        now=NOW + timedelta(seconds=1), runtime_revision="runtime-sha", broker=facts.account,
+    )
     assert not before.blockers and not after.blockers
     result = compare_restart(artifact(before), after, mode=Mode.FRESH_RECONSTRUCTION)
     assert result.status is S.RESTART_MISMATCH

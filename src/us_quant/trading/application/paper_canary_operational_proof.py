@@ -11,6 +11,7 @@ from typing import Protocol
 from us_quant.trading.application.portfolio_reconciliation import PortfolioReconciliationApplication
 from us_quant.trading.domain.account import BrokerAccountPortfolio
 from us_quant.trading.domain.common import Environment
+from us_quant.trading.domain.strategy import StrategyVersion
 from us_quant.trading.domain.portfolio_ledger import PortfolioDecisionRecord, PortfolioExecutionAttribution
 from us_quant.trading.domain.portfolio_reconciliation import (
     BrokerOpenOrderTruth, PortfolioOrderTruth,
@@ -21,6 +22,7 @@ from us_quant.trading.domain.strategy_paper_performance import (
     project_strategy_paper_performance, require_aware,
 )
 from us_quant.trading.ports.strategy_paper_performance_repository import StrategyPaperPerformanceRepositoryNotFound
+from us_quant.trading.ports.strategy_repository import StrategyRepositoryNotFound
 
 
 class ProofStatus(StrEnum):
@@ -79,6 +81,28 @@ class PerformanceProofReadPort(Protocol):
 
 class BrokerProofReadPort(Protocol):
     def broker_open_order_truth(self) -> BrokerOpenOrderTruth: ...
+
+
+class StrategyProofReadPort(Protocol):
+    def get_version(self, version_id: str) -> StrategyVersion: ...
+
+
+@dataclass(frozen=True, slots=True)
+class StrategySourceIdentity:
+    strategy_version_id: str
+    semver: str
+    parameter_hash: str
+    universe_hash: str
+    code_hash: str
+
+
+def _strategy_source_identity(version):
+    # These immutable repository fields are also bound by the evaluator's
+    # source_digest. Keep them visible even when observation times may vary.
+    return StrategySourceIdentity(
+        version.version_id, version.semver, version.parameter_hash,
+        version.universe_hash, version.code_hash,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +183,7 @@ class PaperCanaryOperationalProof:
     replay_blockers: tuple[str, ...]
     attribution_complete: bool
     attributed_fill_counts: tuple[tuple[str, int], ...]
+    strategy_source_identities: tuple[StrategySourceIdentity, ...]
     performance_evaluations: tuple[StrategyPaperPerformanceEvaluation, ...]
     reconciliation_semantics: str | None
     durable_truth_digest: str
@@ -177,6 +202,7 @@ class PaperCanaryOperationalProof:
             "open_order_ids": self.open_order_ids, "replay_blockers": self.replay_blockers,
             "attribution_complete": self.attribution_complete,
             "attributed_fill_counts": self.attributed_fill_counts,
+            "strategy_source_identities": self.strategy_source_identities,
             "performance_evaluations": _sorted_values(
                 performance_semantics(x, mode=mode) for x in self.performance_evaluations
             ),
@@ -189,11 +215,13 @@ class PaperCanaryOperationalProofApplication:
     def __init__(self, *, spec: PaperCanaryOperationalProofSpec,
                  portfolio_repository: PortfolioProofReadPort,
                  order_truth: OrderProofReadPort, evaluations: PerformanceProofReadPort,
+                 strategies: StrategyProofReadPort,
                  broker_order_truth: BrokerProofReadPort | None = None):
         self.spec = spec
         self._portfolio = portfolio_repository
         self._orders = order_truth
         self._evaluations = evaluations
+        self._strategies = strategies
         self._broker_orders = broker_order_truth
 
     def inspect(self, *, now: datetime, runtime_revision: str | None,
@@ -222,6 +250,21 @@ class PaperCanaryOperationalProofApplication:
 
         def block(status, reason):
             failures.setdefault(status, set()).add(reason)
+
+        source_identities = []
+        for version_id in self.spec.strategy_version_ids:
+            try:
+                version = self._strategies.get_version(version_id)
+            except StrategyRepositoryNotFound:
+                block(ProofStatus.INCOMPLETE_SESSION_TRUTH, "strategy_source_identity_missing")
+                continue
+            identity = _strategy_source_identity(version)
+            if identity.strategy_version_id != version_id or any(
+                not isinstance(value, str) or not value.strip()
+                for value in (identity.semver, identity.parameter_hash, identity.universe_hash, identity.code_hash)
+            ):
+                block(ProofStatus.INCOMPLETE_SESSION_TRUTH, "strategy_source_identity_invalid")
+            source_identities.append(identity)
 
         if not campaign_decisions and not campaign_orders:
             block(ProofStatus.NO_CANARY_EVIDENCE, "no_canary_evidence")
@@ -305,6 +348,7 @@ class PaperCanaryOperationalProofApplication:
                 block(ProofStatus.PERFORMANCE_MISSING, "performance_metrics_replay_mismatch")
 
         truth_digest = digest({
+            "strategy_source_identities": _sorted_values(source_identities),
             "decisions": _sorted_values(decisions), "attributions": _sorted_values(attrs),
             "orders": _sorted_values({
                 "intent": x.intent, "account_alias": x.account_alias, "broker_order_id": x.broker_order_id,
@@ -326,6 +370,7 @@ class PaperCanaryOperationalProofApplication:
             tuple(sorted(replay.blockers)), replay.attribution_complete,
             tuple((v, sum(1 for x in replay.attributed_fills if x.strategy_version_id == v and x.order_id in order_ids))
                   for v in sorted(versions)),
+            tuple(source_identities),
             tuple(sorted(evaluations, key=lambda x: x.evaluation_id)),
             _reconciliation_semantics(reconciliation) if reconciliation else None,
             truth_digest, status, blockers,

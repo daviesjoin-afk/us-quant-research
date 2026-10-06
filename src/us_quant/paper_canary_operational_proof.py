@@ -30,6 +30,8 @@ from us_quant.trading.domain.portfolio_ledger import PortfolioStoreUnreadable
 from us_quant.trading.domain.portfolio_reconciliation import BrokerOpenOrder, BrokerOpenOrderTruth
 from us_quant.trading.domain.strategy_paper_performance import canonical_json, canonical_value, digest, require_aware
 from us_quant.trading.ports.strategy_paper_performance_repository import StrategyPaperPerformanceRepositoryError
+from us_quant.trading.ports.strategy_repository import StrategyRepositoryError
+from us_quant.paths import ApplicationPaths
 
 SCHEMA_VERSION = "paper-canary-operational-proof-v1"
 ARTIFACT_FIELDS = frozenset({
@@ -185,10 +187,14 @@ def load_broker_observation(path):
 
 def resolve_runtime_revision():
     try:
-        root = Path(__file__).resolve().parents[2]
+        root = ApplicationPaths.discover().resource_root
         dirty = subprocess.run(["git", "status", "--porcelain"], cwd=root,
                                capture_output=True, text=True, check=True, timeout=5)
         if dirty.stdout.strip():
+            return None
+        top_level = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=root,
+                                   capture_output=True, text=True, check=True, timeout=5)
+        if Path(top_level.stdout.strip()).resolve() != root.resolve():
             return None
         result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
                                 capture_output=True, text=True, check=True, timeout=5)
@@ -241,7 +247,7 @@ def main(argv=None):
             args.mode == "snapshot" and proof.status is ProofStatus.RESTART_BASELINE_MISSING and not proof.blockers
         ) else 2
     except (OSError, ValueError, TypeError, KeyError, ArithmeticError, sqlite3.Error,
-            PortfolioStoreUnreadable, StrategyPaperPerformanceRepositoryError) as error:
+            PortfolioStoreUnreadable, StrategyRepositoryError, StrategyPaperPerformanceRepositoryError) as error:
         print(canonical_json({"status": ProofStatus.RESTART_MISMATCH, "blockers": [f"{type(error).__name__}: {error}"]}))
         return 2
 

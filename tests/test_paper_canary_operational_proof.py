@@ -44,7 +44,8 @@ def inspect_memory(facts, *, decisions=None, attrs=None, orders=None, source=Non
     mapped = dict(zip((x.evaluation_id for x in facts.evaluations), evaluations)) if evaluations is not None else {}
     eval_port = SimpleNamespace(get_evaluation=lambda evaluation_id: mapped[evaluation_id]) if evaluations is not None else facts.components.repository
     app = Application(spec=spec or spec_for(facts.evaluations), portfolio_repository=portfolio,
-                      order_truth=order_port, evaluations=eval_port, broker_order_truth=source or facts.source)
+                      order_truth=order_port, evaluations=eval_port, strategies=facts.components.application._strategies,
+                      broker_order_truth=source or facts.source)
     return app.inspect(now=now, runtime_revision=revision, broker=account or facts.account)
 
 
@@ -244,6 +245,26 @@ def test_fresh_reconstruction_accepts_new_digest_and_evaluation_id(facts):
     assert not after.blockers
     assert compare_restart(artifact(before), after, mode=Mode.FRESH_RECONSTRUCTION).status is S.OPERATIONAL_PROOF_PASS
     assert compare_restart(artifact(before), after).status is S.RESTART_MISMATCH
+
+
+@pytest.mark.parametrize("field", ["semver", "parameter_hash", "universe_hash", "code_hash"])
+def test_fresh_comparison_binds_stable_strategy_source(facts, field):
+    before = proof_for(facts.root, facts.evaluations)
+    # Deliberate corruption case: repository versions are otherwise immutable.
+    # An operator-created evaluation must not conceal changed durable identity.
+    with sqlite3.connect(facts.root / "strategies.sqlite3") as connection:
+        connection.execute(f"UPDATE strategy_version SET {field}=? WHERE version_id='a'", ("changed-business-source",))
+    fresh = tuple(facts.components.application.evaluate(
+        strategy_version_id=v, policy_id="paper-policy", window_start=x.window_start,
+        window_end=x.window_end, broker=facts.account, evaluated_at=NOW,
+    ) for v, x in zip(("a", "b"), facts.evaluations))
+    assert fresh[0].metrics == facts.evaluations[0].metrics
+    assert fresh[0].verdict == facts.evaluations[0].verdict
+    assert fresh[0].source_digest != facts.evaluations[0].source_digest
+    after = proof_for(facts.root, fresh)
+    assert not after.blockers
+    assert before.strategy_source_identities != after.strategy_source_identities
+    assert compare_restart(artifact(before), after, mode=Mode.FRESH_RECONSTRUCTION).status is S.RESTART_MISMATCH
 
 
 @pytest.mark.parametrize("field", ["metrics", "verdict", "blockers", "source_digest", "evaluation_id"])
@@ -504,3 +525,22 @@ def test_cli_snapshot_then_verify_is_readonly(facts, capsys, monkeypatch):
 def test_spec_rejects_duplicate_identities():
     with pytest.raises(ValueError, match="unique"):
         Spec(("a", "a"), ("session",), ())
+
+
+@pytest.mark.parametrize("kind", ["exact", "ancestor", "dirty"])
+def test_runtime_revision_uses_exact_resource_root(tmp_path, monkeypatch, kind):
+    root = tmp_path / "installed-app"
+    monkeypatch.setattr(edge.ApplicationPaths, "discover", lambda: SimpleNamespace(resource_root=root))
+    calls = []
+    def run(arguments, **kwargs):
+        assert kwargs["cwd"] == root
+        calls.append(arguments)
+        if "status" in arguments:
+            return SimpleNamespace(stdout=" M file" if kind == "dirty" else "")
+        if "--show-toplevel" in arguments:
+            return SimpleNamespace(stdout=str(root if kind == "exact" else tmp_path))
+        return SimpleNamespace(stdout="application-sha")
+    monkeypatch.setattr(edge.subprocess, "run", run)
+    assert edge.resolve_runtime_revision() == ("application-sha" if kind == "exact" else None)
+    if kind == "ancestor":
+        assert not any("HEAD" in x for x in calls)

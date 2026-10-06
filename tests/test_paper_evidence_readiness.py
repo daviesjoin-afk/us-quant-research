@@ -293,6 +293,52 @@ def test_r93_02e_expected_symbol_not_realtime_is_blocked() -> None:
     assert report.total_captured_sessions == 4 * 25
 
 
+def test_r93_02h_narrow_recorder_cannot_certify_unsubscribed_targets() -> None:
+    # A recorder configured for SPY alone reports a healthy realtime stream for
+    # its own symbols. That must not certify QQQ/AAPL/NVDA, even when durable
+    # evidence rows for them happen to exist.
+    narrow = MarketStreamProjection(
+        observed=True,
+        source_id=SOURCE_ID,
+        provider=PROVIDER,
+        connected=True,
+        realtime=True,
+        stalled=False,
+        expected_symbols=("SPY",),
+        realtime_symbols=("SPY",),
+        last_snapshot_at=NOW,
+    )
+    report = _inspect(stream=narrow, evidence=_rows())
+    assert report.status is PaperEvidenceReadinessStatus.BLOCKED
+    assert "MARKET_STREAM_SYMBOL_NOT_REALTIME" in report.blockers
+
+
+def test_r93_02i_store_blocker_survives_connectivity_failure() -> None:
+    report = _inspect(
+        ibkr=_ibkr(reachable=False),
+        stream=MarketStreamProjection(
+            observed=False,
+            source_id=SOURCE_ID,
+            provider=PROVIDER,
+            connected=False,
+            realtime=False,
+            stalled=False,
+        ),
+        evidence=(),
+        unavailable="EVIDENCE_STORE_UNAVAILABLE",
+    )
+    assert report.status is PaperEvidenceReadinessStatus.BLOCKED
+    assert "IBKR_SOCKET_UNREACHABLE" in report.blockers
+    assert "MARKET_STREAM_NOT_OBSERVED" in report.blockers
+    assert "EVIDENCE_STORE_UNAVAILABLE" in report.blockers
+
+
+def test_r93_02j_store_blocker_alone_is_reported() -> None:
+    report = _inspect(evidence=(), unavailable="EVIDENCE_STORE_UNAVAILABLE")
+    assert report.status is PaperEvidenceReadinessStatus.BLOCKED
+    assert report.blockers == ("EVIDENCE_STORE_UNAVAILABLE",)
+
+
 def test_r93_02f_expected_symbols_absent_from_targets_do_not_block() -> None:
     projection = MarketStreamProjection(
         observed=True,
@@ -390,7 +436,11 @@ def test_r93_05b_partial_coverage_across_targets_is_not_ready() -> None:
     evidence = _rows() + (
         _row("TSLA", status="COLLECTING", captured=0, review_ready=0),
     )
-    report = _inspect(spec=_spec(FIVE_TARGETS), evidence=evidence)
+    report = _inspect(
+        spec=_spec(FIVE_TARGETS),
+        evidence=evidence,
+        stream=_stream(symbols=FIVE_TARGETS),
+    )
     assert report.status is PaperEvidenceReadinessStatus.BLOCKED
     assert "EVIDENCE_INCOMPLETE" in report.blockers
 

@@ -221,11 +221,14 @@ class PaperEvidenceReadinessApplication:
             ),
         ]
 
+        # The store is independent of connectivity: a missing or unreadable
+        # database is reported even when the socket and stream also failed, so
+        # an operator does not fix one blocker only to discover the next.
+        if evidence_unavailable_reason is not None:
+            blockers.append(evidence_unavailable_reason)
+
         if blockers:
             status = PaperEvidenceReadinessStatus.BLOCKED
-        elif evidence_unavailable_reason is not None:
-            status = PaperEvidenceReadinessStatus.BLOCKED
-            blockers.append(evidence_unavailable_reason)
         elif tuple(item.symbol for item in targets) != self._spec.symbols:
             status = PaperEvidenceReadinessStatus.BLOCKED
             blockers.append("EVIDENCE_TARGET_SET_MISMATCH")
@@ -329,13 +332,13 @@ def _stream_blockers(
         blockers.append("MARKET_STREAM_NOT_REALTIME")
     if stream.provider.strip().upper() != provider.strip().upper():
         blockers.append("PROVIDER_MISMATCH")
-    # A symbol the recorder expects but is not receiving in realtime cannot
-    # produce captured evidence, so "realtime stream" alone is not enough.
+    # A requested symbol the recorder is not receiving in realtime cannot
+    # produce captured evidence, so "the stream is realtime" is not enough.
+    # Membership is judged against the realtime set alone: a recorder that was
+    # configured for a narrower symbol list reports a healthy stream for its own
+    # symbols, and that must not certify targets it never subscribed to.
     missing = tuple(
-        symbol
-        for symbol in targets
-        if symbol in stream.expected_symbols
-        and symbol not in stream.realtime_symbols
+        symbol for symbol in targets if symbol not in stream.realtime_symbols
     )
     if missing:
         blockers.append("MARKET_STREAM_SYMBOL_NOT_REALTIME")

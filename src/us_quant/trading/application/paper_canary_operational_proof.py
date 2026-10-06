@@ -306,6 +306,20 @@ class PaperCanaryOperationalProofApplication:
             for x in orders.orders
         ):
             block(ProofStatus.INCOMPLETE_SESSION_TRUTH, "fill_precedes_order_intent_at_broker_precision")
+        decisions_by_order_id: dict[str, list[PortfolioDecisionRecord]] = {}
+        for decision in decisions:
+            if decision.order_id is not None:
+                decisions_by_order_id.setdefault(decision.order_id, []).append(decision)
+        if any(
+            order.intent is not None
+            and any(
+                decision.created_at > order.intent.created_at
+                or decision.observed_at > order.intent.created_at
+                for decision in decisions_by_order_id.get(order.intent.order_id, ())
+            )
+            for order in orders.orders
+        ):
+            block(ProofStatus.INCOMPLETE_SESSION_TRUTH, "order_intent_predates_authorizing_decision")
         if any(x.created_at > now or x.observed_at > now for x in decisions):
             block(ProofStatus.INCOMPLETE_SESSION_TRUTH, "decision_truth_in_future")
         if not _runtime_revision_known(runtime_revision):

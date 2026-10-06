@@ -114,6 +114,7 @@ def decision_record(
     *,
     order_id: str,
     side: PortfolioSide = PortfolioSide.BUY,
+    created_at: datetime = NOW,
 ) -> PortfolioDecisionRecord:
     signed = sum(quantity for _, _, quantity in contributions)
     action_side = PortfolioSide.BUY if signed > 0 else PortfolioSide.SELL
@@ -146,10 +147,10 @@ def decision_record(
     return PortfolioDecisionRecord(
         decision=decision,
         portfolio_cycle_id=f"cycle-{decision_id}",
-        observed_at=NOW,
+        observed_at=created_at,
         policy_identity="policy",
         policy_revision="1",
-        created_at=NOW,
+        created_at=created_at,
         risk_outcome="approved",
         risk_decision=RiskDecision(
             approved=True,

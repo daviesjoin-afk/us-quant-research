@@ -185,8 +185,27 @@ def test_future_order_truth_cannot_prove_completion(tmp_path, kind):
 @pytest.mark.parametrize("field", ["created_at", "observed_at", "equal"])
 def test_future_decision_truth_cannot_prove_completion(tmp_path, field):
     decisions, attrs, truth = history()
-    if field != "equal":
-        decisions = (replace(decisions[0], **{field: NOW + timedelta(seconds=1)}), *decisions[1:])
+    order = next(x for x in truth.orders if x.intent.order_id == "a-sell")
+    if field == "equal":
+        decisions = tuple(
+            replace(x, created_at=NOW, observed_at=NOW) if x.order_id == order.intent.order_id else x
+            for x in decisions
+        )
+        truth = PortfolioOrderTruth(tuple(
+            replace(
+                x,
+                intent=replace(x.intent, created_at=NOW),
+                events=tuple(replace(e, occurred_at=NOW) for e in x.events),
+                fills=tuple(replace(f, occurred_at=NOW) for f in x.fills),
+            ) if x is order else x
+            for x in truth.orders
+        ))
+    else:
+        decisions = tuple(
+            replace(x, **{field: NOW + timedelta(seconds=1)})
+            if x.order_id == order.intent.order_id else x
+            for x in decisions
+        )
     _, _, _, account, source, evaluations = persist_facts(tmp_path, data=(decisions, attrs, truth))
     proof = proof_for(tmp_path, evaluations, account=account, source=source)
     result = compare_restart(artifact(proof), proof)
@@ -239,6 +258,36 @@ def test_fractional_fill_before_intent_blocks_at_reported_precision(tmp_path):
     proof = proof_for(tmp_path, evaluations, account=account, source=source)
     assert proof.status is S.INCOMPLETE_SESSION_TRUTH
     assert "fill_precedes_order_intent_at_broker_precision" in proof.blockers
+
+
+@pytest.mark.parametrize("field", ["created_at", "observed_at"])
+def test_order_intent_cannot_predate_authorizing_decision(tmp_path, field):
+    decisions, attrs, truth = history()
+    order = next(x for x in truth.orders if x.intent.order_id == "a-sell")
+    decision = next(x for x in decisions if x.order_id == order.intent.order_id)
+    decisions = tuple(
+        replace(x, **{field: order.intent.created_at + timedelta(seconds=1)})
+        if x is decision else x
+        for x in decisions
+    )
+    _, _, _, account, source, evaluations = persist_facts(tmp_path, data=(decisions, attrs, truth))
+    proof = proof_for(tmp_path, evaluations, account=account, source=source)
+    assert proof.status is S.INCOMPLETE_SESSION_TRUTH
+    assert "order_intent_predates_authorizing_decision" in proof.blockers
+
+
+def test_authorizing_decision_equal_to_intent_time_is_valid(tmp_path):
+    decisions, attrs, truth = history()
+    order = next(x for x in truth.orders if x.intent.order_id == "a-sell")
+    decisions = tuple(
+        replace(x, created_at=order.intent.created_at, observed_at=order.intent.created_at)
+        if x.order_id == order.intent.order_id else x
+        for x in decisions
+    )
+    _, _, _, account, source, evaluations = persist_facts(tmp_path, data=(decisions, attrs, truth))
+    proof = proof_for(tmp_path, evaluations, account=account, source=source)
+    assert "order_intent_predates_authorizing_decision" not in proof.blockers
+    assert compare_restart(artifact(proof), proof).status is S.OPERATIONAL_PROOF_PASS
 
 
 def test_evaluation_before_last_session_fill_is_incomplete(tmp_path):

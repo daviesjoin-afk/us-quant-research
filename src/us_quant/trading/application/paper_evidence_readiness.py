@@ -214,7 +214,10 @@ class PaperEvidenceReadinessApplication:
         blockers: list[str] = [
             *_ibkr_blockers(ibkr),
             *_stream_blockers(
-                stream, provider=self._spec.provider, now=now
+                stream,
+                provider=self._spec.provider,
+                targets=self._spec.symbols,
+                now=now,
             ),
         ]
 
@@ -309,7 +312,11 @@ def _ibkr_blockers(ibkr: IbkrConnectionProjection) -> tuple[str, ...]:
 
 
 def _stream_blockers(
-    stream: MarketStreamProjection, *, provider: str, now: datetime
+    stream: MarketStreamProjection,
+    *,
+    provider: str,
+    targets: tuple[str, ...],
+    now: datetime,
 ) -> tuple[str, ...]:
     if not stream.observed:
         return ("MARKET_STREAM_NOT_OBSERVED",)
@@ -322,6 +329,16 @@ def _stream_blockers(
         blockers.append("MARKET_STREAM_NOT_REALTIME")
     if stream.provider.strip().upper() != provider.strip().upper():
         blockers.append("PROVIDER_MISMATCH")
+    # A symbol the recorder expects but is not receiving in realtime cannot
+    # produce captured evidence, so "realtime stream" alone is not enough.
+    missing = tuple(
+        symbol
+        for symbol in targets
+        if symbol in stream.expected_symbols
+        and symbol not in stream.realtime_symbols
+    )
+    if missing:
+        blockers.append("MARKET_STREAM_SYMBOL_NOT_REALTIME")
     return tuple(blockers)
 
 
@@ -330,7 +347,13 @@ def _snapshot_is_stale(
 ) -> bool:
     if last_snapshot_at is None:
         return True
-    return (now - last_snapshot_at).total_seconds() > STREAM_STALE_AFTER_SECONDS
+    age = (now - last_snapshot_at).total_seconds()
+    # A negative age is a future timestamp: a clock that disagrees with the
+    # recorder cannot certify freshness, so it fails closed rather than reading
+    # as arbitrarily fresh.
+    if age < 0:
+        return True
+    return age > STREAM_STALE_AFTER_SECONDS
 
 
 def _normalized_symbols(symbols: object) -> tuple[str, ...]:

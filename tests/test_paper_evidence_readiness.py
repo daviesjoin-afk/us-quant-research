@@ -76,6 +76,7 @@ def _stream(
     stalled: bool = False,
     provider: str = PROVIDER,
     observed_at: datetime = NOW,
+    symbols: tuple[str, ...] = TARGETS,
 ) -> MarketStreamProjection:
     return MarketStreamProjection(
         observed=observed,
@@ -84,8 +85,8 @@ def _stream(
         connected=connected,
         realtime=realtime,
         stalled=stalled,
-        expected_symbols=TARGETS,
-        realtime_symbols=TARGETS,
+        expected_symbols=symbols,
+        realtime_symbols=symbols,
         last_snapshot_at=observed_at,
     )
 
@@ -271,6 +272,49 @@ def test_r93_02c_stale_health_snapshot_is_blocked() -> None:
     assert fresh.status is PaperEvidenceReadinessStatus.READY
 
 
+def test_r93_02e_expected_symbol_not_realtime_is_blocked() -> None:
+    partial = MarketStreamProjection(
+        observed=True,
+        source_id=SOURCE_ID,
+        provider=PROVIDER,
+        connected=True,
+        realtime=True,
+        stalled=False,
+        expected_symbols=TARGETS,
+        realtime_symbols=("SPY", "QQQ", "AAPL"),
+        last_snapshot_at=NOW,
+    )
+    report = _inspect(stream=partial)
+    assert report.status is PaperEvidenceReadinessStatus.BLOCKED
+    assert "MARKET_STREAM_SYMBOL_NOT_REALTIME" in report.blockers
+    # The symbol list is a diagnostic, not a per-symbol verdict: the evidence
+    # rows still decide what is captured.
+    assert report.total_captured_sessions == 4 * 25
+
+
+def test_r93_02f_expected_symbols_absent_from_targets_do_not_block() -> None:
+    projection = MarketStreamProjection(
+        observed=True,
+        source_id=SOURCE_ID,
+        provider=PROVIDER,
+        connected=True,
+        realtime=True,
+        stalled=False,
+        expected_symbols=TARGETS + ("TSLA",),
+        realtime_symbols=TARGETS,
+        last_snapshot_at=NOW,
+    )
+    report = _inspect(stream=projection)
+    assert report.status is PaperEvidenceReadinessStatus.READY
+    assert "MARKET_STREAM_SYMBOL_NOT_REALTIME" not in report.blockers
+
+
+def test_r93_02g_future_health_timestamp_fails_closed() -> None:
+    future = _inspect(stream=_stream(observed_at=NOW + timedelta(seconds=5)))
+    assert future.status is PaperEvidenceReadinessStatus.BLOCKED
+    assert "MARKET_STREAM_STALLED" in future.blockers
+
+
 def test_r93_02d_unobserved_stream_is_blocked() -> None:
     report = _inspect(
         stream=MarketStreamProjection(
@@ -321,7 +365,17 @@ def test_r93_05_five_targets_complete_is_ready() -> None:
     report = _inspect(
         spec=_spec(FIVE_TARGETS),
         evidence=_rows(FIVE_TARGETS),
-        stream=_stream(),
+        stream=MarketStreamProjection(
+            observed=True,
+            source_id=SOURCE_ID,
+            provider=PROVIDER,
+            connected=True,
+            realtime=True,
+            stalled=False,
+            expected_symbols=FIVE_TARGETS,
+            realtime_symbols=FIVE_TARGETS,
+            last_snapshot_at=NOW,
+        ),
     )
     assert report.status is PaperEvidenceReadinessStatus.READY
     assert report.ready is True

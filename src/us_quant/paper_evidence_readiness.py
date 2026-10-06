@@ -132,7 +132,7 @@ def build_report(
         config.ibkr, checked=not args.skip_socket_probe
     )
     stream = load_stream_projection(
-        None if args.health_stdin else args.health_log,
+        args.health_log,
         default_source_id=args.source,
         default_provider=provider,
     )
@@ -167,14 +167,20 @@ def _read_health_from_stdin(
     default_provider: str,
     stream,
 ):
-    """Fold stdin health lines over the file-based projection.
+    """Fold one piped health object over the file-based projection.
 
     ``--health-log`` and ``--health-stdin`` are two transports for the same
-    fact, so the last line read from either wins; the file transport is applied
-    first so a piped live stream is the fresher one.
+    fact.  The file is applied first (the caller loads it), so a piped live
+    stream is the fresher one and wins.
+
+    stdin is read as a **bounded snapshot**: the recorder is a long-running
+    process that holds stdout open, so draining until EOF would block forever
+    when the diagnostic is piped from a live recorder.  The first line that
+    parses as a JSON object is therefore the answer, and the rest of the stream
+    is left unread.  To use the newest line of a finished capture, pass
+    ``--health-log`` instead.
     """
 
-    payload: dict[str, object] | None = None
     for line in sys.stdin:
         stripped = line.strip()
         if not stripped:
@@ -184,14 +190,12 @@ def _read_health_from_stdin(
         except json.JSONDecodeError:
             continue
         if isinstance(candidate, dict):
-            payload = candidate
-    if payload is None:
-        return stream
-    return projection_from_payload(
-        payload,
-        default_source_id=default_source_id,
-        default_provider=default_provider,
-    )
+            return projection_from_payload(
+                candidate,
+                default_source_id=default_source_id,
+                default_provider=default_provider,
+            )
+    return stream
 
 
 def render(report: PaperEvidenceReadinessReport) -> str:

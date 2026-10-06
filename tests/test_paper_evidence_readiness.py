@@ -613,6 +613,95 @@ def test_r93_health_stdin_transport_reads_piped_lines(monkeypatch) -> None:
     assert stream.last_snapshot_at == NOW
 
 
+def test_r93_health_stdin_does_not_wait_for_eof(monkeypatch) -> None:
+    # The recorder is long-running and holds stdout open, so the read must be a
+    # bounded snapshot: returning after the first usable object, never draining
+    # to EOF. A stream that would block forever after the first line proves it.
+    module = _cli()
+
+    class _BlockingStream(io.StringIO):
+        def __next__(self):
+            if self.tell() > 0:
+                raise AssertionError("read past the first health object")
+            return super().__next__()
+
+        def __iter__(self):
+            return self
+
+    payload = {
+        "source": SOURCE_ID,
+        "provider": PROVIDER,
+        "broker_api_connected": True,
+        "market_stream_realtime": True,
+        "symbols_expected": list(TARGETS),
+        "symbols_realtime": list(TARGETS),
+        "last_snapshot_at": NOW.isoformat(),
+        "status": "RUNNING",
+    }
+    monkeypatch.setattr(
+        "sys.stdin", _BlockingStream(json.dumps(payload) + "\n")
+    )
+    stream = module._read_health_from_stdin(
+        default_source_id=SOURCE_ID,
+        default_provider=PROVIDER,
+        stream=MarketStreamProjection(
+            observed=False,
+            source_id=SOURCE_ID,
+            provider=PROVIDER,
+            connected=False,
+            realtime=False,
+            stalled=False,
+        ),
+    )
+    assert stream.observed is True
+    assert stream.realtime is True
+
+
+def test_r93_health_log_is_kept_when_stdin_is_empty(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # --health-log and --health-stdin are two transports for the same fact; an
+    # empty stdin must not discard a valid file snapshot.
+    module = _cli()
+    database = tmp_path / "minute_quotes.sqlite3"
+    _seed(database, [])
+    health = tmp_path / "capture.health.jsonl"
+    health.write_text(
+        json.dumps(
+            {
+                "source": SOURCE_ID,
+                "provider": PROVIDER,
+                "broker_api_connected": True,
+                "market_stream_realtime": True,
+                "symbols_expected": list(TARGETS),
+                "symbols_realtime": list(TARGETS),
+                "last_snapshot_at": NOW.isoformat(),
+                "status": "RUNNING",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    report = module.build_report(
+        module._arguments(
+            [
+                "--db",
+                str(database),
+                "--health-log",
+                str(health),
+                "--health-stdin",
+                "--skip-socket-probe",
+            ]
+        ),
+        config=module.load_config(Path("configs/paper.toml")),
+        symbols=TARGETS,
+        parameters=PARAMETERS,
+    )
+    assert report.stream.observed is True
+    assert report.stream.realtime is True
+    assert "MARKET_STREAM_NOT_OBSERVED" not in report.blockers
+
+
 def test_r93_health_stdin_without_lines_keeps_the_unobserved_projection(
     monkeypatch,
 ) -> None:

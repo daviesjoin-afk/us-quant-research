@@ -158,6 +158,47 @@ def test_no_performance_evaluation_blocks(facts):
     assert "exact_performance_strategy_set_required" in proof.blockers
 
 
+@pytest.mark.parametrize("kind", ["event", "intent", "fill", "equal"])
+def test_future_order_truth_cannot_prove_completion(tmp_path, kind):
+    decisions, attrs, truth = history()
+    at = NOW if kind == "equal" else NOW + timedelta(seconds=1)
+    order = next(x for x in truth.orders if x.intent.order_id == "a-sell")
+    if kind in ("event", "equal"):
+        changed = replace(order, events=tuple(replace(e, occurred_at=at) for e in order.events))
+    elif kind == "intent":
+        changed = replace(order, intent=replace(order.intent, created_at=at))
+    else:
+        changed = replace(order, fills=tuple(replace(f, occurred_at=at) for f in order.fills))
+    truth = PortfolioOrderTruth(tuple(changed if x is order else x for x in truth.orders))
+    _, _, _, account, source, evaluations = persist_facts(tmp_path, data=(decisions, attrs, truth))
+    proof = proof_for(tmp_path, evaluations, account=account, source=source)
+    result = compare_restart(artifact(proof), proof)
+    if kind == "equal":
+        assert not proof.blockers
+        assert result.status is S.OPERATIONAL_PROOF_PASS
+    else:
+        assert proof.status is S.INCOMPLETE_SESSION_TRUTH
+        assert "order_truth_in_future" in proof.blockers
+        assert result.status is not S.OPERATIONAL_PROOF_PASS
+
+
+@pytest.mark.parametrize("field", ["created_at", "observed_at", "equal"])
+def test_future_decision_truth_cannot_prove_completion(tmp_path, field):
+    decisions, attrs, truth = history()
+    if field != "equal":
+        decisions = (replace(decisions[0], **{field: NOW + timedelta(seconds=1)}), *decisions[1:])
+    _, _, _, account, source, evaluations = persist_facts(tmp_path, data=(decisions, attrs, truth))
+    proof = proof_for(tmp_path, evaluations, account=account, source=source)
+    result = compare_restart(artifact(proof), proof)
+    if field == "equal":
+        assert not proof.blockers
+        assert result.status is S.OPERATIONAL_PROOF_PASS
+    else:
+        assert proof.status is S.INCOMPLETE_SESSION_TRUTH
+        assert "decision_truth_in_future" in proof.blockers
+        assert result.status is not S.OPERATIONAL_PROOF_PASS
+
+
 def test_evaluation_before_last_session_fill_is_incomplete(tmp_path):
     decisions, attrs, truth = history()
     sell = next(x for x in truth.orders if x.intent.order_id == "a-sell")

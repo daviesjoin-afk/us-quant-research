@@ -283,6 +283,15 @@ class PaperCanaryOperationalProofApplication:
             block(ProofStatus.INCOMPLETE_SESSION_TRUTH, "decision_order_outside_session")
         if any(x.intent.order_id not in {a.order_id for a in campaign_attrs} for x in campaign_orders):
             block(ProofStatus.INCOMPLETE_SESSION_TRUTH, "missing_execution_attribution")
+        if any(
+            (x.intent is not None and x.intent.created_at > now)
+            or any(e.occurred_at > now for e in x.events)
+            or any(f.occurred_at > now for f in x.fills)
+            for x in orders.orders
+        ):
+            block(ProofStatus.INCOMPLETE_SESSION_TRUTH, "order_truth_in_future")
+        if any(x.created_at > now or x.observed_at > now for x in decisions):
+            block(ProofStatus.INCOMPLETE_SESSION_TRUTH, "decision_truth_in_future")
         if not _runtime_revision_known(runtime_revision):
             block(ProofStatus.RESTART_MISMATCH, "runtime_revision_unknown")
         if self.spec.expected_runtime_revision is not None and runtime_revision != self.spec.expected_runtime_revision:

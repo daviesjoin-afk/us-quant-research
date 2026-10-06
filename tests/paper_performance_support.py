@@ -26,9 +26,10 @@ def policy(**changes):
 
 
 def history(*, sell_price='110', missing_fee=False, pre_window=False, partial_sell=False):
-    buy = decision_record('buy', (('a', 'pa', 60), ('b', 'pb', 40)), order_id='z-buy')
-    buy = replace(buy, risk_decision=RiskDecision(approved=True, requested_quantity=100, approved_quantity=80, adjustments=("budget",)))
     buy_time = NOW-timedelta(days=30) if pre_window else NOW-timedelta(days=2)
+    buy = decision_record('buy', (('a', 'pa', 60), ('b', 'pb', 40)), order_id='z-buy',
+                          created_at=buy_time-timedelta(seconds=1))
+    buy = replace(buy, risk_decision=RiskDecision(approved=True, requested_quantity=100, approved_quantity=80, adjustments=("budget",)))
     bo, ba = linked_order(buy, fills=(
         fill('b2', 'z-buy', 50, price='100', fee=None if missing_fee else '1', occurred_at=buy_time+timedelta(hours=1)),
         fill('b1', 'z-buy', 30, price='100', fee='1', occurred_at=buy_time),
@@ -36,10 +37,12 @@ def history(*, sell_price='110', missing_fee=False, pre_window=False, partial_se
     bo = replace(bo, intent=replace(bo.intent, quantity=80, session_id='buy-session', created_at=buy_time),
                  events=(replace(bo.events[0], status=OrderStatus.FILLED, filled=Decimal(80), remaining=Decimal(0)),))
     ba = replace(ba, quantity=80, contributions=execution_contributions_for_quantity(buy.decision, 80))
-    sell = decision_record('sell', (('a', 'sa', -48), ('b', 'sb', -32)), order_id='a-sell')
+    sell_time = NOW-timedelta(days=1)
+    sell = decision_record('sell', (('a', 'sa', -48), ('b', 'sb', -32)), order_id='a-sell',
+                           created_at=sell_time-timedelta(seconds=1))
     so, sa = linked_order(sell, fills=(fill('s1', 'a-sell', 40 if partial_sell else 80, side=Side.SELL,
-                                        price=sell_price, fee='1', occurred_at=NOW-timedelta(days=1)),))
-    so = replace(so, intent=replace(so.intent, session_id='sell-session', created_at=NOW-timedelta(days=1)), broker_order_id=8, events=tuple(replace(e,broker_order_id=8) for e in so.events), fills=tuple(replace(f,broker_order_id=8) for f in so.fills))
+                                        price=sell_price, fee='1', occurred_at=sell_time),))
+    so = replace(so, intent=replace(so.intent, session_id='sell-session', created_at=sell_time), broker_order_id=8, events=tuple(replace(e,broker_order_id=8) for e in so.events), fills=tuple(replace(f,broker_order_id=8) for f in so.fills))
     return (buy, sell), (ba, sa), PortfolioOrderTruth((so, bo))
 
 

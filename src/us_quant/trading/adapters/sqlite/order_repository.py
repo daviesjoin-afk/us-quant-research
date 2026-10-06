@@ -34,7 +34,7 @@ from us_quant.paper_order_models import (
     ReconciliationSummary,
     TERMINAL_ORDER_STATUSES,
 )
-from us_quant.sqlite_support import connect_sqlite
+from us_quant.sqlite_support import connect_sqlite, connect_sqlite_readonly
 from us_quant.trading.adapters.clock import from_stored_text, now_iso
 from us_quant.trading.adapters.order_status_mapping import (
     order_status_from_text,
@@ -71,10 +71,17 @@ def _decimal_text(value: Decimal | None) -> str | None:
 class SQLiteOrderRepository:
     """The order store: intents, broker events, executions and their views."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, read_only: bool = False) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._initialize()
+        self._read_only = read_only
+        if not read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._initialize()
+
+    def _connection(self):
+        if self._read_only:
+            return connect_sqlite_readonly(self.path)
+        return connect_sqlite(self.path)
 
     # -- writes (the ``OrderRepositoryPort`` surface) --------------------
 
@@ -92,7 +99,7 @@ class SQLiteOrderRepository:
         so it must never move to after the send.
         """
 
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             with connection:
                 connection.execute(
                     """
@@ -120,7 +127,7 @@ class SQLiteOrderRepository:
                 )
 
     def record_event(self, event: OrderEvent) -> None:
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             with connection:
                 connection.execute(
                     """
@@ -144,7 +151,7 @@ class SQLiteOrderRepository:
                 )
 
     def record_fill(self, fill: ExecutionFill) -> bool:
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             with connection:
                 cursor = connection.execute(
                     """
@@ -172,7 +179,7 @@ class SQLiteOrderRepository:
     # -- reads (the ``OrderRepositoryPort`` surface) ---------------------
 
     def status(self, order_id: str) -> OrderStatus | None:
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             row = connection.execute(
                 """
                 SELECT status
@@ -188,7 +195,7 @@ class SQLiteOrderRepository:
         return order_status_from_text(str(row[0]))
 
     def intent(self, order_id: str) -> OrderIntent | None:
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             row = connection.execute(
                 """
                 SELECT intent_id, session_id, strategy_version_id,
@@ -202,7 +209,7 @@ class SQLiteOrderRepository:
         return _intent_from_row(row)
 
     def broker_order_id(self, order_id: str) -> int | None:
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             row = connection.execute(
                 """
                 SELECT broker_order_id
@@ -216,7 +223,7 @@ class SQLiteOrderRepository:
         return int(row[0])
 
     def fills(self, order_id: str) -> tuple[ExecutionFill, ...]:
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             rows = connection.execute(
                 """
                 SELECT execution_id, intent_id, broker_order_id,
@@ -235,7 +242,7 @@ class SQLiteOrderRepository:
         This separate reconciliation read does not widen ``OrderRepositoryPort``
         or the seven-method broker execution surface.
         """
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             intents = connection.execute(
                 """SELECT intent_id, session_id, strategy_version_id, symbol,
                           side, quantity, limit_price, reason, generated_at,
@@ -306,7 +313,7 @@ class SQLiteOrderRepository:
     ) -> OrderIntent | None:
         if not idempotency_key:
             return None
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             row = connection.execute(
                 """
                 SELECT intent_id, session_id, strategy_version_id,
@@ -324,7 +331,7 @@ class SQLiteOrderRepository:
     def intent_for_broker_order(
         self, broker_order_id: int
     ) -> OrderIntent | None:
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             row = connection.execute(
                 """
                 SELECT intent_id, session_id, strategy_version_id,
@@ -338,7 +345,7 @@ class SQLiteOrderRepository:
         return _intent_from_row(row)
 
     def executed_quantity(self, order_id: str) -> Decimal:
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             row = connection.execute(
                 """
                 SELECT COALESCE(SUM(CAST(quantity AS REAL)), 0)
@@ -355,7 +362,7 @@ class SQLiteOrderRepository:
         Used as the floor for the next order id so a Gateway restart can
         never regress the counter into reused ids (CR-4).
         """
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             row = connection.execute(
                 "SELECT MAX(broker_order_id) FROM paper_order_intent"
             ).fetchone()
@@ -373,7 +380,7 @@ class SQLiteOrderRepository:
         before recording the broker's final outcome.
         """
 
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             rows = connection.execute(
                 """
                 SELECT i.intent_id, i.broker_order_id, i.quantity,
@@ -454,7 +461,7 @@ class SQLiteOrderRepository:
             parameters += (session_id,)
         if limit is not None:
             parameters += (limit,)
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             rows = connection.execute(
                 f"""
                 SELECT i.intent_id, i.session_id, i.broker_order_id,
@@ -583,7 +590,7 @@ class SQLiteOrderRepository:
         return tuple(results)
 
     def audit_rows(self, limit: int = 1000) -> tuple[dict, ...]:
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             rows = connection.execute(
                 """
                 SELECT i.intent_id, i.session_id,
@@ -633,7 +640,7 @@ class SQLiteOrderRepository:
         )
 
     def execution_rows(self, limit: int = 1000) -> tuple[dict, ...]:
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             rows = connection.execute(
                 """
                 SELECT e.execution_id, e.intent_id, i.session_id,
@@ -673,7 +680,7 @@ class SQLiteOrderRepository:
     ) -> tuple[dict[str, object], ...]:
         """Per-session rollup: first intent, last activity, fills, status."""
 
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             rows = connection.execute(
                 """
                 SELECT
@@ -709,7 +716,7 @@ class SQLiteOrderRepository:
         )
 
     def _initialize(self) -> None:
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             with connection:
                 self._add_missing_columns(connection)
                 connection.execute(

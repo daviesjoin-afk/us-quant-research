@@ -10,7 +10,7 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
-from us_quant.sqlite_support import connect_sqlite
+from us_quant.sqlite_support import connect_sqlite, connect_sqlite_readonly
 from us_quant.trading.domain.portfolio import (
     PortfolioAction,
     PortfolioBlocker,
@@ -248,10 +248,13 @@ def _from_payload(
 class SQLitePortfolioRepository:
     """Durable append-only decisions with guarded risk/order linkage updates."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, read_only: bool = False) -> None:
         self.path = Path(path)
+        self._read_only = read_only
+        if read_only:
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             with connection:
                 connection.execute(
                     """CREATE TABLE IF NOT EXISTS portfolio_decision (
@@ -266,8 +269,13 @@ class SQLitePortfolioRepository:
                     )"""
                 )
 
+    def _connection(self):
+        if self._read_only:
+            return connect_sqlite_readonly(self.path)
+        return connect_sqlite(self.path)
+
     def decision(self, decision_id: str) -> PortfolioDecisionRecord | None:
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             row = connection.execute(
                 "SELECT decision_id, payload FROM portfolio_decision WHERE decision_id = ?",
                 (decision_id,),
@@ -275,7 +283,7 @@ class SQLitePortfolioRepository:
         return _from_payload(row[1], expected_decision_id=row[0]) if row else None
 
     def decisions(self) -> tuple[PortfolioDecisionRecord, ...]:
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             rows = connection.execute(
                 "SELECT decision_id, payload FROM portfolio_decision ORDER BY decision_id"
             ).fetchall()
@@ -285,7 +293,7 @@ class SQLitePortfolioRepository:
         )
 
     def execution_attribution(self, order_id: str) -> PortfolioExecutionAttribution | None:
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             row = connection.execute(
                 "SELECT order_id, payload FROM portfolio_execution_attribution WHERE order_id = ?",
                 (order_id,),
@@ -293,7 +301,7 @@ class SQLitePortfolioRepository:
         return _from_execution_payload(row[1], expected_order_id=row[0]) if row else None
 
     def execution_attributions(self) -> tuple[PortfolioExecutionAttribution, ...]:
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             rows = connection.execute(
                 "SELECT order_id, payload FROM portfolio_execution_attribution ORDER BY order_id"
             ).fetchall()
@@ -305,7 +313,7 @@ class SQLitePortfolioRepository:
     def record_decision(self, record: PortfolioDecisionRecord) -> PortfolioDecisionRecord:
         if not isinstance(record, PortfolioDecisionRecord):
             raise TypeError("record must be PortfolioDecisionRecord")
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             with connection:
                 row = connection.execute(
                     "SELECT decision_id, payload FROM portfolio_decision WHERE decision_id = ?",
@@ -335,7 +343,7 @@ class SQLitePortfolioRepository:
     ) -> PortfolioDecisionRecord:
         if type(expected_revision) is not int or expected_revision <= 0:
             raise ValueError("expected_revision must be a positive integer")
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             with connection:
                 row = connection.execute(
                     "SELECT decision_id, payload FROM portfolio_decision WHERE decision_id = ?",
@@ -399,7 +407,7 @@ class SQLitePortfolioRepository:
             raise ValueError("execution attribution does not match its portfolio decision")
         if type(expected_revision) is not int or expected_revision <= 0:
             raise ValueError("expected_revision must be a positive integer")
-        with closing(connect_sqlite(self.path)) as connection:
+        with closing(self._connection()) as connection:
             with connection:
                 row = connection.execute(
                     "SELECT decision_id, payload FROM portfolio_decision WHERE decision_id = ?",

@@ -259,21 +259,55 @@ def test_fresh_comparison_rejects_reused_evaluations(facts, kind):
     assert result.blockers == ("fresh_evaluation_required",)
 
 
+@pytest.mark.parametrize("seconds", [(1, 1), (2, 2), (1, 3), (3, 3)])
+def test_fresh_evaluations_must_postdate_baseline(facts, seconds):
+    before = proof_for(facts.root, facts.evaluations)
+    # Different persisted IDs alone cannot prove reconstruction after the snapshot.
+    fresh = []
+    for version, original, delta in zip(("a", "b"), facts.evaluations, seconds):
+        at = NOW + timedelta(seconds=delta)
+        facts.components.application._broker_orders = broker_source(observed_at=at)
+        fresh.append(facts.components.application.evaluate(
+            strategy_version_id=version, policy_id="paper-policy",
+            window_start=original.window_start, window_end=original.window_end,
+            broker=broker(quantities={}, observed_at=at), evaluated_at=at,
+        ))
+    fresh = tuple(fresh)
+    assert not {x.evaluation_id for x in fresh} & {x.evaluation_id for x in facts.evaluations}
+    baseline_at = (NOW + timedelta(seconds=2)).astimezone(timezone(timedelta(hours=8)))
+    baseline = edge.validate_artifact(edge.make_artifact(before, generated_at=baseline_at))
+    after = build(spec_for(fresh), runtime_root=facts.root,
+                  broker_order_truth=broker_source(observed_at=NOW + timedelta(seconds=4))).inspect(
+        now=NOW + timedelta(seconds=4), runtime_revision="runtime-sha",
+        broker=broker(quantities={}, observed_at=NOW + timedelta(seconds=4)),
+    )
+    assert not after.blockers
+    assert before.semantic_projection(Mode.FRESH_RECONSTRUCTION) == after.semantic_projection(Mode.FRESH_RECONSTRUCTION)
+    result = compare_restart(baseline, after, mode=Mode.FRESH_RECONSTRUCTION)
+    if seconds == (3, 3):
+        assert result.status is S.OPERATIONAL_PROOF_PASS
+    else:
+        assert result.status is S.RESTART_MISMATCH
+        assert result.blockers == ("fresh_evaluation_must_postdate_baseline",)
+
+
 def test_fresh_comparison_binds_requested_missing_policy(facts):
-    def evaluate_missing(name):
+    def evaluate_missing(name, at):
         return tuple(facts.components.application.evaluate(
             strategy_version_id=v, policy_id=name, window_start=x.window_start,
-            window_end=x.window_end, broker=facts.account, evaluated_at=NOW,
+            window_end=x.window_end, broker=facts.account, evaluated_at=at,
         ) for v, x in zip(("a", "b"), facts.evaluations))
-    first = evaluate_missing("missing-before")
-    second = evaluate_missing("missing-after")
+    first = evaluate_missing("missing-before", NOW)
+    second = evaluate_missing("missing-after", NOW + timedelta(seconds=1))
     assert all(x.policy_id is None for x in (*first, *second))
     assert first[0].metrics == second[0].metrics
     assert first[0].verdict == second[0].verdict
     assert first[0].blockers == second[0].blockers
     before, after = proof_for(facts.root, first), proof_for(facts.root, second)
     assert not before.blockers and not after.blockers
-    assert compare_restart(artifact(before), after, mode=Mode.FRESH_RECONSTRUCTION).status is S.RESTART_MISMATCH
+    result = compare_restart(artifact(before), after, mode=Mode.FRESH_RECONSTRUCTION)
+    assert result.status is S.RESTART_MISMATCH
+    assert result.blockers == ("restart_semantic_mismatch",)
 
 
 @pytest.mark.parametrize("field", ["semver", "parameter_hash", "universe_hash", "code_hash"])
@@ -320,7 +354,8 @@ def test_performance_changed_semantics_rejected(facts, field):
     after = replace(before, performance_evaluations=(evaluation_changed(first, **changes[field]), *before.performance_evaluations[1:]))
     assert compare_restart(artifact(before), after).status is S.RESTART_MISMATCH
     if field in ("metrics", "verdict", "blockers"):
-        fresh = tuple(evaluation_changed(x, reconciliation_observed_at=NOW + timedelta(seconds=1))
+        fresh = tuple(evaluation_changed(x, reconciliation_observed_at=NOW + timedelta(seconds=1),
+                                         evaluated_at=NOW + timedelta(seconds=1))
                       for x in after.performance_evaluations)
         result = compare_restart(artifact(before), replace(after, performance_evaluations=fresh),
                                  mode=Mode.FRESH_RECONSTRUCTION)
@@ -586,7 +621,7 @@ def test_cli_snapshot_then_verify_is_readonly(facts, capsys, monkeypatch):
     assert "self-hash" in json.loads(capsys.readouterr().out)["blockers"][0]
 
 
-@pytest.mark.parametrize("kind", ["missing", "baseline", "mixed", "fresh"])
+@pytest.mark.parametrize("kind", ["missing", "baseline", "mixed", "fresh", "preexisting", "equal"])
 def test_cli_fresh_requires_explicit_new_evaluations(facts, capsys, monkeypatch, kind):
     from datetime import datetime
     new_at = NOW + timedelta(seconds=2)
@@ -597,7 +632,9 @@ def test_cli_fresh_requires_explicit_new_evaluations(facts, capsys, monkeypatch,
     monkeypatch.setattr(edge, "datetime", Clock)
     monkeypatch.setattr(edge, "resolve_runtime_revision", lambda: "runtime-sha")
     path = facts.root / "baseline.json"
-    edge.write_artifact_once(path, artifact(proof_for(facts.root, facts.evaluations)))
+    baseline_at = NOW + timedelta(seconds={"preexisting": 3, "equal": 2}.get(kind, 0))
+    edge.write_artifact_once(path, edge.make_artifact(proof_for(facts.root, facts.evaluations),
+                                                   generated_at=baseline_at))
     source = broker_source(observed_at=new_at)
     account = broker(quantities={}, observed_at=new_at)
     facts.components.application._broker_orders = source
@@ -608,7 +645,8 @@ def test_cli_fresh_requires_explicit_new_evaluations(facts, capsys, monkeypatch,
     observation = facts.root / "broker.json"
     observation.write_text(canonical_json({"portfolio": account, "open_orders": source.broker_open_order_truth()}), encoding="utf-8")
     selected = {"missing": (), "baseline": facts.evaluations,
-                "mixed": (fresh[0], facts.evaluations[1]), "fresh": fresh}[kind]
+                "mixed": (fresh[0], facts.evaluations[1]), "fresh": fresh,
+                "preexisting": fresh, "equal": fresh}[kind]
     evaluation_args = [part for x in selected for part in ("--evaluation-id", x.evaluation_id)]
     before = {p.name: p.read_bytes() for p in facts.root.glob("*.sqlite3")}
     code = edge.main(["verify-restart", "--strategy-version", "a", "--strategy-version", "b",
@@ -620,6 +658,8 @@ def test_cli_fresh_requires_explicit_new_evaluations(facts, capsys, monkeypatch,
     assert result["status"] == (S.OPERATIONAL_PROOF_PASS if kind == "fresh" else S.RESTART_MISMATCH)
     if kind == "missing":
         assert "explicit post-restart" in result["blockers"][0]
+    elif kind in ("preexisting", "equal"):
+        assert result["blockers"] == ["fresh_evaluation_must_postdate_baseline"]
     elif kind != "fresh":
         assert result["blockers"] == ["fresh_evaluation_required"]
     assert {p.name: p.read_bytes() for p in facts.root.glob("*.sqlite3")} == before

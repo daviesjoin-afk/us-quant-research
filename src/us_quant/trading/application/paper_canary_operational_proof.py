@@ -405,6 +405,12 @@ def compare_restart(baseline: Mapping | None, current: PaperCanaryOperationalPro
     ):
         return replace(current, status=ProofStatus.RESTART_MISMATCH,
                        blockers=("fresh_evaluation_required",))
+    if mode is PerformanceComparison.FRESH_RECONSTRUCTION:
+        generated_at = datetime.fromisoformat(baseline["generated_at"])
+        require_aware(generated_at)
+        if any(x.evaluated_at <= generated_at for x in current.performance_evaluations):
+            return replace(current, status=ProofStatus.RESTART_MISMATCH,
+                           blockers=("fresh_evaluation_must_postdate_baseline",))
     key = "semantic_projection" if mode is PerformanceComparison.DURABLE_RECOVERY else "fresh_semantic_projection"
     if canonical_json(baseline.get(key)) != canonical_json(current.semantic_projection(mode)):
         return replace(current, status=ProofStatus.RESTART_MISMATCH, blockers=("restart_semantic_mismatch",))

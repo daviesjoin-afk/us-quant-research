@@ -227,6 +227,10 @@ def main(argv=None):
             baseline = load_artifact(args.baseline)
         elif args.output is None:
             raise ValueError("snapshot requires --output")
+        if (args.mode == "verify-restart"
+                and args.comparison == PerformanceComparison.FRESH_RECONSTRUCTION
+                and not args.evaluation_id):
+            raise ValueError("fresh-reconstruction requires explicit post-restart --evaluation-id")
         spec = PaperCanaryOperationalProofSpec(
             tuple(args.strategy_version), tuple(args.session_id),
             tuple(args.evaluation_id or (baseline["performance_evaluation_ids"] if baseline else ())),

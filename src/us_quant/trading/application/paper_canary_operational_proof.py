@@ -160,6 +160,7 @@ def performance_semantics(evaluation, *, mode: PerformanceComparison):
         "source_execution_ids": sorted(evaluation.source_execution_ids),
         "metrics": evaluation.metrics, "verdict": evaluation.verdict,
         "blockers": sorted(evaluation.blockers),
+        "requested_policy_id": evaluation.requested_policy_id,
         "policy_id": evaluation.policy_id, "policy_revision": evaluation.policy_revision,
         "policy_version": evaluation.policy_version, "evaluator_version": evaluation.evaluator_version,
     }
@@ -389,6 +390,12 @@ def compare_restart(baseline: Mapping | None, current: PaperCanaryOperationalPro
         return replace(current, status=ProofStatus.RESTART_MISMATCH, blockers=("baseline_not_eligible",))
     if current.blockers:
         return current
+    if mode is PerformanceComparison.FRESH_RECONSTRUCTION and (
+        set(baseline.get("performance_evaluation_ids", ()))
+        & {x.evaluation_id for x in current.performance_evaluations}
+    ):
+        return replace(current, status=ProofStatus.RESTART_MISMATCH,
+                       blockers=("fresh_evaluation_required",))
     key = "semantic_projection" if mode is PerformanceComparison.DURABLE_RECOVERY else "fresh_semantic_projection"
     if canonical_json(baseline.get(key)) != canonical_json(current.semantic_projection(mode)):
         return replace(current, status=ProofStatus.RESTART_MISMATCH, blockers=("restart_semantic_mismatch",))

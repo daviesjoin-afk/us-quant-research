@@ -174,6 +174,38 @@ def test_evaluation_before_last_session_fill_is_incomplete(tmp_path):
     assert "performance_does_not_cover_all_session_fills" in proof.blockers
 
 
+@pytest.mark.parametrize("mode", [Mode.DURABLE_RECOVERY, Mode.FRESH_RECONSTRUCTION])
+def test_pre_window_basis_sources_are_valid(tmp_path, mode):
+    _, _, components, account, source, evaluations = persist_facts(tmp_path, data=history(pre_window=True))
+    assert {s for x in evaluations for s in x.paper_session_ids} == {"sell-session"}
+    assert all(set(x.source_execution_ids) == {"b1", "b2", "s1"} for x in evaluations)
+    spec = replace(spec_for(evaluations), expected_session_ids=("sell-session",))
+    before = build(spec, runtime_root=tmp_path, broker_order_truth=source).inspect(
+        now=NOW, runtime_revision="runtime-sha", broker=account,
+    )
+    assert not before.blockers
+    assert before.order_ids == ("a-sell",)
+    assert before.execution_ids == ("s1",) and before.fill_count == 1
+    baseline = artifact(before)
+    if mode is Mode.FRESH_RECONSTRUCTION:
+        at = NOW + timedelta(seconds=2)
+        source = broker_source(observed_at=at)
+        account = broker(quantities={}, observed_at=at)
+        components.application._broker_orders = source
+        evaluations = tuple(components.application.evaluate(
+            strategy_version_id=x.strategy_version_id, policy_id="paper-policy",
+            window_start=x.window_start, window_end=x.window_end, broker=account, evaluated_at=at,
+        ) for x in evaluations)
+        spec = replace(spec, performance_evaluation_ids=tuple(x.evaluation_id for x in evaluations))
+    else:
+        at = NOW
+    after = build(spec, runtime_root=tmp_path, broker_order_truth=source).inspect(
+        now=at, runtime_revision="runtime-sha", broker=account,
+    )
+    assert not after.blockers
+    assert compare_restart(baseline, after, mode=mode).status is S.OPERATIONAL_PROOF_PASS
+
+
 def test_missing_performance_id_blocks(facts):
     proof = inspect_memory(facts, spec=replace(spec_for(facts.evaluations), performance_evaluation_ids=("missing",)))
     assert proof.status is S.PERFORMANCE_MISSING and "performance_evaluation_missing" in proof.blockers

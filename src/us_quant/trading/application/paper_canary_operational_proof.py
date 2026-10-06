@@ -326,12 +326,14 @@ class PaperCanaryOperationalProofApplication:
             block(ProofStatus.PERFORMANCE_MISSING, "exact_performance_strategy_set_required")
         if {s for x in evaluations for s in x.paper_session_ids} != sessions:
             block(ProofStatus.PERFORMANCE_MISSING, "performance_session_linkage_mismatch")
-        if {e for x in evaluations for e in x.source_execution_ids} != {x.execution_id for x in fills}:
+        # Evaluations also retain pre-window fills for canonical cost basis.
+        # They must cover all campaign fills, but may legitimately source older sessions.
+        if not {x.execution_id for x in fills} <= {e for x in evaluations for e in x.source_execution_ids}:
             block(ProofStatus.PERFORMANCE_MISSING, "performance_does_not_cover_all_session_fills")
         for evaluation in evaluations:
-            if (not set(evaluation.source_portfolio_decision_ids) <= {x.decision.decision_id for x in campaign_decisions}
-                    or not set(evaluation.source_order_ids) <= order_ids
-                    or not set(evaluation.source_execution_ids) <= {x.execution_id for x in fills}):
+            if (not set(evaluation.source_portfolio_decision_ids) <= {x.decision.decision_id for x in decisions}
+                    or not set(evaluation.source_order_ids) <= {x.intent.order_id for x in orders.orders if x.intent}
+                    or not set(evaluation.source_execution_ids) <= {f.execution_id for x in orders.orders for f in x.fills}):
                 block(ProofStatus.PERFORMANCE_MISSING, "performance_source_linkage_mismatch")
             # The existing domain projector validates economics without evaluate()/record_evaluation().
             cutoff_replay = replay_portfolio_execution_truth(

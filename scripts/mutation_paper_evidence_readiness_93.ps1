@@ -36,7 +36,7 @@ $mutations = @(
     @{ name='R93-M23 target order not preserved'; file=$APP; find='                key=lambda item: self._target_rank(item.symbol),'; repl='                key=lambda item: item.symbol,'; test=$TEST; select='r93_targets_follow_operator_order' },
     @{ name='R93-M24 quote store opened writable'; file=$COMP; find='    store = MinuteQuoteStore(store_path, read_only=True)'; repl='    store = MinuteQuoteStore(store_path)'; test=$TEST; select='r93_10f_composition_opens_the_store_read_only' },
     @{ name='R93-M25 missing database silently created'; file=$COMP; find='    if not store_path.exists():\n        raise EvidenceStoreUnavailable('; repl='    if False:\n        raise EvidenceStoreUnavailable('; test=$TEST; select='r93_10d_composition_never_creates_the_database' },
-    @{ name='R93-M26 health log written by the diagnostic'; file=$COMP; find='    path = Path(health_log)\n    payload: Mapping[str, Any] | None = None'; repl='    path = Path(health_log)\n    path.parent.mkdir(parents=True, exist_ok=True)\n    path.write_text("", encoding="utf-8")\n    payload: Mapping[str, Any] | None = None'; test=$TEST; select='r93_10c_health_log_is_never_created' },
+    @{ name='R93-M26 health log written by the diagnostic'; file=$COMP; find='        path = Path(health_log)\n        try:'; repl='        path = Path(health_log)\n        path.parent.mkdir(parents=True, exist_ok=True)\n        path.write_text("", encoding="utf-8")\n        try:'; test=$TEST; select='r93_10c_health_log_is_never_created' },
     @{ name='R93-M27 recorder auto-started by the diagnostic'; file=$COMP; find='from us_quant.trading.application.market_evidence_readiness import ('; repl='from us_quant.trading.application.market_evidence_capture import (\n    MarketEvidenceCaptureApplication,\n)\nfrom us_quant.trading.application.market_evidence_readiness import ('; test=$TEST; select='r93_10e_readiness_layers_hold_no_write_or_trading_authority' },
     @{ name='R93-M28 configuration rewritten by the CLI'; file=$CLI; find='        config = load_config(args.config)'; repl='        _text = Path(args.config).read_text(encoding="utf-8")\n        Path(args.config).write_text(_text.replace("4002", "4003"), encoding="utf-8")\n        config = load_config(args.config)'; test=$TEST; select='r93_cli_end_to_end_over_a_real_capture_environment' },
     @{ name='R93-M29 socket probe forced off'; file=$CLI; find='        config.ibkr, checked=not args.skip_socket_probe'; repl='        config.ibkr, checked=False'; test=$TEST; select='r93_cli_probes_the_configured_socket' },
@@ -46,6 +46,16 @@ $mutations = @(
     @{ name='R93-M32 expected symbol not realtime ignored'; file=$APP; find='    if missing:
         blockers.append("MARKET_STREAM_SYMBOL_NOT_REALTIME")'; repl='    if False:
         blockers.append("MARKET_STREAM_SYMBOL_NOT_REALTIME")'; test=$TEST; select='r93_02e_expected_symbol_not_realtime_is_blocked' },
+    @{ name='R93-M33 absent health log reported as healthy'; file=$COMP; find='    """The honest projection when no health line has been seen."""
+
+    return MarketStreamProjection(
+        observed=False,'; repl='    """The honest projection when no health line has been seen."""
+
+    return MarketStreamProjection(
+        observed=True,'; test=$TEST; select='r93_no_health_log_means_not_observed' },
+    @{ name='R93-M34 recorder stalled status ignored'; file=$COMP; find='        stalled=str(payload.get("status") or "") == "CAPTURE_STALLED",'; repl='        stalled=False,'; test=$TEST; select='r93_stalled_recorder_status_is_reported' },
+    @{ name='R93-M35 piped health lines ignored'; file=$CLI; find='    if payload is None:
+        return stream'; repl='    return stream'; test=$TEST; select='r93_health_stdin_transport_reads_piped_lines' },
     @{ name='R93-M30 readiness strategy parameters dropped'; file=$CLI; find='        if seed.strategy_id == READINESS_STRATEGY_ID:\n            return dict(seed.parameters)'; repl='        if seed.strategy_id == READINESS_STRATEGY_ID:\n            return dict(seed.parameters)\n        break'; test=$TEST; select='r93_cli_uses_shipped_intraday_parameters' }
 )
 $baselineTargets = @(

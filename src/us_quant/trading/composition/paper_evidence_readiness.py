@@ -83,43 +83,80 @@ def build_ibkr_projection(
 
 
 def load_stream_projection(
-    health_log: Path,
+    health_log: Path | None,
     *,
     default_source_id: str,
     default_provider: str,
 ) -> MarketStreamProjection:
-    """Read the recorder's newest health line; never write to the log."""
+    """Read the recorder's newest health line; never write to the log.
 
-    path = Path(health_log)
+    The recorder prints one health JSON object per interval to **stdout**; it
+    does not own a log file.  An operator therefore either redirects that
+    stream to a file and passes it as ``health_log``, or passes ``None`` and
+    gets ``observed=False`` -- which is reported as a blocker, never as a
+    healthy stream.
+    """
+
     payload: Mapping[str, Any] | None = None
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                try:
-                    candidate = json.loads(stripped)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(candidate, Mapping):
-                    payload = candidate
-    except FileNotFoundError:
-        payload = None
-    except OSError as error:
-        raise EvidenceStoreUnavailable(
-            f"health log is unreadable: {error}"
-        ) from error
+    if health_log is not None:
+        path = Path(health_log)
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        candidate = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(candidate, Mapping):
+                        payload = candidate
+        except FileNotFoundError:
+            payload = None
+        except OSError as error:
+            raise EvidenceStoreUnavailable(
+                f"health log is unreadable: {error}"
+            ) from error
 
     if payload is None:
-        return MarketStreamProjection(
-            observed=False,
-            source_id=default_source_id,
-            provider=default_provider,
-            connected=False,
-            realtime=False,
-            stalled=False,
+        return unobserved_stream(
+            default_source_id=default_source_id, default_provider=default_provider
         )
+    return projection_from_payload(
+        payload,
+        default_source_id=default_source_id,
+        default_provider=default_provider,
+    )
+
+
+def unobserved_stream(
+    *, default_source_id: str, default_provider: str
+) -> MarketStreamProjection:
+    """The honest projection when no health line has been seen."""
+
+    return MarketStreamProjection(
+        observed=False,
+        source_id=default_source_id,
+        provider=default_provider,
+        connected=False,
+        realtime=False,
+        stalled=False,
+    )
+
+
+def projection_from_payload(
+    payload: Mapping[str, Any],
+    *,
+    default_source_id: str,
+    default_provider: str,
+) -> MarketStreamProjection:
+    """Map one recorder health payload onto the stream projection.
+
+    Both transports (a redirected file and a piped stdin) decode the same
+    recorder payload, so the mapping lives here once.
+    """
+
     source_id = str(payload.get("source") or default_source_id)
     provider = str(
         payload.get("provider") or SOURCE_LABELS.get(source_id, default_provider)
@@ -135,6 +172,10 @@ def load_stream_projection(
         realtime_symbols=tuple(payload.get("symbols_realtime") or ()),
         last_snapshot_at=_parse_timestamp(payload.get("last_snapshot_at")),
     )
+
+
+#: Backwards-compatible private alias used by the CLI.
+_projection_from_payload = projection_from_payload
 
 
 def build_evidence_readiness(
@@ -205,5 +246,7 @@ __all__ = [
     "build_paper_evidence_readiness_application",
     "is_evidence_ready",
     "load_stream_projection",
+    "projection_from_payload",
     "provider_label",
+    "unobserved_stream",
 ]

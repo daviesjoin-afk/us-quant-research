@@ -34,6 +34,7 @@ from us_quant.trading.composition.paper_evidence_readiness import (
     build_ibkr_projection,
     build_paper_evidence_readiness_application,
     load_stream_projection,
+    projection_from_payload,
 )
 
 DEFAULT_SYMBOLS = ("SPY", "QQQ", "AAPL", "NVDA")
@@ -68,8 +69,16 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--health-log",
         type=Path,
-        default=paths.runtime_root / "market_evidence_capture.health.jsonl",
-        help="recorder health JSONL 路径（只读）",
+        default=None,
+        help=(
+            "recorder health JSONL 路径（只读）；recorder 默认把 health "
+            "打印到 stdout，需由操作者重定向"
+        ),
+    )
+    parser.add_argument(
+        "--health-stdin",
+        action="store_true",
+        help="从 stdin 读取 recorder 的 health JSON 行",
     )
     parser.add_argument(
         "--config",
@@ -122,10 +131,16 @@ def build_report(
         config.ibkr, checked=not args.skip_socket_probe
     )
     stream = load_stream_projection(
-        args.health_log,
+        None if args.health_stdin else args.health_log,
         default_source_id=args.source,
         default_provider=provider,
     )
+    if args.health_stdin:
+        stream = _read_health_from_stdin(
+            default_source_id=args.source,
+            default_provider=provider,
+            stream=stream,
+        )
     evidence = ()
     unavailable: str | None = None
     try:
@@ -142,6 +157,39 @@ def build_report(
         stream=stream,
         evidence=evidence,
         evidence_unavailable_reason=unavailable,
+    )
+
+
+def _read_health_from_stdin(
+    *,
+    default_source_id: str,
+    default_provider: str,
+    stream,
+):
+    """Fold stdin health lines over the file-based projection.
+
+    ``--health-log`` and ``--health-stdin`` are two transports for the same
+    fact, so the last line read from either wins; the file transport is applied
+    first so a piped live stream is the fresher one.
+    """
+
+    payload: dict[str, object] | None = None
+    for line in sys.stdin:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            candidate = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            payload = candidate
+    if payload is None:
+        return stream
+    return projection_from_payload(
+        payload,
+        default_source_id=default_source_id,
+        default_provider=default_provider,
     )
 
 

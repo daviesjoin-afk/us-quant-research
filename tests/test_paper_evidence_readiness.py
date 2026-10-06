@@ -6,6 +6,7 @@ import ast
 import json
 import socket
 import sqlite3
+import io
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -528,6 +529,99 @@ def test_r93_10b_read_only_store_refuses_writes(tmp_path: Path) -> None:
                 " ('SPY', 'x', 'IBKR', 'c', '1', '1', '1', 'realtime', 1, 0,"
                 " NULL, 1, 'now')"
             )
+
+
+def test_r93_health_stdin_transport_reads_piped_lines(monkeypatch) -> None:
+    module = _cli()
+    payload = {
+        "source": SOURCE_ID,
+        "provider": PROVIDER,
+        "broker_api_connected": True,
+        "market_stream_realtime": True,
+        "symbols_expected": list(TARGETS),
+        "symbols_realtime": list(TARGETS),
+        "last_snapshot_at": NOW.isoformat(),
+        "status": "RUNNING",
+    }
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps(payload) + "\n")
+    )
+    stream = module._read_health_from_stdin(
+        default_source_id=SOURCE_ID,
+        default_provider=PROVIDER,
+        stream=MarketStreamProjection(
+            observed=False,
+            source_id=SOURCE_ID,
+            provider=PROVIDER,
+            connected=False,
+            realtime=False,
+            stalled=False,
+        ),
+    )
+    assert stream.observed is True
+    assert stream.realtime is True
+    assert stream.last_snapshot_at == NOW
+
+
+def test_r93_health_stdin_without_lines_keeps_the_unobserved_projection(
+    monkeypatch,
+) -> None:
+    module = _cli()
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    base = MarketStreamProjection(
+        observed=False,
+        source_id=SOURCE_ID,
+        provider=PROVIDER,
+        connected=False,
+        realtime=False,
+        stalled=False,
+    )
+    assert (
+        module._read_health_from_stdin(
+            default_source_id=SOURCE_ID,
+            default_provider=PROVIDER,
+            stream=base,
+        )
+        is base
+    )
+
+
+def test_r93_no_health_log_means_not_observed(tmp_path: Path) -> None:
+    # The recorder prints health to stdout and owns no log file, so the default
+    # transport must report an unobserved stream rather than inventing health.
+    projection = load_stream_projection(
+        None, default_source_id=SOURCE_ID, default_provider=PROVIDER
+    )
+    assert projection.observed is False
+    assert projection.connected is False
+    assert projection.realtime is False
+
+
+def test_r93_stalled_recorder_status_is_reported(tmp_path: Path) -> None:
+    health = tmp_path / "capture.health.jsonl"
+    health.write_text(
+        json.dumps(
+            {
+                "source": SOURCE_ID,
+                "provider": PROVIDER,
+                "broker_api_connected": True,
+                "market_stream_realtime": True,
+                "symbols_expected": list(TARGETS),
+                "symbols_realtime": list(TARGETS),
+                "last_snapshot_at": NOW.isoformat(),
+                "status": "CAPTURE_STALLED",
+            }
+        ),
+        encoding="utf-8",
+    )
+    projection = load_stream_projection(
+        health, default_source_id=SOURCE_ID, default_provider=PROVIDER
+    )
+    assert projection.observed is True
+    assert projection.stalled is True
+    report = _inspect(stream=projection)
+    assert report.status is PaperEvidenceReadinessStatus.BLOCKED
+    assert "MARKET_STREAM_STALLED" in report.blockers
 
 
 def test_r93_10c_health_log_is_never_created(tmp_path: Path) -> None:

@@ -83,6 +83,36 @@ precision 的（工具自身的定位就是「宁可少报，不可误报」）�
 「targeted verification」不是一个 gate，是内循环的收敛手段。最终仍然必须由
 第 5 步的完整 CI 说话。
 
+### 硬性约束：原地修改 `src/` 的 mutation gate 必须串行
+
+仓库里的 mutation gate（`scripts/mutation_*.ps1`）的工作方式是**就地在 `src/`
+里改写源码**，跑一次 pytest，再在 `finally` 里还原。因此：
+
+> **任何会原地修改 `src/` 的 mutation gate 都必须一次只跑一个。**
+> 需要并行时，必须让每个 gate 在自己的 worktree / checkout 里运行。
+
+这不是效率偏好，是正确性要求。两个 gate 并发时会在同一棵树上交错
+read-modify-write，**一个 gate 可能还原出另一个 gate 的「已变异」文件**。后果是
+后续 gate 读到一个被污染的工作树，并把污染报告成真实回归。已实际观察到：
+`mutation_paper_canary_operational_proof_92.ps1` 在另一个 gate 持有一份变异源码时，
+以 `AttributeError: 'NoneType' object has no attribute 'policy_version'` 失败——
+这个失败与它要验证的代码无关。
+
+**收尾检查不能只看 diff exit code。** gate 跑完后必须同时确认：
+
+```powershell
+git status --short
+git diff --quiet
+```
+
+原因是 `core.autocrlf=true` 时，就地改写还会顺带改写行尾，于是文件在
+`git status --short` 里显示为 `M`，但 `git diff --quiet` 仍然返回 0（内容逐字节
+相同）。只依赖 exit code 会把这种状态误判为「干净」或误判为「有改动」。看到
+`M` 而 `git diff --quiet` 为 0 时，用 `git checkout -- .` 清掉即可。
+
+这条约束对后续任何 CI 加速方案都是强制的：加速不能以并发执行原地 mutation gate
+为代价。
+
 ---
 
 ## 4. 安装

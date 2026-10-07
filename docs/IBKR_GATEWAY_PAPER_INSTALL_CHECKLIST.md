@@ -77,7 +77,7 @@ Test-NetConnection 127.0.0.1 -Port 4002
 
 要求 `TcpTestSucceeded = True`。为 `False` 时停止，回到第 3 步检查 socket 配置与登录状态。
 
-### 5.2 API 连接与只读
+### 5.2 本地 socket 与配置（不是 API 握手）
 
 ```powershell
 Set-Location D:\Codex\USQuant-stage6
@@ -86,18 +86,52 @@ $env:PYTHONPATH = "src"
 ```
 
 此时应看到 `socket: PASS`、`readonly: PASS`、`order_submission: DISABLED`。
-如果 `socket: FAIL`，说明协议握手未完成（不只是端口未监听）。
+
+**必须理解这三行的确切含义，不要过度解读：**
+
+- `socket: PASS` 只表示 **`127.0.0.1:4002` 上有一个 TCP 监听者**。诊断调用的是
+  `probe_ibkr_socket()`，它只做 `socket.create_connection`，**明确不做 IBKR 协议
+  握手、不认证、不读账户**。因此任何占用 4002 的程序都能让这一行显示 PASS。
+- `socket: FAIL` 只表示**端口不可达**，不代表「握手失败」。要确认是 Gateway 而不是
+  别的进程在监听，只能靠 5.3 的真实行情回调。
+- `readonly: PASS` 读的是**本地 `configs/paper.toml` 的 `api_read_only` 值**，不是
+  Gateway 里的设置。它证明的是「本地配置是只读的」，不是「远端已启用只读」。
+
+协议握手与真实权限的唯一可信证据是 5.3 的 `broker_api_connected` 与
+`market_stream_realtime`。
+
+### 5.2b 覆盖度检查需要 health 输入
+
+> **注意：`paper_evidence_readiness` 默认不读 health。**
+> `--health-log` 的默认值是 `None`，所以不带 health 参数直接运行时，market stream
+> 恒为 `observed=False`，报告里必然出现 `MARKET_STREAM_NOT_OBSERVED`。
+
+因此做「运行中 recorder 是否健康」这类判断时，**必须把 recorder 的 health 输出接进来**：
+
+- 方式 A（推荐，可回看最新一行）：让 recorder 把 stdout 重定向到文件，再把该文件
+  传给 `--health-log`；
+- 方式 B（实时快照）：用管道直接接到 `--health-stdin`，诊断取第一个可解析的 health
+  对象就返回，不会挂在 EOF 上。
+
+只做 5.2 那种「端口 + 本地配置」检查时，不带 health 参数是正常的。
 
 ### 5.3 四个标的的 realtime 行情
 
-启动 recorder 并观察 health 行（health 打印在 **stdout**，不是日志文件）：
+recorder 的 health 打印在 **stdout**，不是日志文件，所以先把它重定向到文件，
+这样 5.5 的覆盖度检查可以直接读这个文件：
 
 ```powershell
+New-Item -ItemType Directory -Force runtime\appdata\runtime | Out-Null
+
 .\.venv\Scripts\python.exe -m us_quant.market_evidence_capture `
  --source ibkr `
  --symbols SPY,QQQ,AAPL,NVDA `
- --db runtime/appdata/runtime/minute_quotes.sqlite3
+ --db runtime/appdata/runtime/minute_quotes.sqlite3 `
+ *>&1 | Tee-Object -FilePath runtime\appdata\runtime\capture.health.jsonl
 ```
+
+（`Tee-Object` 让 health 既留在屏幕上便于观察，又落盘供 5.5 读取。若只想落盘，
+可换成 `> runtime\appdata\runtime\capture.health.jsonl`。）
 
 要求 health JSON 中：
 
@@ -116,13 +150,26 @@ $env:PYTHONPATH = "src"
 
 ### 5.5 确认覆盖度增长
 
-另开一个窗口，定期检查覆盖度：
+另开一个窗口，定期检查覆盖度（按 5.2b 接好 health 输入）：
 
 ```powershell
-.\.venv\Scripts\python.exe -m us_quant.paper_evidence_readiness
+.\.venv\Scripts\python.exe -m us_quant.paper_evidence_readiness `
+ --health-log runtime\appdata\runtime\capture.health.jsonl
 ```
 
-期望随交易日推进：`Status: BLOCKED_DATA_COLLECTION`，且每个标的的 `n/25` 递增。
+**`Status` 会随采集进度变化，不要把正常进度读成故障：**
+
+| 阶段 | 每个标的 `n/25` | Status |
+|---|---|---|
+| 尚未采到任何完整会话 | 全部为 0 | `BLOCKED_DATA_COLLECTION` |
+| 已开始累积但未满 25 | 部分递增，未达 25 | `BLOCKED`（blocker 为 `EVIDENCE_INCOMPLETE`） |
+| 全部达到 25 | 全部 25 | `READY` |
+
+也就是说：`BLOCKED_DATA_COLLECTION` **只在所有标的都还是 0** 时出现。一旦
+`n/25` 开始增长但还没到 25，状态会变成 `BLOCKED` + `EVIDENCE_INCOMPLETE` ——
+这是**采集中间的正常状态**，不是失败。判断是否正常应看 `n/25` 是否在递增，而不是
+看 Status 是否等于 `BLOCKED_DATA_COLLECTION`。
+
 采集期跨越交易日（每标的需 25 个完整常规交易日）。
 
 ## 6. 采集期间禁止事项
@@ -147,9 +194,13 @@ $env:PYTHONPATH = "src"
 
 | 现象 | 可能原因 | 处理 |
 |---|---|---|
-| `socket: FAIL`，端口却是 True | 协议握手失败 / 客户端 ID 冲突 | 检查 `client_id` 是否被其他进程占用 |
+| `socket: FAIL`，但 `Test-NetConnection` 为 True | 端口未监听；或监听者不是 Gateway | 确认 Gateway 已登录并应用了 socket 设置 |
+| `socket: PASS` 但 `realtime: FAIL` | 监听者可能不是 Gateway，或订阅未生效 | 以 5.3 的 `broker_api_connected` / `market_stream_realtime` 为准 |
+| `MARKET_STREAM_NOT_OBSERVED` | 没有提供 health 输入（默认 `--health-log=None`） | 按 5.2b 传入 `--health-log` 或 `--health-stdin` |
 | `realtime: FAIL` | 行情订阅未生效或延迟数据 | 检查第 2 步的市场数据订阅 |
 | `SYMBOL_NOT_REALTIME` | 某标的未订阅或无权限 | 逐标的确认权限 |
 | health 一直是 `DISCONNECTED` | Gateway 未登录或只读配置未保存 | 重新登录并确认设置已应用 |
 | `PROVIDER_MISMATCH` | recorder 与诊断使用了不同 source | 两者都用 `--source ibkr` |
 | `EVIDENCE_STORE_UNAVAILABLE` | 数据库路径不存在 | 确认 recorder 已至少运行过一次并写入 |
+| Status 变成 `BLOCKED` + `EVIDENCE_INCOMPLETE` | `n/25` 已开始增长但未满 25 | 正常采集中间状态，不是故障（见 5.5） |
+| Status 一直是 `BLOCKED_DATA_COLLECTION` | 所有标的仍为 0 | 确认 5.3 已全绿且 recorder 持续运行 |
